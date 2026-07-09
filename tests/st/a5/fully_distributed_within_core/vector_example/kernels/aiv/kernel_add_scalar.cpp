@@ -48,7 +48,7 @@ using namespace pto;
  *              args[2] = scalar value (as uint64_t, needs conversion to float)
  *              args[3] = size (number of elements)
  */
-extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
+extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     // Unpack arguments (Tensor* pointers from runtime)
     __gm__ Tensor *src_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
     __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);

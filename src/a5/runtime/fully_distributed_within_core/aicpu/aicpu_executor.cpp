@@ -681,6 +681,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 runtime->dist.core_main_fn = reinterpret_cast<uint64_t>(core_main);
                 runtime->dist.num_workers = num_workers;
                 runtime->dist.done_count = 0;
+                cache_flush_range(const_cast<const void *>(static_cast<const volatile void *>(&runtime->dist.core_main_fn)), 64);
                 // Publish the go signal to EACH worker's per-core dist_go flag.
                 // dist_go lives in the FIRST handshake cache line (offset 32).
                 // The AICPU->AICore path is NOT coherent on A5, so a plain store
@@ -700,6 +701,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 // Also set the shared dist.go (best-effort; the per-core dist_go
                 // above is the authoritative signal the AICore polls).
                 runtime->dist.go = 1u;
+                cache_flush_range(const_cast<const void *>(static_cast<const volatile void *>(&runtime->dist.go)), 64);
                 OUT_OF_ORDER_STORE_BARRIER();
                 LOG_INFO_V9("[dist] Thread %d: engine wired + dist_go flushed, %d workers launched", thread_idx, num_workers);
                 uint32_t wait_iters = 0;
@@ -752,8 +754,41 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                         }
                         LOG_INFO_V9("[dist] Thread %d: waiting dist_done=%d done_count=%d/%d (go=%u) progress=[%s] dbg=[%s]",
                                 thread_idx, dist_done_count,
-                                runtime->dist.done_count,
-                                num_workers, runtime->dist.go, prog, dbg);
+                                runtime->dist.done_count, num_workers, runtime->dist.go, prog, dbg);
+                        {
+                            char tm[32 * 8];
+                            int toff = 0;
+                            for (int i = 0; i < num_workers && i < 32; i++) {
+                                uint32_t s5 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 5];
+                                uint32_t s6 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 6];
+                                uint32_t s7 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 7];
+                                if (s5 != 0 || s6 != 0 || s7 != 0)
+                                    toff += snprintf(tm + toff, sizeof(tm) - toff, "c%d(tm=%u role=%u aic=%u) ", i, s5, s6, s7);
+                            }
+                            if (toff > 0)
+                                LOG_INFO_V9("[dist] Thread %d: TYPE_MATCH %s", thread_idx, tm);
+                        }
+                        // Print slot 1-7 (fn_addr, tensor buffer.addr, start_offset, counts) for cores at crumb 50
+                        {
+                            char ta[32 * 60];
+                            int taoff = 0;
+                            for (int i = 0; i < num_workers && i < 32; i++) {
+                                uint32_t crumb = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE];
+                                uint32_t s1 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 1];
+                                uint32_t s2 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 2];
+                                uint32_t s3 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 3];
+                                uint32_t s4 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 4];
+                                uint32_t s5 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 5];
+                                uint32_t s6 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 6];
+                                uint32_t s7 = runtime->dist.aicore_progress[i * AICORE_PROGRESS_STRIDE + 7];
+                                if (crumb == 50 || s1 != 0)
+                                    taoff += snprintf(ta + taoff, sizeof(ta) - taoff,
+                                        "c%d(crumb=%u fn=0x%08x%08x buf=0x%08x%08x off=%u tc=%u sc=%u) ",
+                                        i, crumb, s2, s1, s4, s3, s5, s6, s7);
+                            }
+                            if (taoff > 0)
+                                LOG_INFO_V9("[dist] Thread %d: FN_DIAG %s", thread_idx, ta);
+                        }
                         // C16 DIAG: task-0 first-output create_info as read by dist_submit_impl
                         // (slots 9-13, written on-core during submit — persists through a crash).
                         LOG_INFO_V9("[dist] Thread %d: CI(t0.out0) @0x%x%08x ndims=%u shape0=%u logicalB=%u",

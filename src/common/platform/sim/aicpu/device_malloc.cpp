@@ -26,3 +26,8 @@ void aicpu_device_free(void *ptr) { free(ptr); }
 
 // Sim shares one address space, so there is no uncacheable alias.
 unsigned long long aicpu_device_nocache_offset() { return 0; }
+
+void aicpu_device_probe_uncacheable(void *va, struct AicpuUncacheProbe *out) {
+    (void)va;
+    *out = AicpuUncacheProbe{};
+}

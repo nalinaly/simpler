@@ -470,6 +470,30 @@ target_link_libraries(test_host_log_off PRIVATE
 )
 add_test(NAME test_host_log_off COMMAND test_host_log_off)
 
+# ---------------------------------------------------------------------------
+# Standalone distributed-atomic minibench UTs (MB-1, MB-3, MB-5, MB-9).
+#
+# These are standalone main() tests (no gtest) that re-implement dist_engine.cpp
+# data structures on host with std::thread contention. They compile with just
+# g++ -O2 -std=c++17 -pthread and run on any host (no hardware needed).
+# Also register the reference a2a3 ring differential test (test_dist_tensormap_ring).
+# ---------------------------------------------------------------------------
+function(add_standalone_dist_test name src)
+    add_executable(${name} ${src})
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/../../../src/common
+    )
+    target_link_libraries(${name} PRIVATE pthread)
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES LABELS "no_hardware")
+endfunction()
+
+add_standalone_dist_test(test_dist_tensormap_ring a2a3/test_dist_tensormap_ring.cpp)
+add_standalone_dist_test(test_dist_atomic_mb1_claim a5/test_dist_atomic_mb1_claim.cpp)
+add_standalone_dist_test(test_dist_atomic_mb3_frontier a5/test_dist_atomic_mb3_frontier.cpp)
+add_standalone_dist_test(test_dist_atomic_mb5_shared_map a5/test_dist_atomic_mb5_shared_map.cpp)
+add_standalone_dist_test(test_dist_atomic_mb9_private_det a5/test_dist_atomic_mb9_private_det.cpp)
+
 # Hardware-gated tests.  Block is only entered when the project is configured
 # with -DSIMPLER_ENABLE_HARDWARE_TESTS=ON.  CI's no-hw `ut` job does not pass
 # this flag, so nothing here is compiled there — this is the structural

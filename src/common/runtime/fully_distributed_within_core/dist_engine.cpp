@@ -379,6 +379,8 @@ __aicore__ inline void pto_shared_fence(std::memory_order) {}
 #if !DIST_SIM_HOST_CLOCK
 template <class T>
 __aicore__ T dist_atomic_cas(__gm__ T *p, T e, T d);
+template <class T>
+__aicore__ T dist_atomic_max(__gm__ T *p, T v);
 #endif
 
 // Drop-in for std::atomic<T> on the cross-core shared path. Same size/alignment
@@ -406,11 +408,7 @@ __aicore__ T dist_atomic_cas(__gm__ T *p, T e, T d);
 //    atomics provide the ordering).
 template <class T>
 struct Coherent {
-#if DIST_SIM_HOST_CLOCK
-    std::atomic<T> a;
-#else
     T a;
-#endif
 };
 
 // coherent_load / coherent_store / coherent_fetch_* / coherent_cas_* — free-
@@ -426,76 +424,79 @@ template <class T>
 __aicore__ T coherent_load(__gm__ const Coherent<T> *c, std::memory_order o = std::memory_order_seq_cst) {
 #if DIST_SIM_HOST_CLOCK
     pto_dcci_inval(&c->a, sizeof(c->a));
-    return c->a.load(o);
+    return __atomic_load_n(&c->a, o);
 #else
     (void)o;
-    // A5 onboard: the segment is CACHEABLE HBM (no uncacheable alias — the double
-    // page table is unavailable on this device, docs §16.2 probe). A plain load
-    // returns this core's STALE cached copy and never observes another core's
-    // store/atomic. Invalidate the covering cache line(s) first so the load pulls
-    // the writer's HBM value. This is the same dcci the sim seam uses; onboard it
-    // is now unconditionally required (docs §11.1.1 / §16.2 C1-revised).
-    pto_dcci_inval(&c->a, sizeof(c->a));
-    return c->a;
+    if constexpr (std::is_signed_v<T>) {
+        return dist_atomic_max(const_cast<__gm__ T*>(&c->a), static_cast<T>(1ull << (sizeof(T) * 8 - 1)));
+    } else {
+        return dist_atomic_max(const_cast<__gm__ T*>(&c->a), static_cast<T>(0));
+    }
 #endif
 }
 template <class T, class V>
 __aicore__ void coherent_store(__gm__ Coherent<T> *c, V v, std::memory_order o = std::memory_order_seq_cst) {
 #if DIST_SIM_HOST_CLOCK
-    c->a.store(static_cast<T>(v), o);
+    __atomic_store_n(&c->a, static_cast<T>(v), o);
     pto_dcci_flush(&c->a, sizeof(c->a));
 #else
     (void)o;
-    // A5 onboard: cacheable HBM — a plain store lands only in this core's cache.
-    // Flush (dcci … CACHELINE_OUT) so the covering line reaches HBM and other
-    // cores (after their coherent_load invalidate) observe it.
-    // NOTE(C4): flags[] is a byte-granular ring — many flags share one 64B line,
-    // so this flush writes back neighbors too. Concurrent cross-core flag stores
-    // on the same line can clobber (docs §16.2 item 4 / §17 C4); the real fix is
-    // per-cacheline flag alignment / per-core shards, tracked separately.
-    c->a = static_cast<T>(v);
-    pto_dcci_flush(&c->a, sizeof(c->a));
+    const T desired = static_cast<T>(v);
+    T cur = dist_atomic_max(&c->a, std::is_signed_v<T> ? static_cast<T>(1ull << (sizeof(T)*8-1)) : static_cast<T>(0));
+    while (cur != desired) {
+        const T old = dist_atomic_cas(&c->a, cur, desired);
+        if (old == cur) break;
+        cur = old;
+    }
+    pto_dcci_inval(&c->a, sizeof(c->a));
 #endif
 }
 template <class T, class V>
 __aicore__ T coherent_fetch_add(__gm__ Coherent<T> *c, V v, std::memory_order o = std::memory_order_seq_cst) {
 #if DIST_SIM_HOST_CLOCK
     pto_dcci_inval(&c->a, sizeof(c->a));
-    const T r = c->a.fetch_add(static_cast<T>(v), o);
+    T r = __atomic_fetch_add(&c->a, static_cast<T>(v), o);
     pto_dcci_flush(&c->a, sizeof(c->a));
     return r;
 #else
     (void)o;
-    return atomicAdd(&c->a, static_cast<T>(v));
+    T r = atomicAdd(&c->a, static_cast<T>(v));
+    pto_dcci_inval(&c->a, sizeof(c->a));
+    return r;
 #endif
 }
 template <class T, class V>
 __aicore__ T coherent_fetch_sub(__gm__ Coherent<T> *c, V v, std::memory_order o = std::memory_order_seq_cst) {
 #if DIST_SIM_HOST_CLOCK
     pto_dcci_inval(&c->a, sizeof(c->a));
-    const T r = c->a.fetch_sub(static_cast<T>(v), o);
+    T r = __atomic_fetch_sub(&c->a, static_cast<T>(v), o);
     pto_dcci_flush(&c->a, sizeof(c->a));
     return r;
 #else
     (void)o;
-    return atomicAdd(&c->a, static_cast<T>(-static_cast<T>(v)));  // no AtomicSub builtin
+    T r = atomicAdd(&c->a, static_cast<T>(-static_cast<T>(v)));
+    pto_dcci_inval(&c->a, sizeof(c->a));
+    return r;
 #endif
 }
 template <class T, class V>
 __aicore__ T coherent_fetch_xor(__gm__ Coherent<T> *c, V v, std::memory_order o = std::memory_order_seq_cst) {
 #if DIST_SIM_HOST_CLOCK
     pto_dcci_inval(&c->a, sizeof(c->a));
-    const T r = c->a.fetch_xor(static_cast<T>(v), o);
+    T r = __atomic_fetch_xor(&c->a, static_cast<T>(v), o);
     pto_dcci_flush(&c->a, sizeof(c->a));
     return r;
 #else
     (void)o;
     const T w = static_cast<T>(v);
     T cur = c->a;
-    while (true) {  // no AtomicXor builtin: CAS-loop
+    while (true) {
         const T nxt = static_cast<T>(cur ^ w);
         const T old = dist_atomic_cas(&c->a, cur, nxt);
-        if (old == cur) return cur;
+        if (old == cur) {
+            pto_dcci_inval(&c->a, sizeof(c->a));
+            return cur;
+        }
         cur = old;
     }
 #endif
@@ -504,7 +505,7 @@ template <class T, class V>
 __aicore__ bool coherent_cas_weak(__gm__ Coherent<T> *c, T &e, V d, std::memory_order s, std::memory_order f) {
 #if DIST_SIM_HOST_CLOCK
     pto_dcci_inval(&c->a, sizeof(c->a));
-    const bool ok = c->a.compare_exchange_weak(e, static_cast<T>(d), s, f);
+    bool ok = __atomic_compare_exchange_n(&c->a, &e, static_cast<T>(d), true, s, f);
     pto_dcci_flush(&c->a, sizeof(c->a));
     return ok;
 #else
@@ -512,7 +513,10 @@ __aicore__ bool coherent_cas_weak(__gm__ Coherent<T> *c, T &e, V d, std::memory_
     (void)f;
     const T dt = static_cast<T>(d);
     const T old = dist_atomic_cas(&c->a, e, dt);
-    if (old == e) return true;
+    if (old == e) {
+        pto_dcci_inval(&c->a, sizeof(c->a));
+        return true;
+    }
     e = old;
     return false;
 #endif
@@ -583,10 +587,11 @@ __aicore__ T dist_atomic_max(__gm__ T *p, T v) {
 // sim/host: shared address space — a released store is already visible.
 __aicore__ inline void dist_set_flag(__gm__ Coherent<int32_t> *c) {
 #if DIST_SIM_HOST_CLOCK
-    c->a.store(1, std::memory_order_release);
-    pto_dcci_flush(&c->a, sizeof(c->a));  // no-op on sim; keeps parity with coherent_store
+    __atomic_store_n(&c->a, 1, std::memory_order_release);
+    pto_dcci_flush(&c->a, sizeof(c->a));
 #else
     (void)dist_atomic_max(&c->a, 1);
+    pto_dcci_inval(&c->a, sizeof(c->a));
 #endif
 }
 
@@ -1631,6 +1636,7 @@ __aicore__ bool claim(__gm__ Coherent<int32_t> *cursor, int32_t N) {
     }
 #else
     const int32_t old = dist_atomic_max(&cursor->a, N);  // hardware fetch_max
+    pto_dcci_inval(&cursor->a, sizeof(cursor->a));
     return old < N;
 #endif
 }
@@ -1655,14 +1661,15 @@ __aicore__ void advance_frontier(__gm__ DistGlobal *gd) {
 // Resolve a kernel id to its executable address (CoreCallable::resolved_addr()).
 __aicore__ uint64_t resolve_kernel_addr(__gm__ Runtime *runtime, int32_t kernel_id) {
     if (kernel_id == INVALID_KERNEL_ID) return 0;
-    // Direct field access (Runtime::get_function_bin_addr is a member method and
-    // cannot be called on a __gm__ Runtime* — CCEC this-addrspace constraint).
-    // func_id_to_addr_ is public (runtime.h:236) and intended for direct AICore
-    // access; resolved_addr_ is a public field of CoreCallable (callable.h:62).
     if (kernel_id < 0 || kernel_id >= RUNTIME_MAX_FUNC_ID) return 0;
+    // AICPU writes func_id_to_addr_ during register (cacheable HBM). Without
+    // dcci_inval the AICore reads its stale cached copy (0), so the kernel
+    // function pointer is null and execute_slot skips the kernel call.
+    pto_dcci_inval(&runtime->func_id_to_addr_[kernel_id], sizeof(runtime->func_id_to_addr_[kernel_id]));
     const uint64_t callable_addr = runtime->func_id_to_addr_[kernel_id];
     if (callable_addr == 0) return 0;
     __gm__ const CoreCallable *callable = reinterpret_cast<__gm__ const CoreCallable *>(callable_addr);
+    pto_dcci_inval(&callable->resolved_addr_, sizeof(callable->resolved_addr_));
     return callable->resolved_addr_;
 }
 
@@ -1675,10 +1682,17 @@ __aicore__ uint64_t resolve_kernel_addr(__gm__ Runtime *runtime, int32_t kernel_
 // scrapes. Writes + flushes unconditionally (same channel/pattern as the C16 CI
 // diag); harmless on sim/AICPU builds.
 static __aicore__ inline void submit_crumb(__gm__ Runtime *rt, int32_t idx, uint32_t val) {
-    __gm__ volatile uint32_t *slot = &rt->dist.aicore_progress[idx * AICORE_PROGRESS_STRIDE];
-    *slot = val;
-    pto_dcci_flush(const_cast<__gm__ uint32_t *>(slot), sizeof(uint32_t));
+#ifdef AICORE_PROGRESS_STRIDE
+#if DIST_SIM_HOST_CLOCK
+    __atomic_store_n(&rt->dist.aicore_progress[idx * AICORE_PROGRESS_STRIDE], val, __ATOMIC_RELAXED);
+    pto_dcci_flush(&rt->dist.aicore_progress[idx * AICORE_PROGRESS_STRIDE], sizeof(uint32_t));
+#else
+    atomicExch(const_cast<__gm__ uint32_t*>(&rt->dist.aicore_progress[idx * AICORE_PROGRESS_STRIDE]), val);
+#endif
     __asm__ __volatile__("" ::: "memory");
+#else
+    (void)rt; (void)idx; (void)val;
+#endif
 }
 
 __aicore__ void execute_slot([[maybe_unused]] __gm__ DistCore *self, __gm__ RingSlot &s) {
@@ -1744,23 +1758,50 @@ __aicore__ void execute_slot([[maybe_unused]] __gm__ DistCore *self, __gm__ Ring
     }
 #else   // !DIST_SIM_HOST_CLOCK — AICore/CCEC: no host clock, no busy-wait emulation.
     if (s.function_bin_addr != 0) {
+#if !DIST_SIM_HOST_CLOCK && defined(DIST_SKIP_EXEC)
+        // Skip kernel execution for debugging — verify engine logic without kernel
+    #else
         KernelFn fn = reinterpret_cast<KernelFn>(s.function_bin_addr);
-        // C16: producer and consumer tasks run on DIFFERENT cores, exchanging
-        // intermediate tensors (c/d/e/g) through CACHEABLE HBM (the outpool). The
-        // completion FLAG is now cross-core coherent (dist_set_flag), but the
-        // tensor DATA is not automatically so: this core may hold a STALE cached
-        // copy of a producer's output, and its own MTE3 output may linger in cache
-        // instead of reaching HBM. Mirror the standard runtime's per-task
-        // coherence (a5 tensormap aicore_executor):
-        //   - INVALIDATE the whole data cache BEFORE the kernel so its MTE2 loads
-        //     pull the producer's freshly-written GM, not a stale line;
-        //   - FLUSH the whole data cache OUT AFTER the kernel so the MTE3-written
-        //     output reaches HBM before a dependent core (which invalidates before
-        //     its own kernel) reads it.
-        dcci(reinterpret_cast<__gm__ int32_t *>(s.args), ENTIRE_DATA_CACHE);
+        // Flush RingSlot (Tensor structs + args) to HBM so the kernel's MTE2
+        // engine reads fresh data from HBM. Do NOT use dcci(ENTIRE_DATA_CACHE)
+        // inval here — unlike tensormap_and_ringbuffer (whose AICore keeps no
+        // engine state), fdwc's AICore has dirty plain-store data in its Data
+        // Cache (local_index, heap_next, TensorMap inserts, occupied_count,
+        // etc.). ENTIRE_DATA_CACHE inval (entire=1, type=ALL) discards ALL
+        // dirty lines without write-back, destroying that engine state.
+        pto_dcci_flush(&s, sizeof(RingSlot));
         __asm__ __volatile__("" ::: "memory");
+        // DIAG: record full 64-bit function_bin_addr + args[0] (Tensor ptr)
+        // and Tensor[0].buffer.addr (the actual HBM data pointer TLOAD uses)
+        // and Tensor[0].start_offset, so we can verify the kernel is jumping
+        // to the right code address and reading valid tensor descriptors.
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+        {
+            __gm__ volatile uint32_t *_pr =
+                &gd->runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE];
+            _pr[1] = static_cast<uint32_t>(s.function_bin_addr & 0xffffffffu);
+            _pr[2] = static_cast<uint32_t>(s.function_bin_addr >> 32);
+            // Read Tensor[0] fields from the RingSlot (just flushed to HBM,
+            // so inval first to get the HBM value, not stale D-cache).
+            __gm__ Tensor *_t0 = reinterpret_cast<__gm__ Tensor *>(s.args[0]);
+            pto_dcci_inval(&_t0->buffer.addr, sizeof(_t0->buffer.addr));
+            pto_dcci_inval(&_t0->start_offset, sizeof(_t0->start_offset));
+            uint64_t _bufaddr = _t0->buffer.addr;
+            uint32_t _startoff = _t0->start_offset;
+            _pr[3] = static_cast<uint32_t>(_bufaddr & 0xffffffffu);
+            _pr[4] = static_cast<uint32_t>(_bufaddr >> 32);
+            _pr[5] = _startoff;
+            _pr[6] = static_cast<uint32_t>(s.tensor_count);
+            _pr[7] = static_cast<uint32_t>(s.scalar_count);
+            pto_dcci_flush(const_cast<__gm__ uint32_t *>(&_pr[1]), 7 * sizeof(uint32_t));
+        }
+#endif
+        submit_crumb(gd->runtime, self->core_idx, 50);
         fn(reinterpret_cast<__gm__ int64_t *>(s.args));
+        submit_crumb(gd->runtime, self->core_idx, 51);
         __asm__ __volatile__("" ::: "memory");
+        // Flush all OUT dirty lines to HBM (non-destructive write-back) so any
+        // GM data the kernel wrote via Data Cache is visible to other cores.
         dcci(reinterpret_cast<__gm__ int32_t *>(s.args), ENTIRE_DATA_CACHE, CACHELINE_OUT);
         // C16 DIAG: snapshot this task's first output element (out[0]) + task_id
         // into this core's OWN aicore_progress spare slots (+3/+4) — the proven,
@@ -1790,6 +1831,7 @@ __aicore__ void execute_slot([[maybe_unused]] __gm__ DistCore *self, __gm__ Ring
         // core — distinguishes a kernel hang (never reaches here) from a
         // post-kernel/flag-publish deadlock.
         submit_crumb(gd->runtime, self->core_idx, 49);
+    #endif
     }
 #endif  // DIST_SIM_HOST_CLOCK
     if (s.is_multicore) {
@@ -1815,15 +1857,16 @@ __aicore__ void execute_slot([[maybe_unused]] __gm__ DistCore *self, __gm__ Ring
 // Returns the number of slots freed this pass.
 __aicore__ int32_t drain_phase_b(__gm__ DistCore *self) {
     __gm__ DistGlobal *gd = self->gd;
-    // Fast path: an empty private ring has nothing to drain. Skips the per-slot
-    // scan on every submit point (called twice per task, on every core) when the
-    // ring is empty — the common case for fine-grained / skip-exec workloads.
-    // Behavior-identical: the loop below is a no-op when occupied_count == 0.
     if (self->occupied_count == 0) return 0;
     int32_t freed = 0;
     for (int32_t i = 0; i < kPrivateSlots; i++) {
         __gm__ RingSlot &s = self->slots[i];
-        if (!s.occupied || !s.built) continue;  // skip reserved-but-unbuilt slots
+        if (!s.occupied || !s.built) {
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+            atomicExch(const_cast<__gm__ uint32_t*>(&gd->runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 5]), (uint32_t)((s.occupied << 8) | (s.built << 0) | 0x20000));
+#endif
+            continue;
+        }
         bool ready = true;
         for (int32_t f = 0; f < s.fanin_count; f++) {
             if (coherent_load(&gd->flags[s.fanin[f] & (kFlagCap - 1)], std::memory_order_acquire) == 0) {
@@ -1832,6 +1875,10 @@ __aicore__ int32_t drain_phase_b(__gm__ DistCore *self) {
             }
         }
         if (!ready) continue;
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+        atomicExch(const_cast<__gm__ uint32_t*>(&gd->runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 5]), (uint32_t)s.task_id | 0x10000);
+        atomicExch(const_cast<__gm__ uint32_t*>(&gd->runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 6]), (uint32_t)s.function_bin_addr);
+#endif
         execute_slot(self, s);
         self->occupied_count--;
         freed++;
@@ -2215,6 +2262,7 @@ __aicore__ TaskOutputTensors dist_submit_impl(__gm__ PTO2Runtime *rt, const Mixe
         // out of the (stack-resident?) create_info: its address + ndims + shape[0]
         // + logical bytes. Reveals whether the create_info pointer is stale (ndims
         // garbage) or the shape itself was built as 0.
+#ifdef AICORE_PROGRESS_STRIDE
         if (N == 0) {
             uintptr_t _cia = args.tensor(i).raw_addr();
             __gm__ volatile uint32_t *_pr =
@@ -2226,6 +2274,7 @@ __aicore__ TaskOutputTensors dist_submit_impl(__gm__ PTO2Runtime *rt, const Mixe
             _pr[13] = static_cast<uint32_t>(logical);
             pto_dcci_flush(const_cast<__gm__ uint32_t *>(&_pr[9]), 5 * sizeof(uint32_t));
         }
+#endif
         if (gd->heap_base == nullptr) {
             set_fatal(gd);
             fprintf(stderr, "[dist_engine] GM output heap not allocated at task %d\n", N);
@@ -2273,12 +2322,27 @@ __aicore__ TaskOutputTensors dist_submit_impl(__gm__ PTO2Runtime *rt, const Mixe
     const bool anchor_is_cube = has_aic;
     const bool type_match = anchor_is_cube ? (self->role == CoreType::AIC) : (self->role == CoreType::AIV);
     bool is_winner = false;
+    if (N == 0) {
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+        atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 5]), (uint32_t)type_match + 1);
+        atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 6]), (uint32_t)self->role);
+        atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 7]), (uint32_t)anchor_is_cube);
+#endif
+    }
     if (type_match) {
-        // Pick the shard for this task (§6.6): shard = N % kCursorShards, a pure
-        // function of the task id so every core targets the same sub-cursor for N.
         __gm__ PaddedCursor *cursors = anchor_is_cube ? gd->cube_cursor : gd->vector_cursor;
         __gm__ Coherent<int32_t> *cursor = &cursors[N % kCursorShards].v;
+        if (N == 0) {
+            int32_t cur_val = coherent_load(cursor, std::memory_order_acquire);
+            (void)cur_val;
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+            atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 3]), (uint32_t)cur_val);
+            atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[self->core_idx * AICORE_PROGRESS_STRIDE + 4]), 0xBEEF);
+#endif
+        }
         is_winner = claim(cursor, N);
+        if (is_winner) submit_crumb(runtime, self->core_idx, 70 + (N & 0xF));
+        if (is_winner) submit_crumb(runtime, self->core_idx, 71);
     }
 
     // (c) Fan-in resolution — WINNER ONLY. Look up producers of INPUT/INOUT regions
@@ -2312,6 +2376,8 @@ __aicore__ TaskOutputTensors dist_submit_impl(__gm__ PTO2Runtime *rt, const Mixe
             }
         }
     }
+
+    if (is_winner) submit_crumb(runtime, self->core_idx, 72);
 
     // (d) Register this task as the producer of its OUTPUT / INOUT / existing
     // outputs. Private: UNCONDITIONAL (every core writes its own replica, so all
@@ -2355,6 +2421,15 @@ __aicore__ TaskOutputTensors dist_submit_impl(__gm__ PTO2Runtime *rt, const Mixe
                 built[i].copy(result.get_ref(bo));
                 bo++;
             } else {
+#if !DIST_SIM_HOST_CLOCK
+                // TensorRef stores an integer address pointing to a Tensor object
+                // in Runtime::orch_args_storage_ (GM). AICPU wrote it; AICore must
+                // inval the cacheline before reading the Tensor's fields.
+                {
+                    const auto &tref = args.tensor(i);
+                    pto_dcci_inval(reinterpret_cast<__gm__ const void *>(tref.raw_addr()), sizeof(Tensor));
+                }
+#endif
                 built[i].copy(args.tensor(i).ref());
             }
         }
@@ -2922,7 +2997,7 @@ void dist_dump_state(int) {
 // inside dist_core_main. Onboard (AICore CCEC) writes + dcci-flushes the line so
 // the AICPU's invalidate-read sees it; sim/AICPU builds no-op. Values chosen to
 // not collide with aicore_executor's 11 (pre-call) / 12 (post-return).
-#if !DIST_SIM_HOST_CLOCK
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
 // The compiler barrier ("memory" clobber) is LOAD-BEARING for diagnostics: at
 // -O3 CCEC freely hoists a later (faulting) memory access ahead of these
 // volatile crumb stores, so the last-retired crumb no longer marks the last
@@ -2932,24 +3007,31 @@ void dist_dump_state(int) {
 // bisection marker.
 #define DIST_CRUMB(rt, idx, val)                                                            \
     do {                                                                                    \
-        (rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE] = (val);                 \
-        dcci(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE], SINGLE_CACHE_LINE, \
-             CACHELINE_OUT);                                                                \
+        atomicExch(const_cast<__gm__ uint32_t*>(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE]), (uint32_t)(val)); \
         __asm__ __volatile__("" ::: "memory");                                              \
     } while (0)
-// Companion to DIST_CRUMB: stash a 64-bit diagnostic value for THIS core in the
-// spare u32 slots of its own crumb cache line (slot 0 = crumb, slots 1/2 = dbg
-// lo/hi). Reuses the same proven-writable line — a separately-appended array
-// faulted on-core because the device Runtime buffer does not map fields past
-// aicore_progress. Same line + same dcci as the crumb, so no false sharing.
 #define DIST_DBG(rt, idx, val64)                                                          \
     do {                                                                                  \
-        (rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 1] =                  \
-            (uint32_t)((uint64_t)(val64) & 0xffffffffu);                                  \
-        (rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 2] =                  \
-            (uint32_t)(((uint64_t)(val64) >> 32) & 0xffffffffu);                          \
-        dcci(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE], SINGLE_CACHE_LINE, \
-             CACHELINE_OUT);                                                              \
+        atomicExch(const_cast<__gm__ uint32_t*>(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 1]),      \
+            (uint32_t)((uint64_t)(val64) & 0xffffffffu));                                \
+        atomicExch(const_cast<__gm__ uint32_t*>(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 2]),      \
+            (uint32_t)(((uint64_t)(val64) >> 32) & 0xffffffffu));                        \
+        __asm__ __volatile__("" ::: "memory");                                           \
+    } while (0)
+#elif defined(AICORE_PROGRESS_STRIDE)
+#define DIST_CRUMB(rt, idx, val)                                                            \
+    do {                                                                                    \
+        __atomic_store_n(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE], (uint32_t)(val), __ATOMIC_RELAXED); \
+        pto_dcci_flush(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE], sizeof(uint32_t)); \
+        __asm__ __volatile__("" ::: "memory");                                              \
+    } while (0)
+#define DIST_DBG(rt, idx, val64)                                                          \
+    do {                                                                                  \
+        __atomic_store_n(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 1],      \
+            (uint32_t)((uint64_t)(val64) & 0xffffffffu), __ATOMIC_RELAXED);                \
+        __atomic_store_n(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE + 2],      \
+            (uint32_t)(((uint64_t)(val64) >> 32) & 0xffffffffu), __ATOMIC_RELAXED);        \
+        pto_dcci_flush(&(rt)->dist.aicore_progress[(idx) * AICORE_PROGRESS_STRIDE], sizeof(uint32_t)); \
         __asm__ __volatile__("" ::: "memory");                                           \
     } while (0)
 #else
@@ -2981,6 +3063,9 @@ __attribute__((used)) __aicore__ void dist_core_main_impl(__gm__ void *runtime_v
     // ops callbacks (which only get PTO2Runtime*) can recover this same core via
     // pto_core_id(). `gd`/`self` are threaded as locals from here on.
     DIST_CRUMB(runtime, core_idx, 20);  // entered dist_core_main
+#if !DIST_SIM_HOST_CLOCK && defined(AICORE_PROGRESS_STRIDE)
+    atomicExch(const_cast<__gm__ uint32_t*>(&runtime->dist.aicore_progress[core_idx * AICORE_PROGRESS_STRIDE + 5]), 0xDEAD);
+#endif
     __gm__ DistGlobal *gd = reinterpret_cast<__gm__ DistGlobal *>(runtime->dist.global_data_base);
     if (gd == nullptr) return;
     DIST_CRUMB(runtime, core_idx, 21);  // gd recovered (deref of global_data_base ok)
@@ -3055,6 +3140,24 @@ __attribute__((used)) __aicore__ void dist_core_main_impl(__gm__ void *runtime_v
     }
 
     DIST_CRUMB(runtime, core_idx, 24);  // passed startup barrier
+    // AICPU wrote config fields (orch_func, orch_args, rt, runtime, H, heap_base,
+    // layout, etc.) in register() via plain stores. Even with L2 cache coherence
+    // between AICPU and AICore, ARM's weak memory model does NOT guarantee these
+    // stores are visible to AICore in program order. The startup barrier above
+    // (coherent_fetch_add on started_count) provides an acquire-release pair, but
+    // only synchronizes the started_count cacheline. Invalidate the config region
+    // of DistGlobal (everything up to cores[]) so subsequent plain loads pull fresh
+    // data, and use an atomic load as an acquire fence to order the inval before
+    // any config read.
+#if !DIST_SIM_HOST_CLOCK
+    {
+        // Invalidate from gd to just before cores[] (the per-core private region).
+        // cores[] is huge (~240 MB) and per-core private, so skip it.
+        size_t config_size = reinterpret_cast<uintptr_t>(&gd->cores[0]) - reinterpret_cast<uintptr_t>(gd);
+        pto_dcci_inval(gd, config_size);
+        __asm__ __volatile__("" ::: "memory");
+    }
+#endif
     // Replay the full orchestration submit stream: build the per-core map and
     // claim/build owned tasks into the private ring (back-pressure inline). MIX
     // anchors deposit follower subtasks into block.won during this replay.
@@ -3144,32 +3247,14 @@ __attribute__((used)) __aicore__ void dist_core_main_impl(__gm__ void *runtime_v
         blob_bind(gd->rt);
     }
     DIST_CRUMB(runtime, core_idx, 27);  // blob bound, about to replay orchestration
+#if !DIST_SIM_HOST_CLOCK
+    pto_dcci_inval(&gd->orch_args_gm, sizeof(gd->orch_args_gm));
+#endif
     if (gd->orch_func != nullptr && gd->orch_args != nullptr && !fatal_set(gd)) {
         DIST_CRUMB(runtime, core_idx, 98);  // about to CALL orchestration blob
         gd->orch_func(*gd->orch_args);
         DIST_CRUMB(runtime, core_idx, 99);  // orchestration returned
     }
-    // C15 DIAG: fn (function_bin_addr) was confirmed to resolve to a valid GM
-    // kernel-blob address (0x…1c… region), so the AICore MTE exception is a bad
-    // DMA inside the kernel — i.e. a tensor buffer address the kernel reads/writes
-    // is invalid/unmapped. Snapshot the FIRST built slot's tensor[0] buffer
-    // address (and tensor_count) BEFORE any fn() call. A device-HBM addr should
-    // sit in the 0x1… region; a 0/host/garbage value pinpoints a bad arg build.
-    //   bits 0-47  : tensors[0].buffer.addr (low 48b)  (input-0 device addr)
-    //   bits 48-55 : pto_core_id()                      (logical id)
-    //   bits 56-59 : tensor_count                       (# tensor args)
-    //   bits 60-63 : self->local_index (low 4)          (tasks submitted; expect 5)
-    dbg99 = 0;
-    for (int32_t _si = 0; _si < kPrivateSlots; _si++) {
-        __gm__ RingSlot &_s = self->slots[_si];
-        if (_s.built && _s.function_bin_addr != 0) {
-            dbg99 = (uint64_t)_s.tensors[0].buffer.addr & 0xffffffffffffull;
-            dbg99 |= ((uint64_t)(uint32_t)(_s.tensor_count & 0xf)) << 56;
-            break;
-        }
-    }
-    dbg99 |= ((uint64_t)(uint32_t)(pto_core_id() & 0xff)) << 48;
-    dbg99 |= ((uint64_t)(uint32_t)(self->local_index & 0xf)) << 60;
     DIST_CRUMB(runtime, core_idx, 28);  // orchestration replay returned
     (void)dbg99;  // C14 DIAG: unused when DIST_DBG is a no-op (sim build)
 #if DIST_SIM_HOST_CLOCK
@@ -3380,8 +3465,18 @@ void *dist_engine_register(
     // the Coherent<T> note above). A5 maps HBM twice; add the double-page-table
     // offset to reach the uncacheable alias of the SAME physical pages. On sim /
     // when the driver lacks the double page table this returns 0 (stay cacheable).
-    const uint64_t host_seg_base_raw = static_cast<uint64_t>(runtime->dist.seg_base);
-    const uint64_t host_seg_size = static_cast<uint64_t>(runtime->dist.seg_size);
+    const uint64_t host_seg_base_raw =
+#ifdef AICORE_PROGRESS_STRIDE
+        static_cast<uint64_t>(runtime->dist.seg_base);
+#else
+        0ULL;
+#endif
+    const uint64_t host_seg_size =
+#ifdef AICORE_PROGRESS_STRIDE
+        static_cast<uint64_t>(runtime->dist.seg_size);
+#else
+        0ULL;
+#endif
     const uint64_t nocache_off = (host_seg_base_raw != 0) ? aicpu_device_nocache_offset() : 0ULL;
     const uint64_t host_seg_base = (host_seg_base_raw != 0) ? (host_seg_base_raw + nocache_off) : 0ULL;
     static __gm__ DistGlobal *g_segment = nullptr;
@@ -3593,9 +3688,13 @@ void *dist_engine_register(
             (unsigned long long)reinterpret_cast<uint64_t>(gd),
             (unsigned long long)reinterpret_cast<uint64_t>(&gd->orch_args_gm),
             gd->orch_args_gm.tensor_count(),
+#ifdef AICORE_PROGRESS_STRIDE
             (gd->orch_args_gm.tensor_count() > 0
                  ? (unsigned long long)gd->orch_args_gm.tensor(0).raw_addr()
                  : 0ull)
+#else
+            0ull
+#endif
         );
     } else {
         gd->orch_args = nullptr;

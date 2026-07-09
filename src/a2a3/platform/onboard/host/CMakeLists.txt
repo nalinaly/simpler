@@ -39,7 +39,7 @@ endif()
 # needed by the sdma_async_completion_demo. Until that coupling is
 # refactored away, the macro is forced ON: PTO_ISA_ROOT and CANN 9.0+ are
 # hard build/runtime preconditions for a2a3 onboard.
-set(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE ON)
+set(SIMPLER_ENABLE_PTO_SDMA_WORKSPACE OFF)
 if(NOT DEFINED ENV{PTO_ISA_ROOT})
     message(FATAL_ERROR
         "a2a3 onboard host_runtime requires PTO_ISA_ROOT "
