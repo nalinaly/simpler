@@ -13,7 +13,7 @@
 
 > cleanroom 迁移状态（2026-07-19）：本文由
 > `wip/qk-lazy-pmu-migration-20260718@cb799c4d` 迁入当前
-> `origin/fdwic-swimlane-deps@6caa269c`。当前分支保留旧 caller-capture
+> `origin/fdwic-swimlane-deps@14c2429f`。当前分支保留旧 caller-capture
 > fixture，但没有随附 `d11277bd` 新增的 `nested_lambda_claim_first_once`、
 > `block_local_cross_tu` 源码、构建产物和设备日志；相关命令在重建前不能从
 > 当前 HEAD 直接复跑。下文对应的 A5 PASS 是绑定当时源码/ELF SHA 的历史

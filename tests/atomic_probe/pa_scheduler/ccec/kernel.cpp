@@ -361,7 +361,24 @@ __aicore__ inline void CcecOps::PmuWindowStop(
 
 }  // namespace
 
-#if defined(PA_BUILD_AIC)
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH) && defined(PA_BUILD_AIC)
+// split artifact: the runtime entry/state-owner TU calls this orchestration
+// function once per kernel launch.  It is not a launchable kernel and the
+// version script localizes it in the final mixed ELF.
+extern "C" __attribute__((noinline, used)) __aicore__ void
+pa_scheduler_qk_callback_orchestration_aic(
+    __gm__ pa_scheduler::SchedulerState *state, uint32_t worker_id
+) {
+    pa_scheduler::RunScheduler<CcecOps>(state, worker_id, pa_scheduler::CoreRole::Aic);
+}
+#elif defined(PA_QK_CALLBACK_SPLIT_FINISH) && defined(PA_BUILD_AIV)
+extern "C" __attribute__((noinline, used)) __aicore__ void
+pa_scheduler_qk_callback_orchestration_aiv(
+    __gm__ pa_scheduler::SchedulerState *state, uint32_t worker_id
+) {
+    pa_scheduler::RunScheduler<CcecOps>(state, worker_id, pa_scheduler::CoreRole::Aiv);
+}
+#elif defined(PA_BUILD_AIC)
 // 同一源码分别按 cube/vec 架构编译；metadata 声明每个物理 block 静态组合 1 个 AIC 与 2 个 AIV。
 PTO_SYNCALL_MIX_AIC_KERNEL_META(pa_scheduler_0_mix_aic, 1, 2);
 

@@ -2,8 +2,8 @@
 
 > cleanroom 归档状态（2026-07-19）：本文由
 > `wip/qk-lazy-pmu-migration-20260718@cb799c4d` 迁入当前目录；新实现基线为
-> `origin/fdwic-swimlane-deps@6caa269c`。本文在进入 cleanroom 前的 A/B/C、
-> production、STOP 和 PMU 数字均为历史实验记录，不是 `6caa269c` 的性能基线，
+> `origin/fdwic-swimlane-deps@14c2429f`。本文在进入 cleanroom 前的 A/B/C、
+> production、STOP 和 PMU 数字均为历史实验记录，不是 `14c2429f` 的性能基线，
 > 当前分支必须重新构建和采样。历史 `docs/make_replay_faster*.md`、
 > `tests/atomic_probe/pa_lazy_qk_pmu/`、d112 增量 probe 及 `/atomic/sfd/gpt/`
 > 产物没有随附；旧 `/private/3-gpt/` 工件也位于本 worktree 之外。下文明确
@@ -11,21 +11,23 @@
 
 ## 0. cleanroom standalone 当前进展（2026-07-19）
 
-本节只记录 `origin/fdwic-swimlane-deps@6caa269c` 之上的当前 cleanroom
+本节只记录 `origin/fdwic-swimlane-deps@14c2429f` 之上的当前 cleanroom
 实现和复测；下文第 1 节起仍是旧分支历史实验。当前工作分支为
 `wip/qk-lazy-cleanroom-20260719`，实现入口固定在
 `tests/atomic_probe/pa_scheduler/`。
 
-### 0.1 当前只完成 inline-semantic 对照，不是 D
+### 0.1 inline control 与 split-TU 组合语义
 
-新增两种**编译期独立产物**：
+当前共有四种**编译期独立产物**：
 
 | 产物 | shape id | QK callback 内的参数策略 | 与历史标签的关系 |
 | --- | ---: | --- | --- |
 | `callback-eager` | 1 | 所有 worker 都求值 input/output/scalar thunk | claim-first callback 家族的 all-thunks control；**不是** legacy eager，也不是历史 A |
-| `callback-lazy` | 2 | 所有 worker 求值 fresh output；只有 QK winner 求值 input/scalar thunk | standalone 的 lazy 语义候选；尚不是 split D |
+| `callback-lazy` | 2 | 所有 worker 求值 fresh output；只有 QK winner 求值 input/scalar thunk | inline lazy control |
+| `split-eager` | 3 | 与 shape 1 相同 | split-TU all-thunks control；不是 legacy eager/A/A′ |
+| `split-lazy` | 4 | 与 shape 2 相同 | standalone split-TU lazy 组合语义候选 |
 
-两种 shape 都固定为：
+四种 shape 都固定为：
 
 ```text
 task-id
@@ -40,7 +42,7 @@ task-id
 → winner-only Build
 ```
 
-运行 banner、raw JSON 和 ready manifest 都明确记录：
+shape 1/2 的运行 banner、raw JSON 和 ready manifest 明确记录：
 
 ```text
 observation=inline-semantic
@@ -48,11 +50,20 @@ finish=inline-same-tu
 control_family=claim-first-callback-not-legacy-eager
 ```
 
-当前 `QkCallbackTicket` 只是同一 TU 内的 16 B 源码载体，finish 也被静态门禁
-要求完全 inline。它没有形成 cross-TU ABI，没有验证唯一 noinline finish、
-external `[[block_local]]` state 或 caller object 的单 relocation。因此本节只能
-回答“claim-first、single callback 与 lazy thunk 语义在 standalone 中可行”，
-不能回答“D 已实现”，也不能拿 `callback-eager` 代替 legacy eager 性能基线。
+shape 1/2 中 `QkCallbackTicket` 只是同一 TU 内的 16 B 源码载体，finish 被静态
+门禁要求完全 inline。shape 3/4 则把同一语义拆成三个职责：runtime entry TU
+拥有按 AIC/AIV 分角色的 external `[[block_local]] QkSplitRuntimeState`，caller /
+orchestration TU 只通过 ticket 与 `TaskArgs` 指针调用一次强定义 noinline finish，
+finish TU 完成最终处理。launch entry 对 orchestration 使用强符号直接调用，不保留
+weak/null-check 旁路。
+
+split 构建门禁要求：每角色 caller 对对应 finish 恰好一个 `.rela.text` relocation；
+runtime entry 对对应 orchestration 恰好一个强 `GLOBAL UND` 调用 relocation；state
+精确为 1600 B/64 B 对齐并绑定 `.bl.uninit`；final ELF 只导出两个 entry、无 relocation，
+且 orchestration/finish/state 均为 local。host 还逐 worker 校验 caller/finish 观察到
+同一非零 state 地址、finish 次数、owner/cookie/task sum 和前端精确计数。由此可以说
+“standalone split-TU 组合语义已经实现并跑通”，但它仍不是 production D，也不能拿
+`split-eager` 冒充历史 legacy A/A′。
 
 默认构建不定义 `PA_QK_CALLBACK_SHAPE_ID`，继续走原 `SubmitTask`；shape 选择
 不存在运行时分支。当前最新 patch 的默认 CPU/CCEC 规范化预处理 token 5/5
@@ -66,17 +77,17 @@ external `[[block_local]]` state 或 caller object 的单 relocation。因此本
 
 | shape | view | tensor Arg | scalar Arg | TaskArgs reset |
 | --- | ---: | ---: | ---: | ---: |
-| callback-eager | `2B` | `22B` | `9B` | `4B` |
-| callback-lazy | `B + q_i` | `19B + 3q_i` | `7B + 2q_i` | `4B` |
+| callback-eager / split-eager | `2B` | `22B` | `9B` | `4B` |
+| callback-lazy / split-lazy | `B + q_i` | `19B + 3q_i` | `7B + 2q_i` | `4B` |
 
 96-worker standalone 每 batch 恰有一个 QK winner，所以全局期望为：
 
 | shape | view | tensor Arg | scalar Arg | TaskArgs reset |
 | --- | ---: | ---: | ---: | ---: |
-| callback-eager | `192B` | `2112B` | `864B` | `384B` |
-| callback-lazy | `97B` | `1827B` | `674B` | `384B` |
+| callback-eager / split-eager | `192B` | `2112B` | `864B` | `384B` |
+| callback-lazy / split-lazy | `97B` | `1827B` | `674B` | `384B` |
 
-两形态仍共同要求 `dynamic_create_infos=192B`、
+四种形态仍共同要求 `dynamic_create_infos=192B`、
 `materialized_outputs=768B`、`map_inserts=384B`，并复用既有 heap、TensorMap、
 fanin、winner placement、completion/frontier 和数值输出 oracle。Reset 放在 outer
 callback 内；若 callback 被调用两次，`reset_calls != 1` 会在 Materialize 前失败。
@@ -92,10 +103,16 @@ cd tests/atomic_probe/pa_scheduler
 ./run.sh build-qk-callback cpu  callback-lazy
 ./run.sh build-qk-callback ccec callback-eager
 ./run.sh build-qk-callback ccec callback-lazy
+./run.sh build-qk-callback ccec split-eager
+./run.sh build-qk-callback ccec split-lazy
 
 ./run.sh qk-callback ccec callback-eager \
   --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
 ./run.sh qk-callback ccec callback-lazy \
+  --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
+./run.sh qk-callback ccec split-eager \
+  --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
+./run.sh qk-callback ccec split-lazy \
   --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
 ```
 
@@ -107,6 +124,10 @@ CPU callback build 在发布 SHA256 manifest 前会自动运行 b1 real-compute 
 | CPU b1 real-compute、无泳道 | 全部结构/计数/数值 oracle PASS；`192/2112/864/384` | 全部结构/计数/数值 oracle PASS；`97/1827/674/384` |
 | CCEC device0 b1 real-compute、无泳道 | 全部结构/计数/数值 oracle PASS；`192/2112/864/384` | 全部结构/计数/数值 oracle PASS；`97/1827/674/384` |
 | CCEC device0 b1 scalar-nop、atomic 泳道 | raw record 闭合、dropped=0、converter/exclusive PASS | raw record 闭合、dropped=0、converter/exclusive PASS；最新 provenance capture 为 `4129/4129` |
+
+split-eager 与 split-lazy 的 CCEC device0 b1 real-compute、无泳道复测也分别以
+`192/2112/864/384` 和 `97/1827/674/384` 通过全部数值、结构、state 与 cross-TU
+oracle。按约定没有追加 CPU b256 或 CCEC b256 功能测试。
 
 这里的“无泳道”只是 runtime `--no-swimlane`，当前 CCEC callback ELF 仍以
 `PA_BUILD_SWIMLANE=1` 编译。b1 的单轮 Submit span 只用于确认 marker 有效，
@@ -134,18 +155,98 @@ python3 swimlane_exclusive_analyzer.py /tmp/pa_qk_callback_lazy_ccec_b1.json \
 | CCEC | `/home/q00473782/Ascend/cann-9.1.0-weekly-20260708/cann-9.1.0/bin/ccec` | `34355dde8c995f3c7d769ddf0e1b853aba65cf6ef6fb3863ab86c026d40aebfd` |
 | CPU C++ | `/usr/bin/g++` | `1353e9bdd29a7295c7226bf6c63abccce056d8cac31f112e5cdbecc3f28c2769` |
 
-### 0.4 下一步与 5% 停止门槛
+### 0.4 split-TU `.text` 与 b256 性能结论
 
-下一步先把 inline-semantic 作为独立小提交冻结，再实现真正的 split-TU
-single-finish 组合 oracle：caller object 只保留对应 finish 的一个 UND/一个
-text relocation，runtime object 提供强定义，final ELF 无 relocation，且真实
-反汇编证明 callback/closure/thunk 没有跨界。完成该静态和 device0 b1 门禁前，
-不能称为 D。
+构建会发布并在运行前复核 `device_text_layout.manifest`，记录工具身份、每个 device
+object/final ELF 的 `.text` 大小与 SHA256，以及关键 symbol body 的大小与 SHA256。
+当前 device0 性能产物为：
 
-性能阶段另建 compile-time 无泳道、无 PMU 的独立产物，只在 CCEC device0
-跑 b256 相邻交错 paired A/B；功能阶段不浪费 CPU b256 或 CCEC b256。若逐 pair
-方向不稳定或中位数绝对差异小于 5%，立即停止，不做 I-cache 对比；只有稳定
-达到 5% 才复用已有 submit-pmu `none` 观察手段细化，而不是在本阶段先补 PMU。
+| shape | final `.text` | final `.text` SHA256 | AIC caller / runtime / finish | AIV caller / runtime / finish |
+| --- | ---: | --- | ---: | ---: |
+| split-eager | 955448 B | `ef3f83f6d7d30278311ff4aafb1ba9077ada42ec45650d7b824b5b66de13d6e1` | 406016 / 112 / 70096 B | 408376 / 128 / 70552 B |
+| split-lazy | 953656 B | `780864b66f976c0f06a14da409cc56885dea2890c6a0d5a1ad0ba2739a7a10d6` | 405480 / 112 / 70096 B | 407096 / 128 / 70552 B |
+
+两份可复核 manifest 位于
+`build/ccec/qk-callback/{split-eager,split-lazy}/swimlane/device_text_layout.manifest`。
+split-lazy final `.text` 比 split-eager 少 1792 B（相对 eager 约 0.188%）；split
+产物本身又明显大于 inline control。这里只把 `.text` 作为必须跟踪的实验变量，
+不能从大小或哈希直接推断 I-cache miss。runtime entry 从 weak/null-check 改为强调用后
+object body 变小，但 final 总大小受链接布局/对齐吸收而未变化，SHA 已变化，也不能把
+“总大小不变”写成“代码没有变化”。
+
+性能只跑 CCEC device0、96 workers、b256、10 runs、real-compute、runtime
+`--no-swimlane`、PMU off；全部 20 个样本的执行、语义与 postprocess oracle PASS。
+完整保留的一轮反序相邻对照为：
+
+| 顺序 | shape | 10 轮 Submit span 中位数 |
+| ---: | --- | ---: |
+| 1 | split-lazy | 4064.685 us |
+| 2 | split-eager | 4008.860 us |
+
+该轮 split-lazy 慢 55.825 us，即相对 split-eager **+1.393%**。此前正序复跑中
+split-lazy 中位数为 4001.821 us，但 split-eager 汇总因工具输出截断未完整归档，
+因此不把它包装成完整 paired 结论。现有完整对照没有达到 5%，不足以支持 lazy
+存在稳定性能收益或稳定显著回退。按当时约定的停止门槛，该轮原本停止在这里，
+没有先验启动 PMU/I-cache 对比；下节记录随后由用户明确重新要求的微观分析，
+不能把后续 PMU 写成由 5% 门槛自动触发。
+
+用户给出的约 4.9 ms 是 production 基线参考；本 standalone 测量落在约
+4.0～4.1 ms，执行路径与观测口径不能冒充 production 基线。当前证据只回答：
+split-lazy 在 standalone 上功能可行，但没有观察到值得继续细化的 5% 性能差异。
+
+### 0.5 simpler split D 的 Level 1 对照（2026-07-19）
+
+simpler 实验位于独立 worktree，分支
+`wip/qk-lazy-simpler-split-20260719`，基线为
+`origin/fdwic-swimlane-deps@14c2429f`。本节记录的是尚未提交的实验 patch，
+不是远端分支已有能力。它把 standalone 已验证的 split 组合语义迁到 production
+FDWIC：角色独立的 external `[[block_local]]` worker state、16 B ticket、每角色
+唯一一次 noinline finish；A′ 与 D 只切换 QK builder 的编译期 `Lazy` 模板实参。
+
+三种静态形态为：
+
+| 形态 | QK 参数语义 | final `.text` | final ELF SHA256 |
+| --- | --- | ---: | --- |
+| production A | 原始 eager submit | 178768 B | `318732a9053b5ff2f25ec71155ca13f8235a289ed0b69688fda7676bd380d1c2` |
+| split A′ | claim-first；所有 worker 求值 input/output/scalar thunk | 253776 B | `49aaa5fe59052dea6732390b953de712ad6e1ac013723da16a01fdff4673b5fb` |
+| split D | claim-first；仅 winner 求值 input/scalar，所有 worker 求值 output | 254032 B | `3b3ceb7071b8e6104e3b55f647a84883fb056a7327dda780810edaa8a3bd197f` |
+
+A′/D orchestration object 的 `.text` 分别为 AIC `30512/30576 B`、AIV
+`30672/30752 B`；D 相对 A′ 的 final `.text` 增加 256 B。两份 split final
+ELF 均无 relocation；每角色 caller object 对对应 finish 恰有一个
+`.rela.text` relocation。相对 production，A′/D final `.text` 分别增加
+75008 B（41.958%）和 75264 B（42.101%）。这是重要混杂变量，只能用
+`D-A′` 回答 lazy bundle 的局部差异，不能用 `D-production` 单独归因 lazy。
+
+device0 `Case1/b256` 使用 `--enable-l2-swimlane 1`；这里的 Level 1 是 L2
+swimlane perf level，不是测试框架打印的 scene `Level: 2`。每轮均
+`--rounds 1 --skip-golden`，从 raw `fdwic_events` 中筛选全部 `Submit`，要求
+精确 122880 条，并取 `min(start)～max(end)` 的 1 GHz SYS_CNT 跨度：
+
+| 实际顺序 | 形态 | 输出目录 | Submit span |
+| ---: | --- | --- | ---: |
+| 1 | A′ | `outputs/TestPagedAttentionUnroll_Case1_20260719_163633` | 5.079530 ms |
+| 2 | D | `outputs/TestPagedAttentionUnroll_Case1_20260719_164133` | 5.070987 ms |
+| 3 | A′ | `outputs/TestPagedAttentionUnroll_Case1_20260719_164427` | 5.050620 ms |
+| 4 | D | `outputs/TestPagedAttentionUnroll_Case1_20260719_164620` | 5.048429 ms |
+| 5 | D | `outputs/TestPagedAttentionUnroll_Case1_20260719_164856` | 5.065078 ms |
+| 6 | A′ | `outputs/TestPagedAttentionUnroll_Case1_20260719_165043` | 5.083549 ms |
+
+三样本中位数为 A′ `5.079530 ms`、D `5.065078 ms`，D 快 `14.452 us`，
+即 **-0.285%**；均值差为 `-9.735 us`（`-0.192%`）。前两组正序
+`A′→D` 分别为 `-0.168%/-0.043%`，最后一组反序 `D→A′` 中 D 为
+`-0.363%`。方向都略偏 D，但数量级远小于 5%，只能说本轮没有观察到
+显著 lazy 性能差异。production 的单轮同口径参考为
+`outputs/TestPagedAttentionUnroll_Case1_20260719_162151` 的 `4.783123 ms`；
+split 两形态约 5.05～5.08 ms 的绝对回退同时包含 state export、跨 TU
+front/finish 与显著 `.text` 扩张，不能归给 lazy。
+
+随后曾按用户要求接入 `pa_scheduler` 的正式 submit-PMU `none` 整窗口径；
+split-eager 与 split-lazy 的 PMU 诊断产物均通过构建期静态门禁，split-eager
+完成了一次 device0/b256 运行，96/96 PMU record 与全部语义 oracle PASS。用户随后
+停止 I-cache 测试，故 split-lazy 没有运行样本，两者没有形成可比较的 PMU 数据集，
+本次不作任何 I-cache 归因。PMU 诊断 ELF 的 wall-time 也不替代上述无 PMU/Level 1
+性能结论。
 
 > 验证日期：2026-07-17～2026-07-19
 > Production 业务代码基线：`a3f5ecc2186fb8a06cded6d26886a4ab802009c0`
@@ -327,7 +428,8 @@ winner `Prepare + WinnerBind` 两次 dispatcher：
 TU 内的 `static [[block_local]]`。独立 orchestration TU 不能直接用同一份
 对象完成 claim-first。
 
-同时，`tests/atomic_probe/AICore嵌套Lambda捕获与模板调用验证.md` 已经证明
+同时，`tests/atomic_probe/pa_scheduler/AICore嵌套Lambda捕获与模板调用验证.md`
+已经证明
 caller 栈地址跨
 特定未内联调用边界存在 CCEC codegen 敏感性。候选因此临时生成：
 
@@ -1275,7 +1377,7 @@ tests/atomic_probe/pa_lazy_qk_pmu/
 ```text
 tests/atomic_probe/pa_scheduler/PA调度器独立复现与泳道使用指南.md
 tests/atomic_probe/test_case.md
-tests/atomic_probe/AICore嵌套Lambda捕获与模板调用验证.md
+tests/atomic_probe/pa_scheduler/AICore嵌套Lambda捕获与模板调用验证.md
 src/a5/platform/include/common/pmu_profiling.h
 ```
 

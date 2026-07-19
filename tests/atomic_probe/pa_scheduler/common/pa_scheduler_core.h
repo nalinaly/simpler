@@ -31,6 +31,35 @@ struct LocalStats {
     TraceContext trace;
 };
 
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+// runtime TU owns one external [[block_local]] instance per architecture.
+// The caller imports that same object and keeps all Submit-internal context in
+// it, so the only cross-TU function arguments are a POD ticket and built args.
+struct alignas(64) QkSplitRuntimeState {
+    PA_GM SchedulerState *scheduler;
+    PA_GM WorkerState *worker;
+    uint32_t task_count;
+    uint32_t worker_id;
+    SubmitContext context;
+    LocalStats stats;
+    uint64_t caller_state_address;
+    uint64_t finish_state_address;
+    uint64_t finish_calls;
+    uint64_t protocol_errors;
+    uint64_t state_cookie;
+    uint64_t task_id_sum;
+    uint64_t owner_worker_id;
+    uint64_t reserved;
+};
+static_assert(sizeof(QkSplitRuntimeState) % 64 == 0,
+              "split runtime state must occupy whole cache lines");
+
+PA_DEVICE uint64_t QkSplitStateCookie(uint32_t worker_id, CoreRole role) {
+    return kQkSplitStateCookieBase ^ static_cast<uint64_t>(worker_id) ^
+           (static_cast<uint64_t>(static_cast<uint32_t>(role)) << 32U);
+}
+#endif
+
 // submit-pmu 的 phase 在编译期固定；非诊断构建完全不引用 Ops 的 phase
 // 接口。这样公共调度代码保持一份，swimlane/CPU/AscendC 也不会多出运行时分支。
 template <SubmitPmuPhase Phase, typename Ops, typename PmuContext>
@@ -843,7 +872,7 @@ PA_DEVICE bool BuildQkCallbackArgs(
 #undef PA_QK_LAMBDA_DEVICE
 
 template <typename Ops, bool Profile, typename PmuContext>
-PA_DEVICE bool FinishInlineQkCallbackSubmit(
+PA_DEVICE bool FinishQkCallbackSubmitBody(
     PA_GM SchedulerState *state, PA_GM WorkerState &worker, uint32_t task_count,
     const TaskArgs &args, SubmitContext &context, LocalStats &stats,
     PmuContext &pmu_context, const QkCallbackTicket &ticket
@@ -852,9 +881,9 @@ PA_DEVICE bool FinishInlineQkCallbackSubmit(
     const int32_t function_id = static_cast<int32_t>(ticket.function_id);
     const bool winner = ticket.won != 0;
 
-    // The callback has ended before this source-level finish consumes TaskArgs.
-    // No closure, nested thunk, or caller context escapes its lifetime.  Since
-    // this helper is still inline/same-TU, “finish” is not yet a compiled ABI.
+    // The callback has ended before this body consumes TaskArgs.  No closure
+    // or nested thunk escapes its lifetime.  Inline shapes instantiate this in
+    // the caller; split shapes instantiate it inside the runtime finish TU.
     const uint64_t materialize_begin = TraceTimestamp<Ops>(stats.trace, stats.result);
     BeginSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
     const bool materialized =
@@ -883,7 +912,7 @@ PA_DEVICE bool FinishInlineQkCallbackSubmit(
     );
 
     uint64_t register_begin = prepare_end;
-    if (winner) {
+    if (__builtin_expect(winner, 0)) {
         const uint64_t fanin_begin = prepare_end;
         context.fanin_count = static_cast<int32_t>(CollectFanin(worker.map, args, context.fanin));
         stats.result.map_lookups += static_cast<uint32_t>(args.tensor_count) - context.result.count;
@@ -907,7 +936,7 @@ PA_DEVICE bool FinishInlineQkCallbackSubmit(
         register_begin, register_end, 0, 1
     );
 
-    if (winner) {
+    if (__builtin_expect(winner, 0)) {
         const uint64_t winner_build_begin = register_end;
         if (!BuildWinner<Ops, Profile>(
                 state, worker, task_id, TaskKind::Qk, args, context, context.fanin,
@@ -939,6 +968,60 @@ PA_DEVICE bool FinishInlineQkCallbackSubmit(
     }
     return true;
 }
+
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+template <typename Ops>
+PA_DEVICE uint32_t FinishSplitQkCallbackFromRuntime(
+    const QkCallbackTicket *ticket, const TaskArgs *args
+) {
+    QkSplitRuntimeState &runtime = Ops::QkSplitState();
+    const uint64_t state_address = reinterpret_cast<uint64_t>(&runtime);
+    runtime.finish_state_address = state_address;
+
+    bool valid = ticket != nullptr && args != nullptr && runtime.scheduler != nullptr &&
+                 runtime.worker != nullptr && runtime.task_count != 0 &&
+                 runtime.worker_id < kWorkers && runtime.owner_worker_id == runtime.worker_id &&
+                 runtime.worker->core_idx == static_cast<int32_t>(runtime.worker_id) &&
+                 runtime.caller_state_address == state_address &&
+                 runtime.state_cookie == QkSplitStateCookie(
+                     runtime.worker_id, runtime.worker->role
+                 ) && runtime.reserved == 0;
+    if (valid) {
+        valid = ticket->reserved == 0 && ticket->task_id < runtime.task_count &&
+                GetTaskKind(ticket->task_id) == TaskKind::Qk &&
+                runtime.context.task_id == static_cast<int32_t>(ticket->task_id) &&
+                runtime.context.kernel_id == static_cast<int32_t>(ticket->function_id) &&
+                runtime.context.won == (ticket->won != 0);
+    }
+    ++runtime.finish_calls;
+    if (ticket != nullptr) runtime.task_id_sum += ticket->task_id;
+    if (!valid) {
+        ++runtime.protocol_errors;
+        if (runtime.scheduler != nullptr) {
+            SetFatal<Ops>(
+                runtime.scheduler, runtime.stats,
+                ticket == nullptr ? -1 : static_cast<int32_t>(ticket->task_id)
+            );
+        }
+        return 0;
+    }
+
+    // split finish 不让 caller 的 SubmitContext/LocalStats/PMU 对象跨过
+    // noinline 边界。诊断构建只允许 phase=none：权威 CNT6/7 仍由 caller
+    // 外层完整窗口读取，finish 内部不做 read-clear 局部快照。
+#if PA_BUILD_SUBMIT_PMU
+    static_assert(
+        kCompiledSubmitPmuPhase == SubmitPmuPhase::None,
+        "split QK submit-PMU supports only the whole-window none phase"
+    );
+#endif
+    bool pmu_context = false;
+    return FinishQkCallbackSubmitBody<Ops, false>(
+        runtime.scheduler, *runtime.worker, runtime.task_count, *args,
+        runtime.context, runtime.stats, pmu_context, *ticket
+    ) ? 1U : 0U;
+}
+#endif
 
 template <typename Ops, bool Profile, typename PmuContext, bool Lazy>
 PA_DEVICE bool SubmitQkCallback(
@@ -994,9 +1077,19 @@ PA_DEVICE bool SubmitQkCallback(
         static_cast<uint8_t>(claim.won ? 1 : 0),
         0,
     };
-    return FinishInlineQkCallbackSubmit<Ops, Profile>(
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    (void)state;
+    (void)worker;
+    (void)task_count;
+    (void)context;
+    (void)stats;
+    (void)pmu_context;
+    return Ops::FinishQkCallback(&ticket, &args);
+#else
+    return FinishQkCallbackSubmitBody<Ops, Profile>(
         state, worker, task_count, args, context, stats, pmu_context, ticket
     );
+#endif
 }
 #endif
 
@@ -1071,6 +1164,16 @@ PA_DEVICE void PublishResult(PA_GM WorkerResult &destination, const WorkerResult
     PA_PUBLISH_FIELD(frontier_updates);
     PA_PUBLISH_FIELD(frontier_terminal_loads);
     PA_PUBLISH_FIELD(atomic_trace_calls);
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    PA_PUBLISH_FIELD(qk_split_caller_state_address);
+    PA_PUBLISH_FIELD(qk_split_finish_state_address);
+    PA_PUBLISH_FIELD(qk_split_finish_calls);
+    PA_PUBLISH_FIELD(qk_split_protocol_errors);
+    PA_PUBLISH_FIELD(qk_split_state_cookie);
+    PA_PUBLISH_FIELD(qk_split_task_id_sum);
+    PA_PUBLISH_FIELD(qk_split_owner_worker_id);
+    PA_PUBLISH_FIELD(qk_split_reserved);
+#endif
 #undef PA_PUBLISH_FIELD
     Ops::StoreBarrier();
 }
@@ -1106,7 +1209,26 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
         worker.slots[index].built = false;
     }
 
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    QkSplitRuntimeState &qk_split_runtime = Ops::QkSplitState();
+    qk_split_runtime.context = SubmitContext{};
+    qk_split_runtime.stats = LocalStats{};
+    qk_split_runtime.scheduler = state;
+    qk_split_runtime.worker = &worker;
+    qk_split_runtime.task_count = 0;
+    qk_split_runtime.worker_id = worker_id;
+    qk_split_runtime.caller_state_address = reinterpret_cast<uint64_t>(&qk_split_runtime);
+    qk_split_runtime.finish_state_address = 0;
+    qk_split_runtime.finish_calls = 0;
+    qk_split_runtime.protocol_errors = 0;
+    qk_split_runtime.state_cookie = QkSplitStateCookie(worker_id, role);
+    qk_split_runtime.task_id_sum = 0;
+    qk_split_runtime.owner_worker_id = worker_id;
+    qk_split_runtime.reserved = 0;
+    LocalStats &stats = qk_split_runtime.stats;
+#else
     LocalStats stats{};
+#endif
     stats.result.worker_id = worker_id;
     stats.result.role = static_cast<uint32_t>(role);
     stats.result.checksum = 0xcbf29ce484222325ULL ^ worker_id;
@@ -1142,9 +1264,16 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
 
     const uint32_t batches = state->config.batches;
     const uint32_t task_count = batches * kTasksPerBatch;
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    qk_split_runtime.task_count = task_count;
+#endif
     PaOrchestrationState orchestration;
     TaskArgs args;
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    SubmitContext &context = qk_split_runtime.context;
+#else
     SubmitContext context;
+#endif
     uint64_t orchestration_begin = 0;
     uint64_t orchestration_end = 0;
     if (!IsFatal<Ops>(state, stats)) {
@@ -1297,6 +1426,34 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
                 (Ops::kAtomicReturnReadyObserved ? kClockAtomicDependencyApplied : 0U)
         );
     }
+#endif
+
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    const uint64_t expected_qk_task_id_sum =
+        static_cast<uint64_t>(batches) +
+        static_cast<uint64_t>(kTasksPerBatch) * batches * (batches - 1U) / 2U;
+    const bool split_protocol_ok =
+        qk_split_runtime.scheduler == state && qk_split_runtime.worker == &worker &&
+        qk_split_runtime.task_count == task_count && qk_split_runtime.worker_id == worker_id &&
+        qk_split_runtime.owner_worker_id == worker_id &&
+        qk_split_runtime.caller_state_address != 0 &&
+        qk_split_runtime.finish_state_address == qk_split_runtime.caller_state_address &&
+        qk_split_runtime.finish_calls == batches &&
+        qk_split_runtime.task_id_sum == expected_qk_task_id_sum &&
+        qk_split_runtime.state_cookie == QkSplitStateCookie(worker_id, role) &&
+        qk_split_runtime.reserved == 0;
+    if (!split_protocol_ok) {
+        ++qk_split_runtime.protocol_errors;
+        SetFatal<Ops>(state, stats);
+    }
+    stats.result.qk_split_caller_state_address = qk_split_runtime.caller_state_address;
+    stats.result.qk_split_finish_state_address = qk_split_runtime.finish_state_address;
+    stats.result.qk_split_finish_calls = qk_split_runtime.finish_calls;
+    stats.result.qk_split_protocol_errors = qk_split_runtime.protocol_errors;
+    stats.result.qk_split_state_cookie = qk_split_runtime.state_cookie;
+    stats.result.qk_split_task_id_sum = qk_split_runtime.task_id_sum;
+    stats.result.qk_split_owner_worker_id = qk_split_runtime.owner_worker_id;
+    stats.result.qk_split_reserved = qk_split_runtime.reserved;
 #endif
 
     // PA writes swimlane records through the ordinary GM cache and explicitly

@@ -16,6 +16,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SUBMIT_PMU_MANIFEST_NAME="submit_pmu_artifacts.manifest"
 QK_CALLBACK_MANIFEST_NAME="qk_callback_artifacts.manifest"
+QK_CALLBACK_TEXT_LAYOUT_NAME="device_text_layout.manifest"
+QK_CALLBACK_SPLIT=0
+QK_CALLBACK_VARIANT=0
+PMU_VARIANT=0
 
 # CCEC 不再生成同时夹带泳道与 PMU 的统一 ELF。无参数保持兼容并明确等价于
 # swimlane；submit-pmu 的 phase 必须先由白名单映射为稳定数值，不能把任意
@@ -51,16 +55,19 @@ case "$BUILD_VARIANT" in
         esac
         BUILD_DIR="$ROOT_DIR/build/ccec/submit-pmu/$PHASE_NAME"
         VARIANT_DEFINES=(-DPA_BUILD_SWIMLANE=0 -DPA_BUILD_SUBMIT_PMU=1 "-DPA_SUBMIT_PMU_PHASE_ID=$PHASE_ID")
+        PMU_VARIANT=1
         ;;
     qk-callback)
         if [[ $# -ne 2 ]]; then
-            echo "Usage: $0 qk-callback callback-eager|callback-lazy" >&2
+            echo "Usage: $0 qk-callback callback-eager|callback-lazy|split-eager|split-lazy" >&2
             exit 1
         fi
         QK_CALLBACK_SHAPE="$2"
         case "$QK_CALLBACK_SHAPE" in
             callback-eager) QK_CALLBACK_SHAPE_ID=1 ;;
             callback-lazy) QK_CALLBACK_SHAPE_ID=2 ;;
+            split-eager) QK_CALLBACK_SHAPE_ID=3; QK_CALLBACK_SPLIT=1 ;;
+            split-lazy) QK_CALLBACK_SHAPE_ID=4; QK_CALLBACK_SPLIT=1 ;;
             *)
                 echo "Unknown QK callback shape: $QK_CALLBACK_SHAPE" >&2
                 exit 1
@@ -68,6 +75,7 @@ case "$BUILD_VARIANT" in
         esac
         PHASE_NAME="none"
         PHASE_ID=0
+        QK_CALLBACK_VARIANT=1
         BUILD_DIR="$ROOT_DIR/build/ccec/qk-callback/$QK_CALLBACK_SHAPE/swimlane"
         VARIANT_DEFINES=(
             -DPA_BUILD_SWIMLANE=1
@@ -75,10 +83,49 @@ case "$BUILD_VARIANT" in
             -DPA_SUBMIT_PMU_PHASE_ID=0
             "-DPA_QK_CALLBACK_SHAPE_ID=$QK_CALLBACK_SHAPE_ID"
         )
+        if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+            VARIANT_DEFINES+=(-DPA_QK_CALLBACK_SPLIT_FINISH=1)
+            QK_CALLBACK_OBSERVATION="split-combination-semantic"
+            QK_CALLBACK_FINISH_SHAPE="noinline-cross-tu"
+        else
+            QK_CALLBACK_OBSERVATION="inline-semantic"
+            QK_CALLBACK_FINISH_SHAPE="inline-same-tu"
+        fi
+        ;;
+    qk-callback-pmu)
+        if [[ $# -ne 2 ]]; then
+            echo "Usage: $0 qk-callback-pmu split-eager|split-lazy" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$2"
+        case "$QK_CALLBACK_SHAPE" in
+            split-eager) QK_CALLBACK_SHAPE_ID=3 ;;
+            split-lazy) QK_CALLBACK_SHAPE_ID=4 ;;
+            *)
+                echo "Unknown PMU QK callback shape: $QK_CALLBACK_SHAPE (expected split-eager|split-lazy)" >&2
+                exit 1
+                ;;
+        esac
+        PHASE_NAME="none"
+        PHASE_ID=0
+        QK_CALLBACK_SPLIT=1
+        QK_CALLBACK_VARIANT=1
+        PMU_VARIANT=1
+        QK_CALLBACK_OBSERVATION="split-combination-semantic"
+        QK_CALLBACK_FINISH_SHAPE="noinline-cross-tu"
+        BUILD_DIR="$ROOT_DIR/build/ccec/qk-callback/$QK_CALLBACK_SHAPE/submit-pmu-none"
+        VARIANT_DEFINES=(
+            -DPA_BUILD_SWIMLANE=0
+            -DPA_BUILD_SUBMIT_PMU=1
+            -DPA_SUBMIT_PMU_PHASE_ID=0
+            "-DPA_QK_CALLBACK_SHAPE_ID=$QK_CALLBACK_SHAPE_ID"
+            -DPA_QK_CALLBACK_SPLIT_FINISH=1
+        )
         ;;
     *)
         echo "Usage: $0 [swimlane] | $0 submit-pmu none|claim|efdrain|materialize|register | "\
-             "$0 qk-callback callback-eager|callback-lazy" >&2
+             "$0 qk-callback callback-eager|callback-lazy|split-eager|split-lazy | "\
+             "$0 qk-callback-pmu split-eager|split-lazy" >&2
         exit 1
         ;;
 esac
@@ -101,7 +148,7 @@ if [[ ! -x "$CCEC" || ! -x "$LD" ]]; then
     echo "CCEC or ld.lld is missing under ASCEND_HOME_PATH=$ASCEND_HOME_PATH" >&2
     exit 1
 fi
-if [[ "$BUILD_VARIANT" == "submit-pmu" && ! -x "$HCC" ]]; then
+if [[ "$PMU_VARIANT" -eq 1 && ! -x "$HCC" ]]; then
     echo "The AICPU HCC compiler is missing under ASCEND_HOME_PATH=$ASCEND_HOME_PATH" >&2
     exit 1
 fi
@@ -125,19 +172,21 @@ for header in pto/pto-inst.hpp pto/common/constants.hpp pto/common/pto_tile.hpp;
 done
 
 mkdir -p "$BUILD_DIR"
-if [[ "$BUILD_VARIANT" == "swimlane" || "$BUILD_VARIANT" == "qk-callback" ]]; then
+if [[ "$PMU_VARIANT" -eq 0 ]]; then
     # 旧统一构建可能在根目录残留 PMU owner；swimlane 构建主动移除这两个
     # 不属于本变体的产物，避免 direct host 调用误加载上一版诊断 SO。
     rm -f \
         "$BUILD_DIR/libpa_scheduler_pmu_owner_dispatcher.so" \
         "$BUILD_DIR/libpa_scheduler_pmu_owner_aicpu.so"
-    if [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
-        rm -f -- "$BUILD_DIR/$QK_CALLBACK_MANIFEST_NAME"
-    fi
 else
     # manifest 是同一 phase 四件套唯一的“可运行”标记。重建一开始先使旧
     # manifest 失效；即使后续编译中断，run.sh 也不会消费目录里的半成品。
     rm -f -- "$BUILD_DIR/$SUBMIT_PMU_MANIFEST_NAME"
+fi
+if [[ "$QK_CALLBACK_VARIANT" -eq 1 ]]; then
+    rm -f -- \
+        "$BUILD_DIR/$QK_CALLBACK_MANIFEST_NAME" \
+        "$BUILD_DIR/$QK_CALLBACK_TEXT_LAYOUT_NAME"
 fi
 
 # 关闭编译器自动插入的 scalar DCCI，由 kernel.cpp 中与 PA 对齐的显式失效/回写协议负责 cache 可见性。
@@ -155,6 +204,20 @@ COMMON_FLAGS=(
     -I"$PTO_INCLUDE_ROOT/include"
     "${VARIANT_DEFINES[@]}"
 )
+
+# split finish 的完整 QK runtime state 为 1600B，超过 CCEC 默认保留的
+# block-local 栈空间。编译器 hidden help 明确该参数以 byte 为单位、上限
+# 4KiB。实测 1600B 与 2048B 虽生成相同大小的 .text，内容 SHA 却不同，
+# 因此使用当前 ABI 的精确尺寸而不增加无依据余量，并严格限于 split 变体。
+QK_CALLBACK_SPLIT_STATE_BYTES=1600
+QK_CALLBACK_BLOCK_LOCAL_RESERVE_BYTES=0
+if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+    QK_CALLBACK_BLOCK_LOCAL_RESERVE_BYTES=$QK_CALLBACK_SPLIT_STATE_BYTES
+    COMMON_FLAGS+=(
+        -mllvm -cce-block-local-relocate=true
+        -mllvm "-cce-block-local-reserve-size=$QK_CALLBACK_BLOCK_LOCAL_RESERVE_BYTES"
+    )
+fi
 
 # 同一入口源码分别面向 cube 与 vector ISA 编译，宏只选择各自的全局入口和 mixed metadata。
 echo "[BUILD] CCEC AIC entry (dav-c310-cube)"
@@ -199,13 +262,259 @@ check_workload_dispatcher_object \
     pa_execute_real_winner_workload_aic
 echo "[CHECK] role-specific real-compute dispatchers are strong and do not cross roles"
 
+text_relocation_count_for_symbol() {
+    local object_path="$1"
+    local symbol_name="$2"
+    "$READELF_BIN" --relocs --wide "$object_path" | awk -v name="$symbol_name" '
+        /^Relocation section '\''\.rela\.text'\''/ {in_text = 1; next}
+        /^Relocation section / {in_text = 0}
+        in_text {
+            for (column = 1; column <= NF; ++column) {
+                if ($column == name) {
+                    count++
+                    next
+                }
+            }
+        }
+        END {print count + 0}
+    '
+}
+
+check_split_role_objects() {
+    local role="$1"
+    local wrong_role="$2"
+    local caller="$BUILD_DIR/pa_scheduler_${role}.o"
+    local runtime="$BUILD_DIR/pa_scheduler_qk_callback_runtime_${role}.o"
+    local finish="$BUILD_DIR/pa_scheduler_qk_callback_finish_${role}.o"
+    local state_symbol="pa_scheduler_qk_callback_state_${role}"
+    local finish_symbol="pa_scheduler_qk_callback_finish_${role}"
+    local orchestration_symbol="pa_scheduler_qk_callback_orchestration_${role}"
+    local dispatcher_symbol="pa_execute_real_winner_workload_${role}"
+    local entry_symbol="pa_scheduler_0_mix_${role}"
+    local caller_symbols runtime_symbols finish_symbols
+    caller_symbols="$("$READELF_BIN" --symbols --wide --sym-base=10 "$caller")"
+    runtime_symbols="$("$READELF_BIN" --symbols --wide --sym-base=10 "$runtime")"
+    finish_symbols="$("$READELF_BIN" --symbols --wide --sym-base=10 "$finish")"
+
+    if ! awk -v name="$orchestration_symbol" \
+        '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+         END {exit count != 1}' <<<"$caller_symbols"; then
+        echo "Missing unique strong split orchestration in caller object: $orchestration_symbol" >&2
+        exit 1
+    fi
+    for imported in "$state_symbol" "$finish_symbol"; do
+        if ! awk -v name="$imported" \
+            '$5 == "GLOBAL" && $7 == "UND" && $NF == name {count++}
+             END {exit count != 1}' <<<"$caller_symbols"; then
+            echo "Caller must import exactly one matching split symbol: $caller ($imported)" >&2
+            exit 1
+        fi
+    done
+    if [[ "$(text_relocation_count_for_symbol "$caller" "$finish_symbol")" -ne 1 ]]; then
+        echo "Caller must contain exactly one split-finish .rela.text relocation: $caller" >&2
+        exit 1
+    fi
+    if [[ "$(text_relocation_count_for_symbol "$caller" "$state_symbol")" -eq 0 ]]; then
+        echo "Caller must access its matching external block-local state: $caller" >&2
+        exit 1
+    fi
+    if "$READELF_BIN" --sections --wide "$caller" | awk \
+        'index($0, ".ascend.meta.") != 0 {found = 1} END {exit !found}'; then
+        echo "Split caller object must not define launch metadata: $caller" >&2
+        exit 1
+    fi
+
+    if ! awk -v name="$state_symbol" -v bytes="$QK_CALLBACK_SPLIT_STATE_BYTES" \
+        '$4 == "OBJECT" && $5 == "GLOBAL" && $7 != "UND" && $NF == name && $3 + 0 == bytes {count++}
+         END {exit count != 1}' <<<"$runtime_symbols"; then
+        echo "Runtime must own one exact-size block-local state: $runtime ($state_symbol)" >&2
+        exit 1
+    fi
+    if ! awk -v name="$entry_symbol" \
+        '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+         END {exit count != 1}' <<<"$runtime_symbols"; then
+        echo "Runtime must own one non-empty mixed entry: $runtime ($entry_symbol)" >&2
+        exit 1
+    fi
+    if ! awk -v name="$orchestration_symbol" \
+        '$5 == "GLOBAL" && $7 == "UND" && $NF == name {count++}
+         END {exit count != 1}' <<<"$runtime_symbols"; then
+        echo "Runtime must strongly import one role-specific orchestration: $runtime ($orchestration_symbol)" >&2
+        exit 1
+    fi
+    if [[ "$(text_relocation_count_for_symbol "$runtime" "$orchestration_symbol")" -ne 1 ]]; then
+        echo "Runtime entry must contain exactly one orchestration call relocation: $runtime" >&2
+        exit 1
+    fi
+    local block_local_record block_local_section_index block_local_size_hex block_local_alignment
+    block_local_record="$(
+        "$READELF_BIN" --sections --wide "$runtime" | awk '
+            {for (column = 1; column <= NF; ++column) {
+                if ($column == ".bl.uninit") {
+                    section_index = $(column - 1)
+                    gsub(/\[/, "", section_index)
+                    gsub(/\]/, "", section_index)
+                    print section_index, $(column + 4), $NF
+                    exit
+                }
+            }}
+        '
+    )"
+    read -r block_local_section_index block_local_size_hex block_local_alignment \
+        <<<"$block_local_record"
+    if [[ -z "$block_local_section_index" || -z "$block_local_size_hex" ||
+          $((16#$block_local_size_hex)) -ne "$QK_CALLBACK_SPLIT_STATE_BYTES" ||
+          "$block_local_alignment" -ne 64 ]]; then
+        echo "Runtime block-local section must be exact-size and 64B aligned: $runtime" >&2
+        exit 1
+    fi
+    if ! awk -v name="$state_symbol" -v section="$block_local_section_index" \
+        '$4 == "OBJECT" && $7 == section && $NF == name {count++}
+         END {exit count != 1}' <<<"$runtime_symbols"; then
+        echo "Runtime state must be defined in its exact .bl.uninit section: $runtime" >&2
+        exit 1
+    fi
+    local runtime_sections
+    runtime_sections="$("$READELF_BIN" --sections --wide "$runtime")"
+    if ! awk -v name=".ascend.meta.$entry_symbol" '
+        {for (column = 1; column <= NF; ++column) {
+            if ($column == name) found = 1
+        }}
+        END {exit !found}
+    ' <<<"$runtime_sections"; then
+        echo "Runtime object is missing matching mixed-entry metadata: $runtime" >&2
+        exit 1
+    fi
+    if awk -v name=".ascend.meta.pa_scheduler_0_mix_${wrong_role}" '
+        {for (column = 1; column <= NF; ++column) {
+            if ($column == name) found = 1
+        }}
+        END {exit !found}
+    ' <<<"$runtime_sections"; then
+        echo "Wrong-role mixed-entry metadata leaked into runtime object: $runtime" >&2
+        exit 1
+    fi
+
+    if ! awk -v name="$finish_symbol" \
+        '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+         END {exit count != 1}' <<<"$finish_symbols"; then
+        echo "Finish object must define one non-empty strong finish: $finish ($finish_symbol)" >&2
+        exit 1
+    fi
+    for imported in "$state_symbol" "$dispatcher_symbol"; do
+        if ! awk -v name="$imported" \
+            '$5 == "GLOBAL" && $7 == "UND" && $NF == name {count++}
+             END {exit count != 1}' <<<"$finish_symbols"; then
+            echo "Finish object must import exactly one matching symbol: $finish ($imported)" >&2
+            exit 1
+        fi
+        if [[ "$(text_relocation_count_for_symbol "$finish" "$imported")" -eq 0 ]]; then
+            echo "Finish object must reference its matching imported symbol: $finish ($imported)" >&2
+            exit 1
+        fi
+    done
+    if "$READELF_BIN" --sections --wide "$finish" | awk \
+        'index($0, ".ascend.meta.") != 0 {found = 1} END {exit !found}'; then
+        echo "Split finish object must not define launch metadata: $finish" >&2
+        exit 1
+    fi
+
+    local forbidden symbol_table object_path
+    for object_path in "$caller" "$runtime" "$finish"; do
+        case "$object_path" in
+            "$caller") symbol_table="$caller_symbols" ;;
+            "$runtime") symbol_table="$runtime_symbols" ;;
+            *) symbol_table="$finish_symbols" ;;
+        esac
+        for forbidden in \
+            "pa_scheduler_qk_callback_state_${wrong_role}" \
+            "pa_scheduler_qk_callback_finish_${wrong_role}" \
+            "pa_scheduler_qk_callback_orchestration_${wrong_role}" \
+            "pa_execute_real_winner_workload_${wrong_role}" \
+            "pa_scheduler_0_mix_${wrong_role}"; do
+            if awk -v name="$forbidden" \
+                '$NF == name {found = 1} END {exit !found}' <<<"$symbol_table"; then
+                echo "Wrong-role split symbol leaked into $object_path: $forbidden" >&2
+                exit 1
+            fi
+        done
+    done
+
+    for forbidden in "$entry_symbol"; do
+        if awk -v name="$forbidden" '$NF == name {found = 1} END {exit !found}' \
+            <<<"$caller_symbols"; then
+            echo "Split caller must not own a launch entry: $caller ($forbidden)" >&2
+            exit 1
+        fi
+        if awk -v name="$forbidden" '$NF == name {found = 1} END {exit !found}' \
+            <<<"$finish_symbols"; then
+            echo "Split finish must not own a launch entry: $finish ($forbidden)" >&2
+            exit 1
+        fi
+    done
+    for forbidden in "$finish_symbol" "$dispatcher_symbol"; do
+        if awk -v name="$forbidden" '$NF == name {found = 1} END {exit !found}' \
+            <<<"$runtime_symbols"; then
+            echo "Runtime entry/state owner contains an unexpected split helper: $runtime ($forbidden)" >&2
+            exit 1
+        fi
+    done
+    if awk -v name="$orchestration_symbol" '$NF == name {found = 1} END {exit !found}' \
+        <<<"$finish_symbols"; then
+        echo "Split finish must not contain orchestration: $finish ($orchestration_symbol)" >&2
+        exit 1
+    fi
+}
+
+if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+    echo "[BUILD] CCEC AIC split runtime entry/state owner (dav-c310-cube)"
+    "$CCEC" "${COMMON_FLAGS[@]}" \
+        --cce-aicore-arch=dav-c310-cube \
+        -DPA_BUILD_AIC \
+        -o "$BUILD_DIR/pa_scheduler_qk_callback_runtime_aic.o" \
+        "$SCRIPT_DIR/qk_callback_runtime_entry.cpp"
+    echo "[BUILD] CCEC AIC split QK finish (dav-c310-cube)"
+    "$CCEC" "${COMMON_FLAGS[@]}" \
+        --cce-aicore-arch=dav-c310-cube \
+        -DPA_BUILD_AIC \
+        -o "$BUILD_DIR/pa_scheduler_qk_callback_finish_aic.o" \
+        "$SCRIPT_DIR/qk_callback_finish.cpp"
+    echo "[BUILD] CCEC AIV split runtime entry/state owner (dav-c310-vec)"
+    "$CCEC" "${COMMON_FLAGS[@]}" \
+        --cce-aicore-arch=dav-c310-vec \
+        -DPA_BUILD_AIV \
+        -o "$BUILD_DIR/pa_scheduler_qk_callback_runtime_aiv.o" \
+        "$SCRIPT_DIR/qk_callback_runtime_entry.cpp"
+    echo "[BUILD] CCEC AIV split QK finish (dav-c310-vec)"
+    "$CCEC" "${COMMON_FLAGS[@]}" \
+        --cce-aicore-arch=dav-c310-vec \
+        -DPA_BUILD_AIV \
+        -o "$BUILD_DIR/pa_scheduler_qk_callback_finish_aiv.o" \
+        "$SCRIPT_DIR/qk_callback_finish.cpp"
+    check_split_role_objects aic aiv
+    check_split_role_objects aiv aic
+    echo "[CHECK] split caller/runtime/finish objects satisfy role, state, metadata, and call-boundary gates"
+    DEVICE_OBJECTS=(
+        "$BUILD_DIR/pa_scheduler_qk_callback_runtime_aic.o"
+        "$BUILD_DIR/pa_scheduler_aic.o"
+        "$BUILD_DIR/pa_scheduler_qk_callback_finish_aic.o"
+        "$BUILD_DIR/pa_scheduler_qk_callback_runtime_aiv.o"
+        "$BUILD_DIR/pa_scheduler_aiv.o"
+        "$BUILD_DIR/pa_scheduler_qk_callback_finish_aiv.o"
+    )
+else
+    DEVICE_OBJECTS=(
+        "$BUILD_DIR/pa_scheduler_aic.o"
+        "$BUILD_DIR/pa_scheduler_aiv.o"
+    )
+fi
+
 # 静态链接把两个 device object 合成一个可由 runtime 按 1:2 比例启动的 mixed AICore ELF。
 echo "[BUILD] Static 1:2 mixed AICore ELF"
 "$LD" -m aicorelinux -Ttext=0 -static \
     --version-script="$SCRIPT_DIR/pa_scheduler_device_exports.map" \
     -o "$BUILD_DIR/pa_scheduler_kernel.o" \
-    "$BUILD_DIR/pa_scheduler_aic.o" \
-    "$BUILD_DIR/pa_scheduler_aiv.o"
+    "${DEVICE_OBJECTS[@]}"
 
 SYMBOL_TABLE="$("$READELF_BIN" --symbols --wide --sym-base=10 "$BUILD_DIR/pa_scheduler_kernel.o")"
 SECTION_TABLE="$("$READELF_BIN" --sections --wide "$BUILD_DIR/pa_scheduler_kernel.o")"
@@ -218,7 +527,12 @@ for entry in pa_scheduler_0_mix_aic pa_scheduler_0_mix_aiv; do
         echo "Missing non-empty defined GLOBAL mixed-kernel entry: $entry" >&2
         exit 1
     fi
-    if [[ "$SECTION_TABLE" != *".ascend.meta.$entry"* ]]; then
+    if ! awk -v name=".ascend.meta.$entry" '
+        {for (column = 1; column <= NF; ++column) {
+            if ($column == name) found = 1
+        }}
+        END {exit !found}
+    ' <<<"$SECTION_TABLE"; then
         echo "Missing mixed-kernel metadata section: .ascend.meta.$entry" >&2
         exit 1
     fi
@@ -266,16 +580,77 @@ for workload_symbol in \
 done
 echo "[CHECK] CCEC cube/vector real-compute helpers are non-empty LOCAL functions"
 
-if [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
-    # The semantic-stage callback path is intentionally all-inline.  A named
-    # out-of-line builder/front would make the two shapes incomparable before
-    # the later, separately controlled split-finish step.
+if [[ "$QK_CALLBACK_VARIANT" -eq 1 ]]; then
+    # callback/builder/front must remain inline in both families.  Only split
+    # shapes may retain the two fixed, role-specific runtime finish functions.
     if awk \
         '$4 == "FUNC" && $7 != "UND" &&
-         (index($NF, "QkCallback") != 0 || index($NF, "SubmitQk") != 0) {found = 1}
+         (index($NF, "QkCallback") != 0 || index($NF, "SubmitQk") != 0 ||
+          index($NF, "QkSplitState") != 0) {found = 1}
          END {exit !found}' <<<"$SYMBOL_TABLE"; then
         echo "QK callback builder/front unexpectedly survived as an out-of-line device function." >&2
         exit 1
+    fi
+    if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+        for role in aic aiv; do
+            finish_symbol="pa_scheduler_qk_callback_finish_${role}"
+            if ! awk -v name="$finish_symbol" \
+                '$4 == "FUNC" && $5 == "LOCAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+                 END {exit count != 1}' <<<"$SYMBOL_TABLE"; then
+                echo "Missing unique non-empty LOCAL split finish in final ELF: $finish_symbol" >&2
+                exit 1
+            fi
+            orchestration_symbol="pa_scheduler_qk_callback_orchestration_${role}"
+            if ! awk -v name="$orchestration_symbol" \
+                '$4 == "FUNC" && $5 == "LOCAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+                 END {exit count != 1}' <<<"$SYMBOL_TABLE"; then
+                echo "Missing unique non-empty LOCAL split orchestration in final ELF: $orchestration_symbol" >&2
+                exit 1
+            fi
+            state_symbol="pa_scheduler_qk_callback_state_${role}"
+            if ! awk -v name="$state_symbol" -v bytes="$QK_CALLBACK_SPLIT_STATE_BYTES" \
+                '$4 == "OBJECT" && $5 == "LOCAL" && $7 != "UND" && $NF == name && $3 + 0 == bytes {count++}
+                 END {exit count != 1}' <<<"$SYMBOL_TABLE"; then
+                echo "Missing unique exact-size LOCAL split state in final ELF: $state_symbol" >&2
+                exit 1
+            fi
+        done
+        aic_state_hex="$(awk '$NF == "pa_scheduler_qk_callback_state_aic" {print $2; exit}' <<<"$SYMBOL_TABLE")"
+        aiv_state_hex="$(awk '$NF == "pa_scheduler_qk_callback_state_aiv" {print $2; exit}' <<<"$SYMBOL_TABLE")"
+        final_block_local_record="$(
+            awk '{for (column = 1; column <= NF; ++column) {
+                if ($column == ".bl_uninit") {
+                    section_index = $(column - 1)
+                    gsub(/\[/, "", section_index)
+                    gsub(/\]/, "", section_index)
+                    print section_index, $(column + 4), $NF
+                    exit
+                }
+            }}' <<<"$SECTION_TABLE"
+        )"
+        read -r final_block_local_section_index final_block_local_size_hex \
+            final_block_local_alignment \
+            <<<"$final_block_local_record"
+        if [[ -z "$aic_state_hex" || -z "$aiv_state_hex" ||
+              $((16#$aic_state_hex)) -ne 0 ||
+              $((16#$aiv_state_hex)) -ne "$QK_CALLBACK_SPLIT_STATE_BYTES" ||
+              -z "$final_block_local_section_index" || -z "$final_block_local_size_hex" ||
+              $((16#$final_block_local_size_hex)) -ne $((2 * QK_CALLBACK_SPLIT_STATE_BYTES)) ||
+              "$final_block_local_alignment" -ne 64 ]]; then
+            echo "Final split block-local layout must be two exact, non-overlapping 64B-aligned states." >&2
+            exit 1
+        fi
+        for state_symbol in \
+            pa_scheduler_qk_callback_state_aic \
+            pa_scheduler_qk_callback_state_aiv; do
+            if ! awk -v name="$state_symbol" -v section="$final_block_local_section_index" \
+                '$4 == "OBJECT" && $7 == section && $NF == name {count++}
+                 END {exit count != 1}' <<<"$SYMBOL_TABLE"; then
+                echo "Final split state must be bound to the exact .bl_uninit section: $state_symbol" >&2
+                exit 1
+            fi
+        done
+        echo "[CHECK] split finishes/orchestrations/states are LOCAL and final block-local layout is exact"
     fi
     if [[ -n "$("$READELF_BIN" --relocs --wide "$BUILD_DIR/pa_scheduler_kernel.o" | sed -n '/Relocation section/p')" ]]; then
         echo "Final QK callback mixed ELF must not retain relocations." >&2
@@ -324,6 +699,94 @@ check_icache_probe_layout() {
          "thrash=0x$thrash_hex/$thrash_size"
 }
 
+emit_text_section_fingerprint() {
+    local object_path="$1"
+    local artifact_name
+    artifact_name="$(basename "$object_path")"
+    local text_record text_address_hex text_offset_hex text_size_hex
+    text_record="$(
+        "$READELF_BIN" --sections --wide "$object_path" | awk '
+            {for (column = 1; column <= NF; ++column) {
+                if ($column == ".text") {
+                    print $(column + 2), $(column + 3), $(column + 4)
+                    exit
+                }
+            }}
+        '
+    )"
+    read -r text_address_hex text_offset_hex text_size_hex <<<"$text_record"
+    if [[ -z "$text_address_hex" || -z "$text_offset_hex" || -z "$text_size_hex" ]]; then
+        echo "Cannot fingerprint missing .text section: $object_path" >&2
+        return 1
+    fi
+    local text_size=$((16#$text_size_hex))
+    local text_sha
+    text_sha="$(
+        dd if="$object_path" bs=1 skip=$((16#$text_offset_hex)) count="$text_size" status=none |
+            sha256sum | awk '{print $1}'
+    )"
+    printf 'text %s %u %s\n' "$artifact_name" "$text_size" "$text_sha"
+}
+
+emit_symbol_body_fingerprint() {
+    local object_path="$1"
+    local symbol_name="$2"
+    local artifact_name
+    artifact_name="$(basename "$object_path")"
+    local symbol_record symbol_address_hex symbol_size
+    symbol_record="$(
+        "$READELF_BIN" --symbols --wide --sym-base=10 "$object_path" | awk -v name="$symbol_name" '
+            $4 == "FUNC" && $7 != "UND" && $NF == name && $3 + 0 > 0 {
+                count++
+                address = $2
+                size = $3
+            }
+            END {
+                if (count != 1) exit 1
+                print address, size
+            }
+        '
+    )" || {
+        echo "Cannot fingerprint non-unique or empty function: $object_path ($symbol_name)" >&2
+        return 1
+    }
+    read -r symbol_address_hex symbol_size <<<"$symbol_record"
+
+    local text_record text_address_hex text_offset_hex text_size_hex
+    text_record="$(
+        "$READELF_BIN" --sections --wide "$object_path" | awk '
+            {for (column = 1; column <= NF; ++column) {
+                if ($column == ".text") {
+                    print $(column + 2), $(column + 3), $(column + 4)
+                    exit
+                }
+            }}
+        '
+    )"
+    read -r text_address_hex text_offset_hex text_size_hex <<<"$text_record"
+    if [[ -z "$text_address_hex" || -z "$text_offset_hex" || -z "$text_size_hex" ]]; then
+        echo "Cannot locate .text for function fingerprint: $object_path ($symbol_name)" >&2
+        return 1
+    fi
+    local symbol_address=$((16#$symbol_address_hex))
+    local text_address=$((16#$text_address_hex))
+    local text_size=$((16#$text_size_hex))
+    local relative_offset=$((symbol_address - text_address))
+    if (( relative_offset < 0 || symbol_size <= 0 || relative_offset + symbol_size > text_size )); then
+        echo "Function body lies outside .text: $object_path ($symbol_name)" >&2
+        return 1
+    fi
+    local symbol_sha
+    symbol_sha="$(
+        dd if="$object_path" bs=1 \
+            skip=$((16#$text_offset_hex + relative_offset)) \
+            count="$symbol_size" status=none |
+            sha256sum | awk '{print $1}'
+    )"
+    printf 'symbol %s %s %u %s\n' \
+        "$artifact_name" "$symbol_name" "$symbol_size" "$symbol_sha"
+}
+
 # 两个正式 ELF 都不携带旧 cold/warm 校准冲刷体；submit-pmu 只观察真实
 # Submit。保留上面的检查函数供历史布局取证时复核，但正式构建不调用它。
 
@@ -332,7 +795,7 @@ check_icache_probe_layout() {
 # 落到设备预安装目录，后者由 mode=0 JSON 注册并通过统一入口执行命令。
 # swimlane 构建不生成 PMU owner/dispatcher；submit-pmu 则把 kernel、host、
 # owner 与 dispatcher 全部放在同一个 phase 目录，禁止跨 phase 复用。
-if [[ "$BUILD_VARIANT" == "submit-pmu" ]]; then
+if [[ "$PMU_VARIANT" -eq 1 ]]; then
     echo "[BUILD] self-contained AICPU PMU dispatcher"
     "$HCC" -shared -fPIC -O3 -g -std=gnu++17 -Wall -Wextra -Werror \
         -Wl,--build-id \
@@ -388,7 +851,7 @@ echo "[BUILD] CCEC host runner"
     -ldl \
     -o "$BUILD_DIR/pa_scheduler_host"
 
-if [[ "$BUILD_VARIANT" == "submit-pmu" ]]; then
+if [[ "$PMU_VARIANT" -eq 1 ]]; then
     # host、kernel、owner、dispatcher 全部成功后才生成 manifest；校验和使用
     # 相对文件名，目录复制后仍可在 run 前原样复核。临时文件与最终文件位于
     # 同一目录，mv 只承担单文件原子发布，不会暴露半写 manifest。
@@ -428,13 +891,81 @@ if [[ "$BUILD_VARIANT" == "submit-pmu" ]]; then
     MANIFEST_TMP=""
     trap - EXIT
     echo "[CHECK] submit-pmu artifact manifest published: $MANIFEST_PATH"
-elif [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
+fi
+if [[ "$QK_CALLBACK_VARIANT" -eq 1 ]]; then
+    TEXT_LAYOUT_PATH="$BUILD_DIR/$QK_CALLBACK_TEXT_LAYOUT_NAME"
+    TEXT_LAYOUT_TMP="$(mktemp "$BUILD_DIR/.${QK_CALLBACK_TEXT_LAYOUT_NAME}.tmp.XXXXXX")"
+    cleanup_text_layout_tmp() {
+        if [[ -n "${TEXT_LAYOUT_TMP:-}" ]]; then
+            rm -f -- "$TEXT_LAYOUT_TMP"
+        fi
+    }
+    trap cleanup_text_layout_tmp EXIT
+    {
+        printf '# schema=pa_scheduler_device_text_layout/v1\n'
+        printf '# backend=ccec\n'
+        printf '# shape=%s\n' "$QK_CALLBACK_SHAPE"
+        printf '# block_local_reserve_bytes=%u\n' "$QK_CALLBACK_BLOCK_LOCAL_RESERVE_BYTES"
+        printf '# compiler=%s\n' "$CCEC"
+        printf '# compiler_sha256=%s\n' "$(sha256sum "$CCEC" | awk '{print $1}')"
+        printf '# linker=%s\n' "$LD"
+        printf '# linker_sha256=%s\n' "$(sha256sum "$LD" | awk '{print $1}')"
+        emit_text_section_fingerprint "$BUILD_DIR/pa_scheduler_kernel.o"
+        for object_path in "${DEVICE_OBJECTS[@]}"; do
+            emit_text_section_fingerprint "$object_path"
+        done
+        for role in aic aiv; do
+            emit_symbol_body_fingerprint \
+                "$BUILD_DIR/pa_scheduler_kernel.o" "pa_scheduler_0_mix_${role}"
+            if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_qk_callback_runtime_${role}.o" \
+                    "pa_scheduler_0_mix_${role}"
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_${role}.o" \
+                    "pa_scheduler_qk_callback_orchestration_${role}"
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_qk_callback_finish_${role}.o" \
+                    "pa_scheduler_qk_callback_finish_${role}"
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_kernel.o" \
+                    "pa_scheduler_qk_callback_orchestration_${role}"
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_kernel.o" \
+                    "pa_scheduler_qk_callback_finish_${role}"
+            else
+                emit_symbol_body_fingerprint \
+                    "$BUILD_DIR/pa_scheduler_${role}.o" "pa_scheduler_0_mix_${role}"
+            fi
+        done
+    } > "$TEXT_LAYOUT_TMP"
+    mv -f -- "$TEXT_LAYOUT_TMP" "$TEXT_LAYOUT_PATH"
+    TEXT_LAYOUT_TMP=""
+    trap - EXIT
+    awk '$1 == "text" {
+        printf "[TEXT] %s size=%s sha256=%s\n", $2, $3, $4
+    }' "$TEXT_LAYOUT_PATH"
+    echo "[CHECK] QK callback device .text layout manifest published: $TEXT_LAYOUT_PATH"
+
     QK_CALLBACK_ARTIFACTS=(
         pa_scheduler_host
         pa_scheduler_kernel.o
-        pa_scheduler_aic.o
-        pa_scheduler_aiv.o
     )
+    if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+        QK_CALLBACK_ARTIFACTS+=(pa_scheduler_qk_callback_runtime_aic.o)
+    fi
+    QK_CALLBACK_ARTIFACTS+=(pa_scheduler_aic.o)
+    if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+        QK_CALLBACK_ARTIFACTS+=(pa_scheduler_qk_callback_finish_aic.o)
+    fi
+    if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+        QK_CALLBACK_ARTIFACTS+=(pa_scheduler_qk_callback_runtime_aiv.o)
+    fi
+    QK_CALLBACK_ARTIFACTS+=(pa_scheduler_aiv.o)
+    if [[ "$QK_CALLBACK_SPLIT" -eq 1 ]]; then
+        QK_CALLBACK_ARTIFACTS+=(pa_scheduler_qk_callback_finish_aiv.o)
+    fi
+    QK_CALLBACK_ARTIFACTS+=("$QK_CALLBACK_TEXT_LAYOUT_NAME")
     for artifact in "${QK_CALLBACK_ARTIFACTS[@]}"; do
         if [[ ! -s "$BUILD_DIR/$artifact" ]]; then
             echo "Cannot publish QK callback manifest; artifact is missing or empty: $artifact" >&2
@@ -458,7 +989,7 @@ elif [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
         printf '# backend=ccec\n'
         printf '# shape=%s\n' "$QK_CALLBACK_SHAPE"
         printf '# shape_id=%u\n' "$QK_CALLBACK_SHAPE_ID"
-        printf '# observation=inline-semantic\n'
+        printf '# observation=%s\n' "$QK_CALLBACK_OBSERVATION"
         (cd "$BUILD_DIR" && sha256sum "${QK_CALLBACK_ARTIFACTS[@]}")
     } > "$MANIFEST_TMP"
     mv -f -- "$MANIFEST_TMP" "$MANIFEST_PATH"

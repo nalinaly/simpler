@@ -39,16 +39,29 @@ namespace pa_scheduler {
 // callback-eager is the all-thunks control inside the new claim-first callback
 // family; it is not the legacy eager SubmitTask baseline.
 static_assert(
-    PA_QK_CALLBACK_SHAPE_ID == 1 || PA_QK_CALLBACK_SHAPE_ID == 2,
-    "PA_QK_CALLBACK_SHAPE_ID must select callback-eager(1) or callback-lazy(2)"
+    PA_QK_CALLBACK_SHAPE_ID >= 1 && PA_QK_CALLBACK_SHAPE_ID <= 4,
+    "PA_QK_CALLBACK_SHAPE_ID must select callback-eager(1), callback-lazy(2), "
+    "split-eager(3), or split-lazy(4)"
 );
-constexpr bool kQkCallbackLazy = PA_QK_CALLBACK_SHAPE_ID == 2;
+constexpr bool kQkCallbackLazy =
+    PA_QK_CALLBACK_SHAPE_ID == 2 || PA_QK_CALLBACK_SHAPE_ID == 4;
+constexpr bool kQkCallbackSplitFinish = PA_QK_CALLBACK_SHAPE_ID >= 3;
 constexpr uint32_t kQkCallbackShapeId = PA_QK_CALLBACK_SHAPE_ID;
 constexpr const char *kQkCallbackShapeName =
-    kQkCallbackLazy ? "callback-lazy" : "callback-eager";
-constexpr const char *kQkCallbackObservation = "inline-semantic";
-constexpr const char *kQkCallbackFinishShape = "inline-same-tu";
+    PA_QK_CALLBACK_SHAPE_ID == 1 ? "callback-eager" :
+    PA_QK_CALLBACK_SHAPE_ID == 2 ? "callback-lazy" :
+    PA_QK_CALLBACK_SHAPE_ID == 3 ? "split-eager" : "split-lazy";
+constexpr const char *kQkCallbackObservation =
+    kQkCallbackSplitFinish ? "split-combination-semantic" : "inline-semantic";
+constexpr const char *kQkCallbackFinishShape =
+    kQkCallbackSplitFinish ? "noinline-cross-tu" : "inline-same-tu";
 constexpr const char *kQkCallbackControlFamily = "claim-first-callback-not-legacy-eager";
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+static_assert(PA_QK_CALLBACK_SPLIT_FINISH == 1, "split-finish feature macro must equal one");
+static_assert(kQkCallbackSplitFinish, "split-finish macro requires shape 3 or 4");
+#else
+static_assert(!kQkCallbackSplitFinish, "shape 3 or 4 requires PA_QK_CALLBACK_SPLIT_FINISH");
+#endif
 #endif
 
 // 这里固定的是 PA Case1 的调度拓扑，而不是为了缩小 standalone 人为选择的规模：
@@ -135,6 +148,10 @@ enum class CoreRole : uint32_t {
     Aic = 0,
     Aiv = 1,
 };
+
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+constexpr uint64_t kQkSplitStateCookieBase = 0x514b53504c495400ULL;
+#endif
 
 // task_id % 5 即 kind；该周期性是不变量，既决定 Claim cursor/active role，
 // 也决定输出大小、fanin 拓扑和 winner workload 的选择。
@@ -820,10 +837,30 @@ struct alignas(64) WorkerResult {
     uint32_t pmu_phase_icache_misses;
     uint32_t pmu_shadow_icache_requests;
     uint32_t pmu_shadow_icache_misses;
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    // split 组合 oracle 独占一条诊断 cache line；legacy 与 inline shape 完全
+    // 不带这些字段，避免改变既有 WorkerResult/SchedulerState 的布局。
+    uint64_t qk_split_caller_state_address;
+    uint64_t qk_split_finish_state_address;
+    uint64_t qk_split_finish_calls;
+    uint64_t qk_split_protocol_errors;
+    uint64_t qk_split_state_cookie;
+    uint64_t qk_split_task_id_sum;
+    uint64_t qk_split_owner_worker_id;
+    uint64_t qk_split_reserved;
+#endif
 };
 // WorkerResult 是 standalone 尾部的诊断 sidecar，不属于真实 DistCore ABI；按
 // cache line 隔离后，各 worker 发布统计不会相互覆盖或污染被测共享状态。
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+static_assert(sizeof(WorkerResult) == 896, "split WorkerResult diagnostics must occupy whole cache lines");
+static_assert(offsetof(WorkerResult, qk_split_caller_state_address) == 832,
+              "split WorkerResult oracle offset mismatch");
+static_assert(offsetof(WorkerResult, qk_split_reserved) == 888,
+              "split WorkerResult oracle tail mismatch");
+#else
 static_assert(sizeof(WorkerResult) == 832, "WorkerResult diagnostics must occupy whole cache lines");
+#endif
 static_assert(offsetof(WorkerResult, pmu_total_cycles) == 680, "WorkerResult PMU offset mismatch");
 static_assert(offsetof(WorkerResult, pmu_status) == 700, "WorkerResult PMU status offset mismatch");
 static_assert(offsetof(WorkerResult, fanin_not_ready_loads) == 704, "WorkerResult atomic diagnostic offset mismatch");

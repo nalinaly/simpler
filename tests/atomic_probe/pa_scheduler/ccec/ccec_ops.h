@@ -15,6 +15,10 @@
 // common/pa_scheduler_core.h.  kernel.cpp defines the implementation switch
 // exactly once per architecture; split runtime TUs consume only the external
 // dispatcher declaration and the shared inline adapter.
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+#include "qk_callback_finish_api.h"
+#endif
+
 #if defined(PA_BUILD_AIC)
 extern "C" __attribute__((noinline)) __aicore__ void pa_execute_real_winner_workload_aic(
     __gm__ pa_scheduler::SchedulerState *state, __gm__ pa_scheduler::WorkerState *worker,
@@ -255,6 +259,26 @@ struct CcecOps {
         ::pa_execute_real_winner_workload_aiv(state, &worker, kind);
 #endif
     }
+
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    __aicore__ static inline pa_scheduler::QkSplitRuntimeState &QkSplitState() {
+#if defined(PA_BUILD_AIC)
+        return ::pa_scheduler_qk_callback_state_aic;
+#elif defined(PA_BUILD_AIV)
+        return ::pa_scheduler_qk_callback_state_aiv;
+#endif
+    }
+
+    __aicore__ static inline bool FinishQkCallback(
+        const pa_scheduler::QkCallbackTicket *ticket, const pa_scheduler::TaskArgs *args
+    ) {
+#if defined(PA_BUILD_AIC)
+        return ::pa_scheduler_qk_callback_finish_aic(ticket, args) != 0;
+#elif defined(PA_BUILD_AIV)
+        return ::pa_scheduler_qk_callback_finish_aiv(ticket, args) != 0;
+#endif
+    }
+#endif
 
 #if PA_BUILD_SUBMIT_PMU
     using PmuContext = SubmitPmuContext;

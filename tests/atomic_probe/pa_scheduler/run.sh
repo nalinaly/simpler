@@ -21,8 +21,12 @@ Usage:
   ./run.sh run    ccec|ascendc|cpu|all [benchmark options]
   ./run.sh smoke  ccec|ascendc|cpu|all [--device N]
   ./run.sh swimlane ccec|ascendc|cpu|all [benchmark options]
-  ./run.sh build-qk-callback ccec|cpu callback-eager|callback-lazy
-  ./run.sh qk-callback ccec|cpu callback-eager|callback-lazy [benchmark options]
+  ./run.sh build-qk-callback ccec callback-eager|callback-lazy|split-eager|split-lazy
+  ./run.sh build-qk-callback cpu callback-eager|callback-lazy
+  ./run.sh qk-callback ccec callback-eager|callback-lazy|split-eager|split-lazy [benchmark options]
+  ./run.sh qk-callback cpu callback-eager|callback-lazy [benchmark options]
+  ./run.sh build-qk-callback-pmu ccec split-eager|split-lazy
+  ./run.sh qk-callback-pmu ccec split-eager|split-lazy [benchmark options]
   ./run.sh build-submit-pmu ccec none|claim|efdrain|materialize|register
   ./run.sh submit-pmu ccec none|claim|efdrain|materialize|register [benchmark options]
 
@@ -70,6 +74,8 @@ The submit-pmu action is a separate CCEC-only build. It fixes one PMU-only run
 covering the complete Submit window. phase=none performs no internal snapshots;
 phase=claim/efdrain/materialize/register reports running read-clear lower/loss-adjusted upper bounds
 for one compile-time phase while CNT6/7 retain the authoritative whole-window counters.
+The qk-callback-pmu action reuses the same phase=none whole-window protocol for
+split-eager/split-lazy only; its PMU ELF is diagnostic and not a timing result.
 
 The swimlane action performs exactly one run and writes the raw capture,
 merged Perfetto JSON, and exclusive timing analysis below this directory's
@@ -150,10 +156,27 @@ validate_submit_pmu_phase() {
 }
 
 validate_qk_callback_shape() {
-    case "$1" in
-        callback-eager|callback-lazy) ;;
+    local backend="$1"
+    local shape="$2"
+    case "$backend:$shape" in
+        cpu:callback-eager|cpu:callback-lazy|ccec:callback-eager|ccec:callback-lazy|ccec:split-eager|ccec:split-lazy) ;;
+        cpu:*)
+            echo "Unknown CPU QK callback shape: $shape (expected callback-eager|callback-lazy)" >&2
+            exit 1
+            ;;
         *)
-            echo "Unknown QK callback shape: $1 (expected callback-eager|callback-lazy)" >&2
+            echo "Unknown CCEC QK callback shape: $shape "\
+                 "(expected callback-eager|callback-lazy|split-eager|split-lazy)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+validate_qk_callback_pmu_shape() {
+    case "$1" in
+        split-eager|split-lazy) ;;
+        *)
+            echo "Unknown PMU QK callback shape: $1 (expected split-eager|split-lazy)" >&2
             exit 1
             ;;
     esac
@@ -164,7 +187,7 @@ qk_callback_artifact_failure() {
     local shape="$2"
     local reason="$3"
     echo "Invalid QK callback artifact set for $backend/$shape: $reason" >&2
-    echo "Run: $0 build-qk-callback $backend $shape" >&2
+    echo "Run the matching build-qk-callback or build-qk-callback-pmu action first." >&2
     return 1
 }
 
@@ -173,15 +196,35 @@ validate_qk_callback_artifacts() {
     local shape="$2"
     local build_dir="$3"
     local shape_id
+    local observation
     case "$shape" in
-        callback-eager) shape_id=1 ;;
-        callback-lazy) shape_id=2 ;;
+        callback-eager) shape_id=1; observation=inline-semantic ;;
+        callback-lazy) shape_id=2; observation=inline-semantic ;;
+        split-eager) shape_id=3; observation=split-combination-semantic ;;
+        split-lazy) shape_id=4; observation=split-combination-semantic ;;
         *) qk_callback_artifact_failure "$backend" "$shape" "unsupported shape"; return 1 ;;
     esac
     local artifacts=()
     case "$backend" in
         cpu) artifacts=(pa_scheduler_cpu) ;;
-        ccec) artifacts=(pa_scheduler_host pa_scheduler_kernel.o pa_scheduler_aic.o pa_scheduler_aiv.o) ;;
+        ccec)
+            artifacts=(pa_scheduler_host pa_scheduler_kernel.o)
+            if [[ "$shape_id" -ge 3 ]]; then
+                artifacts+=(pa_scheduler_qk_callback_runtime_aic.o)
+            fi
+            artifacts+=(pa_scheduler_aic.o)
+            if [[ "$shape_id" -ge 3 ]]; then
+                artifacts+=(pa_scheduler_qk_callback_finish_aic.o)
+            fi
+            if [[ "$shape_id" -ge 3 ]]; then
+                artifacts+=(pa_scheduler_qk_callback_runtime_aiv.o)
+            fi
+            artifacts+=(pa_scheduler_aiv.o)
+            if [[ "$shape_id" -ge 3 ]]; then
+                artifacts+=(pa_scheduler_qk_callback_finish_aiv.o)
+            fi
+            artifacts+=(device_text_layout.manifest)
+            ;;
         *) qk_callback_artifact_failure "$backend" "$shape" "unsupported backend"; return 1 ;;
     esac
 
@@ -203,7 +246,7 @@ validate_qk_callback_artifacts() {
           "${manifest_lines[1]}" != "# backend=$backend" ||
           "${manifest_lines[2]}" != "# shape=$shape" ||
           "${manifest_lines[3]}" != "# shape_id=$shape_id" ||
-          "${manifest_lines[4]}" != "# observation=inline-semantic" ]]; then
+          "${manifest_lines[4]}" != "# observation=$observation" ]]; then
         qk_callback_artifact_failure "$backend" "$shape" "manifest identity does not match"
         return 1
     fi
@@ -233,6 +276,20 @@ validate_qk_callback_artifacts() {
         qk_callback_artifact_failure "$backend" "$shape" "one or more SHA256 values do not match"
         return 1
     fi
+    if [[ "$backend" == "ccec" ]]; then
+        local text_layout_lines=()
+        mapfile -t text_layout_lines < "$build_dir/device_text_layout.manifest"
+        local expected_reserve=0
+        if [[ "$shape_id" -ge 3 ]]; then expected_reserve=1600; fi
+        if [[ ${#text_layout_lines[@]} -lt 9 ||
+              "${text_layout_lines[0]}" != "# schema=pa_scheduler_device_text_layout/v1" ||
+              "${text_layout_lines[1]}" != "# backend=ccec" ||
+              "${text_layout_lines[2]}" != "# shape=$shape" ||
+              "${text_layout_lines[3]}" != "# block_local_reserve_bytes=$expected_reserve" ]]; then
+            qk_callback_artifact_failure "$backend" "$shape" ".text layout identity does not match"
+            return 1
+        fi
+    fi
     echo "[CHECK] QK callback artifact manifest verified: $manifest"
 }
 
@@ -247,6 +304,15 @@ run_qk_callback() {
         "$build_dir/pa_scheduler_cpu" "$@"
         return
     fi
+    local argument
+    for argument in "$@"; do
+        case "$argument" in
+            --kernel|--kernel=*)
+                echo "The qk-callback action owns --kernel; rebuild the selected shape instead of overriding it." >&2
+                return 1
+                ;;
+        esac
+    done
     build_dir="$SCRIPT_DIR/build/ccec/qk-callback/$shape/swimlane"
     validate_qk_callback_artifacts "$backend" "$shape" "$build_dir"
     "$build_dir/pa_scheduler_host" --kernel "$build_dir/pa_scheduler_kernel.o" "$@"
@@ -348,10 +414,10 @@ reject_managed_submit_pmu_options() {
     done
 }
 
-run_submit_pmu() {
+run_submit_pmu_from_dir() {
     local phase="$1"
-    shift
-    local build_dir="$SCRIPT_DIR/build/ccec/submit-pmu/$phase"
+    local build_dir="$2"
+    shift 2
     local host="$build_dir/pa_scheduler_host"
     local kernel="$build_dir/pa_scheduler_kernel.o"
     local pmu_json=""
@@ -384,6 +450,20 @@ run_submit_pmu() {
         fi
         "$python_bin" "$SCRIPT_DIR/pmu_html_report.py" "$pmu_json"
     fi
+}
+
+run_submit_pmu() {
+    local phase="$1"
+    shift
+    run_submit_pmu_from_dir "$phase" "$SCRIPT_DIR/build/ccec/submit-pmu/$phase" "$@"
+}
+
+run_qk_callback_pmu() {
+    local shape="$1"
+    shift
+    local build_dir="$SCRIPT_DIR/build/ccec/qk-callback/$shape/submit-pmu-none"
+    validate_qk_callback_artifacts ccec "$shape" "$build_dir"
+    run_submit_pmu_from_dir none "$build_dir" "$@"
 }
 
 reject_managed_swimlane_options() {
@@ -524,22 +604,44 @@ case "$ACTION" in
         ;;
     build-qk-callback)
         if [[ ( "$BACKEND" != "ccec" && "$BACKEND" != "cpu" ) || $# -ne 1 ]]; then
-            echo "Usage: $0 build-qk-callback ccec|cpu callback-eager|callback-lazy" >&2
+            echo "Usage: $0 build-qk-callback ccec callback-eager|callback-lazy|split-eager|split-lazy" >&2
+            echo "       $0 build-qk-callback cpu callback-eager|callback-lazy" >&2
             exit 1
         fi
         QK_CALLBACK_SHAPE="$1"
-        validate_qk_callback_shape "$QK_CALLBACK_SHAPE"
+        validate_qk_callback_shape "$BACKEND" "$QK_CALLBACK_SHAPE"
         "$SCRIPT_DIR/$BACKEND/build.sh" qk-callback "$QK_CALLBACK_SHAPE"
         ;;
     qk-callback)
         if [[ ( "$BACKEND" != "ccec" && "$BACKEND" != "cpu" ) || $# -lt 1 ]]; then
-            echo "Usage: $0 qk-callback ccec|cpu callback-eager|callback-lazy [benchmark options]" >&2
+            echo "Usage: $0 qk-callback ccec callback-eager|callback-lazy|split-eager|split-lazy [benchmark options]" >&2
+            echo "       $0 qk-callback cpu callback-eager|callback-lazy [benchmark options]" >&2
             exit 1
         fi
         QK_CALLBACK_SHAPE="$1"
         shift
-        validate_qk_callback_shape "$QK_CALLBACK_SHAPE"
+        validate_qk_callback_shape "$BACKEND" "$QK_CALLBACK_SHAPE"
         run_qk_callback "$BACKEND" "$QK_CALLBACK_SHAPE" "$@"
+        ;;
+    build-qk-callback-pmu)
+        if [[ "$BACKEND" != "ccec" || $# -ne 1 ]]; then
+            echo "Usage: $0 build-qk-callback-pmu ccec split-eager|split-lazy" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$1"
+        validate_qk_callback_pmu_shape "$QK_CALLBACK_SHAPE"
+        "$SCRIPT_DIR/ccec/build.sh" qk-callback-pmu "$QK_CALLBACK_SHAPE"
+        ;;
+    qk-callback-pmu)
+        if [[ "$BACKEND" != "ccec" || $# -lt 1 ]]; then
+            echo "Usage: $0 qk-callback-pmu ccec split-eager|split-lazy [benchmark options]" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$1"
+        shift
+        validate_qk_callback_pmu_shape "$QK_CALLBACK_SHAPE"
+        reject_managed_submit_pmu_options "$@"
+        run_qk_callback_pmu "$QK_CALLBACK_SHAPE" "$@"
         ;;
     build-submit-pmu)
         if [[ "$BACKEND" != "ccec" || $# -ne 1 ]]; then

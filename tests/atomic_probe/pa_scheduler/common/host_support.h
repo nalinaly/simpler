@@ -1060,6 +1060,12 @@ inline Metrics Validate(
     bool fanin_worker_counts_ok = true;
     bool frontier_worker_counts_ok = true;
     bool role_kernel_routing_ok = true;
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    bool qk_split_runtime_oracle_ok = true;
+    const uint64_t expected_qk_split_task_id_sum =
+        static_cast<uint64_t>(batches) +
+        static_cast<uint64_t>(kTasksPerBatch) * batches * (batches - 1U) / 2U;
+#endif
 
     // 按真实输出大小、1 KiB 对齐和 256 MiB 环回规则重算每个 task 可接受的最小 vend。
     uint64_t expected_heap_next = 0;
@@ -1141,6 +1147,23 @@ inline Metrics Validate(
         slot_tensor_copies += result.slot_tensor_copies;
         slot_scalar_copies += result.slot_scalar_copies;
         fanin_edges += result.fanin_edges;
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+        const CoreRole expected_role = index < kAicWorkers ? CoreRole::Aic : CoreRole::Aiv;
+        qk_split_runtime_oracle_ok &= result.worker_id == index;
+        qk_split_runtime_oracle_ok &= result.qk_split_caller_state_address != 0;
+        qk_split_runtime_oracle_ok &=
+            result.qk_split_finish_state_address == result.qk_split_caller_state_address;
+        qk_split_runtime_oracle_ok &= result.qk_split_finish_calls == batches;
+        qk_split_runtime_oracle_ok &= result.qk_split_protocol_errors == 0;
+        qk_split_runtime_oracle_ok &=
+            result.qk_split_state_cookie ==
+                (kQkSplitStateCookieBase ^ static_cast<uint64_t>(index) ^
+                 (static_cast<uint64_t>(static_cast<uint32_t>(expected_role)) << 32U));
+        qk_split_runtime_oracle_ok &=
+            result.qk_split_task_id_sum == expected_qk_split_task_id_sum;
+        qk_split_runtime_oracle_ok &= result.qk_split_owner_worker_id == index;
+        qk_split_runtime_oracle_ok &= result.qk_split_reserved == 0;
+#endif
 #if defined(PA_QK_CALLBACK_SHAPE_ID)
         const uint64_t qk_wins = result.wins[static_cast<uint32_t>(TaskKind::Qk)];
         const uint64_t expected_worker_views = kQkCallbackLazy
@@ -1229,6 +1252,13 @@ inline Metrics Validate(
     // 第一组断言覆盖参与者拓扑、Claim/winner、completion 和最终 drain 等调度主协议。
     Expect(aic_count == kAicWorkers && aiv_count == kAivWorkers, "participant topology is 32 AIC + 64 AIV", &metrics);
     Expect(worker_shape_ok, "all 96 worker markers and private rings are valid", &metrics);
+#if defined(PA_QK_CALLBACK_SPLIT_FINISH)
+    Expect(
+        qk_split_runtime_oracle_ok,
+        "split caller/finish share one role-specific block-local state and finish every QK once",
+        &metrics
+    );
+#endif
     Expect(submit_timestamps_ok, "all Submit timing markers are valid", &metrics);
     Expect(state.started_count.value == kWorkers, "started_count is 96", &metrics);
     Expect(submits == expected_submits, "replay count is workers * tasks", &metrics);
