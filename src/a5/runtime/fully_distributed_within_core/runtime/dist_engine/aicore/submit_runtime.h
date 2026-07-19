@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "dist_engine/aicore/qk_split_submit_types.h"
+
 namespace {
 
 PTO_DEVICE_FUNC int32_t anchor_lane_for_mask(const ActiveMask &M) {
@@ -307,6 +309,113 @@ PTO_DEVICE_FUNC void dist_submit_replay_orch(__gm__ Runtime *runtime) {
 #include "dist_engine/aicore/onboard_entry.h"
 
 }  // namespace
+
+#if defined(__CCE_AICORE__)
+namespace {
+
+PTO_DEVICE_FUNC TaskOutputTensors fdwic_qk_split_finish_body(
+    const FdwicQkSplitSubmitTicket *ticket, const L0TaskArgs *args
+) {
+    if (ticket == nullptr || args == nullptr || g_dist_ptr == nullptr || g_self == nullptr) {
+        fdwic_trace_set_fatal();
+        return TaskOutputTensors{};
+    }
+
+    const int32_t task_id = static_cast<int32_t>(ticket->task_id);
+    const int32_t submitted_kernel_id = static_cast<int32_t>(ticket->kernel_id);
+    const bool won = ticket->won != 0;
+    const bool valid = ticket->reserved == 0 && ticket->won <= 1 && task_id >= 0 && task_id < kFlagCap &&
+                       submitted_kernel_id >= 0 && submitted_kernel_id < RUNTIME_MAX_FUNC_ID &&
+                       g_self->local_index == task_id + 1 && (!won || g_self->role == CoreType::AIC);
+    if (!valid) {
+        fdwic_trace_set_fatal(task_id);
+        return TaskOutputTensors{};
+    }
+
+    DistSubmitCtx ctx;
+    ctx.self = g_self;
+    ctx.task_id = task_id;
+    ctx.payload = &ctx.self->task_payloads[task_id & kTaskPayloadMask];
+    ctx.result.set_task_id(PTO2TaskId::make(0, static_cast<uint32_t>(task_id)));
+    ctx.tensor_count = args->tensor_count();
+    ctx.scalar_count = args->scalar_count();
+    ctx.register_mask = 0;
+    ctx.output_bytes = 0;
+    ctx.fanin_count = 0;
+    ctx.kernel_id = won ? submitted_kernel_id : INVALID_KERNEL_ID;
+    ctx.won = won;
+    ctx.joint = false;
+    ctx.joint_init = false;
+    ctx.joint_block = -1;
+    ctx.joint_slot = -1;
+    ctx.joint_count = 0;
+    ctx.claim_attempted = ctx.self->role == CoreType::AIC;
+
+    TRACE_LAP_RESET(ctx.self);
+    TRACE_SPAN_BEGIN(materialize_trace);
+    if (!dist_submit_materialize_args(*args, ctx, DistSubmitKind::Kernel)) {
+        if (ctx.won) complete_executed_task(ctx.self, ctx.task_id);
+        return ctx.result;
+    }
+    TRACE_SPAN_END(
+        materialize_trace, ctx.self, ctx.task_id, -1, TracePhase::Materialize, 0,
+        static_cast<uint32_t>(DistSubmitKind::Kernel)
+    );
+
+    TRACE_SPAN_BEGIN(prepare_map_trace);
+    dist_submit_prepare_map(ctx.self, ctx.task_id);
+    TRACE_SPAN_END(
+        prepare_map_trace, ctx.self, ctx.task_id, -1, TracePhase::PrepareMap, 0,
+        static_cast<uint32_t>(DistSubmitKind::Kernel)
+    );
+
+    if (ctx.won) {
+        TRACE_SPAN_BEGIN(fanin_trace);
+        ctx.fanin_count = dist_submit_collect_fanin(*args, ctx, ctx.fanin);
+        TRACE_SPAN_END(
+            fanin_trace, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Fanin, 0,
+            static_cast<uint32_t>(ctx.fanin_count)
+        );
+    }
+
+    TRACE_SPAN_BEGIN(register_trace);
+    dist_submit_register_outputs(ctx, *args, /*include_existing=*/true);
+    TRACE_SPAN_END(register_trace, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Register, 0, 1);
+
+    MixedKernels mixed;
+    mixed.aic_kernel_id = submitted_kernel_id;
+    if (__builtin_expect(ctx.won, 0)) {
+        TRACE_LAP(ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Build);
+        dist_submit_build_winner_task(ctx, mixed, *args);
+    } else {
+        TRACE_LAP(ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Replay);
+        drain_block_won(ctx.self);
+    }
+    TRACE_SPAN_END(
+        ticket->submit_trace_start, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Submit,
+        static_cast<uint32_t>(ctx.won), 0
+    );
+    return ctx.result;
+}
+
+}  // namespace
+
+extern "C" {
+#if defined(__DAV_CUBE__)
+__attribute__((used, noinline)) PTO_DEVICE_FUNC TaskOutputTensors fdwic_qk_split_finish_aic(
+    const FdwicQkSplitSubmitTicket *ticket, const L0TaskArgs *args
+) {
+    return fdwic_qk_split_finish_body(ticket, args);
+}
+#elif defined(__DAV_VEC__)
+__attribute__((used, noinline)) PTO_DEVICE_FUNC TaskOutputTensors fdwic_qk_split_finish_aiv(
+    const FdwicQkSplitSubmitTicket *ticket, const L0TaskArgs *args
+) {
+    return fdwic_qk_split_finish_body(ticket, args);
+}
+#endif
+}
+#endif
 
 DIST_API_ATTR PTO_DEVICE_FUNC TaskOutputTensors
 dist_submit_impl(PTO2Runtime *, const MixedKernels &mixed, const L0TaskArgs &args) {

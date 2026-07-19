@@ -26,7 +26,7 @@
 #include <cstdint>
 #include <cstring>
 
-#include "pto_orchestration_api.h"
+#include "pto_qk_split_submit.h"
 
 #define N_UNROLL 64
 
@@ -34,12 +34,12 @@
 #define FUNC_SOFTMAX_PREPARE 1
 #define FUNC_PV_MATMUL 2
 #define FUNC_ONLINE_UPDATE 3
-constexpr uint64_t PLATFORM_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
+constexpr uint64_t PA_ORCH_PROF_SYS_CNT_FREQ = 50000000;  // 50 MHz
 
 PTO_DEVICE_FUNC inline uint64_t min_u64(uint64_t a, uint64_t b) { return a < b ? a : b; }
 
-inline double cycles_to_us(uint64_t cycles) {
-    return (static_cast<double>(cycles) / PLATFORM_PROF_SYS_CNT_FREQ) * 1000000.0;
+inline double pa_orch_cycles_to_us(uint64_t cycles) {
+    return (static_cast<double>(cycles) / PA_ORCH_PROF_SYS_CNT_FREQ) * 1000000.0;
 }
 
 inline uint64_t get_sys_cnt_aicpu() {
@@ -164,12 +164,13 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
 
                 uint32_t qi_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t qi_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
-                Tensor qi = Tensor::view(query, qi_shapes, qi_offsets);
+                Tensor qi;
+                bool qi_ready = false;
                 uint32_t out_view_shapes[2] = {static_cast<uint32_t>(q_tile), static_cast<uint32_t>(head_dim)};
                 uint32_t out_view_offsets[2] = {static_cast<uint32_t>(cur_offset), 0};
                 Tensor out_view = Tensor::view(out, out_view_shapes, out_view_offsets, true);
 #ifdef ENABLE_PROFILING
-                prof_view_count += 2;
+                prof_view_count += 1;
                 CYCLE_COUNT_LAP(prof_tensor_view);
 #endif
                 // alloc_tensors() and the four kernel submits synchronously
@@ -207,12 +208,30 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
                     CYCLE_COUNT_LAP(prof_make_tensor);
 #endif
 
-                    params.reset();
-                    params.add_input(qi, key_cache, block_table);
-                    params.add_output(sij_buf_ci);
-                    params.add_scalar(n_blocks, b_idx * block_num + bn);
                     CYCLE_COUNT_LAP(prof_param_setup);
-                    TaskOutputTensors qk_outs = rt_submit_aic_task(FUNC_QK_MATMUL, params);
+                    TaskOutputTensors qk_outs = rt_submit_private_aic_qk_split_once<true>(
+                        FUNC_QK_MATMUL, params, [&](FdwicPrivateAicQkBuilder<true> &builder) PTO_DEVICE_FUNC {
+                            builder.add_input([&]() PTO_DEVICE_FUNC -> const Tensor & {
+                                if (!qi_ready) {
+                                    qi = Tensor::view(query, qi_shapes, qi_offsets);
+                                    qi_ready = true;
+#ifdef ENABLE_PROFILING
+                                    prof_view_count++;
+#endif
+                                }
+                                return qi;
+                            });
+                            builder.add_input([&]() PTO_DEVICE_FUNC -> const Tensor & { return key_cache; });
+                            builder.add_input([&]() PTO_DEVICE_FUNC -> const Tensor & { return block_table; });
+                            builder.add_output(
+                                [&]() PTO_DEVICE_FUNC -> const TensorCreateInfo & { return sij_buf_ci; }
+                            );
+                            builder.add_scalar([&]() PTO_DEVICE_FUNC -> uint64_t { return n_blocks; });
+                            builder.add_scalar(
+                                [&]() PTO_DEVICE_FUNC -> uint64_t { return b_idx * block_num + bn; }
+                            );
+                        }
+                    );
                     __gm__ const Tensor &sij_buf = qk_outs.get_ref(0);
 #ifdef ENABLE_PROFILING
                     prof_submit_count++;
@@ -282,36 +301,36 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
                      prof_submit_task + prof_scope_and_loop;
     LOG_INFO_V9(
         "=== PagedAttn Orch Profiling: %d submits, %d makes, %d views, total=%.3fus ===", prof_submit_count,
-        prof_make_count, prof_view_count, cycles_to_us(total)
+        prof_make_count, prof_view_count, pa_orch_cycles_to_us(total)
     );
     if (total > 0) {
         LOG_INFO_V9(
-            "  param_extract    : %7.3fus (%5.1f%%)", cycles_to_us(prof_param_extract),
+            "  param_extract    : %7.3fus (%5.1f%%)", pa_orch_cycles_to_us(prof_param_extract),
             prof_param_extract * 100.0 / total
         );
         LOG_INFO_V9(
-            "  ext_tensor(x4)   : %7.3fus (%5.1f%%)", cycles_to_us(prof_ext_tensor), prof_ext_tensor * 100.0 / total
+            "  ext_tensor(x4)   : %7.3fus (%5.1f%%)", pa_orch_cycles_to_us(prof_ext_tensor), prof_ext_tensor * 100.0 / total
         );
         LOG_INFO_V9(
-            "  create_info(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_make_count, cycles_to_us(prof_make_tensor),
+            "  create_info(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_make_count, pa_orch_cycles_to_us(prof_make_tensor),
             prof_make_tensor * 100.0 / total,
-            prof_make_count > 0 ? cycles_to_us(prof_make_tensor) / prof_make_count : 0.0
+            prof_make_count > 0 ? pa_orch_cycles_to_us(prof_make_tensor) / prof_make_count : 0.0
         );
         LOG_INFO_V9(
-            "  tensor_view(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_view_count, cycles_to_us(prof_tensor_view),
+            "  tensor_view(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_view_count, pa_orch_cycles_to_us(prof_tensor_view),
             prof_tensor_view * 100.0 / total,
-            prof_view_count > 0 ? cycles_to_us(prof_tensor_view) / prof_view_count : 0.0
+            prof_view_count > 0 ? pa_orch_cycles_to_us(prof_tensor_view) / prof_view_count : 0.0
         );
         LOG_INFO_V9(
-            "  param_setup      : %7.3fus (%5.1f%%)", cycles_to_us(prof_param_setup), prof_param_setup * 100.0 / total
+            "  param_setup      : %7.3fus (%5.1f%%)", pa_orch_cycles_to_us(prof_param_setup), prof_param_setup * 100.0 / total
         );
         LOG_INFO_V9(
-            "  submit_task(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_submit_count, cycles_to_us(prof_submit_task),
+            "  submit_task(x%d) : %7.3fus (%5.1f%%)  avg=%.3fus", prof_submit_count, pa_orch_cycles_to_us(prof_submit_task),
             prof_submit_task * 100.0 / total,
-            prof_submit_count > 0 ? cycles_to_us(prof_submit_task) / prof_submit_count : 0.0
+            prof_submit_count > 0 ? pa_orch_cycles_to_us(prof_submit_task) / prof_submit_count : 0.0
         );
         LOG_INFO_V9(
-            "  scope_and_loop   : %7.3fus (%5.1f%%)", cycles_to_us(prof_scope_and_loop),
+            "  scope_and_loop   : %7.3fus (%5.1f%%)", pa_orch_cycles_to_us(prof_scope_and_loop),
             prof_scope_and_loop * 100.0 / total
         );
     }

@@ -20,26 +20,67 @@
 // while CPU sim uses an ordinary process pointer into the AICPU DSO's BSS.
 // The `g_dist` macro keeps hot-path code identical.
 #if defined(__CCE_AICORE__)
-[[block_local]] static __gm__ DistGlobal *g_dist_ptr;
-[[block_local]] static __gm__ DistCore *g_self;
-[[block_local]] static __gm__ Runtime *g_ccec_runtime;
-[[block_local]] static int32_t g_ccec_core_idx;
-[[block_local]] static int32_t g_ccec_core_type;
-[[block_local]] static int32_t g_ccec_aic_count;
-[[block_local]] static int32_t g_ccec_aiv_count;
-[[block_local]] static int32_t g_ccec_ordinal;
-[[block_local]] static bool g_ccec_valid_worker;
-[[block_local]] static bool g_fdwic_joint_submit_seen;
-[[block_local]] static uint32_t g_fdwic_swimlane_level;
-[[block_local]] static __gm__ FdwicSwimlaneHeader *g_fdwic_swimlane_header;
-[[block_local]] static __gm__ FdwicSwimlaneCoreState *g_fdwic_swimlane_core;
-[[block_local]] static __gm__ FdwicSwimlaneRecord *g_fdwic_swimlane_records;
-[[block_local]] static uint32_t g_fdwic_swimlane_records_per_core;
-[[block_local]] static FdwicAtomicPollBurst g_fdwic_atomic_poll_burst;
-[[block_local]] static uint32_t g_fdwic_atomic_calls;
-[[block_local]] static uint32_t g_fdwic_poll_calls;
-[[block_local]] static uint32_t g_fdwic_poll_batch_records;
-[[block_local]] static bool g_fdwic_atomic_counter_overflow;
+#define FDWIC_WORKER_STATE_NAME_IMPL(base, suffix) base##suffix
+#define FDWIC_WORKER_STATE_NAME_EXPAND(base, suffix) FDWIC_WORKER_STATE_NAME_IMPL(base, suffix)
+#if defined(__DAV_CUBE__)
+#define FDWIC_WORKER_STATE_NAME(base) FDWIC_WORKER_STATE_NAME_EXPAND(base, _aic)
+#elif defined(__DAV_VEC__)
+#define FDWIC_WORKER_STATE_NAME(base) FDWIC_WORKER_STATE_NAME_EXPAND(base, _aiv)
+#else
+#error "CCEC worker state requires __DAV_CUBE__ or __DAV_VEC__"
+#endif
+
+#define g_dist_ptr FDWIC_WORKER_STATE_NAME(fdwic_g_dist_ptr)
+#define g_self FDWIC_WORKER_STATE_NAME(fdwic_g_self)
+#define g_ccec_runtime FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_runtime)
+#define g_ccec_core_idx FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_core_idx)
+#define g_ccec_core_type FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_core_type)
+#define g_ccec_aic_count FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_aic_count)
+#define g_ccec_aiv_count FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_aiv_count)
+#define g_ccec_ordinal FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_ordinal)
+#define g_ccec_valid_worker FDWIC_WORKER_STATE_NAME(fdwic_g_ccec_valid_worker)
+#define g_fdwic_joint_submit_seen FDWIC_WORKER_STATE_NAME(fdwic_g_joint_submit_seen)
+#define g_fdwic_swimlane_level FDWIC_WORKER_STATE_NAME(fdwic_g_swimlane_level)
+#define g_fdwic_swimlane_header FDWIC_WORKER_STATE_NAME(fdwic_g_swimlane_header)
+#define g_fdwic_swimlane_core FDWIC_WORKER_STATE_NAME(fdwic_g_swimlane_core)
+#define g_fdwic_swimlane_records FDWIC_WORKER_STATE_NAME(fdwic_g_swimlane_records)
+#define g_fdwic_swimlane_records_per_core FDWIC_WORKER_STATE_NAME(fdwic_g_swimlane_records_per_core)
+#define g_fdwic_atomic_poll_burst FDWIC_WORKER_STATE_NAME(fdwic_g_atomic_poll_burst)
+#define g_fdwic_atomic_calls FDWIC_WORKER_STATE_NAME(fdwic_g_atomic_calls)
+#define g_fdwic_poll_calls FDWIC_WORKER_STATE_NAME(fdwic_g_poll_calls)
+#define g_fdwic_poll_batch_records FDWIC_WORKER_STATE_NAME(fdwic_g_poll_batch_records)
+#define g_fdwic_atomic_counter_overflow FDWIC_WORKER_STATE_NAME(fdwic_g_atomic_counter_overflow)
+
+#if defined(FDWIC_DEFINE_CCEC_WORKER_STATE)
+#define FDWIC_WORKER_STATE_STORAGE
+#else
+#define FDWIC_WORKER_STATE_STORAGE extern
+#endif
+
+extern "C" {
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ DistGlobal *g_dist_ptr;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ DistCore *g_self;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ Runtime *g_ccec_runtime;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE int32_t g_ccec_core_idx;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE int32_t g_ccec_core_type;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE int32_t g_ccec_aic_count;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE int32_t g_ccec_aiv_count;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE int32_t g_ccec_ordinal;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE bool g_ccec_valid_worker;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE bool g_fdwic_joint_submit_seen;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE uint32_t g_fdwic_swimlane_level;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ FdwicSwimlaneHeader *g_fdwic_swimlane_header;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ FdwicSwimlaneCoreState *g_fdwic_swimlane_core;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE __gm__ FdwicSwimlaneRecord *g_fdwic_swimlane_records;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE uint32_t g_fdwic_swimlane_records_per_core;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE FdwicAtomicPollBurst g_fdwic_atomic_poll_burst;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE uint32_t g_fdwic_atomic_calls;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE uint32_t g_fdwic_poll_calls;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE uint32_t g_fdwic_poll_batch_records;
+[[block_local]] FDWIC_WORKER_STATE_STORAGE bool g_fdwic_atomic_counter_overflow;
+}
+
+#undef FDWIC_WORKER_STATE_STORAGE
 #define g_dist (*g_dist_ptr)
 #elif defined(__CPU_SIM)
 static DistGlobal g_dist_fallback;

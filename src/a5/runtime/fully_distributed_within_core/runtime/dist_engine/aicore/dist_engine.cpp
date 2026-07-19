@@ -16,6 +16,7 @@
 #include "pto_types.h"
 #include "runtime.h"
 
+#define FDWIC_DEFINE_CCEC_WORKER_STATE 1
 #include "dist_engine/common/state.h"          // NOLINT(build/include_subdir)
 #include "dist_engine/common/atomic.h"         // NOLINT(build/include_subdir)
 #include "dist_engine/common/trace.h"          // NOLINT(build/include_subdir)
