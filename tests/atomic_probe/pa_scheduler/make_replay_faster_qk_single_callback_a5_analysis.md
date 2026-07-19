@@ -9,6 +9,144 @@
 > 产物没有随附；旧 `/private/3-gpt/` 工件也位于本 worktree 之外。下文明确
 > 标出的历史路径不能冒充当前仓内可复跑入口。
 
+## 0. cleanroom standalone 当前进展（2026-07-19）
+
+本节只记录 `origin/fdwic-swimlane-deps@6caa269c` 之上的当前 cleanroom
+实现和复测；下文第 1 节起仍是旧分支历史实验。当前工作分支为
+`wip/qk-lazy-cleanroom-20260719`，实现入口固定在
+`tests/atomic_probe/pa_scheduler/`。
+
+### 0.1 当前只完成 inline-semantic 对照，不是 D
+
+新增两种**编译期独立产物**：
+
+| 产物 | shape id | QK callback 内的参数策略 | 与历史标签的关系 |
+| --- | ---: | --- | --- |
+| `callback-eager` | 1 | 所有 worker 都求值 input/output/scalar thunk | claim-first callback 家族的 all-thunks control；**不是** legacy eager，也不是历史 A |
+| `callback-lazy` | 2 | 所有 worker 求值 fresh output；只有 QK winner 求值 input/scalar thunk | standalone 的 lazy 语义候选；尚不是 split D |
+
+两种 shape 都固定为：
+
+```text
+task-id
+→ execute-first EfDrain
+→ Claim 恰好一次
+→ outer callback 恰好一次
+→ callback 返回、nested thunk 生命周期结束
+→ Materialize
+→ private TensorMap retire
+→ winner-only Fanin
+→ Register
+→ winner-only Build
+```
+
+运行 banner、raw JSON 和 ready manifest 都明确记录：
+
+```text
+observation=inline-semantic
+finish=inline-same-tu
+control_family=claim-first-callback-not-legacy-eager
+```
+
+当前 `QkCallbackTicket` 只是同一 TU 内的 16 B 源码载体，finish 也被静态门禁
+要求完全 inline。它没有形成 cross-TU ABI，没有验证唯一 noinline finish、
+external `[[block_local]]` state 或 caller object 的单 relocation。因此本节只能
+回答“claim-first、single callback 与 lazy thunk 语义在 standalone 中可行”，
+不能回答“D 已实现”，也不能拿 `callback-eager` 代替 legacy eager 性能基线。
+
+默认构建不定义 `PA_QK_CALLBACK_SHAPE_ID`，继续走原 `SubmitTask`；shape 选择
+不存在运行时分支。当前最新 patch 的默认 CPU/CCEC 规范化预处理 token 5/5
+均与冻结值一致；此前同阶段默认 device `.text` 复核也一致，避免把 callback
+实验暗中带入 legacy ELF。
+
+### 0.2 精确工作量 oracle
+
+设 batch 数为 `B`，worker `i` 赢得的 QK 数为 `q_i`。每个 worker 的精确前端
+计数为：
+
+| shape | view | tensor Arg | scalar Arg | TaskArgs reset |
+| --- | ---: | ---: | ---: | ---: |
+| callback-eager | `2B` | `22B` | `9B` | `4B` |
+| callback-lazy | `B + q_i` | `19B + 3q_i` | `7B + 2q_i` | `4B` |
+
+96-worker standalone 每 batch 恰有一个 QK winner，所以全局期望为：
+
+| shape | view | tensor Arg | scalar Arg | TaskArgs reset |
+| --- | ---: | ---: | ---: | ---: |
+| callback-eager | `192B` | `2112B` | `864B` | `384B` |
+| callback-lazy | `97B` | `1827B` | `674B` | `384B` |
+
+两形态仍共同要求 `dynamic_create_infos=192B`、
+`materialized_outputs=768B`、`map_inserts=384B`，并复用既有 heap、TensorMap、
+fanin、winner placement、completion/frontier 和数值输出 oracle。Reset 放在 outer
+callback 内；若 callback 被调用两次，`reset_calls != 1` 会在 Materialize 前失败。
+
+### 0.3 构建与 b1 功能结果
+
+独立构建/运行入口为：
+
+```bash
+cd tests/atomic_probe/pa_scheduler
+
+./run.sh build-qk-callback cpu  callback-eager
+./run.sh build-qk-callback cpu  callback-lazy
+./run.sh build-qk-callback ccec callback-eager
+./run.sh build-qk-callback ccec callback-lazy
+
+./run.sh qk-callback ccec callback-eager \
+  --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
+./run.sh qk-callback ccec callback-lazy \
+  --device 0 --batches 1 --runs 1 --winner-workload real-compute --no-swimlane
+```
+
+CPU callback build 在发布 SHA256 manifest 前会自动运行 b1 real-compute 数值与
+完整语义 oracle。按本阶段约定，没有运行 CPU b256 或 CCEC b256 功能测试。
+
+| 后端/模式 | callback-eager | callback-lazy |
+| --- | --- | --- |
+| CPU b1 real-compute、无泳道 | 全部结构/计数/数值 oracle PASS；`192/2112/864/384` | 全部结构/计数/数值 oracle PASS；`97/1827/674/384` |
+| CCEC device0 b1 real-compute、无泳道 | 全部结构/计数/数值 oracle PASS；`192/2112/864/384` | 全部结构/计数/数值 oracle PASS；`97/1827/674/384` |
+| CCEC device0 b1 scalar-nop、atomic 泳道 | raw record 闭合、dropped=0、converter/exclusive PASS | raw record 闭合、dropped=0、converter/exclusive PASS；最新 provenance capture 为 `4129/4129` |
+
+这里的“无泳道”只是 runtime `--no-swimlane`，当前 CCEC callback ELF 仍以
+`PA_BUILD_SWIMLANE=1` 编译。b1 的单轮 Submit span 只用于确认 marker 有效，
+没有作为性能数字归档；CPU timing 也不是 A5 参考。构建时出现的 168/183 条
+告警来自随包 PTO/CANN header，构建退出码和本仓静态门禁均为 0，不能把这些
+既有告警写成网络、设备或本次源码故障。
+
+泳道后处理可复跑为：
+
+```bash
+./run.sh qk-callback ccec callback-lazy \
+  --device 0 --batches 1 --runs 1 \
+  --winner-workload scalar-nop --nop-count 0 \
+  --trace-atomics --swimlane-json /tmp/pa_qk_callback_lazy_ccec_b1.json
+python3 swimlane_converter.py /tmp/pa_qk_callback_lazy_ccec_b1.json \
+  -o /tmp/pa_qk_callback_lazy_ccec_b1_merged.json
+python3 swimlane_exclusive_analyzer.py /tmp/pa_qk_callback_lazy_ccec_b1.json \
+  -o /tmp/pa_qk_callback_lazy_ccec_b1_exclusive.json
+```
+
+当前复测工具身份：
+
+| 工具 | 绝对路径 | SHA256 |
+| --- | --- | --- |
+| CCEC | `/home/q00473782/Ascend/cann-9.1.0-weekly-20260708/cann-9.1.0/bin/ccec` | `34355dde8c995f3c7d769ddf0e1b853aba65cf6ef6fb3863ab86c026d40aebfd` |
+| CPU C++ | `/usr/bin/g++` | `1353e9bdd29a7295c7226bf6c63abccce056d8cac31f112e5cdbecc3f28c2769` |
+
+### 0.4 下一步与 5% 停止门槛
+
+下一步先把 inline-semantic 作为独立小提交冻结，再实现真正的 split-TU
+single-finish 组合 oracle：caller object 只保留对应 finish 的一个 UND/一个
+text relocation，runtime object 提供强定义，final ELF 无 relocation，且真实
+反汇编证明 callback/closure/thunk 没有跨界。完成该静态和 device0 b1 门禁前，
+不能称为 D。
+
+性能阶段另建 compile-time 无泳道、无 PMU 的独立产物，只在 CCEC device0
+跑 b256 相邻交错 paired A/B；功能阶段不浪费 CPU b256 或 CCEC b256。若逐 pair
+方向不稳定或中位数绝对差异小于 5%，立即停止，不做 I-cache 对比；只有稳定
+达到 5% 才复用已有 submit-pmu `none` 观察手段细化，而不是在本阶段先补 PMU。
+
 > 验证日期：2026-07-17～2026-07-19
 > Production 业务代码基线：`a3f5ecc2186fb8a06cded6d26886a4ab802009c0`
 > PMU 诊断 host HEAD：`76df85ced5a43099d268cd6bcd5a988d03d9cca7`；
