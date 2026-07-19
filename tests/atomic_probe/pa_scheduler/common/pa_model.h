@@ -32,6 +32,25 @@
 
 namespace pa_scheduler {
 
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+// QK callback experiments are separate compile-time artifacts.  The macro is
+// deliberately absent from the legacy build, so the canonical PA token stream
+// does not acquire a runtime shape branch or a synthetic "shape 0" define.
+// callback-eager is the all-thunks control inside the new claim-first callback
+// family; it is not the legacy eager SubmitTask baseline.
+static_assert(
+    PA_QK_CALLBACK_SHAPE_ID == 1 || PA_QK_CALLBACK_SHAPE_ID == 2,
+    "PA_QK_CALLBACK_SHAPE_ID must select callback-eager(1) or callback-lazy(2)"
+);
+constexpr bool kQkCallbackLazy = PA_QK_CALLBACK_SHAPE_ID == 2;
+constexpr uint32_t kQkCallbackShapeId = PA_QK_CALLBACK_SHAPE_ID;
+constexpr const char *kQkCallbackShapeName =
+    kQkCallbackLazy ? "callback-lazy" : "callback-eager";
+constexpr const char *kQkCallbackObservation = "inline-semantic";
+constexpr const char *kQkCallbackFinishShape = "inline-same-tu";
+constexpr const char *kQkCallbackControlFamily = "claim-first-callback-not-legacy-eager";
+#endif
+
 // 这里固定的是 PA Case1 的调度拓扑，而不是为了缩小 standalone 人为选择的规模：
 // 每个 batch 依次回放 Alloc/QK/SF/PV/UP 五个 task，32 个 AIC 与 64 个 AIV
 // 都执行同一条 orchestration 流，只在 Claim 时按 task 的 active role 分流。

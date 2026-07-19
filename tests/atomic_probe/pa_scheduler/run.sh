@@ -21,6 +21,8 @@ Usage:
   ./run.sh run    ccec|ascendc|cpu|all [benchmark options]
   ./run.sh smoke  ccec|ascendc|cpu|all [--device N]
   ./run.sh swimlane ccec|ascendc|cpu|all [benchmark options]
+  ./run.sh build-qk-callback ccec|cpu callback-eager|callback-lazy
+  ./run.sh qk-callback ccec|cpu callback-eager|callback-lazy [benchmark options]
   ./run.sh build-submit-pmu ccec none|claim|efdrain|materialize|register
   ./run.sh submit-pmu ccec none|claim|efdrain|materialize|register [benchmark options]
 
@@ -145,6 +147,109 @@ validate_submit_pmu_phase() {
             exit 1
             ;;
     esac
+}
+
+validate_qk_callback_shape() {
+    case "$1" in
+        callback-eager|callback-lazy) ;;
+        *)
+            echo "Unknown QK callback shape: $1 (expected callback-eager|callback-lazy)" >&2
+            exit 1
+            ;;
+    esac
+}
+
+qk_callback_artifact_failure() {
+    local backend="$1"
+    local shape="$2"
+    local reason="$3"
+    echo "Invalid QK callback artifact set for $backend/$shape: $reason" >&2
+    echo "Run: $0 build-qk-callback $backend $shape" >&2
+    return 1
+}
+
+validate_qk_callback_artifacts() {
+    local backend="$1"
+    local shape="$2"
+    local build_dir="$3"
+    local shape_id
+    case "$shape" in
+        callback-eager) shape_id=1 ;;
+        callback-lazy) shape_id=2 ;;
+        *) qk_callback_artifact_failure "$backend" "$shape" "unsupported shape"; return 1 ;;
+    esac
+    local artifacts=()
+    case "$backend" in
+        cpu) artifacts=(pa_scheduler_cpu) ;;
+        ccec) artifacts=(pa_scheduler_host pa_scheduler_kernel.o pa_scheduler_aic.o pa_scheduler_aiv.o) ;;
+        *) qk_callback_artifact_failure "$backend" "$shape" "unsupported backend"; return 1 ;;
+    esac
+
+    local manifest_name="qk_callback_artifacts.manifest"
+    local manifest="$build_dir/$manifest_name"
+    if [[ ! -s "$manifest" ]]; then
+        qk_callback_artifact_failure "$backend" "$shape" "ready manifest is missing or empty"
+        return 1
+    fi
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        qk_callback_artifact_failure "$backend" "$shape" "sha256sum is unavailable"
+        return 1
+    fi
+    local manifest_lines=()
+    mapfile -t manifest_lines < "$manifest"
+    local expected_lines=$((5 + ${#artifacts[@]}))
+    if [[ ${#manifest_lines[@]} -ne $expected_lines ||
+          "${manifest_lines[0]}" != "# schema=pa_scheduler_qk_callback_artifacts/v1" ||
+          "${manifest_lines[1]}" != "# backend=$backend" ||
+          "${manifest_lines[2]}" != "# shape=$shape" ||
+          "${manifest_lines[3]}" != "# shape_id=$shape_id" ||
+          "${manifest_lines[4]}" != "# observation=inline-semantic" ]]; then
+        qk_callback_artifact_failure "$backend" "$shape" "manifest identity does not match"
+        return 1
+    fi
+    local index digest filename extra
+    for index in "${!artifacts[@]}"; do
+        digest=""
+        filename=""
+        extra=""
+        read -r digest filename extra <<< "${manifest_lines[index + 5]}"
+        if [[ ! "$digest" =~ ^[[:xdigit:]]{64}$ ||
+              "$filename" != "${artifacts[index]}" || -n "$extra" ]]; then
+            qk_callback_artifact_failure "$backend" "$shape" "malformed checksum entry $((index + 1))"
+            return 1
+        fi
+        if [[ ! -s "$build_dir/$filename" ]]; then
+            qk_callback_artifact_failure "$backend" "$shape" "artifact is missing or empty: $filename"
+            return 1
+        fi
+    done
+    local executable="pa_scheduler_cpu"
+    if [[ "$backend" == "ccec" ]]; then executable="pa_scheduler_host"; fi
+    if [[ ! -x "$build_dir/$executable" ]]; then
+        qk_callback_artifact_failure "$backend" "$shape" "runner is not executable"
+        return 1
+    fi
+    if ! (cd "$build_dir" && sha256sum --check --strict --status "$manifest_name"); then
+        qk_callback_artifact_failure "$backend" "$shape" "one or more SHA256 values do not match"
+        return 1
+    fi
+    echo "[CHECK] QK callback artifact manifest verified: $manifest"
+}
+
+run_qk_callback() {
+    local backend="$1"
+    local shape="$2"
+    shift 2
+    local build_dir
+    if [[ "$backend" == "cpu" ]]; then
+        build_dir="$SCRIPT_DIR/build/cpu/qk-callback/$shape"
+        validate_qk_callback_artifacts "$backend" "$shape" "$build_dir"
+        "$build_dir/pa_scheduler_cpu" "$@"
+        return
+    fi
+    build_dir="$SCRIPT_DIR/build/ccec/qk-callback/$shape/swimlane"
+    validate_qk_callback_artifacts "$backend" "$shape" "$build_dir"
+    "$build_dir/pa_scheduler_host" --kernel "$build_dir/pa_scheduler_kernel.o" "$@"
 }
 
 submit_pmu_artifact_failure() {
@@ -416,6 +521,25 @@ case "$ACTION" in
                 "$RAW_JSON" -o "$EXCLUSIVE_JSON"
         done
         echo "[SWIMLANE] output_root=$OUTPUT_ROOT"
+        ;;
+    build-qk-callback)
+        if [[ ( "$BACKEND" != "ccec" && "$BACKEND" != "cpu" ) || $# -ne 1 ]]; then
+            echo "Usage: $0 build-qk-callback ccec|cpu callback-eager|callback-lazy" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$1"
+        validate_qk_callback_shape "$QK_CALLBACK_SHAPE"
+        "$SCRIPT_DIR/$BACKEND/build.sh" qk-callback "$QK_CALLBACK_SHAPE"
+        ;;
+    qk-callback)
+        if [[ ( "$BACKEND" != "ccec" && "$BACKEND" != "cpu" ) || $# -lt 1 ]]; then
+            echo "Usage: $0 qk-callback ccec|cpu callback-eager|callback-lazy [benchmark options]" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$1"
+        shift
+        validate_qk_callback_shape "$QK_CALLBACK_SHAPE"
+        run_qk_callback "$BACKEND" "$QK_CALLBACK_SHAPE" "$@"
         ;;
     build-submit-pmu)
         if [[ "$BACKEND" != "ccec" || $# -ne 1 ]]; then

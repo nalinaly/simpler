@@ -579,6 +579,26 @@ inline bool ExportSwimlaneRecords(
     }
     // schema-v4 无论是否开启 atomic 都导出 producer summary；phase-only 的
     // atomic/clock 字段为零，离线分析仍可独立证明 records 与 dropped 闭合。
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+    std::fprintf(
+        output,
+        "],\"qk_submit_shape\":{\"name\":\"%s\",\"id\":%u,"
+        "\"observation\":\"%s\",\"finish\":\"%s\",\"control_family\":\"%s\"},"
+        "\"fdwic_summary\":{\"records\":%llu,\"atomic_records\":%llu,"
+        "\"clock_baseline_records\":%llu,\"atomic_calls\":%llu,"
+        "\"batched_poll_calls\":%llu,\"poll_batch_records\":%llu,"
+        "\"dropped_records\":%llu}",
+        kQkCallbackShapeName, kQkCallbackShapeId, kQkCallbackObservation,
+        kQkCallbackFinishShape, kQkCallbackControlFamily,
+        static_cast<unsigned long long>(producer_summary.records),
+        static_cast<unsigned long long>(producer_summary.atomic_records),
+        static_cast<unsigned long long>(producer_summary.clock_baseline_records),
+        static_cast<unsigned long long>(producer_summary.atomic_calls),
+        static_cast<unsigned long long>(producer_summary.poll_calls),
+        static_cast<unsigned long long>(producer_summary.poll_batch_records),
+        static_cast<unsigned long long>(producer_summary.dropped_records)
+    );
+#else
     std::fprintf(
         output,
         "],\"fdwic_summary\":{\"records\":%llu,\"atomic_records\":%llu,"
@@ -593,6 +613,7 @@ inline bool ExportSwimlaneRecords(
         static_cast<unsigned long long>(producer_summary.poll_batch_records),
         static_cast<unsigned long long>(producer_summary.dropped_records)
     );
+#endif
     std::fprintf(
         output,
         "},\n\"aicore_tasks\":[],\n\"aicpu_tasks\":[],\n"
@@ -1120,6 +1141,27 @@ inline Metrics Validate(
         slot_tensor_copies += result.slot_tensor_copies;
         slot_scalar_copies += result.slot_scalar_copies;
         fanin_edges += result.fanin_edges;
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+        const uint64_t qk_wins = result.wins[static_cast<uint32_t>(TaskKind::Qk)];
+        const uint64_t expected_worker_views = kQkCallbackLazy
+            ? static_cast<uint64_t>(batches) + qk_wins
+            : static_cast<uint64_t>(batches) * 2;
+        const uint64_t expected_worker_tensors = kQkCallbackLazy
+            ? static_cast<uint64_t>(batches) * 19 + qk_wins * 3
+            : static_cast<uint64_t>(batches) * 22;
+        const uint64_t expected_worker_scalars = kQkCallbackLazy
+            ? static_cast<uint64_t>(batches) * 7 + qk_wins * 2
+            : static_cast<uint64_t>(batches) * 9;
+        frontend_worker_counts_ok &= result.context_reads == batches;
+        frontend_worker_counts_ok &= result.views_created == expected_worker_views;
+        frontend_worker_counts_ok &= result.dynamic_create_infos == static_cast<uint64_t>(batches) * 2;
+        // Three non-QK resets plus exactly one reset inside each QK outer callback.
+        frontend_worker_counts_ok &= result.arg_resets == static_cast<uint64_t>(batches) * 4;
+        frontend_worker_counts_ok &= result.tensor_args_added == expected_worker_tensors;
+        frontend_worker_counts_ok &= result.scalar_args_added == expected_worker_scalars;
+        frontend_worker_counts_ok &= result.materialized_outputs == static_cast<uint64_t>(batches) * 8;
+        frontend_worker_counts_ok &= result.map_inserts == static_cast<uint64_t>(batches) * 4;
+#else
         frontend_worker_counts_ok &= result.context_reads == batches;
         frontend_worker_counts_ok &= result.views_created == static_cast<uint64_t>(batches) * 2;
         frontend_worker_counts_ok &= result.dynamic_create_infos == static_cast<uint64_t>(batches) * 2;
@@ -1128,6 +1170,7 @@ inline Metrics Validate(
         frontend_worker_counts_ok &= result.scalar_args_added == static_cast<uint64_t>(batches) * 9;
         frontend_worker_counts_ok &= result.materialized_outputs == static_cast<uint64_t>(batches) * 8;
         frontend_worker_counts_ok &= result.map_inserts == static_cast<uint64_t>(batches) * 4;
+#endif
         final_worker_state_ok &= result.final_heap_next == expected_heap_next;
         final_worker_state_ok &= result.map_high_water == expected_map_live;
         final_worker_state_ok &= result.map_live_entries == expected_map_live;
@@ -1233,6 +1276,38 @@ inline Metrics Validate(
     Expect(joint_polls == 0, "single-lane PA performs no BlockWon polling", &metrics);
     // 第二组断言锁定 scalar 前端工作量，防止编译器优化或后续改动悄悄删掉 PA 模拟步骤。
     Expect(frontend_worker_counts_ok, "every worker replays the exact PA frontend operation counts", &metrics);
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+    const uint64_t expected_global_views = static_cast<uint64_t>(batches) *
+        (kQkCallbackLazy ? kWorkers + 1 : kWorkers * 2);
+    const uint64_t expected_global_tensors = static_cast<uint64_t>(batches) *
+        (kQkCallbackLazy ? kWorkers * 19 + 3 : kWorkers * 22);
+    const uint64_t expected_global_scalars = static_cast<uint64_t>(batches) *
+        (kQkCallbackLazy ? kWorkers * 7 + 2 : kWorkers * 9);
+    Expect(
+        context_reads == static_cast<uint64_t>(kWorkers) * batches &&
+            views_created == expected_global_views &&
+            dynamic_create_infos == static_cast<uint64_t>(kWorkers) * batches * 2 &&
+            arg_resets == static_cast<uint64_t>(kWorkers) * batches * 4 &&
+            tensor_args_added == expected_global_tensors &&
+            scalar_args_added == expected_global_scalars &&
+            materialized_outputs == static_cast<uint64_t>(kWorkers) * batches * 8 &&
+            map_inserts == static_cast<uint64_t>(kWorkers) * batches * 4,
+        "global PA frontend operation totals are exact", &metrics
+    );
+    std::printf(
+        "[QK_FRONTEND] shape=%s views=%llu/%llu tensor_args=%llu/%llu "
+        "scalar_args=%llu/%llu resets=%llu/%llu\n",
+        kQkCallbackShapeName,
+        static_cast<unsigned long long>(views_created),
+        static_cast<unsigned long long>(expected_global_views),
+        static_cast<unsigned long long>(tensor_args_added),
+        static_cast<unsigned long long>(expected_global_tensors),
+        static_cast<unsigned long long>(scalar_args_added),
+        static_cast<unsigned long long>(expected_global_scalars),
+        static_cast<unsigned long long>(arg_resets),
+        static_cast<unsigned long long>(static_cast<uint64_t>(kWorkers) * batches * 4)
+    );
+#else
     Expect(
         context_reads == static_cast<uint64_t>(kWorkers) * batches &&
             views_created == static_cast<uint64_t>(kWorkers) * batches * 2 &&
@@ -1244,6 +1319,7 @@ inline Metrics Validate(
             map_inserts == static_cast<uint64_t>(kWorkers) * batches * 4,
         "global PA frontend operation totals are exact", &metrics
     );
+#endif
     Expect(
         map_lookups == static_cast<uint64_t>(batches) * 14 &&
             slot_tensor_copies == static_cast<uint64_t>(batches) * 19 &&
@@ -1482,6 +1558,14 @@ inline void PrintBanner(const char *backend, const Options &options) {
         options.trace_atomics ? "on" : "off",
         options.trace_enabled ? kTraceBytes : 0
     );
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+    std::printf(
+        "qk_submit_shape=%s qk_submit_shape_id=%u observation=%s finish=%s "
+        "control_family=%s\n",
+        kQkCallbackShapeName, kQkCallbackShapeId, kQkCallbackObservation,
+        kQkCallbackFinishShape, kQkCallbackControlFamily
+    );
+#endif
     if (!options.swimlane_json.empty()) {
         std::printf("swimlane_json=%s\n", options.swimlane_json.c_str());
     }

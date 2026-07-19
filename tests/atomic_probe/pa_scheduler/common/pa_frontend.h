@@ -497,6 +497,34 @@ PA_DEVICE void MakeBatchViews(PaOrchestrationState &orch, uint32_t batch) {
     orch.output_view.extent_elem_cache = kPaHeads * kPaHeadDim;
 }
 
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+// The callback artifacts keep output_view on the all-worker path because UP
+// consumes it later, while query_view is a QK input thunk.  These helpers are
+// callback-only so the legacy MakeBatchViews/BeginPaBatch source stays intact.
+PA_DEVICE void MakeQkCallbackOutputView(PaOrchestrationState &orch, uint32_t batch) {
+    CopyTensorLine1(orch.output_view, orch.output);
+    orch.output_view.start_offset = static_cast<uint64_t>(batch) * kPaHeads * kPaHeadDim;
+    orch.output_view.ndims = 2;
+    orch.output_view.manual_dep = true;
+    orch.output_view.shapes[0] = kPaHeads;
+    orch.output_view.shapes[1] = kPaHeadDim;
+    orch.output_view.strides[0] = kPaHeadDim;
+    orch.output_view.strides[1] = 1;
+    orch.output_view.extent_elem_cache = kPaHeads * kPaHeadDim;
+}
+
+PA_DEVICE void MakeQkCallbackQueryView(PaOrchestrationState &orch, uint32_t batch) {
+    CopyTensorLine1(orch.query_view, orch.query);
+    orch.query_view.start_offset = static_cast<uint64_t>(batch) * kPaHeads * kPaHeadDim;
+    orch.query_view.ndims = 2;
+    orch.query_view.shapes[0] = kPaHeads;
+    orch.query_view.shapes[1] = kPaHeadDim;
+    orch.query_view.strides[0] = kPaHeadDim;
+    orch.query_view.strides[1] = 1;
+    orch.query_view.extent_elem_cache = kPaHeads * kPaHeadDim;
+}
+#endif
+
 PA_DEVICE uint64_t MinU64(uint64_t lhs, uint64_t rhs) { return lhs < rhs ? lhs : rhs; }
 
 PA_DEVICE uint64_t ReadPaContextLength(const PaOrchestrationState &orch, uint32_t batch) {
@@ -534,6 +562,17 @@ PA_DEVICE void BeginPaBatch(PaOrchestrationState &orch, uint32_t batch) {
     orch.current_blocks = (orch.current_sequence + kPaBlockSize - 1) / kPaBlockSize;
     MakeBatchViews(orch, batch);
 }
+
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+PA_DEVICE void BeginPaBatchForQkCallback(PaOrchestrationState &orch, uint32_t batch) {
+    // The context GM read and block arithmetic remain at the same batch
+    // boundary as legacy.  Only query_view moves into the conditional QK thunk.
+    orch.current_batch = batch;
+    orch.current_sequence = ReadPaContextLength(orch, batch);
+    orch.current_blocks = (orch.current_sequence + kPaBlockSize - 1) / kPaBlockSize;
+    MakeQkCallbackOutputView(orch, batch);
+}
+#endif
 
 PA_DEVICE void InitPaOrchestration(
     PaOrchestrationState &orch, uint32_t batches, PA_GM const volatile int32_t *context_lens_data
@@ -605,6 +644,19 @@ PA_DEVICE void BuildAllocArgs(PaOrchestrationState &orch, TaskArgs &args, uint32
     AppendOutput(args, orch.scalar_create_info);
 }
 
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+PA_DEVICE void BuildAllocArgsForQkCallback(
+    PaOrchestrationState &orch, TaskArgs &args, uint32_t batch
+) {
+    BeginPaBatchForQkCallback(orch, batch);
+    ConstructTaskArgs(args);
+    if (!ReserveTensorArgs(args, 3)) return;
+    AppendOutput(args, orch.tile_create_info);
+    AppendOutput(args, orch.scalar_create_info);
+    AppendOutput(args, orch.scalar_create_info);
+}
+#endif
+
 PA_DEVICE void BuildQkArgs(PaOrchestrationState &orch, TaskArgs &args, uint32_t batch) {
     (void)batch;
     // PA computes the block group after Alloc returns, immediately before it
@@ -627,6 +679,79 @@ PA_DEVICE void BuildQkArgs(PaOrchestrationState &orch, TaskArgs &args, uint32_t 
         static_cast<uint64_t>(orch.current_batch) * kPaMaxBlocksPerRequest + orch.current_block_offset
     );
 }
+
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+struct QkCallbackBuildCounts {
+    uint32_t reset_calls;
+    uint32_t views_created;
+    uint32_t dynamic_create_infos;
+    uint32_t tensor_args_added;
+    uint32_t scalar_args_added;
+};
+
+template <bool Lazy>
+class QkCallbackArgsBuilder {
+public:
+    PA_DEVICE QkCallbackArgsBuilder(TaskArgs &args, bool won)
+        : args_(args), won_(won), counts_{} {}
+
+    PA_DEVICE void Reset() {
+        ResetTaskArgs(args_);
+        ++counts_.reset_calls;
+    }
+
+    PA_DEVICE void RecordView() { ++counts_.views_created; }
+
+    template <typename Thunk>
+    PA_DEVICE void AddInput(Thunk thunk) {
+        if constexpr (Lazy) {
+            if (!won_) return;
+        }
+        if (counts_.reset_calls != 1 || args_.has_error) {
+            args_.has_error = true;
+            return;
+        }
+        const TensorDesc &tensor = thunk();
+        AddLocalTensor(args_, tensor, TensorArgType::Input);
+        if (!args_.has_error) ++counts_.tensor_args_added;
+    }
+
+    template <typename Thunk>
+    PA_DEVICE void AddOutput(Thunk thunk) {
+        if (counts_.reset_calls != 1 || args_.has_error) {
+            args_.has_error = true;
+            return;
+        }
+        const TensorCreateInfo &create_info = thunk();
+        pa_scheduler::AddOutput(args_, create_info);
+        if (!args_.has_error) {
+            ++counts_.dynamic_create_infos;
+            ++counts_.tensor_args_added;
+        }
+    }
+
+    template <typename Thunk>
+    PA_DEVICE void AddScalar(Thunk thunk) {
+        if constexpr (Lazy) {
+            if (!won_) return;
+        }
+        if (counts_.reset_calls != 1 || args_.has_error) {
+            args_.has_error = true;
+            return;
+        }
+        pa_scheduler::AddScalar(args_, thunk());
+        if (!args_.has_error) ++counts_.scalar_args_added;
+    }
+
+    PA_DEVICE bool Valid() const { return counts_.reset_calls == 1 && !args_.has_error; }
+    PA_DEVICE const QkCallbackBuildCounts &Counts() const { return counts_; }
+
+private:
+    TaskArgs &args_;
+    bool won_;
+    QkCallbackBuildCounts counts_;
+};
+#endif
 
 PA_DEVICE void BuildSfArgs(PaOrchestrationState &orch, TaskArgs &args) {
     const uint32_t probability_shape[kMaxTensorDims] = {
@@ -989,7 +1114,9 @@ PA_DEVICE bool MaterializeTask(
 ) {
     // 输入是 BeginSubmit 已绑定的 payload/context 与当前 worker.heap_next；成功输出
     // 包括本 task 的 GM TensorDesc 指针、output_bytes 和推进后的单调 heap_next。
-    // 失败不得进入 Claim/slot 流程，由上层设置 fatal 并终止该 worker 回放。
+    // 失败不得进入 slot/build 流程，由上层设置 fatal 并终止该 worker 回放。
+    // legacy 路径在 Claim 前物化；claim-first callback 实验则可能已经完成 Claim，
+    // 因而不能把“尚未 Claim”写成这个共用 helper 的普遍前置条件。
     if (context.payload == nullptr) {
         return false;
     }

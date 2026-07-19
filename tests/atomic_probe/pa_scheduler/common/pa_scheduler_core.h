@@ -737,6 +737,269 @@ PA_DEVICE bool SubmitTask(
     return true;
 }
 
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+// The callback experiment reserves the 16-byte POD layout planned for a later
+// split-TU finish.  It is only a source-level carrier in this stage: the finish
+// remains inline in the same TU, so this does not yet prove an ABI/call boundary.
+struct QkCallbackTicket {
+    uint64_t submit_begin;
+    uint32_t task_id;
+    int16_t function_id;
+    uint8_t won;
+    uint8_t reserved;
+};
+static_assert(sizeof(QkCallbackTicket) == 16, "QK callback ticket must remain a 16-byte POD");
+static_assert(offsetof(QkCallbackTicket, submit_begin) == 0, "QK callback ticket timestamp offset mismatch");
+static_assert(offsetof(QkCallbackTicket, task_id) == 8, "QK callback ticket task offset mismatch");
+static_assert(offsetof(QkCallbackTicket, function_id) == 12, "QK callback ticket function offset mismatch");
+static_assert(offsetof(QkCallbackTicket, won) == 14, "QK callback ticket winner offset mismatch");
+
+PA_DEVICE void BeginQkCallbackSubmit(PA_GM WorkerState &worker, SubmitContext &context) {
+    // This is BeginSubmit without an already-materialized TaskArgs.  The same
+    // fields are completed synchronously after the single callback builds args.
+    const uint32_t task_id = static_cast<uint32_t>(worker.local_index++);
+    context.self = &worker;
+    context.payload = &worker.payloads[task_id & kPayloadMask];
+    context.task_id = static_cast<int32_t>(task_id);
+    context.tensor_count = 0;
+    context.scalar_count = 0;
+    context.result.task_id = task_id;
+    context.result.count = 0;
+    context.register_mask = 0;
+    context.output_bytes = 0;
+    context.fanin_count = 0;
+    context.kernel_id = -1;
+    context.won = false;
+    context.joint = false;
+    context.joint_init = false;
+    context.joint_block = -1;
+    context.joint_slot = -1;
+    context.joint_count = 0;
+}
+
+#if defined(__CCE_AICORE__) || defined(__NPU_ARCH__)
+#define PA_QK_LAMBDA_DEVICE __aicore__
+#else
+#define PA_QK_LAMBDA_DEVICE
+#endif
+
+template <bool Lazy>
+PA_DEVICE bool BuildQkCallbackArgs(
+    PaOrchestrationState &orch, TaskArgs &args, uint32_t batch, bool won,
+    LocalStats &stats
+) {
+    QkCallbackArgsBuilder<Lazy> callback_builder(args, won);
+    auto callback = [&](QkCallbackArgsBuilder<Lazy> &builder) PA_QK_LAMBDA_DEVICE {
+        // reset is deliberately inside the outer callback.  Its exact delta is
+        // therefore also the dynamic once-per-QK callback oracle.
+        builder.Reset();
+        builder.AddInput([&]() PA_QK_LAMBDA_DEVICE -> const TensorDesc & {
+            MakeQkCallbackQueryView(orch, batch);
+            builder.RecordView();
+            return orch.query_view;
+        });
+        builder.AddInput([&]() PA_QK_LAMBDA_DEVICE -> const TensorDesc & {
+            return orch.key_cache;
+        });
+        builder.AddInput([&]() PA_QK_LAMBDA_DEVICE -> const TensorDesc & {
+            return orch.block_table;
+        });
+        builder.AddOutput([&]() PA_QK_LAMBDA_DEVICE -> const TensorCreateInfo & {
+            // Fresh output shape/materialization is Tier-1 and therefore runs
+            // on every private worker in both callback shapes.
+            PreparePaBlockGroup(orch, 0);
+            const uint32_t score_shape[kMaxTensorDims] = {
+                kPaHeads,
+                static_cast<uint32_t>(orch.current_nblocks * kPaBlockSize),
+                0, 0, 0
+            };
+            InitCreateInfo(orch.qk_create_info, score_shape, 2, DataType::Float32);
+            return orch.qk_create_info;
+        });
+        builder.AddScalar([&]() PA_QK_LAMBDA_DEVICE -> uint64_t {
+            return orch.current_nblocks;
+        });
+        builder.AddScalar([&]() PA_QK_LAMBDA_DEVICE -> uint64_t {
+            return static_cast<uint64_t>(orch.current_batch) * kPaMaxBlocksPerRequest +
+                   orch.current_block_offset;
+        });
+    };
+
+    // Exactly one source-level outer callback invocation.  A second invocation
+    // would make reset_calls != 1 and is rejected before materialization.
+    callback(callback_builder);
+    if (!callback_builder.Valid()) {
+        return false;
+    }
+    const QkCallbackBuildCounts &counts = callback_builder.Counts();
+    stats.result.arg_resets += counts.reset_calls;
+    stats.result.views_created += counts.views_created;
+    stats.result.dynamic_create_infos += counts.dynamic_create_infos;
+    stats.result.tensor_args_added += counts.tensor_args_added;
+    stats.result.scalar_args_added += counts.scalar_args_added;
+    return true;
+}
+
+#undef PA_QK_LAMBDA_DEVICE
+
+template <typename Ops, bool Profile, typename PmuContext>
+PA_DEVICE bool FinishInlineQkCallbackSubmit(
+    PA_GM SchedulerState *state, PA_GM WorkerState &worker, uint32_t task_count,
+    const TaskArgs &args, SubmitContext &context, LocalStats &stats,
+    PmuContext &pmu_context, const QkCallbackTicket &ticket
+) {
+    const uint32_t task_id = ticket.task_id;
+    const int32_t function_id = static_cast<int32_t>(ticket.function_id);
+    const bool winner = ticket.won != 0;
+
+    // The callback has ended before this source-level finish consumes TaskArgs.
+    // No closure, nested thunk, or caller context escapes its lifetime.  Since
+    // this helper is still inline/same-TU, “finish” is not yet a compiled ABI.
+    const uint64_t materialize_begin = TraceTimestamp<Ops>(stats.trace, stats.result);
+    BeginSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
+    const bool materialized =
+        MaterializeTask(worker, task_id, args, context, state->heap_base, state->heap_size);
+    if (!materialized) {
+        EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
+        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
+        return false;
+    }
+    stats.result.materialized_outputs += context.result.count;
+    EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
+    const uint64_t materialize_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+        TracePhase::Materialize, ProfilePhase::Materialize,
+        materialize_begin, materialize_end, 0, 0
+    );
+
+    const uint64_t prepare_begin = materialize_end;
+    AdvanceTensorMap(worker.map, task_id, static_cast<int32_t>(state->heap_window));
+    const uint64_t prepare_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+        TracePhase::PrepareMap, ProfilePhase::PrepareMap,
+        prepare_begin, prepare_end, 0, 0
+    );
+
+    uint64_t register_begin = prepare_end;
+    if (winner) {
+        const uint64_t fanin_begin = prepare_end;
+        context.fanin_count = static_cast<int32_t>(CollectFanin(worker.map, args, context.fanin));
+        stats.result.map_lookups += static_cast<uint32_t>(args.tensor_count) - context.result.count;
+        const uint64_t fanin_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+        WriteTrace<Profile>(
+            stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+            TracePhase::Fanin, ProfilePhase::Fanin,
+            fanin_begin, fanin_end, 0, static_cast<uint32_t>(context.fanin_count)
+        );
+        register_begin = fanin_end;
+    }
+
+    BeginSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(pmu_context);
+    RegisterOutputs(context, args, true);
+    stats.result.map_inserts += CountBits(context.register_mask);
+    EndSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(pmu_context);
+    const uint64_t register_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+        TracePhase::Register, ProfilePhase::Register,
+        register_begin, register_end, 0, 1
+    );
+
+    if (winner) {
+        const uint64_t winner_build_begin = register_end;
+        if (!BuildWinner<Ops, Profile>(
+                state, worker, task_id, TaskKind::Qk, args, context, context.fanin,
+                static_cast<uint32_t>(context.fanin_count), stats
+            )) {
+            return false;
+        }
+        const uint64_t winner_build_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+        WriteTrace<false>(
+            stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+            TracePhase::WinnerBuild, ProfilePhase::ReplayTail,
+            winner_build_begin, winner_build_end
+        );
+    }
+
+    ++stats.result.submits;
+#if PA_BUILD_SUBMIT_PMU
+    const uint64_t submit_end = task_id + 1 == task_count ? Ops::Now() : 0;
+#else
+    const uint64_t submit_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+#endif
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
+        TracePhase::Submit, ProfilePhase::Submit,
+        ticket.submit_begin, submit_end, winner ? 1U : 0U, 0
+    );
+    if (task_id + 1 == task_count) {
+        stats.result.submit_end = submit_end;
+    }
+    return true;
+}
+
+template <typename Ops, bool Profile, typename PmuContext, bool Lazy>
+PA_DEVICE bool SubmitQkCallback(
+    PA_GM SchedulerState *state, PA_GM WorkerState &worker, uint32_t task_count,
+    PaOrchestrationState &orch, TaskArgs &args, uint32_t batch,
+    SubmitContext &context, LocalStats &stats, PmuContext &pmu_context
+) {
+    BeginQkCallbackSubmit(worker, context);
+    const uint32_t task_id = static_cast<uint32_t>(context.task_id);
+#if PA_BUILD_SUBMIT_PMU
+    const uint64_t submit_begin = task_id == 0 ? Ops::Now() : 0;
+#else
+    const uint64_t submit_begin = TraceTimestamp<Ops>(stats.trace, stats.result);
+#endif
+    if (task_id == 0) stats.result.submit_begin = submit_begin;
+
+    const uint64_t efdrain_begin = submit_begin;
+    BeginSubmitPmuPhase<SubmitPmuPhase::EfDrain, Ops>(pmu_context);
+    DrainReady<Ops>(state, worker, DrainPlace::EfDrain, stats);
+    EndSubmitPmuPhase<SubmitPmuPhase::EfDrain, Ops>(pmu_context);
+    const uint64_t efdrain_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), -1,
+        TracePhase::EfDrain, ProfilePhase::EfDrain,
+        efdrain_begin, efdrain_end
+    );
+
+    const uint64_t claim_begin = efdrain_end;
+    BeginSubmitPmuPhase<SubmitPmuPhase::Claim, Ops>(pmu_context);
+    const ClaimOutcome claim = Claim<Ops>(state, worker, task_id, TaskKind::Qk, stats);
+    context.won = claim.won;
+    context.kernel_id = claim.function_id;
+    RecordClaimOutcome(stats, TaskKind::Qk, claim);
+    EndSubmitPmuPhase<SubmitPmuPhase::Claim, Ops>(pmu_context);
+    const uint64_t claim_end = TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), claim.function_id,
+        TracePhase::Claim, ProfilePhase::Claim,
+        claim_begin, claim_end,
+        (claim.won ? kClaimWon : 0U) | (claim.attempted ? kClaimAttempted : 0U), 0
+    );
+
+    if (!BuildQkCallbackArgs<Lazy>(orch, args, batch, claim.won, stats)) {
+        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
+        return false;
+    }
+    const QkCallbackTicket ticket{
+        submit_begin,
+        task_id,
+        // Fixed standalone QK function IDs are -1/0 and therefore exactly
+        // representable in the planned int16 ticket field.
+        static_cast<int16_t>(claim.function_id),
+        static_cast<uint8_t>(claim.won ? 1 : 0),
+        0,
+    };
+    return FinishInlineQkCallbackSubmit<Ops, Profile>(
+        state, worker, task_count, args, context, stats, pmu_context, ticket
+    );
+}
+#endif
+
 PA_DEVICE uint32_t CountLiveMapEntries(PA_GM const TensorMap &map) {
     uint32_t free_entries = 0;
     for (int32_t current = map.free_head; current >= 0; current = map.entries[current].next_in_bucket) {
@@ -895,10 +1158,17 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
         orchestration_begin = TraceTimestamp<Ops>(stats.trace, stats.result);
         InitPaOrchestration(orchestration, batches, &state->context_lens[0]);
         for (uint32_t batch = 0; batch < batches; ++batch) {
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+            BuildAllocArgsForQkCallback(orchestration, args, batch);
+            ++stats.result.context_reads;
+            ++stats.result.views_created;
+            stats.result.tensor_args_added += 3;
+#else
             BuildAllocArgs(orchestration, args, batch);
             ++stats.result.context_reads;
             stats.result.views_created += 2;
             stats.result.tensor_args_added += 3;
+#endif
             if (!SubmitTask<Ops, Profile>(
                     state, worker, task_count, TaskKind::Alloc, args, context, stats, pmu_context
                 )) {
@@ -906,6 +1176,14 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
             }
             AcceptTaskOutputs(orchestration, TaskKind::Alloc, context.result);
 
+#if defined(PA_QK_CALLBACK_SHAPE_ID)
+            if (!SubmitQkCallback<Ops, Profile, decltype(pmu_context), kQkCallbackLazy>(
+                    state, worker, task_count, orchestration, args, batch, context, stats,
+                    pmu_context
+                )) {
+                break;
+            }
+#else
             BuildQkArgs(orchestration, args, batch);
             ++stats.result.dynamic_create_infos;
             ++stats.result.arg_resets;
@@ -916,6 +1194,7 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
                 )) {
                 break;
             }
+#endif
             AcceptTaskOutputs(orchestration, TaskKind::Qk, context.result);
 
             BuildSfArgs(orchestration, args);

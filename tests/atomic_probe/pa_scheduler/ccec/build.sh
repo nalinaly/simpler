@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SUBMIT_PMU_MANIFEST_NAME="submit_pmu_artifacts.manifest"
+QK_CALLBACK_MANIFEST_NAME="qk_callback_artifacts.manifest"
 
 # CCEC 不再生成同时夹带泳道与 PMU 的统一 ELF。无参数保持兼容并明确等价于
 # swimlane；submit-pmu 的 phase 必须先由白名单映射为稳定数值，不能把任意
@@ -51,8 +52,33 @@ case "$BUILD_VARIANT" in
         BUILD_DIR="$ROOT_DIR/build/ccec/submit-pmu/$PHASE_NAME"
         VARIANT_DEFINES=(-DPA_BUILD_SWIMLANE=0 -DPA_BUILD_SUBMIT_PMU=1 "-DPA_SUBMIT_PMU_PHASE_ID=$PHASE_ID")
         ;;
+    qk-callback)
+        if [[ $# -ne 2 ]]; then
+            echo "Usage: $0 qk-callback callback-eager|callback-lazy" >&2
+            exit 1
+        fi
+        QK_CALLBACK_SHAPE="$2"
+        case "$QK_CALLBACK_SHAPE" in
+            callback-eager) QK_CALLBACK_SHAPE_ID=1 ;;
+            callback-lazy) QK_CALLBACK_SHAPE_ID=2 ;;
+            *)
+                echo "Unknown QK callback shape: $QK_CALLBACK_SHAPE" >&2
+                exit 1
+                ;;
+        esac
+        PHASE_NAME="none"
+        PHASE_ID=0
+        BUILD_DIR="$ROOT_DIR/build/ccec/qk-callback/$QK_CALLBACK_SHAPE/swimlane"
+        VARIANT_DEFINES=(
+            -DPA_BUILD_SWIMLANE=1
+            -DPA_BUILD_SUBMIT_PMU=0
+            -DPA_SUBMIT_PMU_PHASE_ID=0
+            "-DPA_QK_CALLBACK_SHAPE_ID=$QK_CALLBACK_SHAPE_ID"
+        )
+        ;;
     *)
-        echo "Usage: $0 [swimlane] | $0 submit-pmu none|claim|efdrain|materialize|register" >&2
+        echo "Usage: $0 [swimlane] | $0 submit-pmu none|claim|efdrain|materialize|register | "\
+             "$0 qk-callback callback-eager|callback-lazy" >&2
         exit 1
         ;;
 esac
@@ -83,8 +109,8 @@ if ! command -v "$READELF_BIN" >/dev/null 2>&1; then
     echo "readelf is required to verify the mixed AICore ELF." >&2
     exit 1
 fi
-if [[ "$BUILD_VARIANT" == "submit-pmu" ]] && ! command -v sha256sum >/dev/null 2>&1; then
-    echo "sha256sum is required to publish the submit-pmu artifact manifest." >&2
+if [[ "$BUILD_VARIANT" != "swimlane" ]] && ! command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum is required to publish variant artifact manifests." >&2
     exit 1
 fi
 if [[ ! -f "$PTO_INCLUDE_ROOT/include/pto/common/kernel_meta.hpp" ]]; then
@@ -99,12 +125,15 @@ for header in pto/pto-inst.hpp pto/common/constants.hpp pto/common/pto_tile.hpp;
 done
 
 mkdir -p "$BUILD_DIR"
-if [[ "$BUILD_VARIANT" == "swimlane" ]]; then
+if [[ "$BUILD_VARIANT" == "swimlane" || "$BUILD_VARIANT" == "qk-callback" ]]; then
     # 旧统一构建可能在根目录残留 PMU owner；swimlane 构建主动移除这两个
     # 不属于本变体的产物，避免 direct host 调用误加载上一版诊断 SO。
     rm -f \
         "$BUILD_DIR/libpa_scheduler_pmu_owner_dispatcher.so" \
         "$BUILD_DIR/libpa_scheduler_pmu_owner_aicpu.so"
+    if [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
+        rm -f -- "$BUILD_DIR/$QK_CALLBACK_MANIFEST_NAME"
+    fi
 else
     # manifest 是同一 phase 四件套唯一的“可运行”标记。重建一开始先使旧
     # manifest 失效；即使后续编译中断，run.sh 也不会消费目录里的半成品。
@@ -205,6 +234,24 @@ for workload_symbol in \
     fi
 done
 echo "[CHECK] CCEC cube/vector real-compute helpers are non-empty LOCAL functions"
+
+if [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
+    # The semantic-stage callback path is intentionally all-inline.  A named
+    # out-of-line builder/front would make the two shapes incomparable before
+    # the later, separately controlled split-finish step.
+    if awk \
+        '$4 == "FUNC" && $7 != "UND" &&
+         (index($NF, "QkCallback") != 0 || index($NF, "SubmitQk") != 0) {found = 1}
+         END {exit !found}' <<<"$SYMBOL_TABLE"; then
+        echo "QK callback builder/front unexpectedly survived as an out-of-line device function." >&2
+        exit 1
+    fi
+    if [[ -n "$("$READELF_BIN" --relocs --wide "$BUILD_DIR/pa_scheduler_kernel.o" | sed -n '/Relocation section/p')" ]]; then
+        echo "Final QK callback mixed ELF must not retain relocations." >&2
+        exit 1
+    fi
+    echo "[CHECK] QK callback builder/front is inline and final ELF has no relocations"
+fi
 
 check_icache_probe_layout() {
     local role="$1"
@@ -350,6 +397,43 @@ if [[ "$BUILD_VARIANT" == "submit-pmu" ]]; then
     MANIFEST_TMP=""
     trap - EXIT
     echo "[CHECK] submit-pmu artifact manifest published: $MANIFEST_PATH"
+elif [[ "$BUILD_VARIANT" == "qk-callback" ]]; then
+    QK_CALLBACK_ARTIFACTS=(
+        pa_scheduler_host
+        pa_scheduler_kernel.o
+        pa_scheduler_aic.o
+        pa_scheduler_aiv.o
+    )
+    for artifact in "${QK_CALLBACK_ARTIFACTS[@]}"; do
+        if [[ ! -s "$BUILD_DIR/$artifact" ]]; then
+            echo "Cannot publish QK callback manifest; artifact is missing or empty: $artifact" >&2
+            exit 1
+        fi
+    done
+    if [[ ! -x "$BUILD_DIR/pa_scheduler_host" ]]; then
+        echo "Cannot publish QK callback manifest; host runner is not executable." >&2
+        exit 1
+    fi
+    MANIFEST_PATH="$BUILD_DIR/$QK_CALLBACK_MANIFEST_NAME"
+    MANIFEST_TMP="$(mktemp "$BUILD_DIR/.${QK_CALLBACK_MANIFEST_NAME}.tmp.XXXXXX")"
+    cleanup_callback_manifest_tmp() {
+        if [[ -n "${MANIFEST_TMP:-}" ]]; then
+            rm -f -- "$MANIFEST_TMP"
+        fi
+    }
+    trap cleanup_callback_manifest_tmp EXIT
+    {
+        printf '# schema=pa_scheduler_qk_callback_artifacts/v1\n'
+        printf '# backend=ccec\n'
+        printf '# shape=%s\n' "$QK_CALLBACK_SHAPE"
+        printf '# shape_id=%u\n' "$QK_CALLBACK_SHAPE_ID"
+        printf '# observation=inline-semantic\n'
+        (cd "$BUILD_DIR" && sha256sum "${QK_CALLBACK_ARTIFACTS[@]}")
+    } > "$MANIFEST_TMP"
+    mv -f -- "$MANIFEST_TMP" "$MANIFEST_PATH"
+    MANIFEST_TMP=""
+    trap - EXIT
+    echo "[CHECK] QK callback artifact manifest published: $MANIFEST_PATH"
 fi
 
 echo "[BUILD] complete: $BUILD_DIR"
