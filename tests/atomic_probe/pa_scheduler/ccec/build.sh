@@ -171,9 +171,38 @@ echo "[BUILD] CCEC AIV entry (dav-c310-vec)"
     -o "$BUILD_DIR/pa_scheduler_aiv.o" \
     "$SCRIPT_DIR/kernel.cpp"
 
+check_workload_dispatcher_object() {
+    local object_path="$1"
+    local expected_symbol="$2"
+    local wrong_role_symbol="$3"
+    local object_symbols
+    object_symbols="$("$READELF_BIN" --symbols --wide --sym-base=10 "$object_path")"
+    if ! awk -v name="$expected_symbol" \
+        '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" && $NF == name && $3 + 0 > 0 {count++}
+         END {exit count != 1}' <<<"$object_symbols"; then
+        echo "Expected exactly one non-empty strong workload dispatcher in $object_path: $expected_symbol" >&2
+        exit 1
+    fi
+    if awk -v name="$wrong_role_symbol" \
+        '$NF == name {found = 1} END {exit !found}' <<<"$object_symbols"; then
+        echo "Wrong-role workload dispatcher leaked into $object_path: $wrong_role_symbol" >&2
+        exit 1
+    fi
+}
+check_workload_dispatcher_object \
+    "$BUILD_DIR/pa_scheduler_aic.o" \
+    pa_execute_real_winner_workload_aic \
+    pa_execute_real_winner_workload_aiv
+check_workload_dispatcher_object \
+    "$BUILD_DIR/pa_scheduler_aiv.o" \
+    pa_execute_real_winner_workload_aiv \
+    pa_execute_real_winner_workload_aic
+echo "[CHECK] role-specific real-compute dispatchers are strong and do not cross roles"
+
 # 静态链接把两个 device object 合成一个可由 runtime 按 1:2 比例启动的 mixed AICore ELF。
 echo "[BUILD] Static 1:2 mixed AICore ELF"
 "$LD" -m aicorelinux -Ttext=0 -static \
+    --version-script="$SCRIPT_DIR/pa_scheduler_device_exports.map" \
     -o "$BUILD_DIR/pa_scheduler_kernel.o" \
     "$BUILD_DIR/pa_scheduler_aic.o" \
     "$BUILD_DIR/pa_scheduler_aiv.o"
@@ -209,11 +238,13 @@ while IFS= read -r global_func; do
 done < <(awk '$4 == "FUNC" && $5 == "GLOBAL" && $7 != "UND" {print $NF}' <<<"$SYMBOL_TABLE")
 echo "[CHECK] only the two mixed entries are exported as GLOBAL device functions"
 
-# noinline/used 的三个本地函数是 CCEC 真计算模式的构建期证据；它们不得导出为
-# GLOBAL，否则 runtime 可能把 helper 误识别成可启动 kernel。运行期还必须用
-# 数值闭环和 PMU 的 AIC cube_busy/AIV vector_busy 共同证明它们确实执行。
+# runtime-finish TU 后续需要复用同一个真计算 dispatcher，因此 caller object
+# 按核型提供 strong 定义；version script 必须把它们在最终 mixed ELF 中重新
+# 局部化。这里同时检查两个 role-specific dispatcher 与底层 Cube/Vector 实体，
+# 禁止因抽取 adapter 漏掉任一真实负载路径。
 for workload_symbol in \
-    pa_execute_real_winner_workload \
+    pa_execute_real_winner_workload_aic \
+    pa_execute_real_winner_workload_aiv \
     pa_real_cube_workload_aic \
     pa_real_vector_add_workload_aiv \
     pa_real_vector_mul_workload_aiv; do
