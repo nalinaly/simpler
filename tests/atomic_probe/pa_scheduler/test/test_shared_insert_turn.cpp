@@ -292,7 +292,6 @@ void TestEmptyWriterStillCompletes(SchedulerState &state) {
         context.task_id = task;
         context.won = true;
         context.result.task_id = task;
-        context.shared_result.Reset(task);
         SharedTaskWriterDelta delta{};
         LocalStats stats{};
         CompletionTestOps::ResetTrace(state);
@@ -312,90 +311,6 @@ void TestEmptyWriterStillCompletes(SchedulerState &state) {
         exact && state.fatal.value == 0 && LegacyTurnsMatch(state, legacy),
         "empty metadata transactions still publish one "
         "completion per task without a sidecar baton"
-    );
-}
-
-void TestOutputsPublishBeforePredecessorWait(
-    SchedulerState &state
-) {
-    ResetCompletionWords(state, 2);
-    const LegacyTurnSnapshot legacy = SeedLegacyTurns(state);
-    SharedOutputCell &cell = state.shared_map.shared_outputs[1];
-    cell.published[0].value = -1;
-    cell.last_writer[0].value = -1;
-    TensorDesc descriptor{};
-    descriptor.buffer_addr = 0x510000000ULL;
-    descriptor.ndims = 1;
-    descriptor.shapes[0] = 16;
-    descriptor.strides[0] = 1;
-
-    TaskArgs args;
-    ConstructTaskArgs(args);
-    SubmitContext context{};
-    context.task_id = 1;
-    context.won = true;
-    context.result.task_id = 1;
-    context.result.count = 1;
-    context.result.tensors[0] = &descriptor;
-    context.shared_result.Reset(1);
-    const bool output_ref_ok =
-        context.shared_result.AddOutputRef(1, 0);
-    SharedTaskWriterDelta delta{};
-    const bool delta_ok =
-        PrepareSharedTaskWriterDelta(args, context, delta);
-
-    CompletionTestOps::ResetTrace(state);
-    std::atomic<bool> publish_finished{false};
-    bool publish_ok = false;
-    LocalStats task_stats{};
-    std::thread owner([&]() {
-        publish_ok =
-            PublishSharedTaskWriterDelta<CompletionTestOps>(
-                &state, context, delta, task_stats
-            );
-        publish_finished.store(true, std::memory_order_release);
-    });
-
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (
-        __atomic_load_n(
-            &cell.published[0].value, __ATOMIC_ACQUIRE
-        ) != 1 &&
-        std::chrono::steady_clock::now() < deadline
-    ) {
-        std::this_thread::yield();
-    }
-    const bool visible_before_turn =
-        __atomic_load_n(
-            &cell.published[0].value, __ATOMIC_ACQUIRE
-        ) == 1 &&
-        __atomic_load_n(
-            &state.tasks[1].deps_prepared, __ATOMIC_ACQUIRE
-        ) == -1 &&
-        !publish_finished.load(std::memory_order_acquire);
-
-    LocalStats predecessor_stats{};
-    int64_t predecessor_observed = INT64_MIN;
-    const bool predecessor_published =
-        HandoffSharedTaskInsertTurn<CompletionTestOps>(
-            &state, 0, predecessor_stats,
-            predecessor_observed
-        );
-    owner.join();
-
-    Check(
-        output_ref_ok && delta_ok && visible_before_turn &&
-            predecessor_published &&
-            predecessor_observed == -1 && publish_ok &&
-            state.fatal.value == 0 &&
-            state.tasks[0].deps_prepared == 0 &&
-            state.tasks[1].deps_prepared == 1 &&
-            cell.tensors[0].buffer_addr ==
-                descriptor.buffer_addr &&
-            LegacyTurnsMatch(state, legacy),
-        "fresh output is visible while task 1 still waits for task 0, "
-        "and deps_prepared closes only after serialized metadata"
     );
 }
 
@@ -462,7 +377,6 @@ int main() {
     TestSequentialCompletionChain(*state);
     TestPendingOwnerWakesOnPredecessor(*state);
     TestEmptyWriterStillCompletes(*state);
-    TestOutputsPublishBeforePredecessorWait(*state);
     TestCorruptionAndDuplicateFailClosed(*state);
 
     UnmapSparseSchedulerState(state);

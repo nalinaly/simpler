@@ -11586,3 +11586,109 @@ R5m 的 12 个逐区组差值全部为正，均值回退的近似 95% 区间为
 loser 闭合工作，但超过新的 1% 端到端门槛，因此提交 `755397b0` 连同
 对应运行时代码不再进入待推送分支。R5k 与 R5l 均为端到端改善，继续
 保留。
+
+### 2026-07-29：新 shared Materialize 合同与 CPU 第一阶段
+
+#### 目标合同
+
+本轮只修改 standalone shared，不迁移 Simpler，也不处理 AscendC。旧
+shared 路径由 Claim winner 从全局分片 heap 分配输出，再通过
+`SharedOutputCell` 向其他核发布完整 TensorDesc；loser 只保留
+`(task_id, output_slot)` 符号。新路径改为：
+
+1. 每个 replay actor 在 Claim 前构造本 task 参数并执行 Materialize；
+2. 每核拥有独立 `worker.heap_next` 和独立 payload/TensorDesc 对象；
+3. 所有核使用同一块 GM `heap_base/heap_size`，并按相同 task、shape、
+   output 顺序推进，因此同一 `(task_id, output_slot)` 的
+   `buffer_addr` 必须完全一致；
+4. Claim winner 只负责有序发布 shared TensorMap writer 元数据，
+   `fanin lookup -> Build -> Execute` 继续在有序插入段之外并发；
+5. fresh Output 的直接生产者来自本核 descriptor 的
+   `owner_task_id`，INOUT 的后继 writer 才进入 shared ordinary region
+   ring；不再需要跨核 TensorDesc 发布。
+
+“每核独立申请”在这里指 96 份独立分配记账和 descriptor 构造，不是
+96 块不同的物理输出内存。若物理地址不同，只有 producer winner 的那一块
+会被 kernel 写入，consumer winner 仅凭自己的本核 descriptor 无法找到
+真实结果，删除 SharedOutputRef 后协议必然断裂。
+
+#### 与历史实现和参考实现的取舍
+
+历史提交 `fd109164` 已验证“本核 TensorDesc + 确定性私有 heap”这一
+数据合同，可复用其分配算法和本地 handle 形态，但不能整体回退：
+
+- 它仍在 Claim 后 Materialize，不满足本轮明确的 Claim 前合同；
+- 它使用旧的全局 committed turn，而当前必须保留逐 task
+  `TaskCell::deps_prepared` 完成链；
+- 它没有当前的动态 `SharedPaBatchPlan`、future producer 过滤、
+  通用 INOUT writer intent、故障收敛和跨 Build 并发门槛。
+
+也不能直接恢复旧 `N-H-1` reclaim。旧路径在插入前已经完成 fanin
+lookup；当前路径在发布 task N 的插入完成字之后才于串行区外 lookup，
+N+1 可能在慢 reader N 尚未查询时继续推进。仅凭 writer task id 推导
+回收边界可能提前覆盖慢 reader 所需槽位。第一功能版继续使用 no-reclaim；
+PA B256 的 ordinary writer 数量低于现有 16K 总槽容量，后续若要通用
+回绕，应接通真实 `reader_done`，不能照搬旧公式。
+
+#### 已完成的 CPU 门槛
+
+新增 `test_shared_replay_materialize.cpp`，用 Alloc 和 QK 覆盖 96 个
+actor：
+
+- QK 精确得到 `1 winner + 31 loser + 64 not_attempted`；
+- 三类 actor 在 Claim 前均已经持有本核 `TaskOutputs`；
+- 同一 task/output 的 TensorDesc 指针跨 worker 不同；
+- 完整 descriptor 语义及 `buffer_addr` 跨 96 核一致；
+- 每个 actor 的 Alloc 三个输出与 QK 输出互不重叠；
+- 96 个私有 `heap_next` 最终一致。
+
+完整 96-worker ordered Submit 门槛也已调整为新合同并通过：
+
+- loser Finish 不访问 shared TensorMap；
+- task N 仍只等待 `task[N-1].deps_prepared`；
+- INOUT accumulator 通过 ordinary region lookup 得到最终 writer；
+- task 8 的 lookup/Build 可越过 task 4 的 Build；
+- 无依赖 kernel 执行仍可越过前一 owner Build。
+
+host oracle 已同步为新合同，并使用生产代码的真实计数闭合：
+
+- `not_attempted` 表示该 worker 因 AIC/AIV 角色不参与本次 Claim
+  atomic；`loser` 表示它参与了 Claim atomic、但没有赢。两者仍都在
+  Claim 前完成构参与 Materialize；
+- 每个 worker 的 eager 构参、Materialize 次数及最终 `heap_next`
+  均按动态 task plan 精确重建；
+- 每个 UP 只由有序插入 owner 发布三条 accumulator ordinary region，
+  旧 `SharedOutputCell`、symbol history 和 global shared heap 控制字
+  必须保持初始值；
+- 当前 `CollectSharedFanin<AcceptLatestWriter>` 会对所有 active Input
+  执行 ordinary lookup，因此每组 lookup 的真实计数为
+  `QK 3 + SF 1 + PV 3 + UP 6 = 13`。这不是按旧估算值反推生产逻辑；
+- G2 的第二个 UP 同时保留稳定 Alloc owner 和前一 UP writer，故两组
+  fanin 为 `5 + 6 = 11`。稳定 owner 是可由上一 UP 传递的冗余边，
+  后续若消减须作为独立优化验证，不能混入本轮功能迁移。
+
+sparse trace 的状态机也改为真实顺序：
+
+```text
+EfDrain -> Materialize -> Claim
+  loser/not_attempted -> Submit
+  winner -> Register -> metadata
+           -> AllocComplete
+           或 Fanin -> WinnerBuild
+           -> Submit
+```
+
+旧的 `SharedMaterializePublishTaskOutputs` 及 copy/flush 明细在新 raw 中
+被明确拒绝。CPU 已完成以下动态验证，均为
+`semantic_status=PASS, postprocess_status=PASS`：
+
+| 场景 | task 数 | 最终 heap_next | ordinary region | fanin |
+| --- | ---: | ---: | ---: | ---: |
+| B1 / G1 (`context_len=8192`) | 5 | 806,912 | 3 | 5 |
+| B1 / G2 (`context_len=8193`) | 9 | 829,440 | 6 | 11 |
+| B256 / G1 | 1,280 | 206,569,472 | 768 | 1,280 |
+
+B256 还验证了 96 个 worker 的 eager 前端工作量、逐 task 插入完成字、
+shared frontier/vend、ordinary TensorMap 最终 writer 投影和 retired
+shared 状态。上述结果只证明 CPU standalone 功能合同；CCEC 构建和 A5
+动态结果尚未执行，不在本阶段提前宣称。

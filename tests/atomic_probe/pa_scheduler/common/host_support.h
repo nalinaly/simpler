@@ -1161,19 +1161,15 @@ inline bool ClockRecordSchemaValid(const TraceRecord &record) {
            record.function_id == -1 && record.auxiliary == 0;
 }
 
-// shared 的真实回放边界是稀疏的：每个逻辑 task 都记录连续的
-// EfDrain -> Claim，并都用 Submit 父区间覆盖本次轻量或完整调用；winner
-// 才继续记录 Materialize、Register、Fanin（非 Alloc）和
-// WinnerBuild/AllocComplete 子区间。每个 Materialize 父区间后依次紧跟
-// fresh-output publish 及其 copy/flush 两层 detail；每个 Register 后只
-// 跟唯一 SharedRegisterPublishMetadata。output detail 严格嵌在
-// Materialize，metadata 严格嵌在 Register，端点分别还原独占 output-cell
-// 发布，以及 wait、串行 writer metadata 与 handoff。
-// PrepareMap 属于 private TensorMap，不得以零时长 marker 混入 shared raw。
-// 这里复用现有字段逐核闭合身份、顺序、次数和相邻时间边界；每个 winner
-// 固定增加四条 detail（outputs + copy + flush + metadata），不增加
-// TraceRecord 字段，更不按 poll 扩张记录。
-// private 编译仍保持无约束，避免改变既有行为。
+// shared 的真实回放边界是稀疏的：每个逻辑 task 都记录
+// EfDrain -> Materialize -> Claim，并用最后写出的 Submit 父区间覆盖本次
+// 调用。Materialize 发生在 Claim 前，因此 winner、attempted loser 和
+// not_attempted actor 都各有一条；只有 winner 才继续记录 Register、
+// Fanin（非 Alloc）和 WinnerBuild/AllocComplete。Register 后只跟唯一
+// SharedRegisterPublishMetadata detail，旧 shared-output descriptor
+// publish/copy/flush 三层已经退出协议，任何残留记录都必须拒绝。
+// PrepareMap 属于 private TensorMap，也不得混入 shared raw。Atomic、
+// Kernel/Commit 等嵌套或异步记录不推进本状态机。
 struct SharedSparseTraceValidator {
 #if PTO_FDWIC_SHARED_MAP
     explicit SharedSparseTraceValidator(
@@ -1184,7 +1180,13 @@ struct SharedSparseTraceValidator {
     bool Observe(const TraceRecord &record) {
 #if PTO_FDWIC_SHARED_MAP
         const auto phase = static_cast<TracePhase>(record.phase);
-        if (phase == TracePhase::PrepareMap) {
+        if (phase == TracePhase::PrepareMap ||
+            phase ==
+                TracePhase::SharedMaterializePublishTaskOutputs ||
+            phase ==
+                TracePhase::SharedMaterializePublishTaskOutputsCopy ||
+            phase ==
+                TracePhase::SharedMaterializePublishTaskOutputsFlush) {
             return false;
         }
         if (phase == TracePhase::EfDrain) {
@@ -1192,6 +1194,8 @@ struct SharedSparseTraceValidator {
                 record.task_id != next_task_id_ ||
                 record.function_id != -1 || record.flags != 0 ||
                 record.auxiliary != 0 ||
+                (submit_count_ != 0 &&
+                 record.start_cycle < last_submit_end_) ||
                 record.end_cycle < record.start_cycle) {
                 return false;
             }
@@ -1201,10 +1205,24 @@ struct SharedSparseTraceValidator {
             }
             task_id_ = record.task_id;
             kind_ = task->kind;
+            winner_ = false;
             efdrain_begin_ = record.start_cycle;
             previous_end_ = record.end_cycle;
-            state_ = State::AwaitClaim;
+            state_ = State::AwaitMaterialize;
             ++efdrain_count_;
+        } else if (phase == TracePhase::Materialize) {
+            if (state_ != State::AwaitMaterialize ||
+                !SameTask(record) ||
+                record.function_id != -1 || record.flags != 0 ||
+                record.auxiliary !=
+                    (kind_ == TaskKind::Alloc ? 1U : 0U) ||
+                record.start_cycle < previous_end_ ||
+                record.end_cycle < record.start_cycle) {
+                return false;
+            }
+            previous_end_ = record.end_cycle;
+            state_ = State::AwaitClaim;
+            ++materialize_count_;
         } else if (phase == TracePhase::Claim) {
             if (state_ != State::AwaitClaim ||
                 !SameTask(record) ||
@@ -1230,76 +1248,14 @@ struct SharedSparseTraceValidator {
                 if (kind_ == TaskKind::Alloc) {
                     ++alloc_winner_count_;
                 }
-                state_ = State::AwaitMaterialize;
+                state_ = State::AwaitRegister;
             } else {
                 state_ = State::AwaitLoserSubmit;
             }
-        } else if (phase == TracePhase::Materialize) {
-            if (state_ != State::AwaitMaterialize ||
-                !SameWinnerTask(record) || record.flags != 0 ||
-                record.auxiliary !=
-                    (kind_ == TaskKind::Alloc ? 1U : 0U) ||
-                record.start_cycle < previous_end_ ||
-                record.end_cycle < record.start_cycle) {
-                return false;
-            }
-            materialize_begin_ = record.start_cycle;
-            materialize_end_ = record.end_cycle;
-            previous_end_ = record.end_cycle;
-            state_ = State::AwaitMaterializeTaskOutputs;
-            ++materialize_count_;
-        } else if (
-            phase ==
-                TracePhase::SharedMaterializePublishTaskOutputs
-        ) {
-            if (state_ != State::AwaitMaterializeTaskOutputs ||
-                !SameWinnerTask(record) || record.flags != 0 ||
-                record.auxiliary != 0 ||
-                record.start_cycle < materialize_begin_ ||
-                record.end_cycle < record.start_cycle ||
-                record.end_cycle > materialize_end_) {
-                return false;
-            }
-            materialize_task_outputs_begin_ = record.start_cycle;
-            materialize_task_outputs_end_ = record.end_cycle;
-            state_ = State::AwaitMaterializeTaskOutputsCopy;
-            ++materialize_task_outputs_count_;
-        } else if (
-            phase ==
-                TracePhase::SharedMaterializePublishTaskOutputsCopy
-        ) {
-            if (state_ != State::AwaitMaterializeTaskOutputsCopy ||
-                !SameWinnerTask(record) || record.flags != 0 ||
-                record.auxiliary != 0 ||
-                record.start_cycle <
-                    materialize_task_outputs_begin_ ||
-                record.end_cycle < record.start_cycle ||
-                record.end_cycle >
-                    materialize_task_outputs_end_) {
-                return false;
-            }
-            materialize_task_outputs_copy_end_ = record.end_cycle;
-            state_ = State::AwaitMaterializeTaskOutputsFlush;
-            ++materialize_task_outputs_copy_count_;
-        } else if (
-            phase ==
-                TracePhase::SharedMaterializePublishTaskOutputsFlush
-        ) {
-            if (state_ != State::AwaitMaterializeTaskOutputsFlush ||
-                !SameWinnerTask(record) || record.flags != 0 ||
-                record.auxiliary != 0 ||
-                record.start_cycle !=
-                    materialize_task_outputs_copy_end_ ||
-                record.end_cycle < record.start_cycle ||
-                record.end_cycle >
-                    materialize_task_outputs_end_) {
-                return false;
-            }
-            state_ = State::AwaitRegister;
-            ++materialize_task_outputs_flush_count_;
         } else if (phase == TracePhase::Fanin) {
             if (state_ != State::AwaitFanin ||
                 !SameWinnerTask(record) || record.flags != 0 ||
+                record.auxiliary > kMaxFanin ||
                 record.start_cycle != previous_end_ ||
                 record.end_cycle < record.start_cycle) {
                 return false;
@@ -1313,7 +1269,7 @@ struct SharedSparseTraceValidator {
                 (kind_ == TaskKind::Alloc
                      ? record.auxiliary != 0
                      : record.auxiliary > kMaxTaskTensors) ||
-                record.start_cycle != previous_end_ ||
+                record.start_cycle < previous_end_ ||
                 record.end_cycle < record.start_cycle) {
                 return false;
             }
@@ -1368,6 +1324,7 @@ struct SharedSparseTraceValidator {
                 record.end_cycle < previous_end_) {
                 return false;
             }
+            last_submit_end_ = record.end_cycle;
             state_ = State::AwaitEfDrain;
             ++submit_count_;
         }
@@ -1381,12 +1338,7 @@ struct SharedSparseTraceValidator {
 #if PTO_FDWIC_SHARED_MAP
         return state_ == State::AwaitEfDrain &&
                efdrain_count_ == claim_count_ &&
-               materialize_count_ == winner_count_ &&
-               materialize_task_outputs_count_ == winner_count_ &&
-               materialize_task_outputs_copy_count_ ==
-                   winner_count_ &&
-               materialize_task_outputs_flush_count_ ==
-                   winner_count_ &&
+               materialize_count_ == claim_count_ &&
                register_count_ == winner_count_ &&
                register_metadata_count_ == winner_count_ &&
                fanin_count_ + alloc_winner_count_ ==
@@ -1428,18 +1380,6 @@ struct SharedSparseTraceValidator {
         return register_metadata_count_;
     }
 
-    uint32_t MaterializeTaskOutputsCount() const {
-        return materialize_task_outputs_count_;
-    }
-
-    uint32_t MaterializeTaskOutputsCopyCount() const {
-        return materialize_task_outputs_copy_count_;
-    }
-
-    uint32_t MaterializeTaskOutputsFlushCount() const {
-        return materialize_task_outputs_flush_count_;
-    }
-
     uint32_t WinnerTailCount() const {
         return winner_tail_count_;
     }
@@ -1452,11 +1392,8 @@ private:
 #if PTO_FDWIC_SHARED_MAP
     enum class State {
         AwaitEfDrain,
-        AwaitClaim,
         AwaitMaterialize,
-        AwaitMaterializeTaskOutputs,
-        AwaitMaterializeTaskOutputsCopy,
-        AwaitMaterializeTaskOutputsFlush,
+        AwaitClaim,
         AwaitFanin,
         AwaitRegister,
         AwaitRegisterMetadata,
@@ -1507,11 +1444,7 @@ private:
     bool winner_ = false;
     uint64_t efdrain_begin_ = 0;
     uint64_t previous_end_ = 0;
-    uint64_t materialize_begin_ = 0;
-    uint64_t materialize_end_ = 0;
-    uint64_t materialize_task_outputs_begin_ = 0;
-    uint64_t materialize_task_outputs_end_ = 0;
-    uint64_t materialize_task_outputs_copy_end_ = 0;
+    uint64_t last_submit_end_ = 0;
     uint64_t register_begin_ = 0;
     uint64_t register_end_ = 0;
     uint32_t efdrain_count_ = 0;
@@ -1519,9 +1452,6 @@ private:
     uint32_t winner_count_ = 0;
     uint32_t alloc_winner_count_ = 0;
     uint32_t materialize_count_ = 0;
-    uint32_t materialize_task_outputs_count_ = 0;
-    uint32_t materialize_task_outputs_copy_count_ = 0;
-    uint32_t materialize_task_outputs_flush_count_ = 0;
     uint32_t fanin_count_ = 0;
     uint32_t register_count_ = 0;
     uint32_t register_metadata_count_ = 0;
@@ -2210,7 +2140,7 @@ inline uint64_t ExpectedPaDependencySignature(
 ) {
     uint64_t signature = 0;
     for (const SharedHostBatchPlan &batch : plan.batches) {
-        uint32_t accumulator_writer = batch.batch_start;
+        uint32_t previous_up = UINT32_MAX;
         for (uint32_t group = 0;
              group < batch.group_count; ++group) {
             const uint32_t qk =
@@ -2219,15 +2149,23 @@ inline uint64_t ExpectedPaDependencySignature(
             const uint32_t pv = qk + 2U;
             const uint32_t up = qk + 3U;
             // 每组始终有 SF<-QK、PV<-SF、UP<-SF/PV 三条 fresh
-            // 依赖。三个 accumulator symbol 在 CollectFanin 中去重为
-            // 一条：首组 writer 是 Alloc，后续组 writer 是前一 UP。
+            // 依赖。accumulator descriptor 的稳定 owner 始终是 Alloc；
+            // 第二组起 ordinary TensorMap 还返回前一 UP writer。二者都
+            // 是合法前驱并在 CollectFanin 内分别去重，不能用后者替换
+            // owner 边。
             signature ^= DependencyEdgeSignatureHost(sf, qk);
             signature ^= DependencyEdgeSignatureHost(pv, sf);
             signature ^= DependencyEdgeSignatureHost(up, sf);
             signature ^= DependencyEdgeSignatureHost(up, pv);
             signature ^=
-                DependencyEdgeSignatureHost(up, accumulator_writer);
-            accumulator_writer = up;
+                DependencyEdgeSignatureHost(
+                    up, batch.batch_start
+                );
+            if (previous_up != UINT32_MAX) {
+                signature ^=
+                    DependencyEdgeSignatureHost(up, previous_up);
+            }
+            previous_up = up;
         }
     }
     return signature;
@@ -2280,7 +2218,8 @@ inline int64_t SharedExpectedUnusedInsertTurnHost(
 
 inline SharedTensorMapValidation ValidateSharedTensorMap(
     const SharedTensorMapSidecar &map,
-    const SharedHostTaskPlan &plan
+    const SharedHostTaskPlan &plan,
+    uint64_t heap_size
 ) {
     SharedTensorMapValidation validation;
     for (uint32_t lane = 0;
@@ -2291,77 +2230,121 @@ inline SharedTensorMapValidation ValidateSharedTensorMap(
     }
     validation.protocol_ok &= map.reclaim_upto.value == -1;
 
-    // PA 的 fresh Output 由 shared_outputs 直接定位，唯一 ordinary
-    // output_view 又是 manual_dep，因此 region ring 仍为空；但每个
-    // task（包括空 writer 集）都必须发布自己的 per-task 插入完成字；
-    // 该终态由 SchedulerState host oracle 单独逐 task 校验。
+    // shared 的 96 个 actor 都按同一 task 顺序推进私有逻辑 heap；物理
+    // 地址只在跨越 ring 尾部时回绕。fresh Output 依赖直接来自本核
+    // descriptor.owner_task_id，不进入共享表；每个 UP 仅把三个非 manual
+    // accumulator INOUT 依次发布为 max、sum、output 的 ordinary region。
+    std::vector<SharedRegionValue> expected_by_bucket[kMapBuckets];
+    std::vector<uint64_t> alloc_physical_base(
+        plan.batch_count, UINT64_MAX
+    );
+    uint64_t expected_heap_next = 0;
+    bool expected_layout_ok = heap_size != 0;
+    for (const SharedHostPlannedTask &task : plan.tasks) {
+        uint64_t task_base =
+            (expected_heap_next + kOutputAlignment - 1U) /
+            kOutputAlignment * kOutputAlignment;
+        if (task.output_bytes != 0 && heap_size != 0 &&
+            (task_base % heap_size) + task.output_bytes > heap_size) {
+            task_base =
+                (task_base / heap_size + 1U) * heap_size;
+        }
+        expected_layout_ok &=
+            task.task_id < plan.total_tasks &&
+            task.batch < plan.batch_count &&
+            task.output_bytes <= heap_size;
+        if (task.kind == TaskKind::Alloc) {
+            alloc_physical_base[task.batch] =
+                heap_size == 0 ? 0 : task_base % heap_size;
+        } else if (task.kind == TaskKind::Up) {
+            const uint64_t alloc_base =
+                alloc_physical_base[task.batch];
+            expected_layout_ok &= alloc_base != UINT64_MAX;
+            const uint64_t offsets[3] = {9216, 8192, 0};
+            const uint64_t sizes[3] = {64, 64, 8192};
+            for (uint32_t index = 0; index < 3; ++index) {
+                SharedRegionValue value{};
+                value.buffer_addr =
+                    kSyntheticHeapBase + alloc_base + offsets[index];
+                value.lo = 0;
+                value.hi = sizes[index];
+                value.producer =
+                    static_cast<int32_t>(task.task_id);
+                const uint32_t bucket =
+                    SharedTensorMapHashHost(value.buffer_addr);
+                expected_by_bucket[bucket].push_back(value);
+            }
+        }
+        expected_heap_next = task_base + task.output_bytes;
+    }
+    validation.protocol_ok &= expected_layout_ok;
+
     const SharedRegionPayload zero_payload{};
     for (uint32_t bucket = 0; bucket < kMapBuckets; ++bucket) {
         const int64_t head = map.buckets[bucket].head.value;
         const int64_t tail = map.buckets[bucket].tail.value;
-        validation.protocol_ok &= head == 0 && tail == 0;
+        const std::vector<SharedRegionValue> &expected =
+            expected_by_bucket[bucket];
+        validation.protocol_ok &=
+            head == 0 &&
+            tail == static_cast<int64_t>(expected.size()) &&
+            expected.size() <= kMapBucketCapacity;
+        validation.total_appends += expected.size();
+        validation.physical_entries += expected.size();
+        validation.logical_entries += expected.size();
+        for (uint32_t cursor = 0;
+             cursor < kMapBucketCapacity; ++cursor) {
+            const uint32_t slot_index =
+                bucket * kMapBucketCapacity + cursor;
+            const SharedRegionSlot &slot = map.slots[slot_index];
+            if (cursor >= expected.size()) {
+                validation.protocol_ok &=
+                    slot.seq.value == -1 &&
+                    std::memcmp(
+                        &slot.payload, &zero_payload,
+                        sizeof(zero_payload)
+                    ) == 0;
+                continue;
+            }
+            const SharedRegionValue &actual =
+                slot.payload.value;
+            const SharedRegionValue &wanted = expected[cursor];
+            validation.protocol_ok &=
+                slot.seq.value == static_cast<int64_t>(cursor) &&
+                actual.buffer_addr == wanted.buffer_addr &&
+                actual.lo == wanted.lo &&
+                actual.hi == wanted.hi &&
+                actual.producer == wanted.producer &&
+                actual.reserved == 0;
+            SharedLogicalHashWord(
+                &validation.logical_signature, bucket
+            );
+            SharedLogicalHashWord(
+                &validation.logical_signature,
+                actual.buffer_addr
+            );
+            SharedLogicalHashWord(
+                &validation.logical_signature, actual.lo
+            );
+            SharedLogicalHashWord(
+                &validation.logical_signature, actual.hi
+            );
+            SharedLogicalHashWord(
+                &validation.logical_signature,
+                static_cast<uint32_t>(actual.producer)
+            );
+        }
     }
-    for (uint32_t slot = 0; slot < kMapCapacity; ++slot) {
-        validation.protocol_ok &= map.slots[slot].seq.value == -1;
-        validation.protocol_ok &= std::memcmp(
-            &map.slots[slot].payload, &zero_payload,
-            sizeof(zero_payload)
-        ) == 0;
-    }
-    // 每个 UP 按 max/sum/output 三个 accumulator symbol 发布不可变
-    // history。首组前驱是本 batch 的 Alloc，后续组前驱是前一 UP；
-    // 非 UP task 与 plan 尾部必须保持空 history。
+
+    // symbol writer history 已退出新主协议；它与 reader_done 都必须保持
+    // 初始化值，避免旧 SharedOutputRef 路径在新实现中被意外触发。
     const SharedWriterHistoryCell zero_history{};
     for (uint32_t task = 0; task < kMaxTasks; ++task) {
-        const SharedHostPlannedTask *planned =
-            plan.TaskAt(task);
         const SharedWriterHistoryCell &history =
             map.writer_history[task];
-        if (planned == nullptr ||
-            planned->kind != TaskKind::Up) {
-            validation.protocol_ok &= std::memcmp(
-                &history, &zero_history,
-                sizeof(zero_history)
-            ) == 0;
-            continue;
-        }
-        const int32_t expected_previous =
-            planned->group_index == 0
-                ? static_cast<int32_t>(
-                      planned->batch_start
-                  )
-                : static_cast<int32_t>(task) - 4;
-        validation.protocol_ok &=
-            history.magic == kSharedWriterHistoryMagic &&
-            history.writer_task == static_cast<int32_t>(task) &&
-            history.count == 3 &&
-            history.reserved == 0;
-        bool slots_seen[3] = {};
-        for (uint32_t index = 0;
-             index < history.count && index < 3; ++index) {
-            const SharedWriterHistoryRecord &record =
-                history.entries[index];
-            const uint32_t key_base =
-                planned->batch_start *
-                    kSharedOutputMaxPerTask +
-                1U;
-            const bool key_ok =
-                record.symbol_key >= key_base &&
-                record.symbol_key < key_base + 3U;
-            validation.protocol_ok &=
-                key_ok &&
-                record.previous_writer == expected_previous;
-            if (key_ok) {
-                const uint32_t slot =
-                    record.symbol_key - key_base;
-                validation.protocol_ok &=
-                    !slots_seen[slot];
-                slots_seen[slot] = true;
-            }
-        }
-        validation.protocol_ok &=
-            slots_seen[0] && slots_seen[1] &&
-            slots_seen[2];
+        validation.protocol_ok &= std::memcmp(
+            &history, &zero_history, sizeof(zero_history)
+        ) == 0;
     }
     for (uint32_t worker = 0; worker < kWorkers; ++worker) {
         validation.protocol_ok &=
@@ -2967,9 +2950,30 @@ inline uint64_t ExpectedNormalizedWriterSignature(
 
 #if PTO_FDWIC_SHARED_MAP
 inline uint64_t ExpectedNormalizedWriterSignature(
-    const SharedHostTaskPlan &plan, uint32_t logical_floor
+    const SharedHostTaskPlan &plan, uint32_t logical_floor,
+    uint64_t heap_size
 ) {
     std::vector<NormalizedWriterEntry> by_bucket[kMapBuckets];
+    std::vector<uint64_t> physical_task_bases(
+        plan.total_tasks, 0
+    );
+    uint64_t heap_next = 0;
+    for (const SharedHostPlannedTask &task : plan.tasks) {
+        uint64_t task_base =
+            (heap_next + kOutputAlignment - 1U) /
+            kOutputAlignment * kOutputAlignment;
+        if (task.output_bytes != 0 && heap_size != 0 &&
+            (task_base % heap_size) + task.output_bytes >
+                heap_size) {
+            task_base =
+                (task_base / heap_size + 1U) * heap_size;
+        }
+        if (task.task_id < physical_task_bases.size()) {
+            physical_task_bases[task.task_id] =
+                heap_size == 0 ? 0 : task_base % heap_size;
+        }
+        heap_next = task_base + task.output_bytes;
+    }
     for (const SharedHostBatchPlan &batch : plan.batches) {
         if (batch.group_count == 0 ||
             batch.final_up_task_id < logical_floor) {
@@ -2978,18 +2982,22 @@ inline uint64_t ExpectedNormalizedWriterSignature(
         const SharedHostPlannedTask *alloc =
             plan.TaskAt(batch.batch_start);
         if (alloc == nullptr ||
-            alloc->kind != TaskKind::Alloc) {
+            alloc->kind != TaskKind::Alloc ||
+            alloc->task_id >= physical_task_bases.size()) {
             continue;
         }
-        // RegisterOutputs 的真实顺序是 max、sum、output、manual
-        // output_view；canonical 地址由动态计划中的 task-order prefix
-        // 给出，不再从 task_id / 5 猜 batch。
+        // shared ordinary map 只登记 max、sum、output 三个非 manual
+        // accumulator；fresh Output 依赖来自 owner_task_id，output_view
+        // 明确标为 manual_dep。地址按确定性私有 heap 的物理 ring 位置
+        // 重建，不能继续使用已退出的 shared shard 布局。
+        const uint64_t alloc_base =
+            physical_task_bases[alloc->task_id];
         AddNormalizedWriter(
             by_bucket,
             ExpectedCanonicalOutputDescriptorForTask(
                 alloc->task_id, 2, alloc->kind,
                 alloc->group_block_count,
-                alloc->canonical_task_base
+                alloc_base
             ),
             batch.final_up_task_id
         );
@@ -2998,7 +3006,7 @@ inline uint64_t ExpectedNormalizedWriterSignature(
             ExpectedCanonicalOutputDescriptorForTask(
                 alloc->task_id, 1, alloc->kind,
                 alloc->group_block_count,
-                alloc->canonical_task_base
+                alloc_base
             ),
             batch.final_up_task_id
         );
@@ -3007,14 +3015,7 @@ inline uint64_t ExpectedNormalizedWriterSignature(
             ExpectedCanonicalOutputDescriptorForTask(
                 alloc->task_id, 0, alloc->kind,
                 alloc->group_block_count,
-                alloc->canonical_task_base
-            ),
-            batch.final_up_task_id
-        );
-        AddNormalizedWriter(
-            by_bucket,
-            ExpectedManualOutputView(
-                batch.batch, plan.batch_count
+                alloc_base
             ),
             batch.final_up_task_id
         );
@@ -3028,57 +3029,51 @@ inline uint64_t SharedNormalizedWriterSignature(
     uint32_t logical_floor
 ) {
     std::vector<NormalizedWriterEntry> by_bucket[kMapBuckets];
-    for (const SharedHostBatchPlan &batch : plan.batches) {
-        if (batch.group_count == 0 ||
-            batch.final_up_task_id < logical_floor) {
-            continue;
+    for (uint32_t bucket = 0; bucket < kMapBuckets; ++bucket) {
+        const int64_t head = map.buckets[bucket].head.value;
+        const int64_t tail = map.buckets[bucket].tail.value;
+        if (head < 0 || tail < head ||
+            static_cast<uint64_t>(tail - head) >
+                kMapBucketCapacity) {
+            return 0;
         }
-        const SharedHostPlannedTask *alloc =
-            plan.TaskAt(batch.batch_start);
-        if (alloc == nullptr ||
-            alloc->kind != TaskKind::Alloc) {
-            continue;
+        for (int64_t cursor = head; cursor < tail; ++cursor) {
+            const SharedRegionSlot &slot =
+                map.slots[
+                    bucket * kMapBucketCapacity +
+                    (static_cast<uint32_t>(cursor) &
+                     kMapBucketSlotMask)
+                ];
+            const SharedRegionValue &value = slot.payload.value;
+            if (slot.seq.value != cursor ||
+                value.producer < static_cast<int32_t>(logical_floor) ||
+                value.producer >=
+                    static_cast<int32_t>(plan.total_tasks)) {
+                continue;
+            }
+            bool found = false;
+            for (NormalizedWriterEntry &entry :
+                 by_bucket[bucket]) {
+                if (entry.buffer_addr == value.buffer_addr &&
+                    entry.lo == value.lo &&
+                    entry.hi == value.hi) {
+                    entry.producer = std::max(
+                        entry.producer,
+                        static_cast<uint32_t>(value.producer)
+                    );
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                by_bucket[bucket].push_back(
+                    {
+                        value.buffer_addr, value.lo, value.hi,
+                        static_cast<uint32_t>(value.producer)
+                    }
+                );
+            }
         }
-        const SharedOutputCell &cell =
-            map.shared_outputs[alloc->task_id];
-        // 实际 shared descriptor 的 8-shard 地址已经由
-        // ValidateSharedOutputs 严格校验。跨模式签名只投影同一个业务
-        // output 的 canonical(private 连续 heap)地址，不能把物理分片差异
-        // 误判成 writer 拓扑差异。
-        AddNormalizedWriter(
-            by_bucket,
-            ExpectedCanonicalOutputDescriptorForTask(
-                alloc->task_id, 2, alloc->kind,
-                alloc->group_block_count,
-                alloc->canonical_task_base
-            ),
-            static_cast<uint32_t>(cell.last_writer[2].value)
-        );
-        AddNormalizedWriter(
-            by_bucket,
-            ExpectedCanonicalOutputDescriptorForTask(
-                alloc->task_id, 1, alloc->kind,
-                alloc->group_block_count,
-                alloc->canonical_task_base
-            ),
-            static_cast<uint32_t>(cell.last_writer[1].value)
-        );
-        AddNormalizedWriter(
-            by_bucket,
-            ExpectedCanonicalOutputDescriptorForTask(
-                alloc->task_id, 0, alloc->kind,
-                alloc->group_block_count,
-                alloc->canonical_task_base
-            ),
-            static_cast<uint32_t>(cell.last_writer[0].value)
-        );
-        AddNormalizedWriter(
-            by_bucket,
-            ExpectedManualOutputView(
-                batch.batch, plan.batch_count
-            ),
-            batch.final_up_task_id
-        );
     }
     return FinishNormalizedWriterSignature(by_bucket);
 }
@@ -3188,6 +3183,17 @@ inline Metrics Validate(
         shared_plan_ok ? shared_plan.total_tasks : 0;
     const uint32_t group_count =
         shared_plan_ok ? shared_plan.total_groups : 0;
+    uint64_t expected_shared_fanin_edges =
+        static_cast<uint64_t>(group_count) * 5;
+    if (shared_plan_ok) {
+        for (const SharedHostBatchPlan &batch :
+             shared_plan.batches) {
+            if (batch.group_count > 1) {
+                expected_shared_fanin_edges +=
+                    batch.group_count - 1U;
+            }
+        }
+    }
 #else
     const uint32_t task_count = batches * kTasksPerBatch;
 #endif
@@ -3284,21 +3290,15 @@ inline Metrics Validate(
         static_cast<uint64_t>(task_count) * (task_count - 1U) / 2U;
 #endif
 
-    // private 按连续逻辑 heap 重建逐 task prefix；shared 只按 task_id%8
-    // 重建每个 shard 的最终字节总量。并发 FetchAdd 后，某 task 获得的
-    // task_base 和 aggregate vend prefix 都不再由 task_id 顺序决定。
+    // private/shared 都由每个 actor 按同一 task 顺序推进私有逻辑 heap。
+    // 因此动态 shared_plan 也能独立重建每个 task 的确定性 prefix，并要求
+    // 96 个 worker 最终停在同一个 heap_next。
     uint64_t expected_heap_next = 0;
     bool vend_progress_bounds_ok = true;
     uint32_t first_bad_vend = task_count;
     uint64_t first_bad_vend_minimum = 0;
     uint64_t first_bad_vend_actual = 0;
     std::vector<uint64_t> minimum_vends(task_count);
-#if PTO_FDWIC_SHARED_MAP
-    uint64_t expected_shared_heap_cursor[kSharedHeapShards] = {};
-    const uint64_t shared_heap_shard_span =
-        ExpectedSharedHeapShardSpan(state.heap_size);
-    bool shared_heap_capacity_ok = shared_heap_shard_span != 0;
-#endif
     for (uint32_t task_id = 0; task_id < task_count; ++task_id) {
 #if PTO_FDWIC_SHARED_MAP
         const SharedHostPlannedTask *planned_task =
@@ -3310,31 +3310,14 @@ inline Metrics Validate(
 #else
         const uint64_t output_bytes = ExpectedTaskOutputBytes(task_id);
 #endif
-#if PTO_FDWIC_SHARED_MAP
-        const uint32_t shard = task_id % kSharedHeapShards;
-        shared_heap_capacity_ok &= planned_task != nullptr;
-        shared_heap_capacity_ok &=
-            expected_shared_heap_cursor[shard] <= shared_heap_shard_span &&
-            output_bytes <=
-                shared_heap_shard_span -
-                    std::min(
-                        expected_shared_heap_cursor[shard],
-                        shared_heap_shard_span
-                    );
-        expected_shared_heap_cursor[shard] += output_bytes;
-        expected_heap_next += output_bytes;
-        minimum_vends[task_id] = output_bytes;
-#else
         uint64_t task_base = (expected_heap_next + kOutputAlignment - 1) / kOutputAlignment * kOutputAlignment;
         if (output_bytes != 0 && (task_base % state.heap_size) + output_bytes > state.heap_size) {
             task_base = (task_base / state.heap_size + 1) * state.heap_size;
         }
         expected_heap_next = task_base + output_bytes;
         minimum_vends[task_id] = expected_heap_next;
-#endif
     }
 #if PTO_FDWIC_SHARED_MAP
-    bool shared_heap_state_ok = shared_heap_capacity_ok;
     // 每个实际回放 task 的插入完成字最终必须恰好保存自己的 task_id；
     // 未使用的 TaskCell 必须继续保持 -1。
     bool shared_per_task_insert_completions_ok = true;
@@ -3351,36 +3334,10 @@ inline Metrics Validate(
         shared_per_task_insert_completions_ok &=
             state.tasks[task_id].deps_prepared == -1;
     }
-    uint64_t actual_shared_cursor_sum = 0;
-    uint64_t expected_shared_cursor_sum = 0;
-    for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        const int64_t raw_cursor =
-            state.shared_map.shared_heap_cursor[shard].value;
-        shared_heap_state_ok &= raw_cursor >= 0;
-        const uint64_t actual_cursor =
-            raw_cursor < 0 ? 0 : static_cast<uint64_t>(raw_cursor);
-        shared_heap_state_ok &=
-            actual_cursor == expected_shared_heap_cursor[shard];
-        shared_heap_capacity_ok &=
-            actual_cursor <= shared_heap_shard_span;
-        actual_shared_cursor_sum += actual_cursor;
-        expected_shared_cursor_sum += expected_shared_heap_cursor[shard];
-    }
-    const int64_t raw_shared_vend =
-        state.shared_map.shared_heap_vend.value;
-    shared_heap_state_ok &= raw_shared_vend >= 0;
-    const uint64_t actual_shared_vend =
-        raw_shared_vend < 0 ? 0 : static_cast<uint64_t>(raw_shared_vend);
-    shared_heap_state_ok &=
-        actual_shared_vend == expected_heap_next &&
-        actual_shared_cursor_sum == actual_shared_vend &&
-        expected_shared_cursor_sum == expected_heap_next;
-    shared_heap_state_ok &= shared_heap_capacity_ok;
 #endif
     for (uint32_t task_id = 0; task_id < task_count; ++task_id) {
         // kernel 可以晚于后续 Submit 完成，故 task vend 可以高于本 task
-        // reserve 后的 prefix。private 使用确定 task-order prefix；shared
-        // 的并发 prefix 只要求覆盖本 task 自身 reserve 且不越过最终 vend。
+        // Materialize 后的确定性 prefix，但不能越过完整回放终点。
         if (state.tasks[task_id].vend < minimum_vends[task_id] ||
             state.tasks[task_id].vend > expected_heap_next) {
             vend_progress_bounds_ok = false;
@@ -3391,10 +3348,10 @@ inline Metrics Validate(
             }
         }
     }
-    // private ring 仍保留 heap window 内的四类 writer。shared fresh
-    // Output 已迁出 region ring，因此它的 region 摘要和 sequencer 均保持
-    // 初值。expected_map_floor 只供跨模式规范化 writer 签名投影使用，
-    // 不能解释成 shared sidecar 实际发生过 reclaim。
+    // private ring 保留 heap window 内的四类 writer。shared fresh Output
+    // 依赖来自 descriptor owner，ordinary ring 只保留 UP 的三个
+    // accumulator writer；当前 shared 不回收物理槽，expected_map_floor
+    // 只用于 latest-writer 规范化投影。
 #if !PTO_FDWIC_SHARED_MAP
     const uint64_t expected_private_map_live =
         static_cast<uint64_t>(kPaCase1MapEntriesPerBatch) *
@@ -3404,37 +3361,34 @@ inline Metrics Validate(
 #if PTO_FDWIC_SHARED_MAP
     const SharedTensorMapValidation shared_map_validation =
         ValidateSharedTensorMap(
-            state.shared_map, shared_plan
-        );
-    const SharedOutputValidation shared_output_validation =
-        ValidateSharedOutputs(
             state.shared_map, shared_plan, state.heap_size
         );
-    if (!shared_output_validation.protocol_ok) {
-        std::printf(
-            "[SHARED_OUTPUT_FAILURE] first_bad_task=%u "
-            "first_bad_slot=%u reason=%s\n",
-            shared_output_validation.first_bad_task,
-            shared_output_validation.first_bad_slot,
-            shared_output_validation.first_bad_reason
-        );
-    }
-    bool shared_output_heap_layout_ok =
-        shared_output_validation.protocol_ok &&
-        shared_output_validation.allocated_bytes == expected_heap_next &&
-        shared_output_validation.allocated_bytes == actual_shared_vend;
+    // 旧 global shared heap、SharedOutputCell 和 symbol history 不再承载
+    // 正确性。仍逐项要求保持初始化值，用于发现旧协议意外回流热路径。
+    bool retired_shared_state_pristine = true;
     for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        const int64_t raw_cursor =
-            state.shared_map.shared_heap_cursor[shard].value;
-        shared_output_heap_layout_ok &=
-            shared_output_validation.shard_bytes[shard] ==
-                expected_shared_heap_cursor[shard] &&
-            raw_cursor >= 0 &&
-            shared_output_validation.shard_bytes[shard] ==
-                static_cast<uint64_t>(raw_cursor);
+        retired_shared_state_pristine &=
+            state.shared_map.shared_heap_cursor[shard].value == 0;
+    }
+    retired_shared_state_pristine &=
+        state.shared_map.shared_heap_vend.value == 0;
+    const TensorDesc zero_tensor{};
+    for (uint32_t task = 0; task < kMaxTasks; ++task) {
+        const SharedOutputCell &cell =
+            state.shared_map.shared_outputs[task];
+        for (uint32_t slot = 0;
+             slot < kSharedOutputMaxPerTask; ++slot) {
+            retired_shared_state_pristine &=
+                cell.published[slot].value == -1 &&
+                cell.last_writer[slot].value == -1 &&
+                std::memcmp(
+                    &cell.tensors[slot], &zero_tensor,
+                    sizeof(zero_tensor)
+                ) == 0;
+        }
     }
     const uint64_t shared_normalized_writer_signature =
-        shared_output_heap_layout_ok
+        shared_map_validation.protocol_ok
             ? SharedNormalizedWriterSignature(
                   state.shared_map, shared_plan,
                   static_cast<uint32_t>(expected_map_floor)
@@ -3445,7 +3399,8 @@ inline Metrics Validate(
 #if PTO_FDWIC_SHARED_MAP
         ExpectedNormalizedWriterSignature(
             shared_plan,
-            static_cast<uint32_t>(expected_map_floor)
+            static_cast<uint32_t>(expected_map_floor),
+            state.heap_size
         );
 #else
         ExpectedNormalizedWriterSignature(
@@ -3571,53 +3526,74 @@ inline Metrics Validate(
             result.compete_first_split_reserved == 0;
 #endif
 #if PTO_FDWIC_SHARED_MAP
-        // shared 的五类重构参和 Materialize 都必须由本核实际 wins[]
-        // 精确推导；loser 只声明稳定符号，任何重构参都会让这里失败。
-        const uint64_t alloc_wins = result.wins[static_cast<uint32_t>(TaskKind::Alloc)];
+        // shared 的五类 task 由每个 replay actor 在 Claim 前完整构参和
+        // Materialize；只有 TensorMap 插入、lookup 与 slot Build 仍按
+        // 本核实际 winner 分布推导。
         const uint64_t qk_wins = result.wins[static_cast<uint32_t>(TaskKind::Qk)];
         const uint64_t sf_wins = result.wins[static_cast<uint32_t>(TaskKind::Sf)];
         const uint64_t pv_wins = result.wins[static_cast<uint32_t>(TaskKind::Pv)];
         const uint64_t up_wins = result.wins[static_cast<uint32_t>(TaskKind::Up)];
-        frontend_worker_counts_ok &= result.context_reads == batches;
-        frontend_worker_counts_ok &=
-            result.views_created == qk_wins + up_wins;
-        frontend_worker_counts_ok &=
-            result.dynamic_create_infos == qk_wins + sf_wins;
-        frontend_worker_counts_ok &=
-            result.arg_resets == qk_wins + sf_wins + pv_wins + up_wins;
-        frontend_worker_counts_ok &=
+        const bool worker_eager_counts_ok =
+            result.context_reads == batches &&
+            result.views_created ==
+                static_cast<uint64_t>(group_count) * 2 &&
+            result.dynamic_create_infos ==
+                static_cast<uint64_t>(group_count) * 2 &&
+            result.arg_resets ==
+                static_cast<uint64_t>(group_count) * 4 &&
             result.tensor_args_added ==
-                alloc_wins * 3 +
-                4 * (qk_wins + sf_wins + pv_wins) + 7 * up_wins;
-        frontend_worker_counts_ok &=
+                static_cast<uint64_t>(batches) * 3 +
+                static_cast<uint64_t>(group_count) * 19 &&
             result.scalar_args_added ==
-                2 * qk_wins + 3 * sf_wins + 2 * pv_wins + 2 * up_wins;
-        frontend_worker_counts_ok &=
+                static_cast<uint64_t>(group_count) * 9 &&
             result.materialized_outputs ==
-                alloc_wins * 3 + qk_wins + sf_wins * 3 + pv_wins;
-        frontend_worker_counts_ok &= result.map_inserts == 0;
-        // shared 的权威进度是 sidecar cursor/vend。worker.heap_next 只保存
-        // 该 worker 最近一次获胜时观察到的并发 aggregate prefix；不同
-        // winner 的 FetchAdd 顺序不由 task_id 决定，因此不能再拿确定的
-        // task-order prefix 集合核对。纯 loser 仍必须保持 0。
-        const uint64_t nonzero_output_wins =
-            alloc_wins + qk_wins + sf_wins + pv_wins;
-        // WorkerResult 只按 kind 聚合 wins，不保存每个动态 group 的
-        // nblocks；对 partial final group 只能重建该 worker 自身 reserve
-        // 的严格下界。全局逐 task output/descriptor/heap cursor 仍由
-        // shared_plan 做精确校验。
-        const uint64_t own_reserved_minimum =
-            alloc_wins * 10240ULL +
-            qk_wins * 8192ULL +
-            sf_wins * 6144ULL +
-            pv_wins * 8192ULL;
+                static_cast<uint64_t>(batches) * 3 +
+                static_cast<uint64_t>(group_count) * 5;
+        const bool worker_winner_counts_ok =
+            result.map_inserts == 3 * up_wins &&
+            // owner_task_id==invalid 的 external Input 仍可能与本轮
+            // ordinary writer 区域重叠，不能跳过 lookup。故每组精确为
+            // QK 3 + SF 1 + PV 3 + UP 6 = 13 次。
+            result.map_lookups ==
+                3 * qk_wins + sf_wins +
+                3 * pv_wins + 6 * up_wins &&
+            result.slot_tensor_copies ==
+                4 * (qk_wins + sf_wins + pv_wins) +
+                7 * up_wins &&
+            result.slot_scalar_copies ==
+                2 * qk_wins + 3 * sf_wins +
+                2 * pv_wins + 2 * up_wins;
+        frontend_worker_counts_ok &=
+            worker_eager_counts_ok && worker_winner_counts_ok;
+        if (!worker_eager_counts_ok ||
+            !worker_winner_counts_ok) {
+            std::printf(
+                "[SHARED_FRONTEND_WORKER_FAILURE] worker=%u "
+                "wins=qk:%llu,sf:%llu,pv:%llu,up:%llu "
+                "eager=context:%llu,views:%llu,create:%llu,"
+                "reset:%llu,tensors:%llu,scalars:%llu,materialized:%llu "
+                "winner=inserts:%llu,lookups:%llu,tensor_copies:%llu,"
+                "scalar_copies:%llu\n",
+                index,
+                static_cast<unsigned long long>(qk_wins),
+                static_cast<unsigned long long>(sf_wins),
+                static_cast<unsigned long long>(pv_wins),
+                static_cast<unsigned long long>(up_wins),
+                static_cast<unsigned long long>(result.context_reads),
+                static_cast<unsigned long long>(result.views_created),
+                static_cast<unsigned long long>(result.dynamic_create_infos),
+                static_cast<unsigned long long>(result.arg_resets),
+                static_cast<unsigned long long>(result.tensor_args_added),
+                static_cast<unsigned long long>(result.scalar_args_added),
+                static_cast<unsigned long long>(result.materialized_outputs),
+                static_cast<unsigned long long>(result.map_inserts),
+                static_cast<unsigned long long>(result.map_lookups),
+                static_cast<unsigned long long>(result.slot_tensor_copies),
+                static_cast<unsigned long long>(result.slot_scalar_copies)
+            );
+        }
         final_worker_state_ok &=
-            result.final_heap_next <= expected_heap_next &&
-            result.final_heap_next >= own_reserved_minimum &&
-            (result.final_heap_next == 0 ||
-             result.final_heap_next % kOutputAlignment == 0) &&
-            (result.claim_wins != 0 || result.final_heap_next == 0) &&
-            (nonzero_output_wins == 0 || result.final_heap_next != 0);
+            result.final_heap_next == expected_heap_next;
 #else
         frontend_worker_counts_ok &= result.context_reads == batches;
         frontend_worker_counts_ok &= result.views_created == static_cast<uint64_t>(batches) * 2;
@@ -3674,20 +3650,11 @@ inline Metrics Validate(
         } else {
             role_kernel_routing_ok = false;
         }
-#if PTO_FDWIC_SHARED_MAP
-        // shared no-wrap heap 不消费连续 frontier；每核完成只发布 vend/flag。
-        // 三个计数必须保持零，防止 private reclaim helping 悄悄回到热路径。
-        frontier_worker_counts_ok &=
-            result.frontier_initial_loads == 0 &&
-            result.frontier_updates == 0 &&
-            result.frontier_terminal_loads == 0;
-#else
         const uint64_t worker_kernel_completions = result.kernel_counts[0] + result.kernel_counts[1] +
                                                    result.kernel_counts[2] + result.kernel_counts[3];
         const uint64_t worker_completions = result.wins[0] + worker_kernel_completions;
         frontier_worker_counts_ok &= result.frontier_initial_loads == worker_completions;
         frontier_worker_counts_ok &= result.frontier_terminal_loads == result.frontier_initial_loads;
-#endif
 #if PTO_FDWIC_SHARED_MAP
         // shared SlotReady 会永久移除已观察为 ready 的本核私有 fanin
         // 前缀；完成 flag 在单轮 kernel 内单调，因此每条真实依赖
@@ -3728,20 +3695,7 @@ inline Metrics Validate(
     for (uint32_t task_id = 0; task_id < task_count; ++task_id) {
         // ready flag 和 vend 是跨核 completion 的最终外部可见状态，不能只依赖 worker 私有计数判断完成。
         ready_flags += state.tasks[task_id].flag == 1;
-#if PTO_FDWIC_SHARED_MAP
-        // 无全局 turn 时，零输出 UP 可能在任一非零 reserve 前观察到
-        // aggregate vend=0。shared 不使用该值做 heap reclaim，因此 oracle
-        // 允许 0；有实际 output reserve 的 task 仍必须发布非零 vend。
-        const SharedHostPlannedTask *planned_task =
-            shared_plan.TaskAt(task_id);
-        vend_values_ok &=
-            (planned_task != nullptr &&
-             planned_task->output_bytes == 0) ||
-            state.tasks[task_id].vend != 0;
-        vend_values_ok &= planned_task != nullptr;
-#else
         vend_values_ok &= state.tasks[task_id].vend != 0;
-#endif
         vend_values_ok &= state.tasks[task_id].vend % kOutputAlignment == 0;
     }
     const uint64_t kernel_total = kernel_counts[0] + kernel_counts[1] + kernel_counts[2] + kernel_counts[3];
@@ -3840,13 +3794,14 @@ inline Metrics Validate(
     Expect(
         heap_guards ==
 #if PTO_FDWIC_SHARED_MAP
-            0,
+            static_cast<uint64_t>(batches) +
+                static_cast<uint64_t>(group_count) * 3,
 #else
             static_cast<uint64_t>(batches) * 4,
 #endif
         kCompiledTensorMapMode == TensorMapBuildMode::Private
             ? "private heap guard count matches output winners"
-            : "shared no-wrap heap needs no private ring guard",
+            : "shared HeapGuard covers Alloc/QK/SF/PV output producers",
         &metrics
     );
     Expect(
@@ -3863,45 +3818,34 @@ inline Metrics Validate(
             : "fanin ready/failure load classification is complete",
         &metrics
     );
-#if PTO_FDWIC_SHARED_MAP
-    Expect(
-        frontier_worker_counts_ok && frontier_initial_loads == 0,
-        "shared no-wrap completion performs no frontier loads", &metrics
-    );
-    Expect(
-        frontier_terminal_loads == 0 && frontier_updates == 0,
-        "shared no-wrap completion performs no frontier helping", &metrics
-    );
-#else
     Expect(
         frontier_worker_counts_ok && frontier_initial_loads == task_count,
-        "private frontier initial loads match completed tasks", &metrics
+        "frontier initial loads match completed tasks", &metrics
     );
     Expect(
         frontier_terminal_loads == task_count && frontier_updates >= task_count,
-        "private frontier ready/update/terminal load identity is exact", &metrics
+        "frontier ready/update/terminal load identity is exact", &metrics
     );
-#endif
     Expect(duplicates == 0, "completion flags are published once", &metrics);
     Expect(ready_flags == task_count, "all task flags are ready", &metrics);
     Expect(
         vend_values_ok,
         kCompiledTensorMapMode == TensorMapBuildMode::Private
             ? "all published vend values are nonzero and aligned"
-            : "shared task vends are aligned and nonzero for output reservations",
+            : "shared task vends use nonzero aligned private-heap snapshots",
         &metrics
     );
     Expect(
         vend_progress_bounds_ok,
         kCompiledTensorMapMode == TensorMapBuildMode::Private
             ? "every task vend is within private worker heap progress bounds"
-            : "every task vend is within shared aggregate heap progress bounds",
+            : "every task vend is within deterministic shared worker heap progress bounds",
         &metrics
     );
 #if PTO_FDWIC_SHARED_MAP
     Expect(
-        state.frontier.value == -1,
-        "shared no-wrap frontier remains at its initial value", &metrics
+        state.frontier.value == static_cast<int64_t>(task_count) - 1,
+        "shared frontier reaches the final task", &metrics
     );
     Expect(
         shared_per_task_insert_completions_ok,
@@ -3929,12 +3873,12 @@ inline Metrics Validate(
         frontend_worker_counts_ok,
         kCompiledTensorMapMode == TensorMapBuildMode::Private
             ? "every private worker replays the exact eager frontend counts"
-            : "shared winner-derived heavy args and materialize counts are exact",
+            : "every shared actor replays exact eager frontend work; winner-only work follows wins",
         &metrics
     );
     const uint64_t expected_global_map_inserts =
 #if PTO_FDWIC_SHARED_MAP
-        0;
+        static_cast<uint64_t>(group_count) * 3;
 #else
         static_cast<uint64_t>(kWorkers) * batches *
         kPaCase1MapEntriesPerBatch;
@@ -3942,18 +3886,22 @@ inline Metrics Validate(
     const bool global_frontend_counts_ok =
 #if PTO_FDWIC_SHARED_MAP
         context_reads == static_cast<uint64_t>(kWorkers) * batches &&
-        views_created == static_cast<uint64_t>(group_count) * 2 &&
+        views_created ==
+            static_cast<uint64_t>(kWorkers) * group_count * 2 &&
         dynamic_create_infos ==
-            static_cast<uint64_t>(group_count) * 2 &&
-        arg_resets == static_cast<uint64_t>(group_count) * 4 &&
+            static_cast<uint64_t>(kWorkers) * group_count * 2 &&
+        arg_resets ==
+            static_cast<uint64_t>(kWorkers) * group_count * 4 &&
         tensor_args_added ==
-            static_cast<uint64_t>(batches) * 3 +
-            static_cast<uint64_t>(group_count) * 19 &&
+            static_cast<uint64_t>(kWorkers) *
+                (static_cast<uint64_t>(batches) * 3 +
+                 static_cast<uint64_t>(group_count) * 19) &&
         scalar_args_added ==
-            static_cast<uint64_t>(group_count) * 9 &&
+            static_cast<uint64_t>(kWorkers) * group_count * 9 &&
         materialized_outputs ==
-            static_cast<uint64_t>(batches) * 3 +
-            static_cast<uint64_t>(group_count) * 5 &&
+            static_cast<uint64_t>(kWorkers) *
+                (static_cast<uint64_t>(batches) * 3 +
+                 static_cast<uint64_t>(group_count) * 5) &&
         map_inserts == expected_global_map_inserts;
 #else
         context_reads == static_cast<uint64_t>(kWorkers) * batches &&
@@ -3972,7 +3920,7 @@ inline Metrics Validate(
     Expect(
         map_lookups ==
 #if PTO_FDWIC_SHARED_MAP
-            static_cast<uint64_t>(group_count) * 5 &&
+            static_cast<uint64_t>(group_count) * 13 &&
 #else
             static_cast<uint64_t>(batches) * 14 &&
 #endif
@@ -3986,35 +3934,32 @@ inline Metrics Validate(
             slot_scalar_copies ==
                 static_cast<uint64_t>(group_count) * 9 &&
             fanin_edges ==
-                static_cast<uint64_t>(group_count) * 5,
+                expected_shared_fanin_edges,
 #else
             slot_scalar_copies == static_cast<uint64_t>(batches) * 9 &&
             fanin_edges == static_cast<uint64_t>(batches) * 5,
 #endif
-        "winner-only TensorMap/symbol, slot-copy, and fanin totals are exact", &metrics
+        "winner-only TensorMap lookup, slot-copy, and fanin totals are exact", &metrics
     );
     Expect(
         shared_symbol_input_loads ==
 #if PTO_FDWIC_SHARED_MAP
-            static_cast<uint64_t>(group_count) * 5 &&
+            0 &&
 #else
             0 &&
 #endif
         shared_symbol_inout_commits ==
 #if PTO_FDWIC_SHARED_MAP
-            static_cast<uint64_t>(group_count) * 3,
+            0,
 #else
             0,
 #endif
-        "shared symbol INPUT-load / INOUT-writer-commit totals are exact", &metrics
+        "retired shared symbol counters stay zero", &metrics
     );
 #if PTO_FDWIC_SHARED_MAP
     std::printf(
-        "[SHARED_SYMBOL] published_outputs=%llu input_loads=%llu "
-        "inout_writer_commits=%llu\n",
-        static_cast<unsigned long long>(
-            shared_output_validation.published_outputs
-        ),
+        "[RETIRED_SHARED_STATE] output_cells=pristine "
+        "input_symbol_loads=%llu inout_symbol_commits=%llu\n",
         static_cast<unsigned long long>(shared_symbol_input_loads),
         static_cast<unsigned long long>(shared_symbol_inout_commits)
     );
@@ -4048,18 +3993,19 @@ inline Metrics Validate(
         final_worker_state_ok,
         kCompiledTensorMapMode == TensorMapBuildMode::Private
             ? "every private worker final heap and TensorMap state is exact"
-            : "shared worker heap snapshots are legal and TensorMap summaries are exact",
+            : "all shared workers end at the same deterministic private heap position",
         &metrics
     );
 #if PTO_FDWIC_SHARED_MAP
     Expect(
-        shared_heap_state_ok,
-        "shared heap cursors, vend sum, and shard capacity are exact",
+        retired_shared_state_pristine,
+        "retired shared heap controls and SharedOutputCell table stay pristine",
         &metrics
     );
     std::printf(
-        "[SHARED_HEAP] shard_span=%llu cursors=[",
-        static_cast<unsigned long long>(shared_heap_shard_span)
+        "[SHARED_HEAP] worker_expected_heap_next=%llu "
+        "retired_cursors=[",
+        static_cast<unsigned long long>(expected_heap_next)
     );
     for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
         std::printf(
@@ -4070,34 +4016,24 @@ inline Metrics Validate(
         );
     }
     std::printf(
-        "] cursor_sum=%llu vend=%lld expected_vend=%llu capacity_ok=%u\n",
-        static_cast<unsigned long long>(actual_shared_cursor_sum),
-        static_cast<long long>(state.shared_map.shared_heap_vend.value),
-        static_cast<unsigned long long>(expected_heap_next),
-        shared_heap_capacity_ok ? 1U : 0U
+        "] retired_vend=%lld\n",
+        static_cast<long long>(state.shared_map.shared_heap_vend.value)
     );
     Expect(
         shared_map_validation.protocol_ok &&
-            shared_map_validation.total_appends == 0 &&
-            shared_map_validation.physical_entries == 0 &&
-            shared_map_validation.logical_entries == 0 &&
-            shared_map_validation.logical_signature == 1469598103934665603ULL,
-        "shared per-task insert chain, empty ordinary ring, and writer history are exact",
+            shared_map_validation.total_appends ==
+                static_cast<uint64_t>(group_count) * 3 &&
+            shared_map_validation.physical_entries ==
+                static_cast<uint64_t>(group_count) * 3 &&
+            shared_map_validation.logical_entries ==
+                static_cast<uint64_t>(group_count) * 3,
+        "shared ordered owner publishes exactly three ordinary INOUT regions per UP",
         &metrics
     );
     Expect(
-        shared_output_heap_layout_ok &&
-            shared_output_validation.published_outputs ==
-                static_cast<uint64_t>(batches) * 3 +
-                static_cast<uint64_t>(group_count) * 5,
-        "shared fresh-output descriptors form exact non-overlapping shard coverage",
-        &metrics
-    );
-    Expect(
-        shared_output_heap_layout_ok &&
-            shared_normalized_writer_signature ==
+        shared_normalized_writer_signature ==
             expected_normalized_writer_signature,
-        "shared symbol projection matches canonical normalized writer signature",
+        "shared ordinary TensorMap latest-writer projection matches the dynamic plan",
         &metrics
     );
     std::printf(
@@ -4106,7 +4042,8 @@ inline Metrics Validate(
         "reclaim_upto=%lld "
         "region_appends=%llu region_physical=%llu region_logical=%llu "
         "region_raw_signature=%016llx normalized_writer_signature=%016llx "
-        "published_outputs=%llu normalized_projection_floor=%llu\n",
+        "expected_normalized_signature=%016llx "
+        "normalized_projection_floor=%llu\n",
         shared_plan.total_tasks,
         static_cast<long long>(
             SharedInsertTurnValueHost(state.shared_map, 0)
@@ -4149,7 +4086,7 @@ inline Metrics Validate(
             shared_normalized_writer_signature
         ),
         static_cast<unsigned long long>(
-            shared_output_validation.published_outputs
+            expected_normalized_writer_signature
         ),
         static_cast<unsigned long long>(expected_map_floor)
     );
@@ -4314,11 +4251,11 @@ inline Metrics Validate(
                 }
                 const uint64_t worker_expected =
 #if PTO_FDWIC_SHARED_MAP
-                    // 每个逻辑 task 都有 EfDrain+Claim+Submit；winner 追加
-                    // Materialize/Register/metadata/outputs/copy/flush/tail，
-                    // 非 Alloc 再追加 Fanin。Alloc 为 7 条、普通为 8 条，
-                    // 即 8*wins - alloc_wins。
-                    3 * result.submits + 8 * result.claim_wins - result.wins[0] +
+                    // 每个逻辑 task 都有 EfDrain+Materialize+Claim+Submit；
+                    // winner 再追加 Register/metadata/tail，非 Alloc 还追加
+                    // Fanin，即每核固定 4*submits，再加
+                    // 4*wins-alloc_wins。
+                    4 * result.submits + 4 * result.claim_wins - result.wins[0] +
 #else
                     6 * result.submits + 2 * result.claim_wins - result.wins[0] +
 #endif
@@ -4330,14 +4267,15 @@ inline Metrics Validate(
             }
         }
 #if PTO_FDWIC_SHARED_MAP
-        // 除三条逐 task 前端记录外：每 batch 的 Alloc winner 有 7 条；
-        // 每 group 的四个普通 winner 子区间有 32 条，四个实际 kernel
-        // 的 Kernel/Commit 有 8 条，合计 40 条。
+        // 除四条逐 task 前端记录外：每 batch 的 Alloc winner 追加
+        // Register/metadata/AllocComplete 三条；每 group 的四个普通 winner
+        // 追加 Register/metadata/Fanin/WinnerBuild 共 16 条，四个实际
+        // kernel 的 Kernel/Commit 再有 8 条，合计 24 条。
         const uint64_t expected_shared_extra_records =
-            7ULL * static_cast<uint64_t>(batches) +
-            40ULL * static_cast<uint64_t>(group_count);
+            3ULL * static_cast<uint64_t>(batches) +
+            24ULL * static_cast<uint64_t>(group_count);
         const uint64_t expected_trace_records =
-            3ULL * expected_submits +
+            4ULL * expected_submits +
             expected_shared_extra_records +
             trace_wait_records + 2 * kWorkers +
             (((state.config.trace_enabled & kTraceAtomicsEnabled) != 0)
@@ -4351,11 +4289,11 @@ inline Metrics Validate(
                  ? physical_atomic_records + 2 * kWorkers
                  : 0);
 #endif
-        // shared 每个逻辑 task 固定 EfDrain+Claim+Submit 三条，loser 没有
-        // 业务子区间；Alloc winner 追加 Materialize/Register/metadata/
-        // outputs/copy/flush/AllocComplete 七条，每个普通 winner 追加
-        // Materialize/Register/metadata/outputs/copy/flush/Fanin/
-        // WinnerBuild 八条；每组四个实际 kernel 再各有 Kernel+Commit 两条。
+        // shared 每个逻辑 task 固定 EfDrain+Materialize+Claim+Submit 四条；
+        // loser/not_attempted 没有后续业务子区间；Alloc winner 再追加
+        // Register/metadata/AllocComplete 三条，每个普通 winner 再追加
+        // Register/metadata/Fanin/WinnerBuild 四条；每组四个实际 kernel
+        // 另各有 Kernel+Commit 两条。
         // private 仍保持既有固定六条 Submit 记录。两个父 span 每核固定
         // 增加 2 条，真实等待按运行时次数加入。
         Expect(trace_shape_ok, "swimlane header and per-worker capacities are valid", &metrics);
@@ -4504,15 +4442,16 @@ inline Metrics Validate(
 #if PTO_FDWIC_SHARED_MAP
         std::printf(
             "[FAILURE_STATE] fatal=%d frontier=%lld first_not_ready=%u first_bad_vend=%u "
-            "vend_minimum=%llu vend_actual=%llu shared_heap_cursors="
-            "[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld] shared_heap_vend=%lld "
-            "shared_heap_shard_span=%llu shared_heap_capacity_ok=%d "
+            "vend_minimum=%llu vend_actual=%llu expected_worker_heap=%llu "
+            "retired_shared_heap_cursors="
+            "[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld] retired_shared_heap_vend=%lld "
             "worker_submits_min=%llu worker_submits_max=%llu incomplete_workers=%u "
             "final_occupied_workers=%u max_final_occupied=%llu\n",
             state.fatal.value, static_cast<long long>(state.frontier.value),
             first_not_ready, first_bad_vend,
             static_cast<unsigned long long>(first_bad_vend_minimum),
             static_cast<unsigned long long>(first_bad_vend_actual),
+            static_cast<unsigned long long>(expected_heap_next),
             static_cast<long long>(state.shared_map.shared_heap_cursor[0].value),
             static_cast<long long>(state.shared_map.shared_heap_cursor[1].value),
             static_cast<long long>(state.shared_map.shared_heap_cursor[2].value),
@@ -4522,8 +4461,6 @@ inline Metrics Validate(
             static_cast<long long>(state.shared_map.shared_heap_cursor[6].value),
             static_cast<long long>(state.shared_map.shared_heap_cursor[7].value),
             static_cast<long long>(state.shared_map.shared_heap_vend.value),
-            static_cast<unsigned long long>(shared_heap_shard_span),
-            shared_heap_capacity_ok ? 1 : 0,
             static_cast<unsigned long long>(min_worker_submits),
             static_cast<unsigned long long>(max_worker_submits),
             incomplete_workers, occupied_workers,

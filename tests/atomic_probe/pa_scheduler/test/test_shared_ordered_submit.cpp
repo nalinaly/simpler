@@ -604,7 +604,7 @@ bool ClaimAndInsertEvidenceMatches(
                    ) == 0;
 }
 
-bool RunLoserZeroTensorMapAccessTest() {
+bool RunLoserFinishSkipsTensorMapTest() {
     SchedulerState *state = MapSchedulerState();
     if (state == nullptr) {
         return false;
@@ -621,7 +621,8 @@ bool RunLoserZeroTensorMapAccessTest() {
     context.task_id = static_cast<int32_t>(kTask);
     context.won = false;
     context.kernel_id = -1;
-    context.shared_result.Reset(static_cast<int32_t>(kTask));
+    context.result.task_id = kTask;
+    context.result.count = 0;
     LocalStats stats{};
     const CallbackSubmitTicket ticket{
         1, kTask, -1, 0,
@@ -669,7 +670,7 @@ bool RunLoserZeroTensorMapAccessTest() {
             std::memory_order_relaxed
         ) == 0;
     std::printf(
-        "[ORDERED_SUBMIT] loser_zero_map_access=%s accesses=%llu\n",
+        "[ORDERED_SUBMIT] loser_finish_zero_map_access=%s accesses=%llu\n",
         ok ? "PASS" : "FAIL",
         static_cast<unsigned long long>(
             OrderedSubmitTestOps::shared_map_accesses.load(
@@ -811,9 +812,17 @@ bool RunInsertReleaseBeforeBuildTest() {
     }
     bool final_writers_ok = true;
     for (uint32_t slot = 0; slot < 3; ++slot) {
-        final_writers_ok &=
-            state->shared_map.shared_outputs[0]
-                .last_writer[slot].value == 16;
+        bool lookup_ok = false;
+        const TensorDesc &accumulator =
+            state->workers[0].payloads[0].tensors[slot];
+        const int32_t writer =
+            SharedLookupTensor<OrderedSubmitTestOps>(
+                state->shared_map, accumulator,
+                static_cast<int32_t>(kTaskCount),
+                static_cast<int32_t>(state->heap_window),
+                lookup_ok
+            );
+        final_writers_ok &= lookup_ok && writer == 16;
     }
 
     const bool overlap =
@@ -961,7 +970,7 @@ bool RunIndependentKernelExecutionTest() {
 }  // namespace
 
 int main() {
-    const bool loser_ok = RunLoserZeroTensorMapAccessTest();
+    const bool loser_ok = RunLoserFinishSkipsTensorMapTest();
     const bool fanin_compaction_ok =
         RunReadyFaninPrefixCompactionTest();
     const bool overlap_ok = RunInsertReleaseBeforeBuildTest();
@@ -975,7 +984,7 @@ int main() {
         return 1;
     }
     std::printf(
-        "[PASS] shared loser skips TensorMap; lookup/Build and "
+        "[PASS] shared loser finishes from local descriptors without TensorMap; lookup/Build and "
         "independent kernel execution cross prior owner Build\n"
     );
     return 0;

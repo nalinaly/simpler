@@ -411,9 +411,6 @@ struct SubmitContext {
     uint32_t register_mask;
     uint64_t output_bytes;
     TaskOutputs result;
-#if PTO_FDWIC_SHARED_MAP
-    SharedTaskOutputs shared_result;
-#endif
     int32_t fanin[kMaxFanin];
     int32_t fanin_count;
     int32_t kernel_id;
@@ -426,53 +423,24 @@ struct SubmitContext {
 };
 // SubmitContext 贯穿一次 Submit：Begin 绑定 task/payload，Materialize 填充输出与
 // register_mask，winner 收集 fanin 并构建 slot。它复刻 DistSubmitCtx 而非诊断结构。
-#if PTO_FDWIC_SHARED_MAP
-static_assert(sizeof(SubmitContext) == 408, "shared SubmitContext must match DistSubmitCtx");
-static_assert(offsetof(SubmitContext, output_bytes) == 32, "shared SubmitContext output-byte offset mismatch");
-static_assert(offsetof(SubmitContext, result) == 40, "shared SubmitContext result offset mismatch");
-static_assert(offsetof(SubmitContext, shared_result) == 312, "shared SubmitContext result-ref offset mismatch");
-static_assert(offsetof(SubmitContext, fanin) == 320, "shared SubmitContext fanin offset mismatch");
-static_assert(
-    __is_trivially_constructible(SubmitContext),
-    "shared SubmitContext must remain trivial for CCEC block-local state"
-);
-#else
 static_assert(sizeof(SubmitContext) == 400, "SubmitContext must match DistSubmitCtx");
 static_assert(offsetof(SubmitContext, output_bytes) == 32, "SubmitContext output-byte offset mismatch");
 static_assert(offsetof(SubmitContext, result) == 40, "SubmitContext result offset mismatch");
 static_assert(offsetof(SubmitContext, fanin) == 312, "SubmitContext fanin offset mismatch");
-#endif
 
-#if PTO_FDWIC_SHARED_MAP
-using PaOutputHandle = FdwicOutputRef;
-using OrchestrationTaskOutputs = SharedTaskOutputs;
-#else
 using PaOutputHandle = PA_GM TensorDesc *;
 using OrchestrationTaskOutputs = TaskOutputs;
-#endif
 
 PA_DEVICE const OrchestrationTaskOutputs &OrchestrationOutputs(const SubmitContext &context) {
-#if PTO_FDWIC_SHARED_MAP
-    return context.shared_result;
-#else
     return context.result;
-#endif
 }
 
 PA_DEVICE PaOutputHandle OutputHandleAt(const OrchestrationTaskOutputs &outputs, uint32_t index) {
-#if PTO_FDWIC_SHARED_MAP
-    return outputs.OutputRef(index);
-#else
     return index < outputs.count ? outputs.tensors[index] : nullptr;
-#endif
 }
 
 PA_DEVICE PaOutputHandle InvalidPaOutputHandle() {
-#if PTO_FDWIC_SHARED_MAP
-    return InvalidSharedOutputRef();
-#else
     return nullptr;
-#endif
 }
 
 struct OutputLayout {
@@ -483,9 +451,9 @@ struct OutputLayout {
 // 作为 HeapGuard 的 output_bytes 和本 worker heap_next 的推进量。
 static_assert(sizeof(OutputLayout) == 264, "OutputLayout must match DistOutputLayout");
 
-// 该状态保存真实 PA orchestration 在五个 Submit 之间传递的输出 handle：
-// private 为本 worker materialize payload 中的 descriptor 指针，shared 为
-// (producer_task_id, output_slot) 符号；两者经同一 facade 构建后继参数。
+// 该状态保存真实 PA orchestration 在五个 Submit 之间传递的本核 descriptor
+// 指针。private/shared 都由每个 actor 独立 Materialize；shared 的 96 份
+// descriptor 对象彼此独立，但同一 task/output 的物理 buffer 地址必须一致。
 struct PaOrchestrationState {
     TensorDesc query;
     TensorDesc key_cache;
@@ -521,19 +489,11 @@ struct PaOrchestrationState {
     PaOutputHandle sf_sum;
     PaOutputHandle pv_output;
 };
-#if PTO_FDWIC_SHARED_MAP
-static_assert(sizeof(PaOrchestrationState) == 1472, "shared PA orchestration state size changed");
-static_assert(
-    offsetof(PaOrchestrationState, accumulated_output) == 1340,
-    "shared PA output-handle offset changed"
-);
-#else
 static_assert(sizeof(PaOrchestrationState) == 1408, "private PA orchestration state size changed");
 static_assert(
     offsetof(PaOrchestrationState, accumulated_output) == 1344,
-    "private PA output-handle offset changed"
+    "PA output-handle offset changed"
 );
-#endif
 
 PA_DEVICE uint64_t ElementSize(DataType dtype) {
     // 输入 dtype 来自已通过 PA ABI 构造的 descriptor/create-info，必须落在 Count 前；
@@ -691,21 +651,11 @@ PA_DEVICE void AddGmTensor(TaskArgs &args, PA_GM const TensorDesc &tensor, Tenso
 }
 
 PA_DEVICE void AddOutputHandleTensor(TaskArgs &args, PaOutputHandle handle, TensorArgType tag) {
-#if PTO_FDWIC_SHARED_MAP
-    if (!IsValidSharedOutputRef(handle)) {
-        args.has_error = true;
-        return;
-    }
-    if (ReserveTensorArgs(args, 1)) {
-        AppendSharedOutputRef(args, handle, tag);
-    }
-#else
     if (handle == nullptr) {
         args.has_error = true;
         return;
     }
     AddGmTensor(args, *handle, tag);
-#endif
 }
 
 PA_DEVICE void AddOutput(TaskArgs &args, const TensorCreateInfo &create_info) {
@@ -1062,9 +1012,9 @@ private:
 PA_DEVICE void AcceptTaskOutputs(
     PaOrchestrationState &orch, TaskKind kind, const OrchestrationTaskOutputs &outputs
 ) {
-    // private 保存本 worker payload descriptor 指针；shared 保存
-    // (producer_task_id, output_slot) 符号。上层五阶段 orchestration 只消费
-    // PaOutputHandle，不需要在每个业务字段处分散模式宏。
+    // 每个 worker 都保存自己 payload 中的 descriptor 指针。shared 只共享
+    // TensorMap 元数据，不跨核传递 TensorDesc；确定性 Materialize 保证同一
+    // task/output 在所有 worker 上落到同一物理 buffer。
     switch (kind) {
         case TaskKind::Alloc:
             orch.accumulated_output = OutputHandleAt(outputs, 0);
@@ -1420,27 +1370,16 @@ PA_DEVICE bool SharedCreateInfoBytes(
 }
 #endif
 
-#if PTO_FDWIC_SHARED_MAP
-template <typename Ops, bool ObserveSharedAtomics = false>
-#endif
 PA_DEVICE bool MaterializeTask(
     PA_GM WorkerState &worker, uint32_t task_id, const TaskArgs &args, SubmitContext &context,
-#if PTO_FDWIC_SHARED_MAP
-    PA_GM SharedTensorMapSidecar &shared_map,
-#endif
     uint64_t heap_base, uint64_t heap_size
-#if PTO_FDWIC_SHARED_MAP
-    , TaskKind task_kind, uint32_t batch_start,
-    uint32_t group_index,
-    TraceContext *atomic_trace = nullptr,
-    WorkerResult *atomic_result = nullptr
-#endif
 ) {
     // 输入是 BeginCallbackSubmit 已绑定的 payload/context 与当前 worker.heap_next；成功输出
     // 包括本 task 的 GM TensorDesc 指针、output_bytes 和推进后的单调 heap_next。
     // 失败不得进入 slot/build 流程，由上层设置 fatal 并终止该 worker 回放。
-    // compete-first 路径在这里已完成 Claim，因此不能再把“尚未 Claim”当作
-    // 这个共用 helper 的前置条件。
+    // shared 路径在 Claim 前调用：每个 replay actor 都独立推进私有
+    // heap_next 并构造自己的 descriptor。所有 actor 使用相同 heap 基址、
+    // task 顺序和输出尺寸，因此同一 (task, output) 的物理地址完全一致。
     if (context.payload == nullptr) {
         return false;
     }
@@ -1452,19 +1391,7 @@ PA_DEVICE bool MaterializeTask(
         args.scalar_count > static_cast<int32_t>(kMaxTaskScalars) ||
         args.has_error ||
         context.result.task_id != task_id ||
-        context.result.count != 0 ||
-        context.shared_result.TaskId() != static_cast<int32_t>(task_id) ||
-        context.shared_result.Size() != FrontendTaskOutputCount(
-            task_kind
-        )) {
-        return false;
-    }
-    TaskKind expected_task_kind = TaskKind::Count;
-    if (!SharedPaTaskKindInBatch(
-            task_id, batch_start, group_index,
-            expected_task_kind
-        ) ||
-        expected_task_kind != task_kind) {
+        context.result.count != 0) {
         return false;
     }
 #endif
@@ -1494,9 +1421,9 @@ PA_DEVICE bool MaterializeTask(
         }
         if (tag != TensorArgType::Output) {
 #if PTO_FDWIC_SHARED_MAP
-            // 先把所有后续 CollectFanin/Register 可能解引用的 active ref
-            // 验证完，再允许任一 shared cursor 推进。symbol 只接受当前
-            // 已接入的 plain 形态，且 producer/slot 必须属于已声明输出。
+            // 先验证所有后续 CollectFanin/Register 会解引用的 active ref，
+            // 再推进本核 heap_next。shared 输入只能来自本核已物化的
+            // descriptor 或稳定外部 descriptor，不再接收跨核 output symbol。
             const TaskTensorRef &reference = args.tensors[index];
             if (reference.kind == TensorRefKind::LocalTensor) {
                 if (reference.pointer.local_tensor == nullptr) {
@@ -1504,31 +1431,6 @@ PA_DEVICE bool MaterializeTask(
                 }
             } else if (reference.kind == TensorRefKind::GmTensor) {
                 if (reference.pointer.gm_tensor == nullptr) {
-                    return false;
-                }
-            } else if (reference.kind == TensorRefKind::SharedOutputRef) {
-                const FdwicOutputRef output_ref =
-                    SharedOutputReference(reference);
-                if (!IsPlainSharedOutputRef(output_ref) ||
-                    output_ref.producer_task_id < 0 ||
-                    output_ref.producer_task_id >=
-                        static_cast<int32_t>(task_id) ||
-                    (tag != TensorArgType::Input &&
-                     tag != TensorArgType::Inout &&
-                     tag != TensorArgType::OutputExisting)) {
-                    return false;
-                }
-                TaskKind producer_kind = TaskKind::Count;
-                if (!SharedPaTaskKindInBatch(
-                        static_cast<uint32_t>(
-                            output_ref.producer_task_id
-                        ),
-                        batch_start, group_index, producer_kind
-                    ) ||
-                    output_ref.output_slot >=
-                        static_cast<int16_t>(
-                            FrontendTaskOutputCount(producer_kind)
-                        )) {
                     return false;
                 }
             } else {
@@ -1576,8 +1478,7 @@ PA_DEVICE bool MaterializeTask(
         layout.total_output_size += aligned_size;
     }
 #if PTO_FDWIC_SHARED_MAP
-    if (output_count > kSharedOutputMaxPerTask ||
-        output_count != context.shared_result.Size()) {
+    if (output_count > kSharedOutputMaxPerTask) {
         return false;
     }
 #else
@@ -1585,21 +1486,6 @@ PA_DEVICE bool MaterializeTask(
 #endif
 
     const uint64_t total = layout.total_output_size;
-#if PTO_FDWIC_SHARED_MAP
-    if (total != 0 &&
-        (heap_base == 0 || heap_base > UINT64_MAX - heap_size)) {
-        return false;
-    }
-    SharedHeapReservation reservation{};
-    if (!ReserveSharedOutputHeap<Ops, ObserveSharedAtomics>(
-            shared_map, task_id, total, heap_size, reservation,
-            atomic_trace, atomic_result
-        )) {
-        return false;
-    }
-    uint64_t task_base = reservation.task_base;
-    worker.heap_next = reservation.aggregate_vend;
-#else
     uint64_t task_base = FrontendAlignUp(worker.heap_next, kOutputAlignment);
     if (total > heap_size || (total != 0 && heap_base == 0)) {
         return false;
@@ -1609,7 +1495,6 @@ PA_DEVICE bool MaterializeTask(
         // 下一圈起点。heap_next 仍保持单调，不在这里取模。
         task_base = (task_base / heap_size + 1) * heap_size;
     }
-#endif
 
     uint64_t output_offset = 0;
     // 各 Output 在同一 task_base 内按参数顺序排布；result 只收集 Output，索引与
@@ -1618,11 +1503,7 @@ PA_DEVICE bool MaterializeTask(
         if ((output_mask & 1U) == 0) {
             continue;
         }
-#if PTO_FDWIC_SHARED_MAP
-        const uint64_t physical = task_base + output_offset;
-#else
         const uint64_t physical = (task_base + output_offset) % heap_size;
-#endif
         PA_GM TensorDesc &tensor = context.payload->tensors[index];
         if (!InitTensorFromCreateInfo(
                 tensor, *args.tensors[index].pointer.create_info, heap_base + physical, layout.buffer_sizes[index]
@@ -1635,9 +1516,7 @@ PA_DEVICE bool MaterializeTask(
         ++context.result.count;
         output_offset += FrontendAlignUp(layout.buffer_sizes[index], kOutputAlignment);
     }
-#if !PTO_FDWIC_SHARED_MAP
     worker.heap_next = task_base + total;
-#endif
     context.output_bytes = total;
     return true;
 }

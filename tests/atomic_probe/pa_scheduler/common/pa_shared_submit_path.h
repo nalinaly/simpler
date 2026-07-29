@@ -333,16 +333,11 @@ PA_DEVICE bool PublishSharedTaskWriterDelta(
     PA_GM SchedulerState *state, const SubmitContext &context,
     const SharedTaskWriterDelta &delta, LocalStats &stats
 ) {
-    // fresh output cell 由本 task 的唯一 Claim winner 独占，不参与
-    // ordinary/symbol 的 task-ID 串行插入。先发布 descriptor，再等待
-    // predecessor；最终 deps_prepared handoff 仍同时封口两类发布。
+    // actor-local descriptor 不需要跨核发布；该复用入口只串行提交
+    // ordinary writer 元数据，并用 deps_prepared 封口本 task 的插入。
     if (state == nullptr || !context.won || context.task_id < 0 ||
         context.task_id >= static_cast<int32_t>(kMaxTasks) ||
-        Ops::Load(&state->fatal.value) != 0 ||
-        !PublishSharedTaskOutputs<Ops>(
-            state->shared_map, context,
-            static_cast<uint32_t>(context.task_id)
-        )) {
+        Ops::Load(&state->fatal.value) != 0) {
         if (state != nullptr) {
             SetFatal<Ops>(state, stats, context.task_id);
         }
@@ -356,23 +351,11 @@ PA_DEVICE bool PublishSharedTaskWriterDelta(
             state, context.task_id, stats,
             ignored_ready_observed
         )) {
-        RollbackSharedTaskOutputs<Ops>(
-            state->shared_map.shared_outputs[
-                static_cast<uint32_t>(context.task_id)
-            ],
-            context.result.count
-        );
         return false;
     }
     if (!PublishSharedTaskWriterMetadata<Ops>(
             state, context, delta, stats
         )) {
-        RollbackSharedTaskOutputs<Ops>(
-            state->shared_map.shared_outputs[
-                static_cast<uint32_t>(context.task_id)
-            ],
-            context.result.count
-        );
         return false;
     }
     int64_t ignored_cas_observed = INT64_MIN;
@@ -380,12 +363,6 @@ PA_DEVICE bool PublishSharedTaskWriterDelta(
         state, context.task_id, stats, ignored_cas_observed
     );
     if (!inserted) {
-        RollbackSharedTaskOutputs<Ops>(
-            state->shared_map.shared_outputs[
-                static_cast<uint32_t>(context.task_id)
-            ],
-            context.result.count
-        );
         return false;
     }
     RecordCommittedSharedTaskWriterStats(delta, stats);
@@ -501,26 +478,11 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
     const int32_t function_id =
         static_cast<int32_t>(ticket.function_id);
 
-    // Claim owner 先构造 descriptor 和 writer delta；这一段不查询
-    // TensorMap，也不占用有序插入通道。
-    const uint64_t materialize_begin =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
-    BeginSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
-        pmu_context
-    );
-    const bool materialized = MaterializeTask<Ops, true>(
-        worker, task_id, args, context, state->shared_map,
-        state->heap_base, state->heap_size,
-        kind, task_meta.batch_start, task_meta.group_index,
-        &stats.trace, &stats.result
-    );
-    if (materialized) {
-        stats.result.materialized_outputs += context.result.count;
-    }
-    if (!materialized) {
-        EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
-            pmu_context
-        );
+    // 全部 actor 已在 Claim 前完成本核 Materialize。winner 只在有序段外
+    // 预计算自己的 writer delta，不再分配共享 heap、发布 TensorDesc 或
+    // 等待跨核 output cell。
+    if (context.result.task_id != task_id ||
+        context.result.count != FrontendTaskOutputCount(kind)) {
         SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
         return false;
     }
@@ -528,51 +490,16 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
     if (!PrepareSharedTaskWriterDelta(
             args, context, writer_delta
         )) {
-        EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
-            pmu_context
-        );
         SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
         return false;
     }
-#if PA_BUILD_TRACE_FREE
-    const bool task_outputs_published =
-        PublishSharedTaskOutputs<Ops>(
-            state->shared_map, context, task_id
-        );
-#else
-    uint64_t task_outputs_begin =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
-    uint64_t task_outputs_copy_begin = task_outputs_begin;
-    uint64_t task_outputs_copy_end = task_outputs_begin;
-    uint64_t task_outputs_flush_begin = task_outputs_begin;
-    uint64_t task_outputs_flush_end = task_outputs_begin;
-    const bool task_outputs_published =
-        PublishSharedTaskOutputs<Ops>(
-            state->shared_map, context, task_id, &stats,
-            &task_outputs_copy_begin, &task_outputs_copy_end,
-            &task_outputs_flush_begin, &task_outputs_flush_end
-        );
-    const uint64_t task_outputs_end =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
-#endif
-    if (!task_outputs_published) {
-        EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
-            pmu_context
-        );
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-    EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
-        pmu_context
-    );
-    const uint64_t materialize_end =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
 
     // 仅这一段全局串行：N>0 只等待 task[N-1].deps_prepared，随后插入
-    // N 的 ordinary/symbol writer 元数据，再发布 task[N].deps_prepared。
-    // fresh output descriptor 已在 Materialize 尾部按 task-cell 独占发布；
+    // N 的 ordinary writer 元数据，再发布 task[N].deps_prepared。fresh
+    // Output 依赖由本核 descriptor.owner_task_id 表达，不进入 TensorMap；
     // 空 writer 集合也必须推进，loser 完全不参与。
-    const uint64_t register_begin = materialize_end;
+    const uint64_t register_begin =
+        TraceTimestamp<Ops>(stats.trace, stats.result);
     BeginSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(
         pmu_context
     );
@@ -628,42 +555,8 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
     EndSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(
         pmu_context
     );
-    // 所有端点完成后再按业务顺序写 raw，避免写 trace 本身落入
-    // Materialize/Register 的测量区间。Materialize 的 output detail
-    // 还原独占 cell 发布；Register 只闭合 wait、writer metadata 与
-    // handoff，不逐 poll 扩张记录。
-    WriteTrace<Profile>(
-        stats.trace, stats.result, static_cast<int32_t>(task_id),
-        function_id, TracePhase::Materialize,
-        ProfilePhase::Materialize, materialize_begin,
-        materialize_end, 0,
-        kind == TaskKind::Alloc ? 1U : 0U
-    );
-#if !PA_BUILD_TRACE_FREE
-    if (task_outputs_published) {
-        WriteTrace<false>(
-            stats.trace, stats.result,
-            static_cast<int32_t>(task_id), function_id,
-            TracePhase::SharedMaterializePublishTaskOutputs,
-            ProfilePhase::Materialize, task_outputs_begin,
-            task_outputs_end
-        );
-        WriteTrace<false>(
-            stats.trace, stats.result,
-            static_cast<int32_t>(task_id), function_id,
-            TracePhase::SharedMaterializePublishTaskOutputsCopy,
-            ProfilePhase::Materialize, task_outputs_copy_begin,
-            task_outputs_copy_end
-        );
-        WriteTrace<false>(
-            stats.trace, stats.result,
-            static_cast<int32_t>(task_id), function_id,
-            TracePhase::SharedMaterializePublishTaskOutputsFlush,
-            ProfilePhase::Materialize, task_outputs_flush_begin,
-            task_outputs_flush_end
-        );
-    }
-#endif
+    // 所有端点完成后再按业务顺序写 raw，避免 trace 写入落进 Register
+    // 测量区间。Materialize 已由 Claim 前的全 actor 路径独立记录。
     WriteTrace<Profile>(
         stats.trace, stats.result, static_cast<int32_t>(task_id),
         function_id, TracePhase::Register,
@@ -700,13 +593,6 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
     }
 #endif
     if (!inserted) {
-        // output cell 虽已在串行等待前短暂可见，但完成字尚未发布；失败路径
-        // 恢复本 task 独占 cell，保留原有 fail-closed 终态。正常路径无额外
-        // rollback 分支开销。
-        RollbackSharedTaskOutputs<Ops>(
-            state->shared_map.shared_outputs[task_id],
-            context.result.count
-        );
         return false;
     }
     // Register 的业务终点已经取完，失败分支也已经退出；成功统计因此
@@ -770,6 +656,12 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
         build_begin = fanin_end;
     }
     if (kind == TaskKind::Alloc) {
+        if (!HeapGuard<Ops, Profile>(
+                state, worker, task_id,
+                context.output_bytes, stats
+            )) {
+            return false;
+        }
         CompleteTask<Ops>(state, worker, task_id, stats);
     } else if (!BuildWinner<Ops, Profile>(
                    state, worker, task_id, kind, args, context,

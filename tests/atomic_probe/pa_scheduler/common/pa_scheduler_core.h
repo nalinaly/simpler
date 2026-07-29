@@ -238,7 +238,7 @@ PA_DEVICE bool SharedPaFunctionIdMatches(
 ) {
     // Claim loser 不执行 kernel，真实 function_id 固定为 -1；winner 则
     // 必须与 ticket 中显式 kind 一致。QK/PV 的 output count 同为 1，
-    // 不能只靠 shared_result.Size() 间接校验。
+    // 不能只靠 context.result.count 间接校验。
     return function_id == (winner ? FunctionId(kind) : -1);
 }
 #endif
@@ -480,9 +480,9 @@ PA_DEVICE void CompleteTask(
     PA_GM SchedulerState *state, PA_GM WorkerState &worker, uint32_t task_id, LocalStats &stats
 ) {
     // 两种模式都先发布 vend，再经 store barrier 发布 ready flag：fanin 和
-    // slot 执行以 flag 为可见性条件，不能交换顺序。private ring 还需要
-    // 连续 frontier 做 heap reclaim；shared PA 使用有界 no-wrap shard，
-    // 依赖逐 task flag，正常完成路径不维护无消费者的全局前沿。
+    // slot 执行以 flag 为可见性条件，不能交换顺序。private/shared 现在都
+    // 使用每核确定性单调 heap_next，因此都要推进连续 frontier，供
+    // HeapGuard 判断物理 ring 的可复用前沿。
     TraceAtomicExchange<Ops>(
         stats.trace, stats.result, static_cast<int32_t>(task_id), AtomicSite::CompletionVendExchange,
         &state->tasks[task_id].vend, worker.heap_next
@@ -492,9 +492,7 @@ PA_DEVICE void CompleteTask(
         stats.trace, stats.result, static_cast<int32_t>(task_id), AtomicSite::CompletionFlagExchange,
         &state->tasks[task_id].flag, static_cast<int64_t>(1)
     );
-#if !PTO_FDWIC_SHARED_MAP
     AdvanceFrontier<Ops>(state, stats);
-#endif
 }
 
 template <typename Ops>
@@ -849,15 +847,13 @@ PA_DEVICE bool BuildWinner(
 #else
     WaitForSlot<Ops, Profile>(state, worker, task_id, stats);
 #endif
-#if !PTO_FDWIC_SHARED_MAP
-    // private heap_next 是单调 ring 坐标，必须通过 frontier/vend 防止覆盖。
-    // shared S3.2 使用有界 shard cursor 且首版禁止回绕，两种坐标不能混用。
+    // private/shared 都使用每核私有的单调 heap_next 和同一物理 ring；
+    // 只有实际执行 winner 需要在 Build 前等待旧输出解除占用。
     if (!HeapGuard<Ops, Profile>(
             state, worker, task_id, context.output_bytes, stats
         )) {
         return false;
     }
-#endif
     const int32_t slot_index = FindFreeSlot(worker);
     if (slot_index < 0) {
         SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
@@ -877,7 +873,7 @@ PA_DEVICE bool BuildWinner(
     }
     const int32_t sub_block_id = worker.lane == 2 ? 1 : 0;
 #if PTO_FDWIC_SHARED_MAP
-    BuildSlotPayload<Ops, true>(
+    BuildSlotPayload<Ops, false>(
         slot, task_id, static_cast<uint32_t>(FunctionId(kind)), 0, args, context, fanin, fanin_count,
         state->shared_map, sub_block_id
     );
@@ -2498,8 +2494,7 @@ PA_DEVICE bool PublishSharedTaskOutputs(
     uint64_t *copy_begin = nullptr, uint64_t *copy_end = nullptr,
     uint64_t *flush_begin = nullptr, uint64_t *flush_end = nullptr
 ) {
-    if (task_id >= kMaxTasks || context.shared_result.TaskId() != static_cast<int32_t>(task_id) ||
-        context.shared_result.Size() != context.result.count ||
+    if (task_id >= kMaxTasks || context.result.task_id != task_id ||
         context.result.count > kSharedOutputMaxPerTask) {
         return false;
     }
@@ -2711,8 +2706,8 @@ PA_DEVICE bool RecordSharedSplitReplayTask(
 #endif
 
 PA_DEVICE void BeginCallbackSubmit(PA_GM WorkerState &worker, SubmitContext &context) {
-    // Claim 必须先于 TaskArgs 构造，因此这里只建立与参数无关的 Submit 上下文；
-    // tensor/scalar 数量由 callback 完成后在 MaterializeTask 内写入。
+    // 为本次 Submit 绑定 worker 私有 payload。shared 会在 Claim 前由所有
+    // replay actor 构参并 Materialize；private 仍沿用既有 Claim 后流程。
     const uint32_t task_id = static_cast<uint32_t>(worker.local_index++);
     context.self = &worker;
     context.payload = &worker.payloads[task_id & kPayloadMask];
@@ -2721,9 +2716,6 @@ PA_DEVICE void BeginCallbackSubmit(PA_GM WorkerState &worker, SubmitContext &con
     context.scalar_count = 0;
     context.result.task_id = task_id;
     context.result.count = 0;
-#if PTO_FDWIC_SHARED_MAP
-    context.shared_result.Reset(static_cast<int32_t>(task_id));
-#endif
     context.register_mask = 0;
     context.output_bytes = 0;
     context.fanin_count = 0;
@@ -2747,23 +2739,8 @@ PA_DEVICE void BeginSharedCallbackSubmit(
     const uint32_t task_id =
         static_cast<uint32_t>(worker.local_index++);
     context.task_id = static_cast<int32_t>(task_id);
-    context.shared_result.Reset(static_cast<int32_t>(task_id));
 }
 
-PA_DEVICE void PrepareSharedWinnerContext(
-    PA_GM WorkerState &worker, uint32_t task_id,
-    SubmitContext &context
-) {
-    // 这些字段都只会被 shared winner 的 Materialize/Fanin/Build 消费。
-    // tensor/scalar/register/output_bytes 由 MaterializeTask 在读取前覆盖；
-    // joint 字段属于 private BlockWon 路径，shared 单 lane PA 不读取。
-    context.self = &worker;
-    context.payload =
-        &worker.payloads[task_id & kPayloadMask];
-    context.result.task_id = task_id;
-    context.result.count = 0;
-    context.fanin_count = 0;
-}
 #endif
 
 #if defined(__CCE_AICORE__) || defined(__NPU_ARCH__)
@@ -2777,9 +2754,8 @@ PA_DEVICE bool BuildCallbackSubmitArgs(
     PaOrchestrationState &orch, TaskArgs &args, uint32_t batch, LocalStats &stats
 ) {
     CallbackSubmitArgsBuilder builder(args, Kind);
-    // 外层 callback 和所有参数 thunk 都只在这一调用点同步执行。调用者决定
-    // 是否构参：private 仍全员 eager；shared 的五类 task 都只由 Claim
-    // owner 进入这里。
+    // 外层 callback 和所有参数 thunk 都只在这一调用点同步执行。private
+    // 沿用 Claim 后全员构参；shared 在 Claim 前由全部 96 个 actor 构参。
     auto callback = [&](CallbackSubmitArgsBuilder &out) PA_CALLBACK_LAMBDA_DEVICE {
         out.Begin();
         if constexpr (Kind == TaskKind::Alloc) {
@@ -2986,9 +2962,8 @@ PA_DEVICE bool FinishSharedLoserSubmit(
         !context.won &&
         context.kernel_id ==
             static_cast<int32_t>(ticket.function_id) &&
-        context.shared_result.TaskId() ==
-            static_cast<int32_t>(task_id) &&
-        context.shared_result.Size() ==
+        context.result.task_id == task_id &&
+        context.result.count ==
             FrontendTaskOutputCount(shared_task_meta.kind);
     if (!valid) {
         SetFatal<Ops>(
@@ -2997,9 +2972,9 @@ PA_DEVICE bool FinishSharedLoserSubmit(
         return false;
     }
 
-    // loser 只完成本次 Submit 的轻量收尾。TensorMap 插入、前沿等待、
-    // fanin lookup 与 Build 全部只属于 Claim owner；loser 不读取任何
-    // TensorMap 控制字，也不再等待 writer-ready 门。
+    // loser/not_attempted 已在 Claim 前完成本核 descriptor 物化，只做轻量
+    // Submit 收尾。TensorMap 插入、前沿等待、fanin lookup 与 Build 仍只
+    // 属于 Claim owner。
     return CloseSharedCallbackSubmit<Ops, Profile>(
         state, stats, ticket, shared_task_meta
     );
@@ -3408,9 +3383,9 @@ PA_DEVICE uint32_t FinishSplitCallbackSubmitFromRuntime(
                     ticket_meta.kind, ticket->won != 0,
                     static_cast<int32_t>(ticket->function_id)
                 ) &&
-                runtime.context.shared_result.TaskId() ==
-                    static_cast<int32_t>(ticket->task_id) &&
-                runtime.context.shared_result.Size() ==
+                runtime.context.result.task_id ==
+                    ticket->task_id &&
+                runtime.context.result.count ==
                     FrontendTaskOutputCount(ticket_meta.kind);
         }
 #else
@@ -3464,11 +3439,7 @@ PA_DEVICE bool SubmitCallbackTask(
     uint32_t shared_task_offset
 #endif
 ) {
-#if PTO_FDWIC_SHARED_MAP
-    BeginSharedCallbackSubmit(worker, context);
-#else
     BeginCallbackSubmit(worker, context);
-#endif
     const uint32_t task_id = static_cast<uint32_t>(context.task_id);
 #if PTO_FDWIC_SHARED_MAP
     SharedPaPlannedTask shared_planned_task{};
@@ -3519,7 +3490,45 @@ PA_DEVICE bool SubmitCallbackTask(
         TracePhase::EfDrain, ProfilePhase::EfDrain, efdrain_begin, efdrain_end
     );
 
+#if PTO_FDWIC_SHARED_MAP
+    // shared 的 descriptor 是 actor-local 状态，不能等 Claim 后只让 winner
+    // 构造。全部 actor 先以相同 task/shape 顺序推进私有 heap_next；这样
+    // loser/not_attempted 返回的 handle 也能直接供后续 task 构参。
+    if (!BuildCallbackSubmitArgs<Kind>(orch, args, batch, stats)) {
+        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
+        return false;
+    }
+    const uint64_t materialize_begin =
+        TraceTimestamp<Ops>(stats.trace, stats.result);
+    BeginSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
+        pmu_context
+    );
+    const bool materialized = MaterializeTask(
+        worker, task_id, args, context,
+        state->heap_base, state->heap_size
+    );
+    if (materialized) {
+        stats.result.materialized_outputs += context.result.count;
+    }
+    EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(
+        pmu_context
+    );
+    const uint64_t materialize_end =
+        TraceTimestamp<Ops>(stats.trace, stats.result);
+    WriteTrace<Profile>(
+        stats.trace, stats.result, static_cast<int32_t>(task_id), -1,
+        TracePhase::Materialize, ProfilePhase::Materialize,
+        materialize_begin, materialize_end, 0,
+        Kind == TaskKind::Alloc ? 1U : 0U
+    );
+    if (!materialized) {
+        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
+        return false;
+    }
+    const uint64_t claim_begin = materialize_end;
+#else
     const uint64_t claim_begin = efdrain_end;
+#endif
     BeginSubmitPmuPhase<SubmitPmuPhase::Claim, Ops>(pmu_context);
     const ClaimOutcome claim = Claim<Ops>(state, worker, task_id, Kind, stats);
     context.won = claim.won;
@@ -3535,28 +3544,10 @@ PA_DEVICE bool SubmitCallbackTask(
     );
 
 #if PTO_FDWIC_SHARED_MAP
-    // fresh Output 的返回值是 task/slot 符号，不依赖哪个 worker 获胜。
-    // 在跨 TU finish 前为所有 replay actor 建立同一句柄集，保证 loser
-    // 返回后也能继续构造本核后续 task 的输入引用。
-    if (!PrepareSharedTaskOutputs(
-            context.shared_result, static_cast<int32_t>(task_id), Kind
-        )) {
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-#endif
-#if PTO_FDWIC_SHARED_MAP
     if (__builtin_expect(claim.won, 0)) {
-        // shared loser 已在上方声明稳定 output symbol；它不需要构造本 task
-        // 的 descriptor/scalar 参数，Alloc 也不例外。finish 的 loser
-        // 分支只闭合边界，不读这里留下的上一 task args。
-        PrepareSharedWinnerContext(
-            worker, task_id, context
-        );
-        if (!BuildCallbackSubmitArgs<Kind>(orch, args, batch, stats)) {
-            SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-            return false;
-        }
+        // Claim 前的全 actor Materialize 已经填好 context/result。winner
+        // 这里只补齐后续 fanin/build 所需字段，不重置 payload 或输出。
+        context.fanin_count = 0;
     }
 #else
     // private 保持所有 worker 对五个 task 的 eager 构参语义。

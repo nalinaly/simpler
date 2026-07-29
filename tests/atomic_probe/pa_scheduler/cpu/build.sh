@@ -142,6 +142,20 @@ else
     echo "[TEST] shared per-task insert-completion self-test"
     "$BUILD_DIR/test_shared_insert_completion"
 
+    # 新 shared 前端由 96 个 actor 在 Claim 前独立构参和 Materialize。
+    # 每核 descriptor 对象属于自己的 payload，但同一 task/output 必须
+    # 得到完全相同的物理地址；winner/loser/not_attempted 三类都覆盖。
+    echo "[BUILD] shared all-actor replay materialize self-test"
+    "$CXX_BIN" -O2 -std=c++17 -pthread -Wall -Wextra -Werror \
+        -DPTO_FDWIC_SHARED_MAP=1 \
+        -DPA_BUILD_SWIMLANE=1 \
+        -I"$ROOT_DIR/common" \
+        "$ROOT_DIR/test/test_shared_replay_materialize.cpp" \
+        -o "$BUILD_DIR/test_shared_replay_materialize"
+
+    echo "[TEST] shared all-actor replay materialize self-test"
+    "$BUILD_DIR/test_shared_replay_materialize"
+
     # host 必须从最终 SchedulerState.context_lens 独立重建 shared task
     # plan，不能复用 device helper 形成同错 oracle。该测试覆盖 G0/G1/G2/G4、
     # mixed 累计 batch_start、TaskAt 元数据、partial group 输出字节、writer
@@ -184,50 +198,6 @@ else
     echo "[TEST] shared sparse raw-trace self-test"
     "$BUILD_DIR/test_shared_sparse_trace"
 
-    # fresh-output symbol 与 region ring 是两条独立协议。该用例单独锁定
-    # descriptor 最终封口、只读 fanin、ready descriptor 直写 slot、
-    # 构建后 INOUT writer commit、失败 slot 撤销及非法引用 fail-closed，
-    # 避免只靠完整 96 线程回放偶然覆盖。
-    echo "[BUILD] shared-output symbol self-test"
-    "$CXX_BIN" -O2 -std=c++17 -Wall -Wextra -Werror -pthread \
-        -DPTO_FDWIC_SHARED_MAP=1 \
-        -DPA_BUILD_SWIMLANE=1 \
-        -I"$ROOT_DIR/common" \
-        "$ROOT_DIR/test/test_shared_output_symbols.cpp" \
-        -o "$BUILD_DIR/test_shared_output_symbols"
-
-    echo "[TEST] shared-output symbol self-test"
-    "$BUILD_DIR/test_shared_output_symbols"
-
-    # 通用 writer-intent 门槛不使用 PA TaskKind/ticket：symbol 锁定
-    # 多跳、跨 cache-line history、乱序和 partial-CAS 终止语义；
-    # ownerless ordinary region 锁定 A->B->C，并验证空 transaction 也
-    # 推进 per-task completion，旧 sidecar turn 保持 canary。
-    echo "[BUILD] generic shared writer-intent self-test"
-    "$CXX_BIN" -O2 -std=c++17 -Wall -Wextra -Werror -pthread \
-        -DPTO_FDWIC_SHARED_MAP=1 \
-        "-DPTO_FDWIC_SHARED_INSERT_TURN_GROUPS=$SHARED_INSERT_TURN_GROUPS" \
-        -DPA_BUILD_SWIMLANE=1 \
-        -I"$ROOT_DIR/common" \
-        "$ROOT_DIR/test/test_shared_writer_intent.cpp" \
-        -o "$BUILD_DIR/test_shared_writer_intent"
-
-    echo "[TEST] generic shared writer-intent self-test"
-    timeout --foreground 15s "$BUILD_DIR/test_shared_writer_intent"
-
-    # shared heap 与 region/symbol 协议分开验证：锁定 8 shard、1 KiB
-    # 对齐、首版禁止 wrap、并发唯一分配及 terminal 容量竞争不回滚。
-    echo "[BUILD] shared heap no-wrap reserve self-test"
-    "$CXX_BIN" -O2 -std=c++17 -Wall -Wextra -Werror -pthread \
-        -DPTO_FDWIC_SHARED_MAP=1 \
-        -DPA_BUILD_SWIMLANE=1 \
-        -I"$ROOT_DIR/common" \
-        "$ROOT_DIR/test/test_shared_heap_reserve.cpp" \
-        -o "$BUILD_DIR/test_shared_heap_reserve"
-
-    echo "[TEST] shared heap no-wrap reserve self-test"
-    "$BUILD_DIR/test_shared_heap_reserve"
-
     # Claim 保持原 cursor 协议：Alloc/Cube 使用 prefix 四分片，Vector
     # 使用 shared sidecar 八分片；96 worker 锁定 role 候选数、唯一
     # winner、重复 loser，并要求 Claim 不触碰 deps_prepared。
@@ -242,23 +212,9 @@ else
     echo "[TEST] shared cursor Claim self-test"
     "$BUILD_DIR/test_shared_vector_claim_cursor"
 
-    # Materialize 在触碰 shared cursor 前必须完成数量、引用、shape/stride
-    # 和地址区间预检；这些 reserve 前拒绝路径不能推进 heap。FetchAdd 后
-    # 才暴露的容量竞争则按 terminal 契约保留 overrun 现场。
-    echo "[BUILD] shared winner materialize self-test"
-    "$CXX_BIN" -O2 -std=c++17 -Wall -Wextra -Werror \
-        -DPTO_FDWIC_SHARED_MAP=1 \
-        -DPA_BUILD_SWIMLANE=1 \
-        -I"$ROOT_DIR/common" \
-        "$ROOT_DIR/test/test_shared_materialize.cpp" \
-        -o "$BUILD_DIR/test_shared_materialize"
-
-    echo "[TEST] shared winner materialize self-test"
-    "$BUILD_DIR/test_shared_materialize"
-
     # 完整 96-worker Submit 逐 task 计数 cursor Claim、前驱 completion
-    # load 和本 task completion CAS；同时锁定 loser 零 map 访问、旧
-    # sidecar turn 零触碰，以及 lookup/Build/执行仍可跨前任 Build。
+    # load 和本 task completion CAS；同时锁定 loser Finish 不访问 map、
+    # INOUT ordinary writer 正确，以及 lookup/Build/执行仍可跨前任 Build。
     echo "[BUILD] shared ordered-insert Submit self-test"
     "$CXX_BIN" -O2 -std=c++17 -pthread -Wall -Wextra -Werror \
         -DPTO_FDWIC_SHARED_MAP=1 \

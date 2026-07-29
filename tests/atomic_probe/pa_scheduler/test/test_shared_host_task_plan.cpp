@@ -611,6 +611,7 @@ int main() {
         DependencyEdgeSignatureHost(13, 12) ^
         DependencyEdgeSignatureHost(14, 12) ^
         DependencyEdgeSignatureHost(14, 13) ^
+        DependencyEdgeSignatureHost(14, 6) ^
         DependencyEdgeSignatureHost(14, 10) ^
         DependencyEdgeSignatureHost(17, 16) ^
         DependencyEdgeSignatureHost(18, 17) ^
@@ -621,21 +622,25 @@ int main() {
         DependencyEdgeSignatureHost(22, 21) ^
         DependencyEdgeSignatureHost(23, 21) ^
         DependencyEdgeSignatureHost(23, 22) ^
+        DependencyEdgeSignatureHost(23, 15) ^
         DependencyEdgeSignatureHost(23, 19) ^
         DependencyEdgeSignatureHost(25, 24) ^
         DependencyEdgeSignatureHost(26, 25) ^
         DependencyEdgeSignatureHost(27, 25) ^
         DependencyEdgeSignatureHost(27, 26) ^
+        DependencyEdgeSignatureHost(27, 15) ^
         DependencyEdgeSignatureHost(27, 23) ^
         DependencyEdgeSignatureHost(29, 28) ^
         DependencyEdgeSignatureHost(30, 29) ^
         DependencyEdgeSignatureHost(31, 29) ^
         DependencyEdgeSignatureHost(31, 30) ^
+        DependencyEdgeSignatureHost(31, 15) ^
         DependencyEdgeSignatureHost(31, 27);
     ok &= Check(
         ExpectedPaDependencySignature(mixed) ==
             expected_mixed_dependency_signature,
-        "dependency oracle chains each later UP to the previous UP writer"
+        "dependency oracle keeps the stable Alloc owner and chains each "
+        "later UP to the previous UP writer"
     );
 
     state->config.batches = 1;
