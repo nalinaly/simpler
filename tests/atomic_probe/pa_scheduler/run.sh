@@ -26,7 +26,7 @@ Usage:
   ./run.sh build-submit-pmu ccec none|claim|efdrain|materialize|register [--tensormap private|shared]
   ./run.sh submit-pmu ccec none|claim|efdrain|materialize|register [--tensormap private|shared] [benchmark options]
   ./run.sh build-shared-protocol-litmus ccec
-  ./run.sh shared-protocol-litmus ccec --scenario history|reader-reclaim|all \
+  ./run.sh shared-protocol-litmus ccec --scenario reader-reclaim \
       [--ordering compiler-clobber|payload-dependency|dsb-all|all] [--device N] [--runs N]
 
 Build identity option (consumed by run.sh and never forwarded to the benchmark):
@@ -707,7 +707,7 @@ case "$ACTION" in
     shared-protocol-litmus)
         if [[ "$BACKEND" != "ccec" ||
               "$TENSORMAP_OPTION_SEEN" -ne 0 ]]; then
-            echo "Usage: $0 shared-protocol-litmus ccec --scenario history|reader-reclaim|all [--ordering compiler-clobber|payload-dependency|dsb-all|all] [--device N] [--runs N]" >&2
+            echo "Usage: $0 shared-protocol-litmus ccec --scenario reader-reclaim [--ordering compiler-clobber|payload-dependency|dsb-all|all] [--device N] [--runs N]" >&2
             exit 1
         fi
         "$SCRIPT_DIR/ccec/shared_protocol_litmus.sh" run "$@"

@@ -204,11 +204,11 @@ COMMON_FLAGS=(
     "${VARIANT_DEFINES[@]}"
 )
 
-# 正式 shared PA entry 已实例化 ordered writer-delta 路径；reader
-# progress/reclaim 与旧 WriterIntentSet 仍只保留为隔离协议原语。构建
-# 额外对这些模板做真实后端代码生成和静态链接，分别锁定 cube/vector
-# 的 CcecOps、GM 地址空间、atomicCAS、DCCI 以及“无未解析 compiler
-# builtin”契约。probe 不加入 DEVICE_OBJECTS，
+# 正式 shared PA entry 已实例化 ordered ordinary writer-delta 路径；
+# reader progress/reclaim 仍只保留为隔离协议原语。构建额外对这些模板
+# 做真实后端代码生成和静态链接，分别锁定 cube/vector 的 CcecOps、
+# GM 地址空间、atomicCAS、DCCI 以及“无未解析 compiler builtin”契约。
+# probe 不加入 DEVICE_OBJECTS，
 # 检查后立即删除，因此不会改变正式 mixed ELF、I-cache 布局或运行性能。
 if [[ "$TENSORMAP_MODE" == "shared" ]]; then
 (

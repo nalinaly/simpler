@@ -11587,7 +11587,7 @@ loser 闭合工作，但超过新的 1% 端到端门槛，因此提交 `755397b0
 对应运行时代码不再进入待推送分支。R5k 与 R5l 均为端到端改善，继续
 保留。
 
-### 2026-07-29：新 shared Materialize 合同与 CPU 第一阶段
+### 2026-07-29：新 shared Materialize 合同与功能闭环
 
 #### 目标合同
 
@@ -11657,11 +11657,9 @@ host oracle 已同步为新合同，并使用生产代码的真实计数闭合�
   Claim 前完成构参与 Materialize；
 - 每个 worker 的 eager 构参、Materialize 次数及最终 `heap_next`
   均按动态 task plan 精确重建；
-- 每个 UP 只由有序插入 owner 发布三条 accumulator ordinary region，
-  旧 `SharedOutputCell`、symbol history 和 global shared heap 控制字
-  必须保持初始值；
-- 当前 `CollectSharedFanin<AcceptLatestWriter>` 会对所有 active Input
-  执行 ordinary lookup，因此每组 lookup 的真实计数为
+- 每个 UP 只由有序插入 owner 发布三条 accumulator ordinary region；
+- 当前 `CollectSharedFanin<Ops>` 会对所有 active Input 执行 ordinary
+  lookup，因此每组 lookup 的真实计数为
   `QK 3 + SF 1 + PV 3 + UP 6 = 13`。这不是按旧估算值反推生产逻辑；
 - G2 的第二个 UP 同时保留稳定 Alloc owner 和前一 UP writer，故两组
   fanin 为 `5 + 6 = 11`。稳定 owner 是可由上一 UP 传递的冗余边，
@@ -11678,8 +11676,8 @@ EfDrain -> Materialize -> Claim
            -> Submit
 ```
 
-旧的 `SharedMaterializePublishTaskOutputs` 及 copy/flush 明细在新 raw 中
-被明确拒绝。CPU 已完成以下动态验证，均为
+旧的 `SharedMaterializePublishTaskOutputs` 及 copy/flush 明细已经退出
+raw 合同。CPU 已完成以下动态验证，均为
 `semantic_status=PASS, postprocess_status=PASS`：
 
 | 场景 | task 数 | 最终 heap_next | ordinary region | fanin |
@@ -11689,6 +11687,58 @@ EfDrain -> Materialize -> Claim
 | B256 / G1 | 1,280 | 206,569,472 | 768 | 1,280 |
 
 B256 还验证了 96 个 worker 的 eager 前端工作量、逐 task 插入完成字、
-shared frontier/vend、ordinary TensorMap 最终 writer 投影和 retired
-shared 状态。上述结果只证明 CPU standalone 功能合同；CCEC 构建和 A5
-动态结果尚未执行，不在本阶段提前宣称。
+shared frontier/vend 和 ordinary TensorMap 最终 writer 投影。
+
+#### 第二阶段：物理删除旧 descriptor 传递协议
+
+第一阶段先切换了热路径，第二阶段再删除已经不可达的旧实现，而不是让两套
+协议长期共存：
+
+- 删除 `SharedTaskOutputs`、`SharedOutputRef`、`SharedOutputCell` 及
+  `(task_id, output_slot)` symbol 解析；
+- 删除 symbol/writer history、全局 shared heap、分片 heap cursor 和
+  descriptor copy/flush 发布链；
+- `TensorRef` 只保留 Local、GM 和 CreateInfo，shared fanin 只查询普通
+  TensorMap region；
+- writer delta 只包含 ordinary region；有序 Claim winner 发布完整
+  metadata 后再发布本 task 的插入完成字；
+- 删除 `common/pa_shared_heap.h`，以及只覆盖旧协议的
+  `test_shared_heap_reserve.cpp`、`test_shared_materialize.cpp`、
+  `test_shared_output_symbols.cpp`、`test_shared_writer_intent.cpp`；
+  shared protocol mixed ELF 同时删除 history 场景，只保留 ordinary
+  `ReaderReclaim`；
+- trace/converter/analyzer 不再要求旧 task-output publish/copy/flush
+  明细。当前 raw 中所有 replay actor 都有 Claim 前 Materialize，只有
+  Claim winner 继续产生 Register 和普通 metadata 记录。
+
+该清理把 shared 构建身份提升到 ABI generation 12。默认 CAP=128 时，
+`SharedTensorMapSidecar` 从 `12,434,560` bytes 缩减到
+`2,128,448` bytes；旧 output table、history 和 shared heap 不保留兼容
+空洞。host/device manifest、静态布局断言和 mixed ELF 必须使用同一代
+ABI，不能混用 generation 11 产物。
+
+#### CPU、CCEC 与 A5 验证结果
+
+当前功能版完成了以下分层验证：
+
+- CPU：shared 全量协议门槛、B1/G1、B1/G2、B256/G1 均通过；private
+  构建和 B1 回归也通过；
+- CCEC：shared/private 的正式 AIC/AIV entry、mixed ELF、split
+  caller/runtime/finish 及 host manifest 均构建通过；
+- shared protocol litmus：ordinary `ReaderReclaim` 的两个物理方向
+  `AIC->AIV`、`AIV->AIC`，分别使用 `compiler-clobber`、
+  `payload-dependency`、`dsb-all`，六种组合全部 PASS；
+- A5 shared B1/G1：Submit `81.873 us`，5 tasks、heap
+  `806,912`、3 ordinary regions、5 fanin，语义和后处理均 PASS；
+- A5 shared B1/G2（`context_len=8193`）：Submit `102.110 us`，
+  9 tasks、heap `829,440`、6 ordinary regions、11 fanin，语义和
+  后处理均 PASS；
+- A5 shared B256/G1：Submit `4,421.551 us`，1,280 tasks、heap
+  `206,569,472`、768 ordinary regions、1,280 fanin，73,728 次 Claim
+  和全部真计算输出均 PASS。
+
+这些结果闭合的是“全员 Claim 前确定性 Materialize + winner 有序发布普通
+TensorMap metadata”的 standalone 功能合同，尚未宣称性能优化。旧 shared
+实现约 `2.4 ms` 只能作为历史量级参考，不能与本轮不同协议、不同 ELF 的
+单次 `4.421551 ms` 直接相减。全员构参和 Materialize 的新增成本需要在后续
+冻结最终 ELF 后，通过泳道和低扰动 perf-clock 分开归因。

@@ -580,14 +580,14 @@ inline bool BuildSharedHostTaskPlan(
     return true;
 }
 
+// shared 模式现在由每个 actor 在自己的 heap 中独立 Materialize；host 仍
+// 复用原准入入口，但校验对象已从“全局八分片 heap”收敛为“单个 worker
+// 完整回放所需容量”。
 struct SharedHostHeapAdmission {
     uint64_t heap_size = 0;
-    uint64_t shard_span = 0;
     uint64_t usable_capacity = 0;
     uint64_t total_reserved_bytes = 0;
-    uint64_t reserved_bytes_by_shard[kSharedHeapShards] = {};
     uint32_t first_failed_task = UINT32_MAX;
-    uint32_t first_failed_shard = UINT32_MAX;
     bool admitted = false;
 };
 
@@ -598,7 +598,7 @@ inline bool ValidateSharedHostHeapAdmission(
 ) {
     if (admission == nullptr) {
         if (error != nullptr) {
-            *error = "null shared heap admission result";
+            *error = "null per-worker heap admission result";
         }
         return false;
     }
@@ -606,19 +606,16 @@ inline bool ValidateSharedHostHeapAdmission(
     admission->heap_size = heap_size;
     if (heap_size > static_cast<uint64_t>(INT64_MAX)) {
         if (error != nullptr) {
-            *error = "shared heap size exceeds signed atomic range";
+            *error = "per-worker heap size exceeds signed cursor range";
         }
         return false;
     }
-    admission->shard_span =
-        (heap_size / kSharedHeapShards) /
-        kOutputAlignment * kOutputAlignment;
     admission->usable_capacity =
-        admission->shard_span * kSharedHeapShards;
+        heap_size / kOutputAlignment * kOutputAlignment;
 
     if (plan.tasks.size() != plan.total_tasks) {
         if (error != nullptr) {
-            *error = "shared heap admission received an incomplete task plan";
+            *error = "per-worker heap admission received an incomplete task plan";
         }
         return false;
     }
@@ -628,7 +625,7 @@ inline bool ValidateSharedHostHeapAdmission(
             admission->first_failed_task = task.task_id;
             if (error != nullptr) {
                 *error =
-                    "shared heap admission task ids are not contiguous";
+                    "per-worker heap admission task ids are not contiguous";
             }
             return false;
         }
@@ -647,41 +644,32 @@ inline bool ValidateSharedHostHeapAdmission(
         const uint64_t reserve =
             (task.output_bytes + kOutputAlignment - 1U) /
             kOutputAlignment * kOutputAlignment;
-        const uint32_t shard =
-            task.task_id % kSharedHeapShards;
         admission->first_failed_task = task.task_id;
-        admission->first_failed_shard = shard;
         if (reserve == 0 ||
             reserve > static_cast<uint64_t>(INT64_MAX) ||
-            reserve > admission->shard_span ||
-            admission->reserved_bytes_by_shard[shard] >
-                admission->shard_span - reserve ||
+            reserve > admission->usable_capacity ||
             admission->total_reserved_bytes >
                 admission->usable_capacity - reserve ||
             admission->total_reserved_bytes >
                 static_cast<uint64_t>(INT64_MAX) - reserve) {
             if (error != nullptr) {
                 *error =
-                    "shared heap capacity exceeded before worker/device start "
-                    "at task " + std::to_string(task.task_id) +
-                    ", shard " + std::to_string(shard);
+                    "per-worker heap capacity exceeded before worker/device "
+                    "start at task " + std::to_string(task.task_id);
             }
             return false;
         }
-        admission->reserved_bytes_by_shard[shard] +=
-            reserve;
         admission->total_reserved_bytes += reserve;
     }
     if (admission->total_reserved_bytes !=
         plan.canonical_heap_bytes) {
         if (error != nullptr) {
             *error =
-                "shared heap admission disagrees with canonical plan bytes";
+                "per-worker heap admission disagrees with canonical plan bytes";
         }
         return false;
     }
     admission->first_failed_task = UINT32_MAX;
-    admission->first_failed_shard = UINT32_MAX;
     admission->admitted = true;
     return true;
 }
@@ -690,28 +678,16 @@ inline void PrintSharedHostHeapAdmission(
     const SharedHostTaskPlan &plan,
     const SharedHostHeapAdmission &admission
 ) {
-    uint64_t maximum_shard_bytes = 0;
-    for (uint32_t shard = 0;
-         shard < kSharedHeapShards; ++shard) {
-        maximum_shard_bytes = std::max(
-            maximum_shard_bytes,
-            admission.reserved_bytes_by_shard[shard]
-        );
-    }
     std::printf(
         "[HOST_HEAP_ADMISSION] batches=%u groups=%u tasks=%u "
-        "total_bytes=%llu max_shard_bytes=%llu "
-        "shard_capacity=%llu status=%s\n",
+        "per_worker_bytes=%llu per_worker_capacity=%llu status=%s\n",
         plan.batch_count, plan.total_groups,
         plan.total_tasks,
         static_cast<unsigned long long>(
             admission.total_reserved_bytes
         ),
         static_cast<unsigned long long>(
-            maximum_shard_bytes
-        ),
-        static_cast<unsigned long long>(
-            admission.shard_span
+            admission.usable_capacity
         ),
         admission.admitted ? "PASS" : "FAIL"
     );
@@ -745,25 +721,12 @@ inline void InitializeState(SchedulerState *state, const Options &options) {
     for (uint32_t slot = 0; slot < kMapCapacity; ++slot) {
         state->shared_map.slots[slot].seq.value = -1;
     }
-    // 每个 task 的 fresh Output 只在本轮使用一次，发布位与最后 writer 都用
-    // -1 表示“尚无可消费 descriptor”。TensorDesc 区已由上方 memset 清零；
-    // 不对 task_id 取模，避免在本阶段提前引入 generation 语义。
     for (uint32_t task_id = 0; task_id < kMaxTasks; ++task_id) {
         // task 表位于 production prefix，前面的 memset 会把该字段清零；
         // shared per-task 插入完成链必须用 -1 区分“尚未发布”与 task 0
         // 已完成 TensorMap writer 元数据插入。
         state->tasks[task_id].deps_prepared = -1;
-        for (uint32_t slot = 0; slot < kSharedOutputMaxPerTask; ++slot) {
-            state->shared_map.shared_outputs[task_id].published[slot].value = -1;
-            state->shared_map.shared_outputs[task_id].last_writer[slot].value = -1;
-        }
     }
-    // shared heap 允许不同 winner 并发推进分片 cursor 与 aggregate vend；
-    // 每轮仍必须从绝对零点开始，不能继承上一轮 sidecar 的终态。
-    for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        state->shared_map.shared_heap_cursor[shard].value = 0;
-    }
-    state->shared_map.shared_heap_vend.value = 0;
     // shared Claim 仍使用八条 Vector cursor；它与 per-task 插入完成链
     // 是两套独立状态，每轮都从 -1 开始。
     for (uint32_t shard = 0; shard < kSharedVectorCursorCapacity; ++shard) {
@@ -832,8 +795,9 @@ inline void ConfigureTrace(SchedulerState *state, const Options &options, const 
 }
 
 inline void InitializeTraceHeader(TraceHeader *header) {
-    // version=5 表示 shared Register 必须携带嵌套的 metadata 与 task-output
-    // detail；core state 继续携带 weighted atomic/PollBatch 计数和权威拓扑。
+    // version=5 的新 shared raw 由每个 actor 在 Claim 前记录 Materialize，
+    // winner 的 Register 只携带 metadata detail；历史 task-output
+    // copy/flush phase id 继续保留数值槽，但当前采集明确禁止发射。
     std::memset(header, 0, sizeof(*header));
     header->magic = 0x4653574cU;
     header->version = 5;
@@ -844,8 +808,8 @@ inline void InitializeTraceHeader(TraceHeader *header) {
 
 // 巨大的 WorkerState 不参与每轮 H2D/D2H。private 仍只搬前缀、控制量和
 // 结果三个既有范围；shared 额外把 results 后的 map sidecar 作为第四个
-// 独立范围搬运：private 约 2 MiB，shared 含 output/history table 约
-// 12 MiB；不能把它混入 ControlBytes/ResultBytes。
+// 独立范围搬运。新 sidecar 只比约 2 MiB 的 ordinary ring 多 Claim、
+// reader 与插入完成控制线；不能把它混入 ControlBytes/ResultBytes。
 inline constexpr size_t StatePrefixBytes() { return offsetof(SchedulerState, workers); }
 
 inline constexpr size_t ControlBytes() {
@@ -858,7 +822,7 @@ inline constexpr size_t ResultBytes() { return sizeof(WorkerResult) * kWorkers; 
 
 inline constexpr size_t SharedSidecarBytes() { return sizeof(SharedTensorMapSidecar); }
 #if PTO_FDWIC_SHARED_MAP
-static_assert(SharedSidecarBytes() == 12434560, "shared TensorMap transfer size changed");
+static_assert(SharedSidecarBytes() == 2128448, "shared TensorMap transfer size changed");
 #else
 static_assert(SharedSidecarBytes() == 2113664, "private TensorMap transfer size changed");
 #endif
@@ -2336,16 +2300,7 @@ inline SharedTensorMapValidation ValidateSharedTensorMap(
         }
     }
 
-    // symbol writer history 已退出新主协议；它与 reader_done 都必须保持
-    // 初始化值，避免旧 SharedOutputRef 路径在新实现中被意外触发。
-    const SharedWriterHistoryCell zero_history{};
-    for (uint32_t task = 0; task < kMaxTasks; ++task) {
-        const SharedWriterHistoryCell &history =
-            map.writer_history[task];
-        validation.protocol_ok &= std::memcmp(
-            &history, &zero_history, sizeof(zero_history)
-        ) == 0;
-    }
+    // reader-progress 尚未接入当前 PA 热路径，必须保持初始化值。
     for (uint32_t worker = 0; worker < kWorkers; ++worker) {
         validation.protocol_ok &=
             map.reader_done[worker].value == -1;
@@ -2442,12 +2397,7 @@ inline uint64_t ExpectedCanonicalTaskBase(uint32_t task_id) {
 }
 #endif
 
-#if PTO_FDWIC_SHARED_MAP
-inline uint64_t ExpectedSharedHeapShardSpan(uint64_t heap_size) {
-    const uint64_t raw = heap_size / kSharedHeapShards;
-    return raw / kOutputAlignment * kOutputAlignment;
-}
-#else
+#if !PTO_FDWIC_SHARED_MAP
 inline TensorDesc ExpectedCanonicalOutputDescriptor(
     uint32_t task_id, uint32_t output_slot
 ) {
@@ -2598,23 +2548,6 @@ inline TensorDesc ExpectedCanonicalOutputDescriptorForTask(
     return expected;
 }
 
-inline TensorDesc ExpectedSharedOutputDescriptorAtBase(
-    const SharedHostPlannedTask &task, uint32_t output_slot,
-    uint64_t task_base
-) {
-    TensorDesc expected =
-        ExpectedCanonicalOutputDescriptorForTask(
-            task.task_id, output_slot, task.kind,
-            task.group_block_count,
-            task.canonical_task_base
-        );
-    const uint64_t output_offset =
-        expected.buffer_addr - kSyntheticHeapBase -
-        task.canonical_task_base;
-    expected.buffer_addr =
-        kSyntheticHeapBase + task_base + output_offset;
-    return expected;
-}
 #endif
 
 inline bool TensorDescFieldsMatch(
@@ -2643,222 +2576,6 @@ inline bool TensorDescFieldsMatch(
     }
     return true;
 }
-
-#if PTO_FDWIC_SHARED_MAP
-struct SharedOutputValidation {
-    bool protocol_ok = true;
-    uint64_t published_outputs = 0;
-    uint64_t allocated_bytes = 0;
-    uint64_t shard_bytes[kSharedHeapShards] = {};
-    uint32_t first_bad_task = UINT32_MAX;
-    uint32_t first_bad_slot = UINT32_MAX;
-    const char *first_bad_reason = "none";
-};
-
-struct SharedHeapInterval {
-    uint64_t begin;
-    uint64_t end;
-    uint32_t task_id;
-};
-
-inline SharedOutputValidation ValidateSharedOutputs(
-    const SharedTensorMapSidecar &map,
-    const SharedHostTaskPlan &plan,
-    uint64_t heap_size
-) {
-    SharedOutputValidation validation;
-    const auto record = [&](
-        bool condition, uint32_t task_id,
-        uint32_t slot, const char *reason
-    ) {
-        validation.protocol_ok &= condition;
-        if (!condition &&
-            validation.first_bad_task == UINT32_MAX) {
-            validation.first_bad_task = task_id;
-            validation.first_bad_slot = slot;
-            validation.first_bad_reason = reason;
-        }
-        return condition;
-    };
-    const TensorDesc zero_tensor{};
-    const uint64_t shard_span = ExpectedSharedHeapShardSpan(heap_size);
-    std::vector<SharedHeapInterval> intervals[kSharedHeapShards];
-    for (uint32_t task_id = 0; task_id < kMaxTasks; ++task_id) {
-        const SharedHostPlannedTask *task =
-            plan.TaskAt(task_id);
-        const uint32_t expected_count =
-            task == nullptr
-                ? 0
-                : ExpectedOutputCount(task->kind);
-        const SharedOutputCell &cell = map.shared_outputs[task_id];
-        uint64_t task_base = 0;
-        if (expected_count != 0) {
-            const uint64_t output_bytes = task->output_bytes;
-            const uint32_t shard = task_id % kSharedHeapShards;
-            const uint64_t shard_begin =
-                static_cast<uint64_t>(shard) * shard_span;
-            const uint64_t shard_end = shard_begin + shard_span;
-            const uint64_t address = cell.tensors[0].buffer_addr;
-            const bool address_ok =
-                address >= kSyntheticHeapBase &&
-                output_bytes != 0 &&
-                output_bytes <= shard_span;
-            if (address_ok) {
-                task_base = address - kSyntheticHeapBase;
-            }
-            const bool interval_ok =
-                address_ok &&
-                task_base % kOutputAlignment == 0 &&
-                task_base >= shard_begin &&
-                task_base <= shard_end - output_bytes;
-            record(
-                interval_ok, task_id, UINT32_MAX,
-                "task heap interval"
-            );
-            if (interval_ok) {
-                intervals[shard].push_back(
-                    {task_base, task_base + output_bytes, task_id}
-                );
-            }
-        }
-        for (uint32_t slot = 0; slot < kSharedOutputMaxPerTask; ++slot) {
-            const bool active = slot < expected_count;
-            if (!active) {
-                record(
-                    cell.published[slot].value == -1,
-                    task_id, slot, "inactive published"
-                );
-                record(
-                    cell.last_writer[slot].value == -1,
-                    task_id, slot, "inactive last_writer"
-                );
-                record(
-                    std::memcmp(
-                        &cell.tensors[slot], &zero_tensor,
-                        sizeof(zero_tensor)
-                    ) == 0,
-                    task_id, slot, "inactive descriptor"
-                );
-                continue;
-            }
-            int64_t expected_writer =
-                static_cast<int64_t>(task_id);
-            if (task->kind == TaskKind::Alloc) {
-                const SharedHostBatchPlan *batch =
-                    plan.BatchAt(task->batch);
-                if (batch == nullptr) {
-                    record(
-                        false, task_id, slot,
-                        "missing batch plan"
-                    );
-                } else if (batch->group_count != 0) {
-                    expected_writer =
-                        static_cast<int64_t>(
-                            batch->final_up_task_id
-                        );
-                }
-            }
-            record(
-                cell.published[slot].value ==
-                    static_cast<int64_t>(task_id),
-                task_id, slot, "active published"
-            );
-            record(
-                cell.last_writer[slot].value == expected_writer,
-                task_id, slot, "active last_writer"
-            );
-            const TensorDesc expected =
-                ExpectedSharedOutputDescriptorAtBase(
-                    *task, slot, task_base
-                );
-            const bool descriptor_ok =
-                TensorDescFieldsMatch(
-                    cell.tensors[slot], expected
-                );
-            if (!descriptor_ok &&
-                validation.first_bad_task == UINT32_MAX) {
-                std::printf(
-                    "[SHARED_OUTPUT_DESCRIPTOR_FAILURE] "
-                    "task=%u slot=%u actual={addr=%llu,size=%llu,"
-                    "owner=%llu,ndims=%u,shapes=%u/%u/%u/%u/%u,"
-                    "strides=%u/%u/%u/%u/%u} "
-                    "expected={addr=%llu,size=%llu,owner=%llu,"
-                    "ndims=%u,shapes=%u/%u/%u/%u/%u,"
-                    "strides=%u/%u/%u/%u/%u}\n",
-                    task_id, slot,
-                    static_cast<unsigned long long>(
-                        cell.tensors[slot].buffer_addr
-                    ),
-                    static_cast<unsigned long long>(
-                        cell.tensors[slot].buffer_size
-                    ),
-                    static_cast<unsigned long long>(
-                        cell.tensors[slot].owner_task_id
-                    ),
-                    cell.tensors[slot].ndims,
-                    cell.tensors[slot].shapes[0],
-                    cell.tensors[slot].shapes[1],
-                    cell.tensors[slot].shapes[2],
-                    cell.tensors[slot].shapes[3],
-                    cell.tensors[slot].shapes[4],
-                    cell.tensors[slot].strides[0],
-                    cell.tensors[slot].strides[1],
-                    cell.tensors[slot].strides[2],
-                    cell.tensors[slot].strides[3],
-                    cell.tensors[slot].strides[4],
-                    static_cast<unsigned long long>(
-                        expected.buffer_addr
-                    ),
-                    static_cast<unsigned long long>(
-                        expected.buffer_size
-                    ),
-                    static_cast<unsigned long long>(
-                        expected.owner_task_id
-                    ),
-                    expected.ndims,
-                    expected.shapes[0],
-                    expected.shapes[1],
-                    expected.shapes[2],
-                    expected.shapes[3],
-                    expected.shapes[4],
-                    expected.strides[0],
-                    expected.strides[1],
-                    expected.strides[2],
-                    expected.strides[3],
-                    expected.strides[4]
-                );
-            }
-            record(
-                descriptor_ok,
-                task_id, slot, "active descriptor"
-            );
-            ++validation.published_outputs;
-        }
-    }
-    for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        std::sort(
-            intervals[shard].begin(), intervals[shard].end(),
-            [](const SharedHeapInterval &left, const SharedHeapInterval &right) {
-                return left.begin < right.begin;
-            }
-        );
-        uint64_t next =
-            static_cast<uint64_t>(shard) * shard_span;
-        for (const SharedHeapInterval &interval : intervals[shard]) {
-            record(
-                interval.begin == next,
-                interval.task_id, UINT32_MAX,
-                "non-contiguous shard interval"
-            );
-            next = interval.end;
-        }
-        validation.shard_bytes[shard] =
-            next - static_cast<uint64_t>(shard) * shard_span;
-        validation.allocated_bytes += validation.shard_bytes[shard];
-    }
-    return validation;
-}
-#endif
 
 struct NormalizedWriterEntry {
     uint64_t buffer_addr;
@@ -3261,8 +2978,6 @@ inline Metrics Validate(
     uint64_t slot_scalar_copies = 0;
     uint64_t fanin_edges = 0;
     uint64_t dependency_signature = 0;
-    uint64_t shared_symbol_input_loads = 0;
-    uint64_t shared_symbol_inout_commits = 0;
     bool worker_ids[kWorkers] = {};
     uint32_t aic_count = 0;
     uint32_t aiv_count = 0;
@@ -3363,30 +3078,6 @@ inline Metrics Validate(
         ValidateSharedTensorMap(
             state.shared_map, shared_plan, state.heap_size
         );
-    // 旧 global shared heap、SharedOutputCell 和 symbol history 不再承载
-    // 正确性。仍逐项要求保持初始化值，用于发现旧协议意外回流热路径。
-    bool retired_shared_state_pristine = true;
-    for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        retired_shared_state_pristine &=
-            state.shared_map.shared_heap_cursor[shard].value == 0;
-    }
-    retired_shared_state_pristine &=
-        state.shared_map.shared_heap_vend.value == 0;
-    const TensorDesc zero_tensor{};
-    for (uint32_t task = 0; task < kMaxTasks; ++task) {
-        const SharedOutputCell &cell =
-            state.shared_map.shared_outputs[task];
-        for (uint32_t slot = 0;
-             slot < kSharedOutputMaxPerTask; ++slot) {
-            retired_shared_state_pristine &=
-                cell.published[slot].value == -1 &&
-                cell.last_writer[slot].value == -1 &&
-                std::memcmp(
-                    &cell.tensors[slot], &zero_tensor,
-                    sizeof(zero_tensor)
-                ) == 0;
-        }
-    }
     const uint64_t shared_normalized_writer_signature =
         shared_map_validation.protocol_ok
             ? SharedNormalizedWriterSignature(
@@ -3445,8 +3136,6 @@ inline Metrics Validate(
         lifecycle_timestamps_ok &= result.finish_cycle >= result.final_barrier_end;
 #endif
         dependency_signature ^= result.dependency_signature;
-        shared_symbol_input_loads += result.shared_symbol_input_loads;
-        shared_symbol_inout_commits += result.shared_symbol_inout_commits;
         first_submit = std::min(first_submit, result.submit_begin);
         last_submit = std::max(last_submit, result.submit_end);
 #if !PA_BUILD_PERF_CLOCK
@@ -3941,29 +3630,6 @@ inline Metrics Validate(
 #endif
         "winner-only TensorMap lookup, slot-copy, and fanin totals are exact", &metrics
     );
-    Expect(
-        shared_symbol_input_loads ==
-#if PTO_FDWIC_SHARED_MAP
-            0 &&
-#else
-            0 &&
-#endif
-        shared_symbol_inout_commits ==
-#if PTO_FDWIC_SHARED_MAP
-            0,
-#else
-            0,
-#endif
-        "retired shared symbol counters stay zero", &metrics
-    );
-#if PTO_FDWIC_SHARED_MAP
-    std::printf(
-        "[RETIRED_SHARED_STATE] output_cells=pristine "
-        "input_symbol_loads=%llu inout_symbol_commits=%llu\n",
-        static_cast<unsigned long long>(shared_symbol_input_loads),
-        static_cast<unsigned long long>(shared_symbol_inout_commits)
-    );
-#endif
     const uint64_t expected_dependency_signature =
 #if PTO_FDWIC_SHARED_MAP
         ExpectedPaDependencySignature(shared_plan);
@@ -3997,27 +3663,9 @@ inline Metrics Validate(
         &metrics
     );
 #if PTO_FDWIC_SHARED_MAP
-    Expect(
-        retired_shared_state_pristine,
-        "retired shared heap controls and SharedOutputCell table stay pristine",
-        &metrics
-    );
     std::printf(
-        "[SHARED_HEAP] worker_expected_heap_next=%llu "
-        "retired_cursors=[",
+        "[WORKER_HEAP] expected_heap_next=%llu\n",
         static_cast<unsigned long long>(expected_heap_next)
-    );
-    for (uint32_t shard = 0; shard < kSharedHeapShards; ++shard) {
-        std::printf(
-            "%s%lld", shard == 0 ? "" : ",",
-            static_cast<long long>(
-                state.shared_map.shared_heap_cursor[shard].value
-            )
-        );
-    }
-    std::printf(
-        "] retired_vend=%lld\n",
-        static_cast<long long>(state.shared_map.shared_heap_vend.value)
     );
     Expect(
         shared_map_validation.protocol_ok &&
@@ -4443,8 +4091,6 @@ inline Metrics Validate(
         std::printf(
             "[FAILURE_STATE] fatal=%d frontier=%lld first_not_ready=%u first_bad_vend=%u "
             "vend_minimum=%llu vend_actual=%llu expected_worker_heap=%llu "
-            "retired_shared_heap_cursors="
-            "[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld] retired_shared_heap_vend=%lld "
             "worker_submits_min=%llu worker_submits_max=%llu incomplete_workers=%u "
             "final_occupied_workers=%u max_final_occupied=%llu\n",
             state.fatal.value, static_cast<long long>(state.frontier.value),
@@ -4452,15 +4098,6 @@ inline Metrics Validate(
             static_cast<unsigned long long>(first_bad_vend_minimum),
             static_cast<unsigned long long>(first_bad_vend_actual),
             static_cast<unsigned long long>(expected_heap_next),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[0].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[1].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[2].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[3].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[4].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[5].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[6].value),
-            static_cast<long long>(state.shared_map.shared_heap_cursor[7].value),
-            static_cast<long long>(state.shared_map.shared_heap_vend.value),
             static_cast<unsigned long long>(min_worker_submits),
             static_cast<unsigned long long>(max_worker_submits),
             incomplete_workers, occupied_workers,

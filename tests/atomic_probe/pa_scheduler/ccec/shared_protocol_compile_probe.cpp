@@ -19,19 +19,10 @@
 #include "../common/pa_scheduler_core.h"
 #include "ccec_ops.h"
 
-// 该 TU 只做 shared 通用协议的设备编译器显式实例化，不参与最终 mixed
-// ELF。它同时锁定 writer-intent 与 reader-progress/reclaim 使用的 CAS、
-// DCCI、GM 地址空间和引用签名，避免普通 PA kernel 尚未接线时只解析模板
-// 定义、却从未生成真实 AIC/AIV 代码。
-template pa_scheduler::SharedWriterIntentResult
-pa_scheduler::PrepareSharedWriterIntentSet<
-    pa_scheduler_ccec::CcecOps>(
-    __gm__ pa_scheduler::SchedulerState *,
-    const pa_scheduler::TaskArgs &,
-    pa_scheduler::SubmitContext &,
-    pa_scheduler::LocalStats &
-);
-
+// 该 TU 只做 ordinary-region reader-progress/reclaim 协议的设备编译器
+// 显式实例化，不参与最终 mixed ELF。它锁定 CAS、DCCI、GM 地址空间和
+// 引用签名，避免普通 PA kernel 尚未接线时只解析模板定义、却从未生成
+// 真实 AIC/AIV 代码。
 template bool pa_scheduler::SharedAdvanceReaderDone<
     pa_scheduler_ccec::CcecOps>(
     __gm__ pa_scheduler::SharedTensorMapSidecar &,

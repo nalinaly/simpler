@@ -96,11 +96,11 @@ constexpr TensorMapBuildMode kCompiledTensorMapMode =
     static_cast<TensorMapBuildMode>(PTO_FDWIC_SHARED_MAP);
 constexpr uint32_t kBuildIdentityMagic = 0x50414249U;  // "PABI"
 #if PTO_FDWIC_SHARED_MAP
-constexpr uint32_t kBuildIdentityAbiGeneration = 11;
+constexpr uint32_t kBuildIdentityAbiGeneration = 12;
 #else
 constexpr uint32_t kBuildIdentityAbiGeneration = 4;
 #endif
-// 默认 CAP=128 时，private 保留历史 ABI 值；shared generation 11 另把
+// 默认 CAP=128 时，private 保留历史 ABI 值；shared generation 12 另把
 // active insert-turn G 编入低位。这样既避免 private AIC/AIV 入口因身份
 // 元数据多一条大立即数构造，也让 manifest v3 和 host/device 握手共同
 // 拒绝不同 G 的 shared 混件。非默认隔离变体继续把 CAP 编进 ABI。
@@ -149,7 +149,7 @@ constexpr uint32_t kTasksPerBatch = 5;
 constexpr uint32_t kSharedPaMaxBlockGroups = 4;
 constexpr uint32_t kSharedPaMaxTasksPerBatch =
     1U + 4U * kSharedPaMaxBlockGroups;
-// 保留现有 4,352-task output/history 物理布局；它既覆盖原 256 batch
+// 保留 4,352-task 的计划与 TaskCell 容量；它既覆盖原 256 batch
 // 的 PA-G4 最坏计划，也覆盖新增 512 batch 的默认 PA-G1 计划。
 // 512 batch 的多 group 计划若超过该总量，会由 host/device plan
 // 在触碰共享状态前 fail closed。
@@ -186,9 +186,6 @@ static_assert(
     kSharedVectorCursorShards <= kSharedVectorCursorCapacity,
     "active shared Vector shards exceed physical capacity"
 );
-// shared 输出 heap 按 task_id 固定分成 8 个物理 shard。首版只做有界
-// 绝对递增分配，不在 shard 内回绕；该常量同时属于 host 地址 oracle。
-constexpr uint32_t kSharedHeapShards = 8;
 constexpr uint32_t kSharedInsertTurnCapacity = 128;
 constexpr uint32_t kSharedInsertTurnGroups =
     static_cast<uint32_t>(
@@ -223,7 +220,13 @@ constexpr uint64_t kOutputAlignment = 1024;
 constexpr uint32_t kMaxTensorDims = 5;
 constexpr uint32_t kMaxTaskTensors = 32;
 constexpr uint32_t kMaxTaskScalars = 16;
+// shared 本地 TaskOutputs 的 PA 业务上限；它不再用于寻址任何全局
+// SharedOutputCell，实际 descriptor 始终留在各 worker 私有 payload 中。
 constexpr uint32_t kSharedOutputMaxPerTask = 8;
+static_assert(
+    kSharedOutputMaxPerTask <= kMaxTaskTensors,
+    "shared local output bound exceeds the task tensor capacity"
+);
 constexpr uint32_t kPayloadSlots = 2048;
 constexpr uint32_t kPayloadMask = kPayloadSlots - 1;
 constexpr uint32_t kPayloadStride = 4096;
@@ -556,13 +559,10 @@ enum class TracePhase : int32_t {
     // 等待 insert turn 和把 turn 交给 N+1 的两段由父/子端点离线还原，
     // 避免为每个 winner 再扩张两条 raw 记录，更不能逐 poll 记录。
     SharedRegisterPublishMetadata = 20,
-    // Materialize 尾部精确包住 fresh shared-output cell 的预检、writer
-    // 预留、descriptor flush 与 published 发布。该 cell 按 task_id
-    // 独占，不进入后续 ordinary/symbol 的全局串行插入区。
+    // 21..23 是已退役 shared-output 发布明细的历史 raw 数值槽。当前
+    // shared 合同只记录全 actor 本地 Materialize，禁止发射这三种记录；
+    // 保留枚举值仅用于避免后续 phase 编号漂移。
     SharedMaterializePublishTaskOutputs = 21,
-    // PublishTaskOutputs 内再拆两层：先整批 copy descriptor，再整批
-    // FlushRegion。两端点仍由正式 Materialize 调用点写 raw，通用 helper
-    // 只回传时间戳，不自行 WriteTrace。
     SharedMaterializePublishTaskOutputsCopy = 22,
     SharedMaterializePublishTaskOutputsFlush = 23,
     Count = 24,
@@ -586,8 +586,9 @@ enum class AtomicSite : uint32_t {
     HeapVendLoad = 12,
     ReplayDoneIncrement = 13,
     ReplayDonePoll = 14,
-    // shared heap 的预检 load 与两个返回型 FetchAdd 必须分开：前者只读
-    // 全局/分片控制字，后者的旧值直接决定本 task 的物理区间。
+    // 15..18 是已退役 global shared heap 协议的历史 raw 数值槽。当前
+    // shared 由每个 actor 独立推进本核 heap_next，不再发射这些 atomic；
+    // 名称与编号暂留以避免后续 site 编号漂移。
     SharedHeapVendLoad = 15,
     SharedHeapCursorLoad = 16,
     SharedHeapCursorReserve = 17,
@@ -1011,60 +1012,6 @@ struct alignas(64) SharedBucketState {
 static_assert(sizeof(SharedBucketState) == 128, "shared TensorMap bucket controls changed");
 static_assert(offsetof(SharedBucketState, tail) == 64, "shared head/tail must not share a cache line");
 
-#if PTO_FDWIC_SHARED_MAP
-// fresh Output 不再借助 region map 按地址查找，而是由
-// (producer_task_id, output_slot) 直接定位。descriptor 发布位、writer 链
-// 和不可变 descriptor 分属独立 cache line 区域，避免三种访问彼此伪共享。
-// shared 最大覆盖 256 batch × 4 block group；本轮 task_id 不复用，
-// 因此外层表直接寻址，不做取模，也不在这里提前引入 generation。
-struct alignas(64) SharedOutputCell {
-    AtomicLine published[kSharedOutputMaxPerTask];
-    AtomicLine last_writer[kSharedOutputMaxPerTask];
-    TensorDesc tensors[kSharedOutputMaxPerTask];
-};
-static_assert(sizeof(SharedOutputCell) == 2048, "shared output cell size changed");
-static_assert(alignof(SharedOutputCell) == 64, "shared output cell alignment changed");
-static_assert(offsetof(SharedOutputCell, published) == 0, "shared output publish offset mismatch");
-static_assert(offsetof(SharedOutputCell, last_writer) == 512, "shared output writer offset mismatch");
-static_assert(offsetof(SharedOutputCell, tensors) == 1024, "shared output tensor offset mismatch");
-
-// latest writer 只是正常顺序 reader 的快取；慢 reader 若在查询前遇到
-// future writer，必须沿不可变前驱链回到严格早于自己的版本。每个 writer
-// task 独占一个 history cell，record 的 writer id 由 cell 下标隐含；
-// packed key 无哈希碰撞，可还原为 fresh descriptor 的 (producer, slot)。
-constexpr uint32_t kSharedWriterHistoryMaxPerTask = kMaxTaskTensors;
-constexpr uint32_t kSharedWriterHistoryMagic = 0x57484953U;  // "WHIS"
-struct SharedWriterHistoryRecord {
-    uint32_t symbol_key;
-    int32_t previous_writer;
-};
-static_assert(sizeof(SharedWriterHistoryRecord) == 8, "shared writer-history record size changed");
-static_assert(alignof(SharedWriterHistoryRecord) == 4, "shared writer-history record alignment changed");
-
-struct alignas(64) SharedWriterHistoryCell {
-    // header 与常见的三个 PA writer record 共处首条 cache line；唯一
-    // winner 一次写回这段不可变 payload，随后各 symbol 的 last_writer
-    // CAS 才是 reader 的发布边界，不额外增加 history atomic。
-    uint32_t magic;
-    int32_t writer_task;
-    uint32_t count;
-    uint32_t reserved;
-    SharedWriterHistoryRecord entries[kSharedWriterHistoryMaxPerTask];
-    uint8_t padding[48];
-};
-static_assert(sizeof(SharedWriterHistoryCell) == 320, "shared writer-history cell size changed");
-static_assert(alignof(SharedWriterHistoryCell) == 64, "shared writer-history cell alignment changed");
-static_assert(
-    offsetof(SharedWriterHistoryCell, entries) == 16,
-    "shared writer-history entries must follow their immutable header"
-);
-static_assert(
-    kSharedOutputMaxPerTask <= 8 &&
-        kMaxTasks <= UINT32_MAX / kSharedOutputMaxPerTask,
-    "packed shared symbol key no longer fits uint32"
-);
-#endif
-
 struct alignas(64) SharedTensorMapSidecar {
     // lane 0 保留既有 committed_tasks 地址：G=1 时它仍表示下一个允许
     // 插入 writer 元数据的 task id。G>1 时它只是交错 token 的 lane 0；
@@ -1077,23 +1024,10 @@ struct alignas(64) SharedTensorMapSidecar {
     SharedBucketState buckets[kMapBuckets];
     SharedRegionSlot slots[kMapCapacity];
 #if PTO_FDWIC_SHARED_MAP
-    // 追加在既有 S2.5 region ring 之后，保持 committed/reclaim、bucket 和
-    // slot 的全部 offset 不变。容量按 shared 最坏 17 task/batch 分配；
-    // 现有 shared sidecar H2D/D2H 按 sizeof 搬运。
-    SharedOutputCell shared_outputs[kMaxTasks];
-    // shared heap 控制字继续追加在 S3.1 output table 之后。每个 shard cursor
-    // 与全局 aggregate vend 独占 cache line，避免不同 winner 的原子更新伪共享。
-    AtomicLine shared_heap_cursor[kSharedHeapShards];
-    AtomicLine shared_heap_vend;
-    // S4.14a 的 shared-only Vector Claim cursor 追加在既有 sidecar 尾部；
-    // S4.14b 只启用此前已经预留的后四条物理线。production prefix 和
-    // 已验证的 region/output/heap 字段仍不移动，且不宣称该地址与参考
-    // DistGlobal 具有相同字节 offset。
+    // shared-only Vector Claim cursor 紧跟 ordinary TensorMap ring。
+    // 旧 SharedOutputCell、writer history 和 shared global heap 已退出协议，
+    // 不保留兼容空洞；每次 shared ABI 变化均由构建身份强制配套。
     AtomicLine shared_vector_cursor[kSharedVectorCursorCapacity];
-    // 追加在全部既有字段之后，避免为通用 writer history 移动 PA 已测
-    // 热点控制字。当前 task id 在一轮内不复用，因此 history 不取模；
-    // 1.33 MiB 增量只影响启动期整块搬运，不改变 Submit 内旧字段地址。
-    SharedWriterHistoryCell writer_history[kMaxTasks];
     // ordinary reader 的完成前沿不能复用 WorkerState::local_index：后者在
     // 读取前就会推进，且 96 个字段分散在近 1 GiB 的 per-worker arena。
     // 每个 worker 独占一条连续 cache line；初值 -1，值 N 只表示该 worker
@@ -1111,10 +1045,16 @@ struct alignas(64) SharedTensorMapSidecar {
 };
 #if PTO_FDWIC_SHARED_MAP
 static_assert(
+    offsetof(SharedTensorMapSidecar, shared_vector_cursor) ==
+        offsetof(SharedTensorMapSidecar, slots) +
+            sizeof(SharedRegionSlot) * kMapCapacity,
+    "shared Vector cursors must immediately follow the ordinary slot pool"
+);
+static_assert(
     offsetof(SharedTensorMapSidecar, reader_done) ==
-        offsetof(SharedTensorMapSidecar, writer_history) +
-            sizeof(SharedWriterHistoryCell) * kMaxTasks,
-    "shared reader progress must immediately follow writer history"
+        offsetof(SharedTensorMapSidecar, shared_vector_cursor) +
+            sizeof(AtomicLine) * kSharedVectorCursorCapacity,
+    "shared reader progress must immediately follow Vector cursors"
 );
 static_assert(
     sizeof(SharedTensorMapSidecar) ==
@@ -1131,34 +1071,18 @@ static_assert(
     "extra shared insert-turn lines must follow reader progress"
 );
 #if PTO_FDWIC_TENSORMAP_RING_CAP == 128
-static_assert(sizeof(SharedTensorMapSidecar) == 12434560, "shared TensorMap sidecar size changed");
+static_assert(sizeof(SharedTensorMapSidecar) == 2128448, "shared TensorMap sidecar size changed");
 static_assert(
-    offsetof(SharedTensorMapSidecar, shared_outputs) == 2113664,
-    "shared output table offset mismatch"
-);
-static_assert(
-    offsetof(SharedTensorMapSidecar, shared_heap_cursor) == 11026560,
-    "shared heap cursor offset mismatch"
-);
-static_assert(
-    offsetof(SharedTensorMapSidecar, shared_heap_vend) == 11027072,
-    "shared heap vend offset mismatch"
-);
-static_assert(
-    offsetof(SharedTensorMapSidecar, shared_vector_cursor) == 11027136,
+    offsetof(SharedTensorMapSidecar, shared_vector_cursor) == 2113664,
     "shared Vector cursor offset mismatch"
 );
 static_assert(
-    offsetof(SharedTensorMapSidecar, writer_history) == 11027648,
-    "shared writer-history tail offset mismatch"
-);
-static_assert(
-    offsetof(SharedTensorMapSidecar, reader_done) == 12420288,
+    offsetof(SharedTensorMapSidecar, reader_done) == 2114176,
     "shared reader-progress tail offset mismatch"
 );
 static_assert(
     offsetof(SharedTensorMapSidecar, insert_turn_extra) ==
-        12426432,
+        2120320,
     "shared insert-turn tail offset mismatch"
 );
 #endif
@@ -1411,19 +1335,15 @@ struct alignas(64) WorkerResult {
     uint64_t final_barrier_begin;
     uint64_t final_barrier_release;
     uint64_t final_barrier_end;
-    // 复用原 barrier_reserved[3] 的 24B，不扩大 WorkerResult。dependency
-    // signature 继续闭合 fanin 拓扑；后两项统计 shared symbol 的
-    // last_writer INPUT load 和构建后 INOUT writer commit，private 构建
-    // 必须保持零。
+    // dependency signature 闭合 fanin 拓扑。旧 SharedOutputRef 的
+    // symbol load/commit 计数随该协议一起删除，剩余尾部由 64B 对齐填充。
     uint64_t dependency_signature;
-    uint64_t shared_symbol_input_loads;
-    uint64_t shared_symbol_inout_commits;
 #if defined(PA_COMPETE_FIRST_SPLIT_FINISH)
     // split 协议诊断独占一条 cache line。普通 CPU/AscendC 与局部 PMU
     // 构建不带这些字段，不改变它们的 WorkerResult ABI。shared 下
     // finish_calls 只统计跨 TU 的 winner Finish；task_id_sum 则由 caller
     // 统计完整逻辑 replay，二者有意采用不同粒度。
-    uint64_t compete_first_split_caller_state_address;
+    alignas(64) uint64_t compete_first_split_caller_state_address;
     uint64_t compete_first_split_finish_state_address;
     uint64_t compete_first_split_finish_calls;
     uint64_t compete_first_split_protocol_errors;
@@ -1453,12 +1373,6 @@ static_assert(offsetof(WorkerResult, pmu_vector_busy) == 776, "WorkerResult exte
 static_assert(offsetof(WorkerResult, pmu_build_variant) == 800, "WorkerResult submit-PMU offset mismatch");
 static_assert(offsetof(WorkerResult, pmu_shadow_icache_misses) == 828, "WorkerResult submit-PMU tail mismatch");
 static_assert(offsetof(WorkerResult, dependency_signature) == 872, "WorkerResult dependency signature offset mismatch");
-static_assert(offsetof(WorkerResult, shared_symbol_input_loads) == 880,
-              "WorkerResult shared symbol-load offset mismatch");
-static_assert(
-    offsetof(WorkerResult, shared_symbol_inout_commits) == 888,
-    "WorkerResult shared symbol-commit offset mismatch"
-);
 
 // 从 cube_cursor 到 workers 结束保留关键字段 offset、DistCore ABI 和生产总字节跨度，
 // 并非字段级完整镜像。RunConfig、输入 context_lens 与校验结果追加在该跨度之后，
@@ -1565,12 +1479,12 @@ static_assert(
 #if PTO_FDWIC_TENSORMAP_RING_CAP == 128
 #if defined(PA_COMPETE_FIRST_SPLIT_FINISH)
 static_assert(
-    sizeof(SchedulerState) == 1019557696,
+    sizeof(SchedulerState) == 1009251584,
     "shared split SchedulerState ABI changed"
 );
 #else
 static_assert(
-    sizeof(SchedulerState) == 1019551552,
+    sizeof(SchedulerState) == 1009245440,
     "shared non-split SchedulerState ABI changed"
 );
 #endif

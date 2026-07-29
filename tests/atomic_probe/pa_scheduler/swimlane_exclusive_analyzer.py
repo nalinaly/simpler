@@ -67,76 +67,20 @@ PRIVATE_REQUIRED_ON_EVERY_SUBMIT = (
     "Claim",
     "Register",
 )
-SHARED_REQUIRED_ON_EVERY_SUBMIT = ("EfDrain", "Claim")
-SHARED_WINNER_ONLY_PHASES = ("Materialize", "Register")
+SHARED_REQUIRED_ON_EVERY_SUBMIT = ("EfDrain", "Materialize", "Claim")
+SHARED_WINNER_ONLY_PHASES = ("Register",)
 SHARED_REGISTER_DETAIL_PHASE = "SharedRegisterPublishMetadata"
-SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE = (
-    "SharedMaterializePublishTaskOutputs"
-)
-SHARED_MATERIALIZE_OUTPUT_COPY_PHASE = (
-    "SharedMaterializePublishTaskOutputsCopy"
-)
-SHARED_MATERIALIZE_OUTPUT_FLUSH_PHASE = (
-    "SharedMaterializePublishTaskOutputsFlush"
-)
-LEGACY_SHARED_REGISTER_OUTPUT_DETAIL_PHASE = (
-    "SharedRegisterPublishTaskOutputs"
-)
-LEGACY_SHARED_REGISTER_OUTPUT_COPY_PHASE = (
-    "SharedRegisterPublishTaskOutputsCopy"
-)
-LEGACY_SHARED_REGISTER_OUTPUT_FLUSH_PHASE = (
-    "SharedRegisterPublishTaskOutputsFlush"
-)
-SHARED_OUTPUT_DETAIL_PHASES = (
-    SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE,
-    LEGACY_SHARED_REGISTER_OUTPUT_DETAIL_PHASE,
-)
-SHARED_OUTPUT_COPY_PHASES = (
-    SHARED_MATERIALIZE_OUTPUT_COPY_PHASE,
-    LEGACY_SHARED_REGISTER_OUTPUT_COPY_PHASE,
-)
-SHARED_OUTPUT_FLUSH_PHASES = (
-    SHARED_MATERIALIZE_OUTPUT_FLUSH_PHASE,
-    LEGACY_SHARED_REGISTER_OUTPUT_FLUSH_PHASE,
-)
-REGISTER_SERIAL_BREAKDOWN_METRICS = (
+REGISTER_BREAKDOWN_METRICS = (
     "parent",
     "register_wait_predecessor_insert",
     "register_publish_metadata",
     "register_publish_writer_metadata",
     "register_publish_insert_completion",
 )
-LEGACY_REGISTER_BREAKDOWN_METRICS = (
-    *REGISTER_SERIAL_BREAKDOWN_METRICS[:-1],
-    "register_publish_task_outputs",
-    "register_publish_task_outputs_copy",
-    "register_publish_task_outputs_flush",
-    "register_publish_task_outputs_residual",
-    "register_publish_metadata_epilogue",
-    "register_publish_insert_completion",
-)
-LEGACY_REGISTER_FLAT_PARTITION_METRICS = (
+REGISTER_FLAT_PARTITION_METRICS = (
     "register_wait_predecessor_insert",
     "register_publish_writer_metadata",
-    "register_publish_task_outputs",
-    "register_publish_metadata_epilogue",
     "register_publish_insert_completion",
-)
-# 报告字段保持向后兼容；新 placement 下五个 legacy output 指标严格为 0，
-# fresh-output 的非零明细只出现在 materialize_breakdown。
-REGISTER_BREAKDOWN_METRICS = LEGACY_REGISTER_BREAKDOWN_METRICS
-REGISTER_FLAT_PARTITION_METRICS = (
-    LEGACY_REGISTER_FLAT_PARTITION_METRICS
-)
-MATERIALIZE_BREAKDOWN_METRICS = (
-    "parent",
-    "materialize_before_publish_task_outputs",
-    "materialize_publish_task_outputs",
-    "materialize_publish_task_outputs_copy",
-    "materialize_publish_task_outputs_flush",
-    "materialize_publish_task_outputs_residual",
-    "materialize_after_publish_task_outputs",
 )
 ACTOR_CYCLE_METRICS = (
     "gross",
@@ -503,19 +447,8 @@ def _associate_shared_register_details(
     children_by_submit: dict[int, list[Event]],
     trace_schema_version: int,
     tensormap_mode: str,
-) -> tuple[
-    dict[int, Event],
-    dict[int, Event],
-    dict[int, Event],
-    dict[int, Event],
-    str,
-]:
-    """建立 Register→metadata 与 Materialize→outputs 的严格关联。
-
-    ``outputs_by_owner`` 以父 row index 为键。新采集的 owner 是
-    Materialize；迁移前 schema-v5 raw 的 owner 是 metadata，并通过返回的
-    ``output_placement`` 显式区分，避免把历史数据悄悄套用新口径。
-    """
+) -> dict[int, Event]:
+    """把唯一 metadata detail 关联到每个 shared winner 的 Register。"""
 
     registers = [
         child
@@ -523,289 +456,85 @@ def _associate_shared_register_details(
         for child in children
         if child.phase == "Register"
     ]
-    materializes = [
-        child
-        for children in children_by_submit.values()
-        for child in children
-        if child.phase == "Materialize"
-    ]
     details = [
         event for event in events if event.phase == SHARED_REGISTER_DETAIL_PHASE
     ]
-    output_details = [
-        event
-        for event in events
-        if event.phase in SHARED_OUTPUT_DETAIL_PHASES
-    ]
-    output_copy_details = [
-        event
-        for event in events
-        if event.phase in SHARED_OUTPUT_COPY_PHASES
-    ]
-    output_flush_details = [
-        event
-        for event in events
-        if event.phase in SHARED_OUTPUT_FLUSH_PHASES
-    ]
     if trace_schema_version != 5 or tensormap_mode != "shared":
+        if details:
+            raise ValueError(
+                f"{SHARED_REGISTER_DETAIL_PHASE} is only valid for shared "
+                "schema-v5"
+            )
+        return {}
+
+    parents_by_lane: dict[tuple[int, int], list[Event]] = defaultdict(list)
+    for parent in registers:
+        parents_by_lane[parent.lane_key].append(parent)
+    for lane_parents in parents_by_lane.values():
+        lane_parents.sort(
+            key=lambda event: (
+                event.start_cycle,
+                event.end_cycle,
+                event.row_index,
+            )
+        )
+    starts = {
+        lane_key: [event.start_cycle for event in lane_parents]
+        for lane_key, lane_parents in parents_by_lane.items()
+    }
+    detail_by_register: dict[int, Event] = {}
+    for detail in details:
+        lane_parents = parents_by_lane.get(detail.lane_key, [])
+        parent = _find_containing_parent(
+            detail,
+            lane_parents,
+            starts.get(detail.lane_key, []),
+            parent_name="Register",
+        )
+        if parent is None:
+            raise ValueError(
+                f"row {detail.row_index} {detail.phase} is outside every "
+                f"Register on core/lane {detail.lane_key}"
+            )
         if (
-            details
-            or output_details
-            or output_copy_details
-            or output_flush_details
+            detail.core_id != parent.core_id
+            or detail.lane != parent.lane
+            or detail.task_id != parent.task_id
+            or detail.function_id != parent.function_id
         ):
             raise ValueError(
-                "shared Materialize/Register details are only valid for "
-                "shared schema-v5"
+                f"row {detail.row_index} {detail.phase} identity does not "
+                f"match Register row {parent.row_index}"
             )
-        return {}, {}, {}, {}, "none"
-
-    def _associate_unique(
-        nested: Sequence[Event],
-        parents: Sequence[Event],
-        *,
-        child_name: str,
-        parent_name: str,
-    ) -> dict[int, Event]:
-        parents_by_lane: dict[tuple[int, int], list[Event]] = defaultdict(list)
-        for parent in parents:
-            parents_by_lane[parent.lane_key].append(parent)
-        for lane_parents in parents_by_lane.values():
-            lane_parents.sort(
-                key=lambda event: (
-                    event.start_cycle,
-                    event.end_cycle,
-                    event.row_index,
-                )
-            )
-        starts = {
-            lane_key: [event.start_cycle for event in lane_parents]
-            for lane_key, lane_parents in parents_by_lane.items()
-        }
-        association: dict[int, Event] = {}
-        for child in nested:
-            lane_parents = parents_by_lane.get(child.lane_key, [])
-            parent = _find_containing_parent(
-                child,
-                lane_parents,
-                starts.get(child.lane_key, []),
-                parent_name=parent_name,
-            )
-            if parent is None:
-                raise ValueError(
-                    f"row {child.row_index} {child.phase} is outside every "
-                    f"{parent_name} on core/lane {child.lane_key}"
-                )
-            if (
-                child.core_id != parent.core_id
-                or child.lane != parent.lane
-                or child.task_id != parent.task_id
-                or child.function_id != parent.function_id
-            ):
-                raise ValueError(
-                    f"row {child.row_index} {child.phase} identity does not "
-                    f"match {parent_name} row {parent.row_index}"
-                )
-            previous = association.setdefault(parent.row_index, child)
-            if previous is not child:
-                raise ValueError(
-                    f"{parent_name} row {parent.row_index} has duplicate "
-                    f"{child_name} rows {previous.row_index} and "
-                    f"{child.row_index}"
-                )
-        missing = [
-            parent.row_index
-            for parent in parents
-            if parent.row_index not in association
-        ]
-        if missing:
+        previous = detail_by_register.setdefault(parent.row_index, detail)
+        if previous is not detail:
             raise ValueError(
-                "shared schema-v5 requires exactly one "
-                f"{child_name} per {parent_name}: "
-                f"missing_parent_rows={missing[:8]}"
+                f"Register row {parent.row_index} has duplicate "
+                f"{SHARED_REGISTER_DETAIL_PHASE} rows {previous.row_index} "
+                f"and {detail.row_index}"
             )
-        if len(association) != len(parents):
-            raise AssertionError(
-                f"shared {child_name} association is not one-to-one"
-            )
-        return association
-
-    detail_by_register = _associate_unique(
-        details,
-        registers,
-        child_name=SHARED_REGISTER_DETAIL_PHASE,
-        parent_name="Register",
-    )
-
-    output_placements = {
-        (
-            "materialize"
-            if event.phase == SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE
-            else "register_legacy"
-        )
-        for event in output_details
-    }
-    if len(output_placements) != 1:
+    missing = [
+        parent.row_index
+        for parent in registers
+        if parent.row_index not in detail_by_register
+    ]
+    if missing:
         raise ValueError(
-            "shared schema-v5 capture must use one task-output placement; "
-            f"got {sorted(output_placements)}"
+            "shared schema-v5 requires exactly one "
+            f"{SHARED_REGISTER_DETAIL_PHASE} per Register: "
+            f"missing_parent_rows={missing[:8]}"
         )
-    output_placement = next(iter(output_placements))
-    output_parents = (
-        materializes if output_placement == "materialize" else details
-    )
-    output_parent_name = (
-        "Materialize"
-        if output_placement == "materialize"
-        else SHARED_REGISTER_DETAIL_PHASE
-    )
-    outputs_by_owner = _associate_unique(
-        output_details,
-        output_parents,
-        child_name=(
-            SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE
-            if output_placement == "materialize"
-            else LEGACY_SHARED_REGISTER_OUTPUT_DETAIL_PHASE
-        ),
-        parent_name=output_parent_name,
-    )
-
-    outputs_by_lane: dict[tuple[int, int], list[Event]] = defaultdict(list)
-    for output_detail in output_details:
-        outputs_by_lane[output_detail.lane_key].append(output_detail)
-    for lane_outputs in outputs_by_lane.values():
-        lane_outputs.sort(
-            key=lambda event: (event.start_cycle, event.end_cycle, event.row_index)
-        )
-    output_starts = {
-        lane_key: [event.start_cycle for event in lane_outputs]
-        for lane_key, lane_outputs in outputs_by_lane.items()
-    }
-
-    def _nest_under_outputs(
-        children: list[Event],
-        phase_name: str,
-        association: dict[int, Event],
-    ) -> None:
-        for child in children:
-            lane_outputs = outputs_by_lane.get(child.lane_key, [])
-            parent_output = _find_containing_parent(
-                child,
-                lane_outputs,
-                output_starts.get(child.lane_key, []),
-                parent_name="task-output publication",
-            )
-            if parent_output is None:
-                raise ValueError(
-                    f"row {child.row_index} {child.phase} is outside every "
-                    "task-output publication on core/lane "
-                    f"{child.lane_key}"
-                )
-            if (
-                child.core_id != parent_output.core_id
-                or child.lane != parent_output.lane
-                or child.task_id != parent_output.task_id
-                or child.function_id != parent_output.function_id
-            ):
-                raise ValueError(
-                    f"row {child.row_index} {child.phase} identity does not "
-                    "match task-output publication row "
-                    f"{parent_output.row_index}"
-                )
-            previous = association.setdefault(parent_output.row_index, child)
-            if previous is not child:
-                raise ValueError(
-                    "task-output publication row "
-                    f"{parent_output.row_index} has duplicate {phase_name} rows "
-                    f"{previous.row_index} and {child.row_index}"
-                )
-        missing = [
-            output_detail.row_index
-            for output_detail in output_details
-            if output_detail.row_index not in association
-        ]
-        if missing:
-            raise ValueError(
-                "shared schema-v5 requires exactly one "
-                f"{phase_name} per task-output publication: "
-                f"missing_output_rows={missing[:8]}"
-            )
-        if len(association) != len(output_details):
-            raise AssertionError(
-                f"shared {phase_name} association is not one-to-one"
-            )
-
-    copies_by_outputs: dict[int, Event] = {}
-    flushes_by_outputs: dict[int, Event] = {}
-    expected_copy_phase = (
-        SHARED_MATERIALIZE_OUTPUT_COPY_PHASE
-        if output_placement == "materialize"
-        else LEGACY_SHARED_REGISTER_OUTPUT_COPY_PHASE
-    )
-    expected_flush_phase = (
-        SHARED_MATERIALIZE_OUTPUT_FLUSH_PHASE
-        if output_placement == "materialize"
-        else LEGACY_SHARED_REGISTER_OUTPUT_FLUSH_PHASE
-    )
-    if any(
-        event.phase != expected_copy_phase
-        for event in output_copy_details
-    ) or any(
-        event.phase != expected_flush_phase
-        for event in output_flush_details
-    ):
-        raise ValueError(
-            "shared schema-v5 task-output parent/copy/flush phase families "
-            "must not be mixed"
-        )
-    _nest_under_outputs(
-        output_copy_details,
-        expected_copy_phase,
-        copies_by_outputs,
-    )
-    _nest_under_outputs(
-        output_flush_details,
-        expected_flush_phase,
-        flushes_by_outputs,
-    )
-    for output_row, copy_event in copies_by_outputs.items():
-        flush_event = flushes_by_outputs[output_row]
-        output_event = next(
-            event for event in output_details if event.row_index == output_row
-        )
-        if not (
-            output_event.start_cycle
-            <= copy_event.start_cycle
-            <= copy_event.end_cycle
-            == flush_event.start_cycle
-            <= flush_event.end_cycle
-            <= output_event.end_cycle
-        ):
-            raise ValueError(
-                f"task-output publication row {output_row} "
-                "copy/flush nesting is invalid"
-            )
-    return (
-        detail_by_register,
-        outputs_by_owner,
-        copies_by_outputs,
-        flushes_by_outputs,
-        output_placement,
-    )
+    return detail_by_register
 
 
 def _build_register_breakdown(
     children_by_submit: dict[int, list[Event]],
     detail_by_register: dict[int, Event],
-    outputs_by_owner: dict[int, Event],
-    copies_by_outputs: dict[int, Event],
-    flushes_by_outputs: dict[int, Event],
-    output_placement: str,
     num_cores: int,
     trace_schema_version: int,
     tensormap_mode: str,
 ) -> dict[str, Any] | None:
-    """由 raw 整数边界构造 Register 串行区排他闭合报告。"""
+    """由 Register 与 metadata 的整数边界构造串行区闭合报告。"""
 
     if trace_schema_version != 5 or tensormap_mode != "shared":
         return None
@@ -824,110 +553,30 @@ def _build_register_breakdown(
             detail = detail_by_register[parent.row_index]
             wait_cycles = detail.start_cycle - parent.start_cycle
             publish_cycles = detail.duration
-            if output_placement == "register_legacy":
-                output_detail = outputs_by_owner[detail.row_index]
-                copy_detail = copies_by_outputs[output_detail.row_index]
-                flush_detail = flushes_by_outputs[output_detail.row_index]
-                writer_metadata_cycles = (
-                    output_detail.start_cycle - detail.start_cycle
-                )
-                task_outputs_cycles = output_detail.duration
-                copy_cycles = copy_detail.duration
-                flush_cycles = flush_detail.duration
-                outputs_residual_cycles = (
-                    task_outputs_cycles - copy_cycles - flush_cycles
-                )
-                metadata_epilogue_cycles = (
-                    detail.end_cycle - output_detail.end_cycle
-                )
-            else:
-                writer_metadata_cycles = publish_cycles
-                task_outputs_cycles = 0
-                copy_cycles = 0
-                flush_cycles = 0
-                outputs_residual_cycles = 0
-                metadata_epilogue_cycles = 0
             handoff_cycles = parent.end_cycle - detail.end_cycle
-            if min(
-                wait_cycles,
-                publish_cycles,
-                writer_metadata_cycles,
-                task_outputs_cycles,
-                copy_cycles,
-                flush_cycles,
-                outputs_residual_cycles,
-                metadata_epilogue_cycles,
-                handoff_cycles,
-            ) < 0:
+            if min(wait_cycles, publish_cycles, handoff_cycles) < 0:
                 raise ValueError(
                     f"Register row {parent.row_index} internal partition has "
                     "a negative raw-cycle segment"
                 )
-            if (
-                writer_metadata_cycles
-                + task_outputs_cycles
-                + metadata_epilogue_cycles
-                != publish_cycles
-            ):
-                raise ValueError(
-                    f"{SHARED_REGISTER_DETAIL_PHASE} row {detail.row_index} "
-                    "internal partition does not close in raw cycles"
-                )
-            if (
-                copy_cycles + flush_cycles + outputs_residual_cycles
-                != task_outputs_cycles
-            ):
-                raise ValueError(
-                    "legacy Register task-output copy/flush residual does not "
-                    "close in raw cycles"
-                )
             if wait_cycles + publish_cycles + handoff_cycles != parent.duration:
                 raise ValueError(
-                    f"Register row {parent.row_index} internal partition does not "
-                    "close in raw cycles"
+                    f"Register row {parent.row_index} internal partition does "
+                    "not close in raw cycles"
                 )
             metrics["parent"] += parent.duration
             metrics["register_wait_predecessor_insert"] += wait_cycles
             metrics["register_publish_metadata"] += publish_cycles
-            metrics["register_publish_writer_metadata"] += (
-                writer_metadata_cycles
-            )
-            metrics["register_publish_task_outputs"] += task_outputs_cycles
-            metrics["register_publish_task_outputs_copy"] += copy_cycles
-            metrics["register_publish_task_outputs_flush"] += flush_cycles
-            metrics["register_publish_task_outputs_residual"] += (
-                outputs_residual_cycles
-            )
-            metrics["register_publish_metadata_epilogue"] += (
-                metadata_epilogue_cycles
-            )
+            metrics["register_publish_writer_metadata"] += publish_cycles
             metrics["register_publish_insert_completion"] += handoff_cycles
             register_count += 1
 
-        metadata_children = (
-            metrics["register_publish_writer_metadata"]
-            + metrics["register_publish_task_outputs"]
-            + metrics["register_publish_metadata_epilogue"]
-        )
         flat_children = sum(
             metrics[name] for name in REGISTER_FLAT_PARTITION_METRICS
         )
-        outputs_children = (
-            metrics["register_publish_task_outputs_copy"]
-            + metrics["register_publish_task_outputs_flush"]
-            + metrics["register_publish_task_outputs_residual"]
-        )
-        if metadata_children != metrics["register_publish_metadata"]:
-            raise ValueError(
-                f"core {core_id} aggregate metadata partition does not close"
-            )
         if flat_children != metrics["parent"]:
             raise ValueError(
                 f"core {core_id} aggregate Register partition does not close"
-            )
-        if outputs_children != metrics["register_publish_task_outputs"]:
-            raise ValueError(
-                f"core {core_id} aggregate task-outputs partition does not close"
             )
         block_id, lane, role = _standalone_topology(core_id)
         per_core.append(
@@ -945,17 +594,10 @@ def _build_register_breakdown(
                         "exact": True,
                     },
                     "metadata": {
-                        "parent_cycles": metrics[
-                            "register_publish_metadata"
+                        "parent_cycles": metrics["register_publish_metadata"],
+                        "children_cycles": metrics[
+                            "register_publish_writer_metadata"
                         ],
-                        "children_cycles": metadata_children,
-                        "exact": True,
-                    },
-                    "task_outputs": {
-                        "parent_cycles": metrics[
-                            "register_publish_task_outputs"
-                        ],
-                        "children_cycles": outputs_children,
                         "exact": True,
                     },
                 },
@@ -966,29 +608,12 @@ def _build_register_breakdown(
         metric: sum(core["metrics_cycles"][metric] for core in per_core)
         for metric in REGISTER_BREAKDOWN_METRICS
     }
-    aggregate_metadata_children = (
-        aggregate["register_publish_writer_metadata"]
-        + aggregate["register_publish_task_outputs"]
-        + aggregate["register_publish_metadata_epilogue"]
-    )
     aggregate_flat_children = sum(
         aggregate[name] for name in REGISTER_FLAT_PARTITION_METRICS
     )
-    aggregate_outputs_children = (
-        aggregate["register_publish_task_outputs_copy"]
-        + aggregate["register_publish_task_outputs_flush"]
-        + aggregate["register_publish_task_outputs_residual"]
-    )
-    if aggregate_metadata_children != aggregate["register_publish_metadata"]:
-        raise AssertionError("aggregate metadata internal partition does not close")
     if aggregate_flat_children != aggregate["parent"]:
-        raise AssertionError("aggregate Register internal partition does not close")
-    if (
-        aggregate_outputs_children
-        != aggregate["register_publish_task_outputs"]
-    ):
         raise AssertionError(
-            "aggregate task-outputs internal partition does not close"
+            "aggregate Register internal partition does not close"
         )
 
     role_statistics: dict[str, Any] = {}
@@ -1006,7 +631,10 @@ def _build_register_breakdown(
             "core_count": len(role_cores),
             "metrics": {
                 metric: _distribution(
-                    [core["metrics_cycles"][metric] for core in role_cores]
+                    [
+                        core["metrics_cycles"][metric]
+                        for core in role_cores
+                    ]
                 )
                 for metric in REGISTER_BREAKDOWN_METRICS
             },
@@ -1016,70 +644,26 @@ def _build_register_breakdown(
         "semantics": {
             "parent": "the existing exclusive Register span",
             "register_wait_predecessor_insert": (
-                "Register.start to SharedRegisterPublishMetadata.start; "
-                "task 0 enters directly, while task N waits for task N-1 to "
-                "publish its TensorMap insertion completion"
+                "Register.start to SharedRegisterPublishMetadata.start"
             ),
             "register_publish_metadata": (
-                "the SharedRegisterPublishMetadata raw parent detail"
+                "the unique SharedRegisterPublishMetadata raw detail"
             ),
             "register_publish_writer_metadata": (
-                "the serialized ordinary/symbol writer publication. In new "
-                "captures this is the complete SharedRegisterPublishMetadata "
-                "span; legacy captures end at task-output publication start"
-            ),
-            "register_publish_task_outputs": (
-                "legacy compatibility field; exactly zero when output_placement "
-                "is materialize"
-            ),
-            "register_publish_task_outputs_copy": (
-                "SharedRegisterPublishTaskOutputsCopy; batch TensorDesc copy "
-                "into shared_outputs[task].tensors[]"
-            ),
-            "register_publish_task_outputs_flush": (
-                "SharedRegisterPublishTaskOutputsFlush; FlushRegion of the "
-                "copied descriptors before StoreBarrier/published"
-            ),
-            "register_publish_task_outputs_residual": (
-                "task-outputs envelope minus copy/flush: pre-check, "
-                "last_writer FetchMax, StoreBarrier, and published Exchange"
-            ),
-            "register_publish_metadata_epilogue": (
-                "legacy compatibility field after Register-owned output "
-                "publication; exactly zero in new captures"
+                "the complete serialized ordinary writer metadata publication"
             ),
             "register_publish_insert_completion": (
-                "SharedRegisterPublishMetadata.end to Register.end; publish this "
-                "task's TensorMap insertion completion for its successor"
+                "SharedRegisterPublishMetadata.end to Register.end"
             ),
-            "raw_arithmetic": "integer cycle boundaries; merged swimlane is not read",
-            "output_placement": output_placement,
+            "raw_arithmetic": (
+                "integer cycle boundaries; merged swimlane is not read"
+            ),
             "included_in_submit_additive_totals": {
                 "parent": True,
                 SHARED_REGISTER_DETAIL_PHASE: False,
-                LEGACY_SHARED_REGISTER_OUTPUT_DETAIL_PHASE: False,
-                LEGACY_SHARED_REGISTER_OUTPUT_COPY_PHASE: False,
-                LEGACY_SHARED_REGISTER_OUTPUT_FLUSH_PHASE: False,
             },
         },
-        "event_count": {
-            "metadata": len(detail_by_register),
-            "task_outputs": (
-                len(outputs_by_owner)
-                if output_placement == "register_legacy"
-                else 0
-            ),
-            "task_outputs_copy": (
-                len(copies_by_outputs)
-                if output_placement == "register_legacy"
-                else 0
-            ),
-            "task_outputs_flush": (
-                len(flushes_by_outputs)
-                if output_placement == "register_legacy"
-                else 0
-            ),
-        },
+        "event_count": {"metadata": len(detail_by_register)},
         "aggregate_core_work": {
             "metrics_cycles": aggregate,
             "closure": {
@@ -1090,14 +674,9 @@ def _build_register_breakdown(
                 },
                 "metadata": {
                     "parent_cycles": aggregate["register_publish_metadata"],
-                    "children_cycles": aggregate_metadata_children,
-                    "exact": True,
-                },
-                "task_outputs": {
-                    "parent_cycles": aggregate[
-                        "register_publish_task_outputs"
+                    "children_cycles": aggregate[
+                        "register_publish_writer_metadata"
                     ],
-                    "children_cycles": aggregate_outputs_children,
                     "exact": True,
                 },
             },
@@ -1109,21 +688,13 @@ def _build_register_breakdown(
 
 def _build_materialize_breakdown(
     children_by_submit: dict[int, list[Event]],
-    outputs_by_owner: dict[int, Event],
-    copies_by_outputs: dict[int, Event],
-    flushes_by_outputs: dict[int, Event],
-    output_placement: str,
     num_cores: int,
     trace_schema_version: int,
     tensormap_mode: str,
 ) -> dict[str, Any] | None:
-    """闭合新路径的 Materialize→task outputs→copy/flush 两级分区。"""
+    """汇总全 actor Claim 前本地 Materialize 的普通父区间。"""
 
-    if (
-        trace_schema_version != 5
-        or tensormap_mode != "shared"
-        or output_placement != "materialize"
-    ):
+    if trace_schema_version != 5 or tensormap_mode != "shared":
         return None
 
     materializes_by_core: dict[int, list[Event]] = defaultdict(list)
@@ -1134,89 +705,9 @@ def _build_materialize_breakdown(
 
     per_core: list[dict[str, Any]] = []
     for core_id in range(num_cores):
-        metrics = {
-            name: 0 for name in MATERIALIZE_BREAKDOWN_METRICS
-        }
-        materialize_count = 0
-        for parent in materializes_by_core.get(core_id, []):
-            output = outputs_by_owner[parent.row_index]
-            copy = copies_by_outputs[output.row_index]
-            flush = flushes_by_outputs[output.row_index]
-            before_cycles = output.start_cycle - parent.start_cycle
-            output_cycles = output.duration
-            copy_cycles = copy.duration
-            flush_cycles = flush.duration
-            output_residual_cycles = (
-                output_cycles - copy_cycles - flush_cycles
-            )
-            after_cycles = parent.end_cycle - output.end_cycle
-            if min(
-                before_cycles,
-                output_cycles,
-                copy_cycles,
-                flush_cycles,
-                output_residual_cycles,
-                after_cycles,
-            ) < 0:
-                raise ValueError(
-                    f"Materialize row {parent.row_index} internal partition "
-                    "has a negative raw-cycle segment"
-                )
-            if (
-                copy_cycles + flush_cycles + output_residual_cycles
-                != output_cycles
-            ):
-                raise ValueError(
-                    f"{SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE} row "
-                    f"{output.row_index} does not close"
-                )
-            if (
-                before_cycles + output_cycles + after_cycles
-                != parent.duration
-            ):
-                raise ValueError(
-                    f"Materialize row {parent.row_index} does not close"
-                )
-            metrics["parent"] += parent.duration
-            metrics[
-                "materialize_before_publish_task_outputs"
-            ] += before_cycles
-            metrics["materialize_publish_task_outputs"] += output_cycles
-            metrics[
-                "materialize_publish_task_outputs_copy"
-            ] += copy_cycles
-            metrics[
-                "materialize_publish_task_outputs_flush"
-            ] += flush_cycles
-            metrics[
-                "materialize_publish_task_outputs_residual"
-            ] += output_residual_cycles
-            metrics[
-                "materialize_after_publish_task_outputs"
-            ] += after_cycles
-            materialize_count += 1
-
-        flat_children = (
-            metrics["materialize_before_publish_task_outputs"]
-            + metrics["materialize_publish_task_outputs"]
-            + metrics["materialize_after_publish_task_outputs"]
+        parent_cycles = sum(
+            event.duration for event in materializes_by_core.get(core_id, [])
         )
-        output_children = (
-            metrics["materialize_publish_task_outputs_copy"]
-            + metrics["materialize_publish_task_outputs_flush"]
-            + metrics["materialize_publish_task_outputs_residual"]
-        )
-        if flat_children != metrics["parent"]:
-            raise ValueError(
-                f"core {core_id} aggregate Materialize partition does not close"
-            )
-        if (
-            output_children
-            != metrics["materialize_publish_task_outputs"]
-        ):
-            raise ValueError(
-                f"core {core_id} aggregate task-output partition does not close"
-            )
         block_id, lane, role = _standalone_topology(core_id)
         per_core.append(
             {
@@ -1224,51 +715,16 @@ def _build_materialize_breakdown(
                 "block_id": block_id,
                 "lane": lane,
                 "role": role,
-                "materialize_count": materialize_count,
-                "metrics_cycles": metrics,
-                "closure": {
-                    "materialize": {
-                        "parent_cycles": metrics["parent"],
-                        "flat_children_cycles": flat_children,
-                        "exact": True,
-                    },
-                    "task_outputs": {
-                        "parent_cycles": metrics[
-                            "materialize_publish_task_outputs"
-                        ],
-                        "children_cycles": output_children,
-                        "exact": True,
-                    },
-                },
+                "materialize_count": len(
+                    materializes_by_core.get(core_id, [])
+                ),
+                "metrics_cycles": {"parent": parent_cycles},
             }
         )
 
-    aggregate = {
-        metric: sum(core["metrics_cycles"][metric] for core in per_core)
-        for metric in MATERIALIZE_BREAKDOWN_METRICS
-    }
-    aggregate_flat_children = (
-        aggregate["materialize_before_publish_task_outputs"]
-        + aggregate["materialize_publish_task_outputs"]
-        + aggregate["materialize_after_publish_task_outputs"]
+    aggregate_parent = sum(
+        core["metrics_cycles"]["parent"] for core in per_core
     )
-    aggregate_output_children = (
-        aggregate["materialize_publish_task_outputs_copy"]
-        + aggregate["materialize_publish_task_outputs_flush"]
-        + aggregate["materialize_publish_task_outputs_residual"]
-    )
-    if aggregate_flat_children != aggregate["parent"]:
-        raise AssertionError(
-            "aggregate Materialize internal partition does not close"
-        )
-    if (
-        aggregate_output_children
-        != aggregate["materialize_publish_task_outputs"]
-    ):
-        raise AssertionError(
-            "aggregate Materialize task-output partition does not close"
-        )
-
     role_statistics: dict[str, Any] = {}
     for role, expected_count in (
         ("aic", EXPECTED_AIC_CORES),
@@ -1283,73 +739,32 @@ def _build_materialize_breakdown(
         role_statistics[role] = {
             "core_count": len(role_cores),
             "metrics": {
-                metric: _distribution(
+                "parent": _distribution(
                     [
-                        core["metrics_cycles"][metric]
+                        core["metrics_cycles"]["parent"]
                         for core in role_cores
                     ]
                 )
-                for metric in MATERIALIZE_BREAKDOWN_METRICS
             },
         }
 
     return {
         "semantics": {
-            "parent": "the existing exclusive Materialize span",
-            "materialize_before_publish_task_outputs": (
-                "Materialize.start to output-publication.start; task "
-                "materialization plus writer-delta preparation"
-            ),
-            "materialize_publish_task_outputs": (
-                f"the unique {SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE} raw detail"
-            ),
-            "materialize_publish_task_outputs_copy": (
-                f"{SHARED_MATERIALIZE_OUTPUT_COPY_PHASE}; batch TensorDesc copy "
-                "into shared_outputs[task].tensors[]"
-            ),
-            "materialize_publish_task_outputs_flush": (
-                f"{SHARED_MATERIALIZE_OUTPUT_FLUSH_PHASE}; FlushRegion before "
-                "StoreBarrier/published"
-            ),
-            "materialize_publish_task_outputs_residual": (
-                "output envelope minus copy/flush: pre-check, last_writer "
-                "FetchMax, StoreBarrier, published Exchange, and helper overhead"
-            ),
-            "materialize_after_publish_task_outputs": (
-                "output-publication.end to Materialize.end; phase closure and "
-                "outer timestamp"
+            "parent": (
+                "the existing exclusive Materialize span; every shared actor "
+                "builds local TensorDesc before Claim"
             ),
             "raw_arithmetic": (
                 "integer cycle boundaries; merged swimlane is not read"
             ),
-            "included_in_submit_additive_totals": {
-                "parent": True,
-                SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE: False,
-                SHARED_MATERIALIZE_OUTPUT_COPY_PHASE: False,
-                SHARED_MATERIALIZE_OUTPUT_FLUSH_PHASE: False,
-            },
         },
         "event_count": {
-            "task_outputs": len(outputs_by_owner),
-            "task_outputs_copy": len(copies_by_outputs),
-            "task_outputs_flush": len(flushes_by_outputs),
+            "materialize": sum(
+                core["materialize_count"] for core in per_core
+            )
         },
         "aggregate_core_work": {
-            "metrics_cycles": aggregate,
-            "closure": {
-                "materialize": {
-                    "parent_cycles": aggregate["parent"],
-                    "flat_children_cycles": aggregate_flat_children,
-                    "exact": True,
-                },
-                "task_outputs": {
-                    "parent_cycles": aggregate[
-                        "materialize_publish_task_outputs"
-                    ],
-                    "children_cycles": aggregate_output_children,
-                    "exact": True,
-                },
-            },
+            "metrics_cycles": {"parent": aggregate_parent}
         },
         "per_role_core_statistics": role_statistics,
         "per_core": per_core,
@@ -2169,13 +1584,7 @@ def analyze_capture(input_path: Path) -> dict[str, Any]:
     children_by_submit = _associate_exclusive_children(
         events, submits_by_lane, exclusive_phases
     )
-    (
-        detail_by_register,
-        outputs_by_owner,
-        copies_by_outputs,
-        flushes_by_outputs,
-        output_placement,
-    ) = _associate_shared_register_details(
+    detail_by_register = _associate_shared_register_details(
         events,
         children_by_submit,
         trace_schema_version,
@@ -2184,20 +1593,12 @@ def analyze_capture(input_path: Path) -> dict[str, Any]:
     register_breakdown = _build_register_breakdown(
         children_by_submit,
         detail_by_register,
-        outputs_by_owner,
-        copies_by_outputs,
-        flushes_by_outputs,
-        output_placement,
         num_cores,
         trace_schema_version,
         tensormap_mode,
     )
     materialize_breakdown = _build_materialize_breakdown(
         children_by_submit,
-        outputs_by_owner,
-        copies_by_outputs,
-        flushes_by_outputs,
-        output_placement,
         num_cores,
         trace_schema_version,
         tensormap_mode,
@@ -2491,26 +1892,10 @@ def analyze_capture(input_path: Path) -> dict[str, Any]:
                     "register_metadata_partition_exact": True,
                     "register_flat_partition_exact": True,
                     "register_details_excluded_from_submit_additive_totals": True,
-                    "task_output_placement": output_placement,
+                    "materialize_exactly_one_per_actor": True,
+                    "materialize_precedes_claim": True,
                 }
             )
-            if output_placement == "materialize":
-                validation.update(
-                    {
-                        "materialize_publish_task_outputs_exactly_one_per_parent": True,
-                        "materialize_task_outputs_identity_matches_parent": True,
-                        "materialize_partition_exact": True,
-                        "materialize_task_outputs_partition_exact": True,
-                        "materialize_details_excluded_from_submit_additive_totals": True,
-                    }
-                )
-            else:
-                validation.update(
-                    {
-                        "register_publish_task_outputs_exactly_one_per_metadata": True,
-                        "register_task_outputs_identity_matches_metadata": True,
-                    }
-                )
 
     semantics: dict[str, Any] = {
         "cycle_arithmetic": "raw_integer_cycles",
@@ -2566,38 +1951,12 @@ def analyze_capture(input_path: Path) -> dict[str, Any]:
                         "RegisterPublishWriterMetadata",
                         "RegisterPublishInsertCompletion",
                     ],
-                    "task_output_placement": output_placement,
+                    "materialize_contract": (
+                        "every actor builds local TensorDesc before Claim"
+                    ),
                     "register_internal_details_are_exclusive_submit_children": False,
                 }
             )
-            if output_placement == "materialize":
-                semantics.update(
-                    {
-                        "materialize_internal_output_detail": (
-                            SHARED_MATERIALIZE_OUTPUT_DETAIL_PHASE
-                        ),
-                        "materialize_internal_children": [
-                            "MaterializeBeforePublishTaskOutputs",
-                            "MaterializePublishTaskOutputs",
-                            "MaterializeAfterPublishTaskOutputs",
-                        ],
-                    }
-                )
-            else:
-                semantics.update(
-                    {
-                        "register_internal_output_detail": (
-                            LEGACY_SHARED_REGISTER_OUTPUT_DETAIL_PHASE
-                        ),
-                        "register_internal_children": [
-                            "RegisterWaitInsertTurn",
-                            "RegisterPublishWriterMetadata",
-                            "RegisterPublishTaskOutputs",
-                            "RegisterPublishMetadataEpilogue",
-                            "RegisterPublishInsertCompletion",
-                        ],
-                    }
-                )
 
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,

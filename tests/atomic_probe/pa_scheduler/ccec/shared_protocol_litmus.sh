@@ -31,14 +31,12 @@ usage() {
 Usage:
   ./ccec/shared_protocol_litmus.sh build
   ./ccec/shared_protocol_litmus.sh run \
-      --scenario history|reader-reclaim|all \
+      --scenario reader-reclaim \
       [--ordering compiler-clobber|payload-dependency|dsb-all|all] \
       [--device N] [--runs N]
 
 Each selected scenario/direction/ordering tuple runs in a fresh host process.
-History runs both directions with ordering "na". Reader-reclaim runs both
-directions for all three orderings by default. Scenario "all" runs history
-first, then all reader-reclaim orderings.
+Reader-reclaim runs both directions for all three orderings by default.
 
 --runs defaults to 20 and repeats every selected tuple that many times.
 EOF
@@ -1136,11 +1134,10 @@ build_litmus() {
     manifest_tmp="$(mktemp "$BUILD_DIR/.shared_protocol_litmus_manifest.XXXXXX")"
     trap 'rm -f -- "${manifest_tmp:-}"' EXIT
     {
-        printf '# schema=pa_scheduler_shared_protocol_litmus/v2\n'
+        printf '# schema=pa_scheduler_shared_protocol_litmus/v3\n'
         printf '# tensormap_mode=shared\n'
         printf '# shared_abi_generation=%s\n' "$SHARED_ABI_GENERATION"
-        printf '# scenarios=history,reader-reclaim\n'
-        printf '# history_directions=aic-to-aiv,aiv-to-aic\n'
+        printf '# scenarios=reader-reclaim\n'
         printf '# reader_reclaim_directions=aic-to-aiv,aiv-to-aic\n'
         printf '# reader_reclaim_orderings=compiler-clobber,payload-dependency,dsb-all\n'
         (
@@ -1173,11 +1170,10 @@ validate_artifacts() {
     fi
 
     local expected_headers=(
-        "# schema=pa_scheduler_shared_protocol_litmus/v2"
+        "# schema=pa_scheduler_shared_protocol_litmus/v3"
         "# tensormap_mode=shared"
         "# shared_abi_generation=$SHARED_ABI_GENERATION"
-        "# scenarios=history,reader-reclaim"
-        "# history_directions=aic-to-aiv,aiv-to-aic"
+        "# scenarios=reader-reclaim"
         "# reader_reclaim_directions=aic-to-aiv,aiv-to-aic"
         "# reader_reclaim_orderings=compiler-clobber,payload-dependency,dsb-all"
     )
@@ -1272,10 +1268,8 @@ run_litmus() {
         case "$1" in
             --scenario)
                 if [[ $# -lt 2 ||
-                      ( "$2" != "history" &&
-                        "$2" != "reader-reclaim" &&
-                        "$2" != "all" ) ]]; then
-                    echo "--scenario requires history, reader-reclaim, or all." >&2
+                      "$2" != "reader-reclaim" ]]; then
+                    echo "--scenario requires reader-reclaim." >&2
                     exit 1
                 fi
                 scenario="$2"
@@ -1318,12 +1312,8 @@ run_litmus() {
         esac
     done
     if [[ -z "$scenario" ]]; then
-        echo "--scenario history, reader-reclaim, or all is required." >&2
+        echo "--scenario reader-reclaim is required." >&2
         usage >&2
-        exit 1
-    fi
-    if [[ "$scenario" != "reader-reclaim" && "$ordering" != "all" ]]; then
-        echo "--ordering may be non-all only with --scenario reader-reclaim." >&2
         exit 1
     fi
 
@@ -1334,7 +1324,7 @@ run_litmus() {
         payload-dependency
         dsb-all
     )
-    if [[ "$scenario" == "reader-reclaim" && "$ordering" != "all" ]]; then
+    if [[ "$ordering" != "all" ]]; then
         reader_orderings=("$ordering")
     fi
 
@@ -1343,24 +1333,14 @@ run_litmus() {
     local reader_ordering
     local process_count=0
     for ((run = 1; run <= runs; ++run)); do
-        if [[ "$scenario" == "history" || "$scenario" == "all" ]]; then
+        for reader_ordering in "${reader_orderings[@]}"; do
             for direction in "${directions[@]}"; do
                 run_one_litmus_process \
-                    history "$direction" na "$device" "$run" "$runs"
+                    reader-reclaim "$direction" "$reader_ordering" \
+                    "$device" "$run" "$runs"
                 ((process_count += 1))
             done
-        fi
-        if [[ "$scenario" == "reader-reclaim" ||
-              "$scenario" == "all" ]]; then
-            for reader_ordering in "${reader_orderings[@]}"; do
-                for direction in "${directions[@]}"; do
-                    run_one_litmus_process \
-                        reader-reclaim "$direction" "$reader_ordering" \
-                        "$device" "$run" "$runs"
-                    ((process_count += 1))
-                done
-            done
-        fi
+        done
     done
     echo "[PASS] scenario=$scenario ordering=$ordering runs=$runs fresh_processes=$process_count"
 }

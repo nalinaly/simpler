@@ -208,8 +208,27 @@ def _append_v4_g1_tail_tasks(
                         start + 7,
                         function_id=function_id,
                     ),
-                    _row(core_id, task_id, "Claim", start + 14, start + 20, flags=0x2),
                 ]
+            )
+            if tensormap_mode == "shared":
+                rows.append(
+                    _row(
+                        core_id,
+                        task_id,
+                        "Materialize",
+                        start + 11,
+                        start + 14,
+                    )
+                )
+            rows.append(
+                _row(
+                    core_id,
+                    task_id,
+                    "Claim",
+                    start + 14,
+                    start + 20,
+                    flags=0x2,
+                )
             )
             if tensormap_mode == "private":
                 rows.extend(
@@ -249,7 +268,7 @@ def _skip_v4_source_phase(
         or (
             tensormap_mode == "shared"
             and not winner
-            and phase in {"Materialize", "Register"}
+            and phase == "Register"
         )
         or (phase == "Fanin" and (not winner or task_id == 0))
     )
@@ -278,9 +297,7 @@ def _v4_capture(*, tensormap_mode: str = "shared") -> dict[str, object]:
         base = 1000 + core_id
         submit_start = base + (0 if task_id == 0 else 120)
         if phase == "Claim":
-            # schema-v5 跟随 compete-first eager 生产路径：Claim 先于
-            # callback 构参与 Materialize。两类 task 都保留 v3 fixture
-            # 的 Claim 时长，只调整边界顺序。
+            # shared 新合同要求所有 actor 先本地构参与 Materialize，再 Claim。
             row[6:8] = (
                 [submit_start + 25, submit_start + 33]
                 if task_id == 0
@@ -288,11 +305,19 @@ def _v4_capture(*, tensormap_mode: str = "shared") -> dict[str, object]:
             )
             row[8] = 0x3 if winner else 0x2
         elif phase == "Materialize":
-            row[6:8] = (
-                [submit_start + 36, submit_start + 46]
-                if task_id == 0
-                else [submit_start + 24, submit_start + 32]
-            )
+            if tensormap_mode == "shared":
+                row[6:8] = (
+                    [submit_start + 21, submit_start + 25]
+                    if task_id == 0
+                    else [submit_start + 11, submit_start + 14]
+                )
+                row[9] = 1 if task_id == 0 else 0
+            else:
+                row[6:8] = (
+                    [submit_start + 36, submit_start + 46]
+                    if task_id == 0
+                    else [submit_start + 24, submit_start + 32]
+                )
         elif phase == "PrepareMap":
             row[6:8] = (
                 [submit_start + 47, submit_start + 52]
@@ -344,17 +369,13 @@ def _v4_capture(*, tensormap_mode: str = "shared") -> dict[str, object]:
             )
 
     if tensormap_mode == "shared":
-        # Register 父区间固定带 metadata 父 detail 和 task-output 子 detail。
-        # 等待前驱、writer metadata、metadata 收尾和完成发布均由端点补集恢复，
-        # 不为这些区域继续扩张 raw。
+        # winner Register 只带一个 metadata detail；等待与交棒由端点补集恢复。
         register_rows = [row for row in rows if row[5] == "Register"]
         for register in register_rows:
             start = int(register[6])
             end = int(register[7])
             publish_start = start + 1
             publish_end = end - 1
-            outputs_start = start + 3
-            outputs_end = end - 2
             rows.append(
                 _row(
                     int(register[0]),
@@ -362,39 +383,6 @@ def _v4_capture(*, tensormap_mode: str = "shared") -> dict[str, object]:
                     "SharedRegisterPublishMetadata",
                     publish_start,
                     publish_end,
-                    function_id=int(register[4]),
-                )
-            )
-            rows.append(
-                _row(
-                    int(register[0]),
-                    int(register[3]),
-                    "SharedRegisterPublishTaskOutputs",
-                    outputs_start,
-                    outputs_end,
-                    function_id=int(register[4]),
-                )
-            )
-            copy_end = outputs_start + max(1, (outputs_end - outputs_start) // 2)
-            if copy_end > outputs_end:
-                copy_end = outputs_end
-            rows.append(
-                _row(
-                    int(register[0]),
-                    int(register[3]),
-                    "SharedRegisterPublishTaskOutputsCopy",
-                    outputs_start,
-                    copy_end,
-                    function_id=int(register[4]),
-                )
-            )
-            rows.append(
-                _row(
-                    int(register[0]),
-                    int(register[3]),
-                    "SharedRegisterPublishTaskOutputsFlush",
-                    copy_end,
-                    outputs_end,
                     function_id=int(register[4]),
                 )
             )
@@ -437,74 +425,6 @@ def _v4_capture(*, tensormap_mode: str = "shared") -> dict[str, object]:
                 _row(core_id, -1, "OrchestrationReplay", base - 10, base + 510),
                 _row(core_id, -1, "FinalDrain", base + 510, base + 550),
                 _row(core_id, 4, "Kernel", base + 520, base + 530, function_id=3),
-            ]
-        )
-    capture["fdwic_events"] = rows
-    _refresh_summary(capture)
-    return capture
-
-
-def _v5_materialize_output_capture() -> dict[str, object]:
-    """把 legacy v5 fixture 迁移成 output publication 位于 Materialize。"""
-
-    capture = _v4_capture()
-    source_rows = capture["fdwic_events"]
-    assert isinstance(source_rows, list)
-    materializes = {
-        (int(row[0]), int(row[3])): row
-        for row in source_rows
-        if row[5] == "Materialize"
-    }
-    metadata_tasks = {
-        (int(row[0]), int(row[3]))
-        for row in source_rows
-        if row[5] == "SharedRegisterPublishMetadata"
-    }
-    rows = [
-        row
-        for row in source_rows
-        if row[5]
-        not in {
-            "SharedRegisterPublishTaskOutputs",
-            "SharedRegisterPublishTaskOutputsCopy",
-            "SharedRegisterPublishTaskOutputsFlush",
-        }
-    ]
-    for task_key in sorted(metadata_tasks):
-        materialize = materializes[task_key]
-        output_start = int(materialize[7]) - 4
-        output_end = int(materialize[7]) - 1
-        core_id, task_id, function_id = (
-            int(materialize[0]),
-            int(materialize[3]),
-            int(materialize[4]),
-        )
-        rows.extend(
-            [
-                _row(
-                    core_id,
-                    task_id,
-                    "SharedMaterializePublishTaskOutputs",
-                    output_start,
-                    output_end,
-                    function_id=function_id,
-                ),
-                _row(
-                    core_id,
-                    task_id,
-                    "SharedMaterializePublishTaskOutputsCopy",
-                    output_start,
-                    output_start + 1,
-                    function_id=function_id,
-                ),
-                _row(
-                    core_id,
-                    task_id,
-                    "SharedMaterializePublishTaskOutputsFlush",
-                    output_start + 1,
-                    output_end - 1,
-                    function_id=function_id,
-                ),
             ]
         )
     capture["fdwic_events"] = rows
@@ -610,10 +530,10 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         self.assertEqual(metrics["fanin"], 2)
         self.assertEqual(metrics["winner_build"], 10)
         self.assertEqual(metrics["alloc_complete"], 10)
-        self.assertEqual(metrics["materialize"], 18)
+        self.assertEqual(metrics["materialize"], 1_536)
         self.assertEqual(metrics["prepare_map"], 0)
         self.assertEqual(metrics["register"], 13)
-        self.assertEqual(metrics["submit_residual"], 31_435)
+        self.assertEqual(metrics["submit_residual"], 29_917)
         self.assertEqual(metrics["orchestration_setup"], 960)
         self.assertEqual(metrics["orchestration_tail"], 960)
         self.assertEqual(metrics["orchestration_replay"], 49_920)
@@ -622,12 +542,12 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         self.assertEqual(metrics["final_drain_residual"], 2_880)
         self.assertEqual(metrics["worker_completion"], 53_760)
         residual = report["residual_breakdown"]
-        self.assertEqual(residual["submit_internal_residual"]["total_cycles"], 2_045)
+        self.assertEqual(residual["submit_internal_residual"]["total_cycles"], 527)
         self.assertEqual(residual["submit_tail_residual"]["total_cycles"], 29_390)
         self.assertEqual(residual["between_submit_residual"]["total_cycles"], 7_680)
         self.assertAlmostEqual(
             residual["submit_internal_residual"]["share_of_submit_union"],
-            2_045 / 40_320,
+            527 / 40_320,
         )
         self.assertAlmostEqual(
             residual["submit_tail_residual"]["share_of_submit_union"],
@@ -653,11 +573,7 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
                 for segment in residual["submit_internal_residual"]["segments"]
             )
         )
-        internal_boundaries = {
-            segment["boundary"]
-            for segment in residual["submit_internal_residual"]["segments"]
-        }
-        self.assertIn("Claim->Materialize", internal_boundaries)
+        self.assertIs(validation["materialize_precedes_claim"], True)
 
         closure = report["aggregate_core_work"]["closure"]
         for name in (
@@ -680,30 +596,13 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         self.assertIsNotNone(register)
         self.assertEqual(
             register["event_count"],
-            {
-                "metadata": 2,
-                "task_outputs": 2,
-                "task_outputs_copy": 2,
-                "task_outputs_flush": 2,
-            },
+            {"metadata": 2},
         )
         register_metrics = register["aggregate_core_work"]["metrics_cycles"]
-        # task_outputs=3 cycles 拆成 copy+flush+residual，且 residual 非负。
         self.assertEqual(register_metrics["parent"], 13)
         self.assertEqual(register_metrics["register_wait_predecessor_insert"], 2)
         self.assertEqual(register_metrics["register_publish_metadata"], 9)
-        self.assertEqual(register_metrics["register_publish_writer_metadata"], 4)
-        self.assertEqual(register_metrics["register_publish_task_outputs"], 3)
-        self.assertEqual(
-            register_metrics["register_publish_task_outputs_copy"]
-            + register_metrics["register_publish_task_outputs_flush"]
-            + register_metrics["register_publish_task_outputs_residual"],
-            register_metrics["register_publish_task_outputs"],
-        )
-        self.assertGreaterEqual(
-            register_metrics["register_publish_task_outputs_residual"], 0
-        )
-        self.assertEqual(register_metrics["register_publish_metadata_epilogue"], 2)
+        self.assertEqual(register_metrics["register_publish_writer_metadata"], 9)
         self.assertEqual(register_metrics["register_publish_insert_completion"], 2)
         self.assertIs(
             register["aggregate_core_work"]["closure"]["register"]["exact"],
@@ -716,10 +615,6 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         self.assertEqual(register_metrics["parent"], metrics["register"])
         self.assertNotIn(
             "SharedRegisterPublishMetadata",
-            report["semantics"]["exclusive_submit_children"],
-        )
-        self.assertNotIn(
-            "SharedRegisterPublishTaskOutputs",
             report["semantics"]["exclusive_submit_children"],
         )
         self.assertIs(
@@ -900,45 +795,24 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
             baseline_loser["post_transition"]["sum_cycles"] + 10,
         )
 
-    def test_v5_moves_task_outputs_into_materialize_breakdown(self) -> None:
+    def test_v5_reports_local_materialize_and_metadata_only_register(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = self._write(
-                directory, _v5_materialize_output_capture()
-            )
+            path = self._write(directory, _v4_capture())
             report = analyze_capture(path)
 
-        self.assertEqual(
-            report["validation"]["task_output_placement"],
-            "materialize",
+        self.assertIs(
+            report["validation"]["materialize_exactly_one_per_actor"],
+            True,
         )
+        self.assertIs(report["validation"]["materialize_precedes_claim"], True)
         materialize = report["materialize_breakdown"]
         self.assertIsNotNone(materialize)
-        materialize_metrics = materialize[
-            "aggregate_core_work"
-        ]["metrics_cycles"]
+        self.assertEqual(materialize["event_count"]["materialize"], 96 * 5)
         self.assertEqual(
-            materialize_metrics,
-            {
-                "parent": 18,
-                "materialize_before_publish_task_outputs": 10,
-                "materialize_publish_task_outputs": 6,
-                "materialize_publish_task_outputs_copy": 2,
-                "materialize_publish_task_outputs_flush": 2,
-                "materialize_publish_task_outputs_residual": 2,
-                "materialize_after_publish_task_outputs": 2,
-            },
-        )
-        self.assertIs(
-            materialize["aggregate_core_work"]["closure"][
-                "materialize"
-            ]["exact"],
-            True,
-        )
-        self.assertIs(
-            materialize["aggregate_core_work"]["closure"][
-                "task_outputs"
-            ]["exact"],
-            True,
+            materialize["aggregate_core_work"]["metrics_cycles"],
+            {"parent": 1536},
         )
 
         register = report["register_breakdown"]
@@ -953,20 +827,39 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         self.assertEqual(
             register_metrics["register_publish_writer_metadata"], 9
         )
-        for metric in (
-            "register_publish_task_outputs",
-            "register_publish_task_outputs_copy",
-            "register_publish_task_outputs_flush",
-            "register_publish_task_outputs_residual",
-            "register_publish_metadata_epilogue",
-        ):
-            self.assertEqual(register_metrics[metric], 0)
         self.assertEqual(
-            report["semantics"]["materialize_internal_output_detail"],
-            "SharedMaterializePublishTaskOutputs",
+            set(register_metrics),
+            {
+                "parent",
+                "register_wait_predecessor_insert",
+                "register_publish_metadata",
+                "register_publish_writer_metadata",
+                "register_publish_insert_completion",
+            },
         )
-        self.assertNotIn(
-            "register_internal_output_detail", report["semantics"]
+
+    def test_v5_not_attempted_actor_keeps_one_local_materialize(
+        self,
+    ) -> None:
+        capture = _v4_capture()
+        rows = capture["fdwic_events"]
+        assert isinstance(rows, list)
+        claim = next(
+            row
+            for row in rows
+            if row[0] == 2 and row[3] == 1 and row[5] == "Claim"
+        )
+        claim[8] = 0
+        _refresh_summary(capture)
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write(directory, capture)
+            report = analyze_capture(path)
+
+        per_core = report["materialize_breakdown"]["per_core"]
+        self.assertEqual(per_core[2]["materialize_count"], 5)
+        self.assertIs(
+            report["validation"]["materialize_exactly_one_per_actor"],
+            True,
         )
 
     def test_v4_shared_register_atomic_overlay_never_changes_exclusive_totals(
@@ -1161,11 +1054,8 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
             ):
                 analyze_capture(path)
 
-    def test_v4_shared_loser_rejects_winner_only_frontend(self) -> None:
-        for phase, start, end in (
-            ("Materialize", 1144, 1152),
-            ("Register", 1154, 1160),
-        ):
+    def test_v4_shared_loser_rejects_winner_only_register(self) -> None:
+        for phase, start, end in (("Register", 1154, 1160),):
             with self.subTest(phase=phase):
                 capture = _v4_capture()
                 rows = capture["fdwic_events"]
@@ -1221,6 +1111,7 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
                     with self.assertRaisesRegex(
                         ValueError,
                         rf"shared winner path requires 1 {phase} spans|"
+                        "requires exactly one Materialize for every actor|"
                         "requires exactly one Register parent for each winner "
                         "and none for losers|"
                         "requires exactly one SharedRegisterPublishMetadata "
@@ -1462,15 +1353,18 @@ class SwimlaneExclusiveAnalyzerTest(unittest.TestCase):
         capture = _v4_capture()
         rows = capture["fdwic_events"]
         assert isinstance(rows, list)
-        first_claim = next(
-            row for row in rows if row[0] == 0 and row[3] == 0 and row[5] == "Claim"
+        first_efdrain = next(
+            row for row in rows if row[0] == 0 and row[3] == 0 and row[5] == "EfDrain"
         )
-        second_claim = next(
-            row for row in rows if row[0] == 0 and row[3] == 1 and row[5] == "Claim"
+        second_efdrain = next(
+            row for row in rows if row[0] == 0 and row[3] == 1 and row[5] == "EfDrain"
         )
-        # 只交换时间，不改 task/flags。converter 的 schema 键与 winner 语义仍
-        # 合法；分析器必须拒绝 task1 Claim 被时间包含进 task0 Submit 的伪闭合。
-        first_claim[6:8], second_claim[6:8] = second_claim[6:8], first_claim[6:8]
+        # 只交换时间，不改 task。converter 的 schema 键与前端合同仍合法；
+        # 分析器必须拒绝 child 被时间包含进另一个 task Submit 的伪闭合。
+        first_efdrain[6:8], second_efdrain[6:8] = (
+            second_efdrain[6:8],
+            first_efdrain[6:8],
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = self._write(directory, capture)
             with self.assertRaisesRegex(ValueError, "does not match containing Submit"):

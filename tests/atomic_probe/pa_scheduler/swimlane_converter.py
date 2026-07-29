@@ -47,24 +47,22 @@ PHASE_NAMES = {
     "WinnerBuild": "winner_build",
     "AllocComplete": "alloc_complete",
     "SharedRegisterPublishMetadata": "register.publish_metadata",
+    # 21..23 是 C++ TracePhase 为稳定 raw 数值保留的退役槽位。保留名称
+    # 只为了在校验阶段给出明确错误，当前 raw 不允许转换这些记录。
     "SharedMaterializePublishTaskOutputs": (
-        "materialize.publish_task_outputs"
+        "retired.shared_materialize_publish_task_outputs"
     ),
     "SharedMaterializePublishTaskOutputsCopy": (
-        "materialize.publish_task_outputs.copy"
+        "retired.shared_materialize_publish_task_outputs_copy"
     ),
     "SharedMaterializePublishTaskOutputsFlush": (
-        "materialize.publish_task_outputs.flush"
+        "retired.shared_materialize_publish_task_outputs_flush"
     ),
-    # 兼容迁移前已经落盘的 schema-v5 raw；新采集只会写上面的
-    # SharedMaterialize* 名称，旧名称仍按其当时的 Register 归属解释。
-    "SharedRegisterPublishTaskOutputs": "register.publish_task_outputs",
-    "SharedRegisterPublishTaskOutputsCopy": (
-        "register.publish_task_outputs.copy"
-    ),
-    "SharedRegisterPublishTaskOutputsFlush": (
-        "register.publish_task_outputs.flush"
-    ),
+}
+RETIRED_SHARED_OUTPUT_PHASES = {
+    "SharedMaterializePublishTaskOutputs",
+    "SharedMaterializePublishTaskOutputsCopy",
+    "SharedMaterializePublishTaskOutputsFlush",
 }
 LEGACY_LAP_PHASES = {"Alloc", "Build", "Replay"}
 V5_PHASES = {
@@ -76,9 +74,6 @@ V5_PHASES = {
     "SharedMaterializePublishTaskOutputs",
     "SharedMaterializePublishTaskOutputsCopy",
     "SharedMaterializePublishTaskOutputsFlush",
-    "SharedRegisterPublishTaskOutputs",
-    "SharedRegisterPublishTaskOutputsCopy",
-    "SharedRegisterPublishTaskOutputsFlush",
 }
 # schema-v5 已有区间足以在离线侧取补集；这些 phase 之外的
 # Atomic、Kernel、RingBp 等是嵌套或 Overlay，不能再从 Submit 扣一次。
@@ -318,9 +313,8 @@ def _load_and_validate(
         raise ValueError("metadata.clock_freq_hz must be positive")
     # v1 是旧 raw，Claim flags 只有 winner bit；v2 追加 attempted bit；
     # v3 再加入精确计数 PollBatch；v5 追加排他父区间、真实尾动作 span
-    # 以及 Materialize→task outputs 与 Register→metadata detail。迁移前
-    # 已落盘的 v5 Register→metadata→task outputs 仍只读兼容。v4 raw 不再接受，
-    # 避免缺少 task-outputs 边界的旧采集被伪装成新细分。
+    # 与 Register→metadata detail。shared 的 TensorDesc 已改为全 actor
+    # Claim 前本地 Materialize，退役 output 发布 phase 不再兼容。
     # 不认识的新版本直接拒绝，避免把新 flags 按旧语义误读。
     trace_schema_version = _integer(metadata.get("trace_schema_version", 1), "metadata.trace_schema_version")
     if trace_schema_version not in (1, 2, 3, 5):
@@ -446,6 +440,7 @@ def _load_and_validate(
         for core_id in range(num_cores)
     }
     v4_claims: dict[tuple[int, int], tuple[bool, bool, bool]] = {}
+    v4_claim_rows: dict[tuple[int, int], tuple[Any, ...]] = {}
     v4_submits: set[tuple[int, int]] = set()
     v4_submit_semantics: dict[tuple[int, int], tuple[bool, bool]] = {}
     v4_tails: dict[tuple[int, int], tuple[str, int]] = {}
@@ -454,15 +449,6 @@ def _load_and_validate(
     ] = {}
     v4_registers: dict[tuple[int, int], list[tuple[Any, ...]]] = {}
     v4_shared_register_details: dict[
-        tuple[int, int], list[tuple[Any, ...]]
-    ] = {}
-    v4_shared_register_output_details: dict[
-        tuple[int, int], list[tuple[Any, ...]]
-    ] = {}
-    v4_shared_register_output_copy_details: dict[
-        tuple[int, int], list[tuple[Any, ...]]
-    ] = {}
-    v4_shared_register_output_flush_details: dict[
         tuple[int, int], list[tuple[Any, ...]]
     ] = {}
     v4_shared_insert_turn_polls: list[tuple[Any, ...]] = []
@@ -492,6 +478,11 @@ def _load_and_validate(
             raise ValueError(f"fdwic_events[{index}] has invalid lane {lane}")
         if phase not in PHASE_NAMES:
             raise ValueError(f"fdwic_events[{index}] has unknown phase {phase!r}")
+        if phase in RETIRED_SHARED_OUTPUT_PHASES:
+            raise ValueError(
+                f"fdwic_events[{index}] contains retired shared-output phase "
+                f"{phase!r}; current raw must materialize TensorDesc locally"
+            )
         if trace_schema_version == 5 and phase in LEGACY_LAP_PHASES:
             raise ValueError(
                 f"fdwic_events[{index}] schema-v5 forbids legacy lap phase {phase!r}"
@@ -687,69 +678,6 @@ def _load_and_validate(
                         auxiliary,
                     )
                 )
-            elif phase in (
-                "SharedMaterializePublishTaskOutputs",
-                "SharedRegisterPublishTaskOutputs",
-            ):
-                if tensormap_mode != "shared":
-                    raise ValueError(
-                        f"fdwic_events[{index}] {phase} "
-                        "is only valid for shared TensorMap"
-                    )
-                if task_id < 0 or flags != 0 or auxiliary != 0:
-                    raise ValueError(
-                        f"fdwic_events[{index}] has invalid {phase} fields"
-                    )
-                v4_shared_register_output_details.setdefault(
-                    task_key, []
-                ).append(
-                    (
-                        core_id,
-                        block_id,
-                        lane,
-                        task_id,
-                        function_id,
-                        phase,
-                        start_cycle,
-                        end_cycle,
-                        flags,
-                        auxiliary,
-                    )
-                )
-            elif phase in (
-                "SharedMaterializePublishTaskOutputsCopy",
-                "SharedMaterializePublishTaskOutputsFlush",
-                "SharedRegisterPublishTaskOutputsCopy",
-                "SharedRegisterPublishTaskOutputsFlush",
-            ):
-                if tensormap_mode != "shared":
-                    raise ValueError(
-                        f"fdwic_events[{index}] {phase} "
-                        "is only valid for shared TensorMap"
-                    )
-                if task_id < 0 or flags != 0 or auxiliary != 0:
-                    raise ValueError(
-                        f"fdwic_events[{index}] has invalid {phase} fields"
-                    )
-                bucket = (
-                    v4_shared_register_output_copy_details
-                    if phase.endswith("Copy")
-                    else v4_shared_register_output_flush_details
-                )
-                bucket.setdefault(task_key, []).append(
-                    (
-                        core_id,
-                        block_id,
-                        lane,
-                        task_id,
-                        function_id,
-                        phase,
-                        start_cycle,
-                        end_cycle,
-                        flags,
-                        auxiliary,
-                    )
-                )
             if phase in ("OrchestrationReplay", "FinalDrain"):
                 if task_id != -1 or function_id != -1 or flags != 0 or auxiliary != 0:
                     raise ValueError(
@@ -774,6 +702,18 @@ def _load_and_validate(
                     )
                 v4_claims[task_key] = (
                     bool(flags & 0x2), bool(flags & 0x1), bool(auxiliary)
+                )
+                v4_claim_rows[task_key] = (
+                    core_id,
+                    block_id,
+                    lane,
+                    task_id,
+                    function_id,
+                    phase,
+                    start_cycle,
+                    end_cycle,
+                    flags,
+                    auxiliary,
                 )
             elif phase == "Materialize":
                 if task_id < 0:
@@ -931,6 +871,28 @@ def _load_and_validate(
                 )
             if tensormap_mode == "shared":
                 materializes = v4_materializes.get(task_key, [])
+                if len(materializes) != 1:
+                    raise ValueError(
+                        "shared schema-v5 requires exactly one Materialize "
+                        "for every actor before Claim at "
+                        f"{task_key}: count={len(materializes)}"
+                    )
+                materialize = materializes[0]
+                claim = v4_claim_rows[task_key]
+                if (
+                    int(materialize[4]) != -1
+                    or int(materialize[8]) != 0
+                    or int(materialize[9]) != (1 if is_alloc else 0)
+                ):
+                    raise ValueError(
+                        "shared schema-v5 Materialize fields do not match "
+                        f"task semantics at {task_key}"
+                    )
+                if int(materialize[7]) > int(claim[6]):
+                    raise ValueError(
+                        "shared schema-v5 Materialize must finish before Claim "
+                        f"at {task_key}"
+                    )
                 parents = v4_registers.get(task_key, [])
                 expected_parent_count = 1 if won else 0
                 if len(parents) != expected_parent_count:
@@ -950,44 +912,10 @@ def _load_and_validate(
                     continue
                 parent = parents[0]
                 detail = details[0]
-                output_details = v4_shared_register_output_details.get(
-                    task_key, []
-                )
-                if len(output_details) != 1:
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputs or "
-                        "SharedMaterializePublishTaskOutputs for each winner "
-                        "and none "
-                        f"for losers at {task_key}: "
-                        f"count={len(output_details)} won={won}"
-                    )
-                output_detail = output_details[0]
-                output_phase = str(output_detail[5])
-                outputs_in_materialize = (
-                    output_phase ==
-                    "SharedMaterializePublishTaskOutputs"
-                )
-                if outputs_in_materialize and len(materializes) != 1:
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one Materialize parent "
-                        "for each winner using Materialize task-output publication "
-                        f"at {task_key}: count={len(materializes)}"
-                    )
                 if parent[:5] != detail[:5]:
                     raise ValueError(
                         "shared schema-v5 Register detail identity differs from "
                         f"its parent at {task_key}"
-                    )
-                output_parent = (
-                    materializes[0]
-                    if outputs_in_materialize
-                    else detail
-                )
-                if output_parent[:5] != output_detail[:5]:
-                    raise ValueError(
-                        "shared schema-v5 task-outputs detail identity differs "
-                        f"from {output_parent[5]} at {task_key}"
                     )
                 parent_start, parent_end = int(parent[6]), int(parent[7])
                 detail_start, detail_end = int(detail[6]), int(detail[7])
@@ -1000,90 +928,6 @@ def _load_and_validate(
                     raise ValueError(
                         "shared schema-v5 SharedRegisterPublishMetadata is outside "
                         f"Register parent at {task_key}"
-                    )
-                output_start = int(output_detail[6])
-                output_end = int(output_detail[7])
-                output_parent_start = int(output_parent[6])
-                output_parent_end = int(output_parent[7])
-                if not (
-                    output_parent_start
-                    <= output_start
-                    <= output_end
-                    <= output_parent_end
-                ):
-                    raise ValueError(
-                        f"shared schema-v5 {output_phase} is outside "
-                        f"{output_parent[5]} at {task_key}"
-                    )
-                copy_details = v4_shared_register_output_copy_details.get(
-                    task_key, []
-                )
-                flush_details = v4_shared_register_output_flush_details.get(
-                    task_key, []
-                )
-                if len(copy_details) != 1:
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputsCopy for each winner "
-                        f"and none for losers at {task_key}: "
-                        f"count={len(copy_details)} won={won}"
-                    )
-                if len(flush_details) != 1:
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputsFlush for each winner "
-                        f"and none for losers at {task_key}: "
-                        f"count={len(flush_details)} won={won}"
-                    )
-                copy_detail = copy_details[0]
-                flush_detail = flush_details[0]
-                expected_copy_phase = (
-                    "SharedMaterializePublishTaskOutputsCopy"
-                    if outputs_in_materialize
-                    else "SharedRegisterPublishTaskOutputsCopy"
-                )
-                expected_flush_phase = (
-                    "SharedMaterializePublishTaskOutputsFlush"
-                    if outputs_in_materialize
-                    else "SharedRegisterPublishTaskOutputsFlush"
-                )
-                if (
-                    copy_detail[5] != expected_copy_phase
-                    or flush_detail[5] != expected_flush_phase
-                ):
-                    raise ValueError(
-                        "shared schema-v5 task-output detail families are mixed "
-                        f"at {task_key}: parent={output_phase} "
-                        f"copy={copy_detail[5]} flush={flush_detail[5]}"
-                    )
-                if output_detail[:5] != copy_detail[:5]:
-                    raise ValueError(
-                        "shared schema-v5 task-outputs copy identity differs "
-                        f"from {output_phase} at {task_key}"
-                    )
-                if output_detail[:5] != flush_detail[:5]:
-                    raise ValueError(
-                        "shared schema-v5 task-outputs flush identity differs "
-                        f"from {output_phase} at {task_key}"
-                    )
-                copy_start = int(copy_detail[6])
-                copy_end = int(copy_detail[7])
-                flush_start = int(flush_detail[6])
-                flush_end = int(flush_detail[7])
-                if not (
-                    output_start
-                    <= copy_start
-                    <= copy_end
-                    == flush_start
-                    <= flush_end
-                    <= output_end
-                ):
-                    raise ValueError(
-                        "shared schema-v5 task-outputs copy/flush nesting is "
-                        f"invalid at {task_key}: "
-                        f"outputs=[{output_start},{output_end}) "
-                        f"copy=[{copy_start},{copy_end}) "
-                        f"flush=[{flush_start},{flush_end})"
                     )
                 if level == 4:
                     matching_polls = [
@@ -1144,63 +988,6 @@ def _load_and_validate(
                     "shared schema-v5 Register details have no matching Claim: "
                     f"{sorted(orphan_detail_keys)[:8]}"
                 )
-            orphan_output_detail_keys = (
-                set(v4_shared_register_output_details) - set(v4_claims)
-            )
-            if orphan_output_detail_keys:
-                raise ValueError(
-                    "shared schema-v5 task-output details have no matching Claim: "
-                    f"{sorted(orphan_output_detail_keys)[:8]}"
-                )
-            orphan_copy_detail_keys = (
-                set(v4_shared_register_output_copy_details) - set(v4_claims)
-            )
-            if orphan_copy_detail_keys:
-                raise ValueError(
-                    "shared schema-v5 task-output copy details have no matching "
-                    f"Claim: {sorted(orphan_copy_detail_keys)[:8]}"
-                )
-            orphan_flush_detail_keys = (
-                set(v4_shared_register_output_flush_details) - set(v4_claims)
-            )
-            if orphan_flush_detail_keys:
-                raise ValueError(
-                    "shared schema-v5 task-output flush details have no matching "
-                    f"Claim: {sorted(orphan_flush_detail_keys)[:8]}"
-                )
-            for task_key, output_details in (
-                v4_shared_register_output_details.items()
-            ):
-                won = v4_claims.get(task_key, (False, False, False))[1]
-                if len(output_details) != (1 if won else 0):
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputs for each winner and none "
-                        f"for losers at {task_key}: "
-                        f"count={len(output_details)} won={won}"
-                    )
-            for task_key, copy_details in (
-                v4_shared_register_output_copy_details.items()
-            ):
-                won = v4_claims.get(task_key, (False, False, False))[1]
-                if len(copy_details) != (1 if won else 0):
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputsCopy for each winner "
-                        f"and none for losers at {task_key}: "
-                        f"count={len(copy_details)} won={won}"
-                    )
-            for task_key, flush_details in (
-                v4_shared_register_output_flush_details.items()
-            ):
-                won = v4_claims.get(task_key, (False, False, False))[1]
-                if len(flush_details) != (1 if won else 0):
-                    raise ValueError(
-                        "shared schema-v5 requires exactly one "
-                        "SharedRegisterPublishTaskOutputsFlush for each winner "
-                        f"and none for losers at {task_key}: "
-                        f"count={len(flush_details)} won={won}"
-                    )
             if level == 4:
                 winner_count = sum(
                     won for _attempted, won, _is_alloc in v4_claims.values()
@@ -1362,14 +1149,12 @@ def _iter_v5_shared_register_derived_spans(
 ) -> Iterator[tuple[int, int, int, int, int, str]]:
     """用 Register 与 metadata 边界补出非 raw 串行段。
 
-    新采集的 task outputs 已属于 Materialize，因此 Register 只合成等待、
-    writer metadata 与交棒。迁移前 raw 仍按旧 outputs 子区间恢复 metadata
-    epilogue，保证历史泳道可重放。
+    TensorDesc 已由每个 actor 在 Claim 前本地 Materialize；winner Register
+    只含有序 writer metadata 发布，因此父/子边界可直接还原等待、发布与交棒。
     """
 
     parents: dict[tuple[int, int], tuple[Any, ...]] = {}
     details: dict[tuple[int, int], tuple[Any, ...]] = {}
-    output_details: dict[tuple[int, int], tuple[Any, ...]] = {}
     for row in rows:
         core_id, _block_id, _lane, task_id, _function_id, phase, *_rest = row
         task_key = (int(core_id), int(task_id))
@@ -1377,16 +1162,10 @@ def _iter_v5_shared_register_derived_spans(
             parents[task_key] = row
         elif phase == "SharedRegisterPublishMetadata":
             details[task_key] = row
-        elif phase in (
-            "SharedMaterializePublishTaskOutputs",
-            "SharedRegisterPublishTaskOutputs",
-        ):
-            output_details[task_key] = row
 
     for task_key in sorted(details):
         parent = parents[task_key]
         detail = details[task_key]
-        output_detail = output_details[task_key]
         core_id, block_id, lane, task_id = (
             int(parent[0]),
             int(parent[1]),
@@ -1401,32 +1180,14 @@ def _iter_v5_shared_register_derived_spans(
             int(detail[6]),
             f"register.wait_predecessor_insert#{task_id}",
         )
-        if output_detail[5] == "SharedRegisterPublishTaskOutputs":
-            yield (
-                core_id,
-                block_id,
-                lane,
-                int(detail[6]),
-                int(output_detail[6]),
-                f"register.publish_writer_metadata#{task_id}",
-            )
-            yield (
-                core_id,
-                block_id,
-                lane,
-                int(output_detail[7]),
-                int(detail[7]),
-                f"register.publish_metadata_epilogue#{task_id}",
-            )
-        else:
-            yield (
-                core_id,
-                block_id,
-                lane,
-                int(detail[6]),
-                int(detail[7]),
-                f"register.publish_writer_metadata#{task_id}",
-            )
+        yield (
+            core_id,
+            block_id,
+            lane,
+            int(detail[6]),
+            int(detail[7]),
+            f"register.publish_writer_metadata#{task_id}",
+        )
         yield (
             core_id,
             block_id,
@@ -1762,9 +1523,8 @@ def convert(input_path: Path, output_path: Path) -> tuple[int, int, int]:
                 emitted += 1
             if trace_schema_version == 5:
                 # shared Register 记录 metadata 子区间；等待、writer
-                # metadata 与交棒由边界离线补出。新采集的 task outputs 是
-                # Materialize detail；历史 v5 仍按旧 Register 嵌套兼容。
-                # 这些 detail 都不能加入 Submit 补集重复扣除。
+                # metadata 与交棒由边界离线补出；detail 不能加入 Submit
+                # 补集重复扣除。
                 for (
                     _core_id,
                     block_id,

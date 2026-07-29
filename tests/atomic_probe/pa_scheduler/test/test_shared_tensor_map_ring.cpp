@@ -66,7 +66,7 @@ static_assert(offsetof(SharedRegionSlot, seq) == 64, "shared seq cache line offs
 static_assert(sizeof(SharedBucketState) == 128, "shared bucket control ABI changed");
 static_assert(offsetof(SharedBucketState, tail) == 64, "shared head/tail cache lines merged");
 #if PTO_FDWIC_TENSORMAP_RING_CAP == 128
-static_assert(sizeof(SharedTensorMapSidecar) == 12434560, "shared sidecar ABI changed");
+static_assert(sizeof(SharedTensorMapSidecar) == 2128448, "shared sidecar ABI changed");
 #endif
 static_assert(alignof(SharedTensorMapSidecar) == 64, "shared sidecar alignment changed");
 static_assert(offsetof(SharedTensorMapSidecar, buckets) == 128, "shared bucket offset changed");
@@ -77,37 +77,31 @@ static_assert(
     "shared slots must immediately follow the active bucket controls"
 );
 static_assert(
-    offsetof(SharedTensorMapSidecar, shared_outputs) ==
+    offsetof(SharedTensorMapSidecar, shared_vector_cursor) ==
         offsetof(SharedTensorMapSidecar, slots) +
         sizeof(SharedRegionSlot) * kMapCapacity,
-    "shared output table must immediately follow the fixed 16K slot pool"
+    "shared Vector cursors must immediately follow the fixed 16K slot pool"
 );
 static_assert(
     offsetof(SharedTensorMapSidecar, reader_done) ==
-        offsetof(SharedTensorMapSidecar, writer_history) +
-            sizeof(pa_scheduler::SharedWriterHistoryCell) *
-                pa_scheduler::kMaxTasks,
-    "shared reader progress must immediately follow writer history"
+        offsetof(SharedTensorMapSidecar, shared_vector_cursor) +
+            sizeof(pa_scheduler::AtomicLine) *
+                pa_scheduler::kSharedVectorCursorCapacity,
+    "shared reader progress must immediately follow Vector cursors"
 );
 #if PTO_FDWIC_TENSORMAP_RING_CAP == 128
 static_assert(offsetof(SharedTensorMapSidecar, slots) == 16512, "default shared slot offset changed");
-static_assert(offsetof(SharedTensorMapSidecar, shared_outputs) == 2113664, "default shared output offset changed");
-static_assert(offsetof(SharedTensorMapSidecar, shared_heap_cursor) == 11026560, "default shared heap offset changed");
 static_assert(
-    offsetof(SharedTensorMapSidecar, shared_heap_vend) == 11027072,
-    "default shared heap vend offset changed"
-);
-static_assert(
-    offsetof(SharedTensorMapSidecar, shared_vector_cursor) == 11027136,
+    offsetof(SharedTensorMapSidecar, shared_vector_cursor) == 2113664,
     "default shared Vector cursor offset changed"
 );
 static_assert(
-    offsetof(SharedTensorMapSidecar, writer_history) == 11027648,
-    "default shared writer-history offset changed"
+    offsetof(SharedTensorMapSidecar, reader_done) == 2114176,
+    "default shared reader-progress offset changed"
 );
 static_assert(
-    offsetof(SharedTensorMapSidecar, reader_done) == 12420288,
-    "default shared reader-progress offset changed"
+    offsetof(SharedTensorMapSidecar, insert_turn_extra) == 2120320,
+    "default shared insert-turn offset changed"
 );
 #endif
 
@@ -318,19 +312,6 @@ void ResetSharedTensorMap(SharedTensorMapSidecar &map) {
     }
     for (uint32_t slot = 0; slot < kMapCapacity; ++slot) {
         StoreControl(&map.slots[slot].seq.value, kSharedMapEmptySeq);
-    }
-    // descriptor 的零值由正式 host 对整块 sidecar 的 memset 建立；独立 ring
-    // 用例不读取 descriptor，但仍把两组发布控制字初始化成协议要求的 -1，
-    // 防止后续 symbol 子测把 task 0 误判成已发布。
-    for (uint32_t task = 0; task < pa_scheduler::kMaxTasks; ++task) {
-        for (uint32_t output = 0; output < pa_scheduler::kSharedOutputMaxPerTask; ++output) {
-            StoreControl(&map.shared_outputs[task].published[output].value, -1);
-            StoreControl(&map.shared_outputs[task].last_writer[output].value, -1);
-        }
-        map.writer_history[task].magic = 0;
-        map.writer_history[task].writer_task = 0;
-        map.writer_history[task].count = 0;
-        map.writer_history[task].reserved = 0;
     }
     for (uint32_t worker = 0;
          worker < pa_scheduler::kWorkers; ++worker) {

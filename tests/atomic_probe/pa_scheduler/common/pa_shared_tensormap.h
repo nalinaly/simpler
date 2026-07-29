@@ -830,8 +830,8 @@ PA_DEVICE SharedAppendCheck SharedTryAppendReaderGatedTask(
     if (entries == nullptr && count != 0) {
         return SharedAppendCheck::ProtocolError;
     }
-    // 纯 symbol writer 没有 ordinary entry，不应为一个空 batch 读取
-    // reclaim 或扫描 reader 前沿。
+    // 没有 ordinary writer 的 task 不应为一个空 batch 读取 reclaim
+    // 或扫描 reader 前沿。
     if (count == 0) {
         return SharedAppendCheck::Ready;
     }

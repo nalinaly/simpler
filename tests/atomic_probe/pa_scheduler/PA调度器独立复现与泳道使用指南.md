@@ -30,16 +30,16 @@
 执行。每次运行都会校验这些数量以及最终 TensorMap、heap、cursor、flag、vend、
 frontier 和 worker 状态，任一不符都会返回失败。
 
-两种 TensorMap 构建都先执行 `EfDrain` 和 `Claim`。private 随后保持
-compete-first eager：每核构造五类完整 `TaskArgs` 并执行 per-worker
-Materialize/map 前端。shared 的 Alloc/QK/SF/PV/UP 五类 task 都只有
-Claim owner 构参和 Materialize；loser 只声明稳定 output symbol，并闭合
-轻量 Submit 边界。这里的零访问从 Claim 已经判负后的 finish/replay 入口
-开始：该路径不等待或访问 TensorMap；Claim 自身仍会访问位于 shared
-sidecar 的 Vector cursor，不属于该断言。CCEC 正式泳道构建将
-orchestration caller、每核 runtime state 和 noinline finish 拆分为独立
-TU；CPU 使用同一公共业务模板做协议回归。本阶段只验收 CCEC 与 CPU，
-不把 AscendC 结果写进闭环证据。
+两种 TensorMap 构建都先执行 `EfDrain`。private 保持自己的既有前端合同；
+当前 shared 则让每个 replay actor 在各自 Claim 前构造完整 `TaskArgs` 并
+执行 Materialize。这里的 actor 同时包括 Claim winner、已经发射 Claim
+atomic 但未赢的 loser，以及因 AIC/AIV 角色不匹配而不发射本次 Claim 的
+`not_attempted`。三类 actor 都持有本核 TensorDesc；只有 Claim winner
+进入有序 TensorMap metadata 发布，loser/not_attempted 不等待插入完成字，
+也不读取 shared TensorMap。CCEC 正式泳道构建将 orchestration caller、
+每核 runtime state 和 noinline finish 拆分为独立 TU；CPU 使用同一公共
+业务模板做协议回归。本轮功能闭环只覆盖 CCEC 与 CPU，不把 AscendC 结果
+写进证据。
 
 Case1 的 task 不是五个彼此独立的占位符。standalone 会从 Tensor descriptor 的
 owner 和当前构建模式的 TensorMap 收集 producer，去重后构造下列 fanin 图：
@@ -232,7 +232,7 @@ mixed 的两个入口和 metadata section；CANN 9.1 自带的 PTO 头可直接�
 
 | 构建 | 后端 | 内容 | 构建命令 | 产物目录 |
 | ---- | ---- | ---- | -------- | -------- |
-| `swimlane` | CCEC/AscendC/CPU | schema-v5 普通阶段、业务父区间、真实 Submit 尾动作与 atomic（direct + PollBatch）合并采集；shared Materialize 另含 task-output/copy/flush detail，Register 含 writer-metadata detail；不配置 PMU | `./run.sh build ccec --tensormap <mode>` 或 `./run.sh build all --tensormap <mode>` | `build/<backend>/<mode>/swimlane/` |
+| `swimlane` | CCEC/AscendC/CPU | schema-v5 普通阶段、业务父区间、真实 Submit 尾动作与 atomic（direct + PollBatch）合并采集；shared 的所有 replay actor 记录 Claim 前 Materialize，只有 winner 继续记录 Register 和 ordinary metadata；不配置 PMU | `./run.sh build ccec --tensormap <mode>` 或 `./run.sh build all --tensormap <mode>` | `build/<backend>/<mode>/swimlane/` |
 | `perf-clock` | CCEC/CPU | 编译掉泳道、atomic 观察、phase-profile、PMU 和 kernel/lifecycle 计时；每核只新增首个 Submit 起点与末个 Submit 终点两个性能边界 | `./run.sh build-perf-clock ccec\|cpu --tensormap <mode>` | `build/<backend>/<mode>/perf-clock/` |
 | `submit-pmu` | 仅 CCEC | 每核完整 Submit PMU，并在编译期可选一个局部阶段；当前有 `none\|claim\|efdrain\|materialize\|register` | `./run.sh build-submit-pmu ccec <phase> --tensormap <mode>` | `build/ccec/<mode>/submit-pmu/<phase>/` |
 
@@ -251,14 +251,14 @@ submit-pmu 四件套都必须通过 manifest 的模式、CAP、insert-turn G、�
 
 shared 构建还读取 `PA_SHARED_INSERT_TURN_GROUPS`，默认 1，只接受
 1/2/4/8/16/32/64/128；private 只允许 1。该值只在构建期生效，不是
-benchmark 参数。默认 CAP=128 时，shared ABI generation 为 11，
-ABI version 为 `(11<<8)|G`；host/device 握手和 schema-v3 manifest
+benchmark 参数。默认 CAP=128 时，shared ABI generation 为 12，
+ABI version 为 `(12<<8)|G`；host/device 握手和 schema-v3 manifest
 都会拒绝不同 G 的混件。turn-G>1 只属于本阶段维护的 CPU/CCEC 后端；
 AscendC 和 `all` 会在任何构建或设备动作前被拒绝。
 
 `perf-clock` 的“两个时间边界”专指新增的性能观察：task 0 在 EfDrain 前
-读取一次，末 task 完成 Submit 尾动作后读取一次。shared per-slot symbol
-等待和 startup 屏障仍保留时间型 watchdog；每个等待窗口先读取一次超时起点，
+读取一次，末 task 完成 Submit 尾动作后读取一次。shared 插入完成链等待和
+startup 屏障仍保留时间型 watchdog；每个等待窗口先读取一次超时起点，
 随后只在每 1024 次未完成轮询时复查系统计数器。它属于防止协议永久挂死
 的正确性机制，不应谎称整个 ELF 物理上只有两条 `SYS_CNT`。CPU 变体会
 逐线程断言专用性能接口恰好调用两次，但 CPU 时间只验证协议和算术，
@@ -340,7 +340,75 @@ ASan/UBSan。CPU b1、CPU b256 的完整调度断言和 CCEC private 三镜像�
 同口径单次为 3,862.246 us，只作协议和规模回归记录，不是性能基线，也不
 替代后续配对多轮性能验证。
 
-### 4.2 当前 shared TensorMap：有序插入、writer history、shared heap 与 no-reclaim ring
+### 4.2 当前 shared TensorMap：本核 descriptor 与 winner 有序 metadata
+
+当前 standalone shared 的核心合同如下：
+
+1. 所有 replay actor 都在各自 Claim 前执行 `BuildArgs + Materialize`；
+2. 每个 worker 使用独立 `worker.heap_next` 和本地 TensorDesc 对象；
+3. 96 个 worker 使用同一 GM `heap_base/heap_size`，并按完全相同的
+   task、shape、output 顺序推进私有 cursor，因此同一
+   `(task_id, output_slot)` 虽然拥有不同的本地 descriptor 地址，却得到
+   完全相同的物理 `buffer_addr`；
+4. 只有有序 Claim winner 发布 ordinary TensorMap metadata，再发布
+   `TaskCell::deps_prepared` 插入完成字；没有 writer 的 task 也必须交接
+   顺序；
+5. fanin lookup、Build、ready 判断和 kernel 执行全部位于有序插入区外，
+   lookup 只接受 `producer∈[N-H,N)`，不会把 self/future writer 当成
+   前任；
+6. `loser` 已经参与 Claim atomic 但没有赢，`not_attempted` 因角色不匹配
+   不发射本次 Claim；两者都已经完成本地 Materialize，Claim 后均不读取
+   shared TensorMap。
+
+该合同不再跨核传递 TensorDesc。`SharedTaskOutputs`、
+`SharedOutputRef`、`SharedOutputCell`、output symbol、writer history
+和 global shared heap 已从当前代码及 ABI 中物理删除；fresh Output 的
+直接 producer 来自本核 descriptor，INOUT 的后继 writer 才进入 ordinary
+region ring。每核“私有 heap”指分配 cursor 和 descriptor 构造私有，
+不是每核拥有不同的物理输出区；物理地址一致性是删除 descriptor 传递协议
+后的必要条件。
+
+当前 shared 构建身份为 ABI generation 12。默认 CAP=128 时，
+`SharedTensorMapSidecar` 为 `2,128,448` bytes；generation 11 的
+`12,434,560` bytes sidecar 中包含的 output table、history 和 global
+shared heap 已删除，不保留兼容空洞。当前 sidecar 只保留 ordinary ring、
+shared Vector Claim cursor，以及 ordinary ring 隔离门槛使用的
+`reader_done`/历史 turn 控制线；当前 PA 热路径的逐 task 插入完成字位于
+`TaskCell::deps_prepared`，不复用这些 sidecar turn 控制线。
+
+本轮已完成 CPU shared/private 回归、CCEC shared/private 构建和 A5
+shared 动态闭环。A5 结果为：B1/G1 Submit `81.873 us`，B1/G2
+`102.110 us`，B256/G1 `4,421.551 us`；三组均通过完整调度、TensorMap、
+fanin、heap 和真计算输出校验。该结果只证明功能合同闭合，尚未宣称性能
+优化。旧 shared 约 `2.4 ms` 只作历史量级参考；全员构参与 Materialize
+的成本需要后续冻结 ELF 后再用泳道和 perf-clock 分开归因。
+
+### 4.3 当前 ordinary ReaderReclaim 独立 A5 门槛
+
+当前 `shared-protocol-litmus` 已删除 output symbol/history 场景，只保留
+ordinary ring 的 ReaderReclaim。它不启动普通 PA benchmark，也不改变
+PA kernel/host；构建和运行命令为：
+
+```bash
+./run.sh build-shared-protocol-litmus ccec
+./run.sh shared-protocol-litmus ccec \
+  --scenario reader-reclaim --ordering all \
+  --device 0 --runs 1
+```
+
+每轮分别执行 `AIC reader -> AIV reclaimer` 与
+`AIV reader -> AIC reclaimer`，并覆盖 `compiler-clobber`、
+`payload-dependency`、`dsb-all` 三种 reader-close 口径。当前
+`2 directions × 3 orderings` 六种组合已经全部 PASS。该门槛只证明受控
+ordinary 满环中“reader 完成读取后发布前沿，另一物理核随后回收并复用
+slot”的当前 artifact；它不等价于 PA 热路径已启用 reader-progress
+reclaim，也不能把最弱的 compiler-clobber 结果外推为通用设备顺序保证。
+
+### 4.4 历史：descriptor 跨核传递、writer history 与 global shared heap
+
+本节只保留旧协议的演进和已撤回实验，便于解释历史提交。下文原记录中的
+“当前”均指当时阶段，不是 generation 12 的现状；其中命令、ABI、字段和
+性能数字都不得作为当前使用说明。当前合同只看 4.2～4.3 节。
 
 S3.2a 在 S3.1 的 4,735,104B output table 尾部追加 8 条 cache-line
 heap cursor 和 1 条 aggregate vend，因此 `SharedTensorMapSidecar`
@@ -552,7 +620,11 @@ S2 的 2,119,808B sidecar（含 96 条 per-core progress）和 S2.5 的
 满桶只允许在写入前终止，不允许覆盖 live producer。S2/S2.5 的历史结构、
 失败实验和上板结果见 `shared_tensormap_record.md`。
 
-#### shared protocol 的独立 A5 门槛
+#### 历史 shared protocol 多场景 A5 门槛
+
+以下内容记录 generation 7～11 的旧 output symbol/history 协议和当时的
+命令、结果，当前 generation 12 不再提供 `history` 或 `all` scenario。
+当前可执行命令以 4.3 节为准。
 
 R4c 的通用 WriterIntentSet 为 future writer 覆盖 latest-cache 的场景追加
 task-indexed immutable history；R4d 用独立 mixed AIC/AIV ELF 验证跨物理核
@@ -822,64 +894,50 @@ FinalDrain；孤儿、越界或多重归属都会使排他分析失败。
 除 Kernel 可以执行前序 task 外，所有 Submit 前端和尾动作的 `task_id` 必须与
 包含它的 Submit 一致。
 
-shared TensorMap 会分别细化 Materialize 中的 fresh-output 发布和
-Register 中的有序 writer 元数据发布。
+shared TensorMap 的泳道必须与当前执行合同一致：
 
-Materialize 显示：
+- 每个 replay actor 都记录 Claim 前 Materialize，因此 winner、loser 和
+  `not_attempted` 均有自己的 Materialize 区间；
+- 只有 Claim winner 记录 Register 和唯一的
+  `SharedRegisterPublishMetadata` detail；
+- generation 12 不再产生
+  `SharedMaterializePublishTaskOutputs`、`Copy`、`Flush`；converter 和
+  analyzer 遇到这些退休记录会直接拒绝，不为旧 raw 做兼容推断。
 
-- `materialize.before_publish_task_outputs#N`：descriptor/heap
-  Materialize 和 writer delta 准备；
-- `materialize.publish_task_outputs#N`：精确包住 task 独占
-  `SharedOutputCell` 的预检、writer 起点、descriptor 发布和
-  `published` 更新；它是父 overlay，不重复加入 Submit 排他总和；
-- `materialize.publish_task_outputs.copy#N`：整批复制
-  `TensorDesc` 到 `shared_outputs[N].tensors[]`；
-- `materialize.publish_task_outputs.flush#N`：整批
-  `FlushRegion`，位于 copy 之后、`StoreBarrier`/`published` 之前；
-- `materialize.publish_task_outputs.residual#N`：由父子端点离线得到的
-  预检、`last_writer`、barrier 和 published 开销；
-- `materialize.after_publish_task_outputs#N`：发布完成后的 Materialize
-  收尾。
-
-Register 显示：
+Register 离线细分为：
 
 - `register.wait_predecessor_insert#N`：等待 task N-1 发布 TensorMap
   插入完成；task 0 直接进入下一段；
-- `register.publish_metadata#N`：metadata 总区间的 overlay，只用于显示
-  父子关系，不加入可加总阶段；
-- `register.publish_writer_metadata#N`：资格检查，并发布 ordinary、
-  symbol 和 writer 元数据；
+- `register.publish_writer_metadata#N`：资格检查并发布 ordinary
+  TensorMap metadata；
 - `register.publish_insert_completion#N`：CAS 发布 task N 的插入完成字，
   供 task N+1 的 owner 轮询。
 
-设备每个成功 winner 固定写一条 `SharedRegisterPublishMetadata`，以及
-`SharedMaterializePublishTaskOutputs`、`Copy`、`Flush` 三条
-Materialize raw detail；loser 不写这些 detail。等待、Materialize
-前后段、outputs residual、writer metadata 和完成发布均由父子端点离线
-还原，不记录逐次 poll。raw detail 都是 overlay，不能再次加入 Submit
-排他总和。
+设备每个成功 winner 固定写一条 `SharedRegisterPublishMetadata`；
+等待、writer metadata 和完成发布由 Register 父区间与这条 detail 的端点
+离线还原，不记录逐次 poll。该 detail 是 overlay，不能再次加入 Submit
+排他总和。Materialize 没有 descriptor 跨核发布子阶段，不再人为拆出
+copy/flush/residual。
+
 CCEC 在每次 turn Load 后用一条 MOV 派生互不等同的比较值和计时依赖值，
 避免 O3 利用 `Ready => observed == task_id` 把后者常量传播成 task id；
 AIC/AIV 优化 IR 都必须保持
 `atomic Load -> dependency fork -> Ready branch / SYS_CNT`。该处理只存在于
 swimlane 构建，不增加 DSB、GM 访问或 SYS_CNT 读取。
-`swimlane_exclusive_analysis.json` 会独立校验：
+`swimlane_exclusive_analysis.json` 会独立校验每个 shared winner 的
+Register 分解：
 
 ```text
-Materialize =
-    before_publish_task_outputs
-  + publish_task_outputs
-  + after_publish_task_outputs
-
-publish_task_outputs =
-    copy + flush + residual
-
-Register = wait_predecessor_insert + metadata + publish_insert_completion
+Register =
+    wait_predecessor_insert
+  + publish_writer_metadata
+  + publish_insert_completion
 ```
 
-当前 placement 下 `metadata == writer_metadata`，Register 中历史
-task-output 字段必须精确为零。报告同时给出整体、AIC/AIV 和逐核整数
-闭合。
+报告还会校验：每个 shared Submit actor 恰有一个 Claim 前 Materialize；
+winner 恰有一个 Register detail，loser/not_attempted 没有 Register
+detail；退休 task-output 字段不得出现。报告同时给出整体、AIC/AIV 和
+逐核整数闭合。
 
 runner 结束时会打印准确目录：
 
@@ -1026,7 +1084,7 @@ frontier_initial=... frontier_flag=... frontier_ready_fetch_max=... frontier_ter
 shared 模式仍保留上述 frontier 字段、AtomicSite 编号和 ABI，以便与 private
 共用 converter/schema。只有在 `--trace-atomics` 已开启、
 `dropped_records=0` 且 logical/physical/batch 闭合通过时，泳道没有对应
-记录才能证明热路径没有执行调用，而不是采集丢失。如果后续 shared heap
+记录才能证明热路径没有执行调用，而不是采集丢失。如果后续每核 heap
 允许 wrap 或复用 task cell，必须恢复 frontier 或等价
 generation/reclaim 协议，不能沿用 no-wrap 结论。
 
@@ -1073,9 +1131,9 @@ atomic.poll_batch.<site>.load×<call_count>
 名称中的 `call_count` 是实际执行的源码 wrapper 调用次数，
 不是采样或估算值。
 
-当前固定 schema 共有 21 个调用点。0～14 是既有 common/private
-调用点，15～18 是 shared heap 调用点，19～20 是 per-task TensorMap
-插入完成链：
+当前固定 schema 保留 21 个编号槽。0～14 是既有 common/private
+调用点，15～18 是已经退役的 global shared heap 历史槽，19～20 是
+per-task TensorMap 插入完成链：
 
 | `site_id` | Perfetto `site` | `op` | 所属路径 |
 | --------: | --------------- | ---- | -------- |
@@ -1094,10 +1152,10 @@ atomic.poll_batch.<site>.load×<call_count>
 | 12 | `heap_vend_load` | `load` | HeapGuard vend |
 | 13 | `replay_done_increment` | `fetch_add` | 回放完成屏障到达计数 |
 | 14 | `replay_done_poll` | `load` | 最终 drain 中轮询回放完成 |
-| 15 | `shared_heap_vend_load` | `load` | shared aggregate vend 预检 |
-| 16 | `shared_heap_cursor_load` | `load` | shared 分片 cursor 预检 |
-| 17 | `shared_heap_cursor_reserve` | `fetch_add` | 取得本 task 分片物理区间 |
-| 18 | `shared_heap_vend_advance` | `fetch_add` | 推进并取得 aggregate vend |
+| 15 | `shared_heap_vend_load` | `load` | 已退役；仅保留 raw 数值槽，不再发射 |
+| 16 | `shared_heap_cursor_load` | `load` | 已退役；仅保留 raw 数值槽，不再发射 |
+| 17 | `shared_heap_cursor_reserve` | `fetch_add` | 已退役；仅保留 raw 数值槽，不再发射 |
+| 18 | `shared_heap_vend_advance` | `fetch_add` | 已退役；仅保留 raw 数值槽，不再发射 |
 | 19 | `shared_insert_predecessor_poll` | `load` | task N 等待 task N-1 的插入完成字 |
 | 20 | `shared_insert_completion_publish` | `compare_exchange` | CAS 发布 task N 的插入完成字 |
 
@@ -1105,12 +1163,10 @@ atomic.poll_batch.<site>.load×<call_count>
 执行 `fatal_set`。standalone 也没有真实 PA 后续追加的 BlockWon site，不能把真实
 PA 的九类 load 加一类 exchange allowlist 照搬到这里。
 
-shared heap 四个站点的返回值都参与协议判断：vend/cursor Load 用于合法性
-与容量检查，两个 FetchAdd 的旧值分别决定物理地址和累计进度。因此 CCEC
-direct 记录均使用 return-ready 边界；它们不是发布后即丢弃返回值的
-source-issue 操作。PA Case1 每 batch 固定执行 5 次 vend load，以及各 4 次
-cursor load、cursor reserve 和 vend advance。output publication/last-writer
-仍按后续 S5.2 小步接入，不能把当前 19-site schema 宣称为 shared 全覆盖。
+generation 12 的 shared 由每个 actor 独立推进本核 `heap_next`，因此
+15～18 在正确 raw 中必须为零。它们的枚举名称与编号暂留，只为避免 19～20
+漂移；不能据此声称当前仍存在 global shared heap。当前 shared 需要关注的
+新增 atomic 是 predecessor Wait 的 site 19 和发布插入完成字的 site 20。
 
 standalone 的通用等待区只允许以下六类 observation load 在匹配窗口内进入
 PollBatch；同一 site 在等待区外的一次性或 opportunistic 读取仍是 direct Atomic：
@@ -2033,17 +2089,27 @@ ClockBaseline，并继续以逐核容量、调用数、总记录数和 `dropped=
 `64 * 96 = 6,144` bytes。split ELF 另预留 AIC/AIV 两个 role-specific
 block-local runtime state，每个精确 1,664 bytes、最终 section 合计
 3,328 bytes；它们不属于 GM `SchedulerState`。以上 `SchedulerState` 数字
-是 private 模式。R4c 的 shared sidecar 历史大小为 12,420,288 bytes；
+是 private 模式。
+
+当前 generation 12 的 shared `SharedTensorMapSidecar` 为
+`2,128,448` bytes。相较 generation 10/11 的 `12,434,560` bytes，
+已经物理删除 output table、writer history、symbol 状态和 global shared
+heap，不保留兼容空洞；现存尾部依次为 shared Vector Claim cursor、
+`reader_done` 和额外 insert-turn lines。shared 的完整
+`sizeof(SchedulerState)` 由当前 host/device 构建身份握手核对，不应再从
+下列历史 sidecar 数字推导。
+
+R4c 的 shared sidecar 历史大小为 12,420,288 bytes；
 R4e-a 追加 96 条 reader-progress cache line 后，generation-8 sidecar 为
 12,426,432 bytes。R5c 在尾部追加七条 insert-turn cache line，形成历史
 generation-9 的 12,426,880 bytes；generation-10 将该尾数组扩为
-127 条 extra line，sidecar 为 12,434,560 bytes，当前 generation-11
-保留同一物理布局但不再从热路径访问这些 turn line。shared batch 输入
-数组扩到 512 后，CPU non-split 与定义
+127 条 extra line，sidecar 为 12,434,560 bytes；generation-11
+曾保留同一物理布局但不再从热路径访问这些 turn line。该历史 shared batch
+输入数组扩到 512 后，CPU non-split 与定义
 `PA_COMPETE_FIRST_SPLIT_FINISH` 的 CCEC 变体总大小分别为
 1,019,551,552/1,019,557,696 bytes；swimlane、perf-clock 以及 submit-PMU
-none/claim/efdrain 使用后者，submit-PMU materialize/register 和独立
-shared-protocol-litmus 使用 non-split 大小。既有 production prefix 和
+none/claim/efdrain 当时使用后者，submit-PMU materialize/register 和独立
+shared-protocol-litmus 当时使用 non-split 大小。既有 production prefix 和
 `WorkerState`/`RunConfig` offset 不变；`context_lens` 后的 standalone
 字段因数组扩容顺延 1,024B。S4.15a/S4.16 历史候选都曾得到
 4,736,704B，但末尾 512B 分别是 Cube cursor 和

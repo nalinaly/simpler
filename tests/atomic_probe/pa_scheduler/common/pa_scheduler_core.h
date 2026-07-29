@@ -872,17 +872,10 @@ PA_DEVICE bool BuildWinner(
         stats.max_occupied = worker.occupied_count;
     }
     const int32_t sub_block_id = worker.lane == 2 ? 1 : 0;
-#if PTO_FDWIC_SHARED_MAP
-    BuildSlotPayload<Ops, false>(
-        slot, task_id, static_cast<uint32_t>(FunctionId(kind)), 0, args, context, fanin, fanin_count,
-        state->shared_map, sub_block_id
-    );
-#else
     BuildSlotPayload(
         slot, task_id, static_cast<uint32_t>(FunctionId(kind)), 0, args,
         context, fanin, fanin_count, sub_block_id
     );
-#endif
     stats.result.slot_tensor_copies += static_cast<uint32_t>(context.tensor_count);
     stats.result.slot_scalar_copies += static_cast<uint32_t>(context.scalar_count);
     stats.result.fanin_edges += fanin_count;
@@ -938,49 +931,6 @@ PA_DEVICE bool DiscardSharedSlotsAfterReplayFatal(
     return accounting_valid;
 }
 
-// register_mask 只指向已经存在的 Local/GM descriptor。两个地址空间分支
-// 必须保持分离，避免 CCEC 把它们合并成不支持的 pointer phi。
-PA_DEVICE bool ValidateEmptySharedRegistration(
-    const TaskArgs &args, const SubmitContext &context
-) {
-    uint32_t register_mask = context.register_mask;
-    for (int32_t index = 0; index < args.tensor_count; ++index) {
-        const uint32_t bit = 1U << static_cast<uint32_t>(index);
-        if ((register_mask & bit) == 0) {
-            continue;
-        }
-        const TaskTensorRef &reference = args.tensors[index];
-        // shared fresh Output 由 (producer,slot) 直接寻址，不能退回
-        // region map。manual_dep 的 output_view 同样不是 TensorMap 的
-        // 自动 hazard，保留在 task args 但不登记。
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            register_mask &= ~bit;
-            continue;
-        }
-        if (reference.kind == TensorRefKind::GmTensor) {
-            PA_GM const TensorDesc &tensor = *reference.pointer.gm_tensor;
-            if (!tensor.manual_dep) {
-                return false;
-            }
-        } else if (reference.kind == TensorRefKind::LocalTensor) {
-            const TensorDesc &tensor = *reference.pointer.local_tensor;
-            if (!tensor.manual_dep) {
-                return false;
-            }
-        } else {
-            return false;
-        }
-        register_mask &= ~bit;
-    }
-    return register_mask == 0;
-}
-
-enum class SharedWriterIntentResult : uint32_t {
-    NotRequired = 0,
-    Published = 1,
-    Failed = 2,
-};
-
 PA_DEVICE bool IsSharedWriterIntentTag(TensorArgType tag) {
     return tag == TensorArgType::Inout ||
            tag == TensorArgType::OutputExisting;
@@ -1004,15 +954,6 @@ PA_DEVICE bool InspectSharedWriterIntent(
             continue;
         }
         const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            if (!IsPlainSharedOutputRef(
-                    SharedOutputReference(reference)
-                )) {
-                return false;
-            }
-            required = true;
-            continue;
-        }
         if (reference.kind == TensorRefKind::GmTensor) {
             if (reference.pointer.gm_tensor == nullptr) {
                 return false;
@@ -1053,20 +994,6 @@ PA_DEVICE bool AddSharedWriterIntentFanin(
     return true;
 }
 
-template <bool Strict>
-PA_DEVICE bool AddCollectedSharedFanin(
-    int32_t fanin[kMaxFanin], uint32_t &count, int32_t producer
-) {
-    if constexpr (Strict) {
-        return AddSharedWriterIntentFanin(
-            fanin, count, producer
-        );
-    }
-    AddFanin(fanin, count, producer);
-    return true;
-}
-
-template <bool Strict>
 PA_DEVICE bool AddCollectedSharedOwner(
     int32_t fanin[kMaxFanin], uint32_t &count, uint64_t owner,
     int32_t reader_task, int32_t reader_lower_bound
@@ -1076,247 +1003,28 @@ PA_DEVICE bool AddCollectedSharedOwner(
     }
     const int32_t producer =
         static_cast<int32_t>(owner & 0xFFFFFFFFU);
-    if constexpr (Strict) {
-        // 新 shared 路径只接受 [N-H,N) 内的真实前任。高 32 位非零、
-        // self/future owner 都是协议错误；已经落到窗口左侧的旧 owner
-        // 不再形成依赖，但后续 ordinary lookup 仍可找到窗口内的新 writer。
-        if (owner > static_cast<uint64_t>(INT32_MAX) ||
-            producer >= reader_task) {
-            return false;
-        }
-        if (producer < reader_lower_bound) {
-            return true;
-        }
+    // shared 只接受 [N-H,N) 内的真实前任。高 32 位非零、
+    // self/future owner 都是协议错误；已经落到窗口左侧的旧 owner
+    // 不再形成依赖，但后续 ordinary lookup 仍可找到窗口内的新 writer。
+    if (owner > static_cast<uint64_t>(INT32_MAX) ||
+        producer >= reader_task) {
+        return false;
     }
-    return AddCollectedSharedFanin<Strict>(
+    if (producer < reader_lower_bound) {
+        return true;
+    }
+    return AddSharedWriterIntentFanin(
         fanin, count, producer
     );
 }
 
 template <typename Ops>
-PA_DEVICE bool WaitForSharedOutputPublished(
-    PA_GM SharedTensorMapSidecar &map, const FdwicOutputRef &output_ref,
-    PA_GM volatile int32_t *fatal
-) {
-    // 前置条件：调用者已经用 IsPlainSharedOutputRef 校验 producer/slot/view
-    // 范围，并确认 producer_task_id 严格早于当前 consumer task。
-    PA_GM volatile int64_t *published =
-        &map.shared_outputs[
-             static_cast<uint32_t>(output_ref.producer_task_id)
-         ].published[output_ref.output_slot].value;
-    const int64_t expected =
-        static_cast<int64_t>(output_ref.producer_task_id);
-    int64_t observed = Ops::Load(published);
-    if (observed == expected) {
-        return true;
-    }
-    if (observed != -1) {
-        if (fatal != nullptr) {
-            (void)Ops::Exchange(fatal, static_cast<int32_t>(1));
-        }
-        return false;
-    }
-
-    // 只在 producer 尚未发布时建立超时窗口；正常已就绪路径不增加
-    // SYS_CNT。轮询对象按 (producer,slot) 分散，不再让所有依赖消费者
-    // 争用同一条全局发布前沿。
-    const uint64_t begin = Ops::Now();
-    uint32_t polls = 0;
-    while (true) {
-        Ops::SpinHint();
-        observed = Ops::Load(published);
-        if (observed == expected) {
-            return true;
-        }
-        if (observed != -1) {
-            if (fatal != nullptr) {
-                (void)Ops::Exchange(fatal, static_cast<int32_t>(1));
-            }
-            return false;
-        }
-        ++polls;
-        if ((polls & 1023U) != 0) {
-            continue;
-        }
-        if (fatal != nullptr && Ops::Load(fatal) != 0) {
-            return false;
-        }
-        if (Ops::Now() - begin > kWatchdogTicks) {
-            if (fatal != nullptr) {
-                (void)Ops::Exchange(fatal, static_cast<int32_t>(1));
-            }
-            return false;
-        }
-    }
-}
-
-// 只供已经取得本 task 有序 insert turn 的调用者使用。对任意合法引用
-// producer P < task N，P 的 fresh descriptor 发布先于 P 的 insert
-// completion；逐 task predecessor completion 链又先于 N 取得 turn。因此
-// 此处若仍未观察到精确的 P，不存在继续轮询后可恢复的正常时序，只能把它
-// 视为协议错误。未取得该前提的通用路径必须继续使用上面的 Wait helper。
-template <typename Ops>
-PA_DEVICE bool CheckSharedOutputPublishedAfterInsertTurn(
-    PA_GM SharedTensorMapSidecar &map,
-    const FdwicOutputRef &output_ref
-) {
-    if (!IsPlainSharedOutputRef(output_ref)) {
-        return false;
-    }
-    PA_GM volatile int64_t *published =
-        &map.shared_outputs[
-             static_cast<uint32_t>(output_ref.producer_task_id)
-         ].published[
-             static_cast<uint32_t>(output_ref.output_slot)
-         ].value;
-    return Ops::Load(published) ==
-           static_cast<int64_t>(output_ref.producer_task_id);
-}
-
-PA_DEVICE bool SharedSymbolHistoryKey(
-    const FdwicOutputRef &output_ref, uint32_t &key
-) {
-    if (!IsPlainSharedOutputRef(output_ref)) {
-        return false;
-    }
-    key =
-        static_cast<uint32_t>(output_ref.producer_task_id) *
-            kSharedOutputMaxPerTask +
-        static_cast<uint32_t>(output_ref.output_slot) + 1U;
-    return true;
-}
-
-PA_DEVICE FdwicOutputRef SharedSymbolHistoryReference(uint32_t key) {
-    if (key == 0) {
-        return InvalidSharedOutputRef();
-    }
-    --key;
-    const uint32_t producer =
-        key / kSharedOutputMaxPerTask;
-    const uint32_t slot =
-        key % kSharedOutputMaxPerTask;
-    if (producer >= kMaxTasks ||
-        slot >= kSharedOutputMaxPerTask) {
-        return InvalidSharedOutputRef();
-    }
-    return FdwicOutputRef{
-        static_cast<int32_t>(producer),
-        static_cast<int16_t>(slot),
-        0, 0, 0, 0
-    };
-}
-
-// writer task 的 history cell 在对应 last_writer CAS 前完整写回，之后
-// 保持不可变。latest cache 若指向 reader 的未来 task，就按该 task 的
-// 精确 symbol key 取前驱，直到回到 reader 的过去；正常 latest<reader
-// 快路完全不读取 history。
-template <typename Ops>
-PA_DEVICE bool ResolveSharedSymbolWriterBefore(
-    PA_GM SharedTensorMapSidecar &map,
-    const FdwicOutputRef &output_ref, int32_t reader_task,
-    int32_t reader_lower_bound, int32_t &resolved_writer
-) {
-    uint32_t symbol_key = 0;
-    if (!SharedSymbolHistoryKey(output_ref, symbol_key) ||
-        reader_task <= output_ref.producer_task_id ||
-        reader_task < 0 || reader_lower_bound < 0 ||
-        reader_lower_bound > reader_task) {
-        return false;
-    }
-    PA_GM SharedOutputCell &origin =
-        map.shared_outputs[
-            static_cast<uint32_t>(
-                output_ref.producer_task_id
-            )
-        ];
-    int64_t latest =
-        Ops::Load(
-            &origin.last_writer[
-                static_cast<uint32_t>(output_ref.output_slot)
-            ].value
-        );
-    uint32_t steps = 0;
-    while (latest >= reader_task) {
-        if (latest < 0 ||
-            latest >= static_cast<int64_t>(kMaxTasks) ||
-            steps++ >= kMaxTasks) {
-            return false;
-        }
-        PA_GM SharedWriterHistoryCell &history =
-            map.writer_history[static_cast<uint32_t>(latest)];
-        // latest CAS 是这份 immutable history 的发布边界。先失效首行
-        // 取得 header；若该 task 有超过六个 symbol writer，再只失效
-        // 余下实际使用的连续 record 行。
-        Ops::InvalidateRegion(&history, 64);
-        const uint32_t count = history.count;
-        if (history.magic != kSharedWriterHistoryMagic ||
-            history.writer_task != latest ||
-            history.reserved != 0 ||
-            count == 0 ||
-            count > kSharedWriterHistoryMaxPerTask) {
-            return false;
-        }
-        const uint64_t used_bytes =
-            offsetof(SharedWriterHistoryCell, entries) +
-            static_cast<uint64_t>(count) *
-                sizeof(SharedWriterHistoryRecord);
-        if (used_bytes > 64) {
-            Ops::InvalidateRegion(
-                &history.entries[6], used_bytes - 64
-            );
-        }
-        bool found = false;
-        int32_t previous = -1;
-        for (uint32_t index = 0; index < count; ++index) {
-            PA_GM const SharedWriterHistoryRecord &record =
-                history.entries[index];
-            if (record.symbol_key != symbol_key) {
-                continue;
-            }
-            if (found) {
-                return false;
-            }
-            found = true;
-            previous = record.previous_writer;
-        }
-        if (!found ||
-            previous < output_ref.producer_task_id ||
-            previous >= latest) {
-            return false;
-        }
-        latest = previous;
-    }
-    if (latest < output_ref.producer_task_id ||
-        latest >= reader_task) {
-        return false;
-    }
-    // 与 ordinary ring 使用同一半开窗口：[N-H,N)。history 仍需走到
-    // 第一个 <N 的 writer 才能验证链完整；若它已经早于左边界，则
-    // 返回 external/no-dependency，而不是把过期 producer 塞进 fanin。
-    resolved_writer =
-        latest < reader_lower_bound
-            ? -1
-            : static_cast<int32_t>(latest);
-    return true;
-}
-
-template <
-    typename Ops, bool ChainedWriter = false,
-    bool AcceptLatestWriter = false
->
 PA_DEVICE uint32_t CollectSharedFanin(
     PA_GM SharedTensorMapSidecar &map, const TaskArgs &args,
-    int32_t task_id, int32_t heap_window, LocalStats &stats,
+    int32_t task_id, int32_t heap_window,
     int32_t fanin[kMaxFanin], bool &protocol_ok,
-    uint32_t &ordinary_lookup_count,
-    PA_GM volatile int32_t *fatal = nullptr,
-    int32_t chained_producer_task_id = -1,
-    int32_t expected_shared_writer = -1
+    uint32_t &ordinary_lookup_count
 ) {
-    static_assert(
-        !(ChainedWriter && AcceptLatestWriter),
-        "generic latest-writer lookup must not use the PA chained selector"
-    );
     protocol_ok = true;
     ordinary_lookup_count = 0;
     if (task_id < 0 || heap_window < 0 ||
@@ -1327,51 +1035,14 @@ PA_DEVICE uint32_t CollectSharedFanin(
     }
     const int32_t reader_lower_bound =
         task_id > heap_window ? task_id - heap_window : 0;
-    if constexpr (ChainedWriter) {
-        // PA 的三个 accumulator 共用同一个 Alloc producer，后续每个 UP
-        // 同步推进这三个 slot。显式的 (producer,writer) 对只选择这一
-        // symbol cell；本组 SF/PV 等 fresh refs 仍按自己的 producer
-        // 校验。selector 必须至少命中一个消费引用，不能传错后静默退化。
-        if (chained_producer_task_id < 0 ||
-            chained_producer_task_id >= expected_shared_writer ||
-            expected_shared_writer >= task_id) {
-            protocol_ok = false;
-            return 0;
-        }
-        bool matched_chain_ref = false;
-        for (int32_t index = 0; index < args.tensor_count; ++index) {
-            const TensorArgType tag =
-                TaskTag(args, static_cast<uint32_t>(index));
-            if (tag == TensorArgType::Output ||
-                (tag != TensorArgType::Input &&
-                 tag != TensorArgType::Inout &&
-                 tag != TensorArgType::OutputExisting)) {
-                continue;
-            }
-            const TaskTensorRef &reference = args.tensors[index];
-            if (reference.kind != TensorRefKind::SharedOutputRef) {
-                continue;
-            }
-            matched_chain_ref |=
-                SharedOutputReference(reference).producer_task_id ==
-                    chained_producer_task_id;
-        }
-        if (!matched_chain_ref) {
-            protocol_ok = false;
-            return 0;
-        }
-    }
 
     int32_t validated_fanin[kMaxFanin] = {};
     uint32_t validated_count = 0;
     uint32_t validated_ordinary_lookups = 0;
-    uint32_t validated_input_loads = 0;
 
-    // 只读取并校验，不修改 last_writer、统计或输出 fanin。旧 PA
-    // chained-writer 路径仍按自己的 registration/Build 边界提交；
-    // 独立 shared ordered-insert 路径则在进入这里前已经发布本 task
-    // writer history，所以 AcceptLatestWriter 必须沿 history 回退到 <N。
-    // 两种路径都先完成本轮只读校验，后续引用非法时不会再留下 writer 更新。
+    // 只读取并校验，不修改 TensorMap、统计或输出 fanin。当前 task 的
+    // ordinary writer 已在有序段发布；lookup 按 task_id 过滤 self/future
+    // writer，只返回 [N-H,N) 内的最后前任。
     for (int32_t index = 0; index < args.tensor_count; ++index) {
         const TensorArgType tag =
             TaskTag(args, static_cast<uint32_t>(index));
@@ -1379,128 +1050,17 @@ PA_DEVICE uint32_t CollectSharedFanin(
             continue;
         }
         const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            // 当前只接收普通 fresh Output；view ABI 已占位但尚未接入，
-            // 不能静默把带 view 的符号当成 plain descriptor 使用。
-            const FdwicOutputRef output_ref = SharedOutputReference(reference);
-            if (!IsPlainSharedOutputRef(output_ref) ||
-                output_ref.producer_task_id < 0 ||
-                output_ref.producer_task_id >= task_id) {
-                protocol_ok = false;
-                return 0;
-            }
-            PA_GM SharedOutputCell &cell =
-                map.shared_outputs[static_cast<uint32_t>(output_ref.producer_task_id)];
-            bool output_published = false;
-            if constexpr (AcceptLatestWriter) {
-                // ordered Submit 在本 task 的 I commit 后才进入该实例；
-                // predecessor completion 链已经证明 producer 完成了 output
-                // 发布，未就绪只能立即按协议错误返回，不能重新打开轮询。
-                output_published =
-                    CheckSharedOutputPublishedAfterInsertTurn<Ops>(
-                        map, output_ref
-                    );
-            } else {
-                output_published =
-                    WaitForSharedOutputPublished<Ops>(
-                        map, output_ref, fatal
-                    );
-            }
-            if (!output_published) {
-                protocol_ok = false;
-                return 0;
-            }
-            if (tag != TensorArgType::Input &&
-                tag != TensorArgType::Inout &&
-                tag != TensorArgType::OutputExisting) {
-                protocol_ok = false;
-                return 0;
-            }
-            // 同一 task 对同一 symbol 最多只能有一个写引用，否则后面的
-            // writer 提交会把本 task 自己误当成预期 producer。
-            if (tag == TensorArgType::Inout ||
-                tag == TensorArgType::OutputExisting) {
-                for (int32_t previous = 0; previous < index; ++previous) {
-                    const TensorArgType previous_tag =
-                        TaskTag(args, static_cast<uint32_t>(previous));
-                    if (previous_tag != TensorArgType::Inout &&
-                        previous_tag != TensorArgType::OutputExisting) {
-                        continue;
-                    }
-                    const TaskTensorRef &previous_ref = args.tensors[previous];
-                    if (previous_ref.kind != TensorRefKind::SharedOutputRef) {
-                        continue;
-                    }
-                    const FdwicOutputRef previous_output =
-                        SharedOutputReference(previous_ref);
-                    if (previous_output.producer_task_id ==
-                            output_ref.producer_task_id &&
-                        previous_output.output_slot ==
-                            output_ref.output_slot) {
-                        protocol_ok = false;
-                        return 0;
-                    }
-                }
-            }
-            int32_t writer = -1;
-            if constexpr (AcceptLatestWriter) {
-                // latest cell 是零开销快取；若 future writer 已经覆盖它，
-                // 只在这一慢路沿不可变前驱链回到 max(writer<task_id)，
-                // 再与 ordinary lookup 一样过滤到 [N-H,N)。
-                if (!ResolveSharedSymbolWriterBefore<Ops>(
-                        map, output_ref, task_id,
-                        reader_lower_bound, writer
-                    )) {
-                    protocol_ok = false;
-                    return 0;
-                }
-            } else {
-                // PA 迁移完成前保留原来的精确 oracle：默认单组要求
-                // writer==descriptor producer，ChainedWriter 只允许调用方
-                // 指定的 accumulator 链。两种口径不能静默混用。
-                const bool chained_ref =
-                    ChainedWriter &&
-                    output_ref.producer_task_id ==
-                        chained_producer_task_id;
-                const int32_t expected_writer =
-                    chained_ref
-                        ? expected_shared_writer
-                        : output_ref.producer_task_id;
-                writer = static_cast<int32_t>(
-                    Ops::Load(
-                        &cell.last_writer[
-                            output_ref.output_slot
-                        ].value
-                    )
-                );
-                if (expected_writer < output_ref.producer_task_id ||
-                    expected_writer >= task_id ||
-                    writer != expected_writer) {
-                    protocol_ok = false;
-                    return 0;
-                }
-            }
-            if (!AddCollectedSharedFanin<AcceptLatestWriter>(
-                    validated_fanin, validated_count,
-                    writer
-                )) {
-                protocol_ok = false;
-                return 0;
-            }
-            if (tag == TensorArgType::Input) {
-                ++validated_input_loads;
-            }
-            continue;
-        }
         if (reference.kind == TensorRefKind::GmTensor) {
+            if (reference.pointer.gm_tensor == nullptr) {
+                protocol_ok = false;
+                return 0;
+            }
             PA_GM const TensorDesc &tensor = *reference.pointer.gm_tensor;
             if (tensor.manual_dep) {
                 continue;
             }
             const uint64_t owner = tensor.owner_task_id;
-            if (!AddCollectedSharedOwner<
-                    AcceptLatestWriter
-                >(
+            if (!AddCollectedSharedOwner(
                     validated_fanin, validated_count, owner,
                     task_id, reader_lower_bound
                 )) {
@@ -1509,8 +1069,7 @@ PA_DEVICE uint32_t CollectSharedFanin(
             }
             if (tag == TensorArgType::Inout ||
                 tag == TensorArgType::OutputExisting ||
-                (tag == TensorArgType::Input &&
-                 (owner != kInvalidTaskId || AcceptLatestWriter))) {
+                tag == TensorArgType::Input) {
                 bool lookup_ok = false;
                 const int32_t producer = SharedLookupTensor<Ops>(
                     map, tensor, task_id, heap_window, lookup_ok
@@ -1520,24 +1079,27 @@ PA_DEVICE uint32_t CollectSharedFanin(
                     return 0;
                 }
                 ++validated_ordinary_lookups;
-                if (!AddCollectedSharedFanin<
-                        AcceptLatestWriter
-                    >(
+                if (!AddSharedWriterIntentFanin(
                         validated_fanin, validated_count, producer
                     )) {
                     protocol_ok = false;
                     return 0;
                 }
+            } else {
+                protocol_ok = false;
+                return 0;
             }
         } else if (reference.kind == TensorRefKind::LocalTensor) {
+            if (reference.pointer.local_tensor == nullptr) {
+                protocol_ok = false;
+                return 0;
+            }
             const TensorDesc &tensor = *reference.pointer.local_tensor;
             if (tensor.manual_dep) {
                 continue;
             }
             const uint64_t owner = tensor.owner_task_id;
-            if (!AddCollectedSharedOwner<
-                    AcceptLatestWriter
-                >(
+            if (!AddCollectedSharedOwner(
                     validated_fanin, validated_count, owner,
                     task_id, reader_lower_bound
                 )) {
@@ -1546,8 +1108,7 @@ PA_DEVICE uint32_t CollectSharedFanin(
             }
             if (tag == TensorArgType::Inout ||
                 tag == TensorArgType::OutputExisting ||
-                (tag == TensorArgType::Input &&
-                 (owner != kInvalidTaskId || AcceptLatestWriter))) {
+                tag == TensorArgType::Input) {
                 bool lookup_ok = false;
                 const int32_t producer = SharedLookupTensor<Ops>(
                     map, tensor, task_id, heap_window, lookup_ok
@@ -1557,14 +1118,15 @@ PA_DEVICE uint32_t CollectSharedFanin(
                     return 0;
                 }
                 ++validated_ordinary_lookups;
-                if (!AddCollectedSharedFanin<
-                        AcceptLatestWriter
-                    >(
+                if (!AddSharedWriterIntentFanin(
                         validated_fanin, validated_count, producer
                     )) {
                     protocol_ok = false;
                     return 0;
                 }
+            } else {
+                protocol_ok = false;
+                return 0;
             }
         } else {
             protocol_ok = false;
@@ -1572,79 +1134,13 @@ PA_DEVICE uint32_t CollectSharedFanin(
         }
     }
 
-    // 全部引用只读校验通过后，才一次性发布统计与 fanin 结果。INPUT 次数
-    // 在验证扫描中先落局部量，保留 late-failure 的 all-or-nothing 口径。
-    stats.result.shared_symbol_input_loads += validated_input_loads;
+    // 全部引用只读校验通过后，才一次性发布 lookup 计数与 fanin 结果，
+    // 保留 late-failure 的 all-or-nothing 口径。
     ordinary_lookup_count = validated_ordinary_lookups;
     for (uint32_t edge = 0; edge < validated_count; ++edge) {
         fanin[edge] = validated_fanin[edge];
     }
     return validated_count;
-}
-
-template <typename Ops>
-PA_DEVICE bool PublishSharedWriterReady(
-    PA_GM SchedulerState *state, int32_t task_id
-) {
-    if (state == nullptr || task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks)) {
-        return false;
-    }
-    // writer 登记必须先于门值对 loser 可见；本 task 是否已经执行完成
-    // 仍由它自己的 completion flag 表达，不能把 deps_prepared 冒充成
-    // 可执行/已完成。CAS 只允许初始化 sentinel -> task_id：重复 winner
-    // 或错误 task-cell 复用不会先写入一个合法门值再报告失败。
-    Ops::StoreBarrier();
-    return Ops::CompareExchange(
-               &state->tasks[static_cast<uint32_t>(task_id)].deps_prepared,
-               static_cast<int64_t>(-1),
-               static_cast<int64_t>(task_id)
-           ) == -1;
-}
-
-template <typename Ops>
-PA_DEVICE bool WaitForSharedWriterReady(
-    PA_GM SchedulerState *state, int32_t task_id, LocalStats &stats
-) {
-    if (state == nullptr || task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks)) {
-        return false;
-    }
-    PA_GM volatile int64_t *prepared =
-        &state->tasks[static_cast<uint32_t>(task_id)].deps_prepared;
-    int64_t observed = Ops::Load(prepared);
-    if (observed == task_id) {
-        return true;
-    }
-    if (observed != -1) {
-        SetFatal<Ops>(state, stats, task_id);
-        return false;
-    }
-
-    const uint64_t begin = Ops::Now();
-    uint32_t polls = 0;
-    while (true) {
-        Ops::SpinHint();
-        observed = Ops::Load(prepared);
-        if (observed == task_id) {
-            return true;
-        }
-        if (observed != -1) {
-            SetFatal<Ops>(state, stats, task_id);
-            return false;
-        }
-        ++polls;
-        if ((polls & 1023U) != 0) {
-            continue;
-        }
-        if (IsFatal<Ops>(state, stats, task_id)) {
-            return false;
-        }
-        if (Ops::Now() - begin > kWatchdogTicks) {
-            SetFatal<Ops>(state, stats, task_id);
-            return false;
-        }
-    }
 }
 
 PA_DEVICE bool CheckedMultiplyU64ByU32(
@@ -1754,10 +1250,8 @@ PA_DEVICE bool ValidateOrdinarySharedWriterReference(
     return owner >= 0 && owner < task_id;
 }
 
-// 在执行任一 atomic/region append 前先完成所有 writer 引用的结构校验。
-// symbol 重复 writer 会让第二次 CAS 把本 task 自己当成旧 writer，因此
-// 必须在第一项改写之前拒绝。ordinary 多 view 可以合法重叠，不在这里
-// 按地址去重。
+// 在执行任一 atomic/region append 前先完成所有 ordinary writer 引用
+// 的结构校验。多个 view 可以合法重叠，不在这里按地址去重。
 PA_DEVICE bool ValidateSharedWriterIntentSet(
     const TaskArgs &args, int32_t task_id
 ) {
@@ -1774,40 +1268,9 @@ PA_DEVICE bool ValidateSharedWriterIntentSet(
             continue;
         }
         const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            const FdwicOutputRef output_ref =
-                SharedOutputReference(reference);
-            if (output_ref.producer_task_id < 0 ||
-                output_ref.producer_task_id >= task_id) {
-                return false;
-            }
-            for (int32_t previous = 0; previous < index; ++previous) {
-                if (!IsSharedWriterIntentTag(
-                        TaskTag(
-                            args, static_cast<uint32_t>(previous)
-                        )
-                    )) {
-                    continue;
-                }
-                const TaskTensorRef &previous_ref =
-                    args.tensors[previous];
-                if (previous_ref.kind !=
-                    TensorRefKind::SharedOutputRef) {
-                    continue;
-                }
-                const FdwicOutputRef previous_output =
-                    SharedOutputReference(previous_ref);
-                if (previous_output.producer_task_id ==
-                        output_ref.producer_task_id &&
-                    previous_output.output_slot ==
-                        output_ref.output_slot) {
-                    return false;
-                }
-            }
-            continue;
-        }
         if (reference.kind == TensorRefKind::GmTensor) {
-            if (!ValidateOrdinarySharedWriterReference(
+            if (reference.pointer.gm_tensor == nullptr ||
+                !ValidateOrdinarySharedWriterReference(
                     *reference.pointer.gm_tensor, task_id
                 )) {
                 return false;
@@ -1815,7 +1278,8 @@ PA_DEVICE bool ValidateSharedWriterIntentSet(
             continue;
         }
         if (reference.kind == TensorRefKind::LocalTensor) {
-            if (!ValidateOrdinarySharedWriterReference(
+            if (reference.pointer.local_tensor == nullptr ||
+                !ValidateOrdinarySharedWriterReference(
                     *reference.pointer.local_tensor, task_id
                 )) {
                 return false;
@@ -1827,823 +1291,6 @@ PA_DEVICE bool ValidateSharedWriterIntentSet(
     return true;
 }
 
-template <typename Ops, typename TensorReference>
-PA_DEVICE bool CommitOrdinarySharedWriterIntent(
-    PA_GM SharedTensorMapSidecar &map,
-    const TensorReference &tensor, int32_t task_id,
-    int32_t heap_window, int32_t fanin[kMaxFanin],
-    uint32_t &fanin_count, LocalStats &stats
-) {
-    if (tensor.manual_dep) {
-        return true;
-    }
-    if (tensor.owner_task_id != kInvalidTaskId) {
-        if (tensor.owner_task_id >
-            static_cast<uint64_t>(INT32_MAX)) {
-            return false;
-        }
-        const int32_t owner = static_cast<int32_t>(
-            tensor.owner_task_id
-        );
-        if (owner < 0 || owner >= task_id ||
-            !AddSharedWriterIntentFanin(
-                fanin, fanin_count, owner
-            )) {
-            return false;
-        }
-    }
-
-    bool lookup_ok = false;
-    const int32_t previous = SharedLookupTensor<Ops>(
-        map, tensor, task_id, heap_window, lookup_ok
-    );
-    if (!lookup_ok ||
-        !AddSharedWriterIntentFanin(
-            fanin, fanin_count, previous
-        )) {
-        return false;
-    }
-    ++stats.result.map_lookups;
-
-    SharedRegionValue entry{};
-    if (!MakeValidatedSharedWriterRegion(
-            tensor, task_id, entry
-        )) {
-        return false;
-    }
-    // 通用 writer-ready 目前只证明 writer publication 的先后，尚未
-    // 证明所有更早 reader 已结束。这里保持 append-only，不按 task_id
-    // 推进 head；容量耗尽走 terminal failure，不能用可能仍被慢 reader
-    // 扫描的槽换取表面上的无限回绕。
-    if (SharedCheckTaskAppend<Ops>(
-            map, &entry, 1, -1
-        ) != SharedAppendCheck::Ready ||
-        !SharedAppendPreparedEntry<Ops>(map, entry)) {
-        return false;
-    }
-    ++stats.result.map_inserts;
-    return true;
-}
-
-template <typename Ops>
-PA_DEVICE bool CommitSymbolSharedWriterIntentSet(
-    PA_GM SharedTensorMapSidecar &map, const TaskArgs &args,
-    int32_t task_id,
-    int32_t fanin[kMaxFanin], uint32_t &fanin_count,
-    LocalStats &stats, PA_GM volatile int32_t *fatal
-) {
-    // 调用方必须保证同一 symbol 的 writer 按 task_id 单调进入本函数。
-    // 独立 shared Submit 由全局 insert turn 建立这一顺序；仍保留的隔离
-    // driver 则必须提供等价的唯一 ordered writer 合同。CAS 负责发现
-    // 乱序或重复 owner，但不会替调用方补回已被跨越的 writer。
-    if (task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks)) {
-        return false;
-    }
-    PA_GM SharedWriterHistoryCell &history =
-        map.writer_history[static_cast<uint32_t>(task_id)];
-
-    uint32_t count = 0;
-    for (int32_t index = 0; index < args.tensor_count; ++index) {
-        if (!IsSharedWriterIntentTag(
-                TaskTag(args, static_cast<uint32_t>(index))
-            )) {
-            continue;
-        }
-        const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind != TensorRefKind::SharedOutputRef) {
-            continue;
-        }
-        if (count >= kSharedWriterHistoryMaxPerTask) {
-            return false;
-        }
-        const FdwicOutputRef output_ref =
-            SharedOutputReference(reference);
-        uint32_t symbol_key = 0;
-        if (!SharedSymbolHistoryKey(output_ref, symbol_key) ||
-            !WaitForSharedOutputPublished<Ops>(
-                map, output_ref, fatal
-            )) {
-            return false;
-        }
-        PA_GM volatile int64_t *last_writer =
-            &map.shared_outputs[
-                 static_cast<uint32_t>(
-                     output_ref.producer_task_id
-                 )
-             ].last_writer[
-                 static_cast<uint32_t>(output_ref.output_slot)
-             ].value;
-        const int64_t previous = Ops::Load(last_writer);
-        if (previous < output_ref.producer_task_id ||
-            previous >= task_id ||
-            !AddSharedWriterIntentFanin(
-                fanin, fanin_count,
-                static_cast<int32_t>(previous)
-            )) {
-            return false;
-        }
-        history.entries[count].symbol_key = symbol_key;
-        history.entries[count].previous_writer =
-            static_cast<int32_t>(previous);
-        ++count;
-    }
-    if (count == 0) {
-        return true;
-    }
-
-    history.magic = kSharedWriterHistoryMagic;
-    history.writer_task = task_id;
-    history.count = count;
-    history.reserved = 0;
-    const uint64_t history_bytes =
-        offsetof(SharedWriterHistoryCell, entries) +
-        static_cast<uint64_t>(count) *
-            sizeof(SharedWriterHistoryRecord);
-    Ops::FlushRegion(&history, history_bytes);
-    Ops::StoreBarrier();
-
-    // last_writer CAS 是每条前驱记录的发布边界。history 已整体写回，
-    // 因而 reader 观察到任一 current task 后都能按 key 取到其前驱。
-    for (uint32_t index = 0; index < count; ++index) {
-        PA_GM const SharedWriterHistoryRecord &record =
-            history.entries[index];
-        const FdwicOutputRef output_ref =
-            SharedSymbolHistoryReference(record.symbol_key);
-        if (!IsPlainSharedOutputRef(output_ref)) {
-            return false;
-        }
-        PA_GM volatile int64_t *last_writer =
-            &map.shared_outputs[
-                 static_cast<uint32_t>(
-                     output_ref.producer_task_id
-                 )
-             ].last_writer[
-                 static_cast<uint32_t>(output_ref.output_slot)
-             ].value;
-        if (Ops::CompareExchange(
-                last_writer,
-                static_cast<int64_t>(record.previous_writer),
-                static_cast<int64_t>(task_id)
-            ) != record.previous_writer) {
-            return false;
-        }
-        // 多 symbol 发布不是事务；若后项冲突，已经线性化的前缀不回滚。
-        // 逐项计数保留故障现场，外层随后设置 fatal 且不发布 ready gate。
-        ++stats.result.shared_symbol_inout_commits;
-    }
-    return true;
-}
-
-// ordered Submit 专用入口：调用方已经在 insert turn 外完成 symbol ref
-// 校验、去重和 packed-key 生成。这里不再扫描 args，也不构造随后会被
-// 丢弃的 fanin；previous writer 仍必须在取得 turn 后读取，才能写入当前
-// task 的不可变 history。通用 CommitSymbolSharedWriterIntentSet 继续保留
-// 原有等待 publication、收集 fanin 和逐项统计的合同，二者不能互换。
-template <typename Ops>
-PA_DEVICE bool CommitPreparedSymbolSharedWriterIntentSet(
-    PA_GM SharedTensorMapSidecar &map,
-    const uint32_t *symbol_keys, uint32_t symbol_count,
-    int32_t task_id, PA_GM volatile int32_t *fatal
-) {
-    // 正式 ordered Submit 在 task-level completion 成功后统一记录完整
-    // transaction；本 helper 固定不产生逐项成功统计，避免部分 CAS 前缀
-    // 与 task-level 计数混成两种口径。
-    if (task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks) ||
-        symbol_count > kSharedWriterHistoryMaxPerTask ||
-        (symbol_count != 0 && symbol_keys == nullptr)) {
-        return false;
-    }
-    if (symbol_count == 0) {
-        return true;
-    }
-
-    PA_GM SharedWriterHistoryCell &history =
-        map.writer_history[static_cast<uint32_t>(task_id)];
-    for (uint32_t index = 0; index < symbol_count; ++index) {
-        const uint32_t symbol_key = symbol_keys[index];
-        const FdwicOutputRef output_ref =
-            SharedSymbolHistoryReference(symbol_key);
-        if (!IsPlainSharedOutputRef(output_ref) ||
-            output_ref.producer_task_id >= task_id ||
-            !CheckSharedOutputPublishedAfterInsertTurn<Ops>(
-                map, output_ref
-            )) {
-            if (fatal != nullptr) {
-                (void)Ops::Exchange(
-                    fatal, static_cast<int32_t>(1)
-                );
-            }
-            return false;
-        }
-
-        PA_GM volatile int64_t *last_writer =
-            &map.shared_outputs[
-                 static_cast<uint32_t>(
-                     output_ref.producer_task_id
-                 )
-             ].last_writer[
-                 static_cast<uint32_t>(output_ref.output_slot)
-             ].value;
-        const int64_t previous = Ops::Load(last_writer);
-        if (previous < output_ref.producer_task_id ||
-            previous >= task_id) {
-            return false;
-        }
-        history.entries[index].symbol_key = symbol_key;
-        history.entries[index].previous_writer =
-            static_cast<int32_t>(previous);
-    }
-
-    history.magic = kSharedWriterHistoryMagic;
-    history.writer_task = task_id;
-    history.count = symbol_count;
-    history.reserved = 0;
-    const uint64_t history_bytes =
-        offsetof(SharedWriterHistoryCell, entries) +
-        static_cast<uint64_t>(symbol_count) *
-            sizeof(SharedWriterHistoryRecord);
-    Ops::FlushRegion(&history, history_bytes);
-    Ops::StoreBarrier();
-
-    for (uint32_t index = 0; index < symbol_count; ++index) {
-        PA_GM const SharedWriterHistoryRecord &record =
-            history.entries[index];
-        const FdwicOutputRef output_ref =
-            SharedSymbolHistoryReference(record.symbol_key);
-        if (!IsPlainSharedOutputRef(output_ref)) {
-            return false;
-        }
-        PA_GM volatile int64_t *last_writer =
-            &map.shared_outputs[
-                 static_cast<uint32_t>(
-                     output_ref.producer_task_id
-                 )
-             ].last_writer[
-                 static_cast<uint32_t>(output_ref.output_slot)
-             ].value;
-        if (Ops::CompareExchange(
-                last_writer,
-                static_cast<int64_t>(record.previous_writer),
-                static_cast<int64_t>(task_id)
-            ) != record.previous_writer) {
-            return false;
-        }
-    }
-    return true;
-}
-
-// 该公共原语只处理写集合本身：读取旧 writer、发布当前 writer，并在
-// 全部 symbol/ordinary 元数据完成后放行同 task loser。它不收集纯 INPUT，
-// 不做 Materialize/Build，也不发布 completion；后两者必须继续使用
-// task.flag。当前阶段锁定 A->B->慢 C->D->E 的慢 reader：
-// - symbol 以 last_writer 为快取、task-indexed immutable history 为慢路；
-// - 同一 symbol writer 必须按 task id 发布，乱序/部分 CAS 失败均终止整轮；
-// - ordinary ring 只允许有序单追加且不回收，容量耗尽时 terminal fail。
-// 因此本函数尚未接入 PA runtime，也不能被描述成通用多版本 backend 已闭合。
-template <typename Ops>
-PA_DEVICE SharedWriterIntentResult PrepareSharedWriterIntentSet(
-    PA_GM SchedulerState *state, const TaskArgs &args,
-    SubmitContext &context, LocalStats &stats
-) {
-    bool required = false;
-    if (state == nullptr ||
-        !InspectSharedWriterIntent(args, required)) {
-        if (state != nullptr) {
-            SetFatal<Ops>(state, stats, context.task_id);
-        }
-        return SharedWriterIntentResult::Failed;
-    }
-    if (!required) {
-        return SharedWriterIntentResult::NotRequired;
-    }
-    const int32_t task_id = context.task_id;
-    if (!context.won ||
-        task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks) ||
-        context.fanin_count < 0 ||
-        context.fanin_count > static_cast<int32_t>(kMaxFanin) ||
-        !ValidateSharedWriterIntentSet(args, task_id) ||
-        Ops::Load(&state->fatal.value) != 0) {
-        SetFatal<Ops>(state, stats, task_id);
-        return SharedWriterIntentResult::Failed;
-    }
-
-    int32_t intent_fanin[kMaxFanin] = {};
-    uint32_t intent_fanin_count = 0;
-    // Writer intent 可以接在调用方已经完成的只读 fanin 解析之后。先把
-    // 既有边复制进本地去重集合，全部 writer metadata 成功后再一次性
-    // 回写 context；这样 PA 迁移无需保留另一套“先 Collect 再 Commit”
-    // 专用协议，失败路径也不会留下半更新的 context。
-    for (int32_t edge = 0; edge < context.fanin_count; ++edge) {
-        const int32_t producer =
-            context.fanin[static_cast<uint32_t>(edge)];
-        if (producer < 0 || producer >= task_id ||
-            !AddSharedWriterIntentFanin(
-                intent_fanin, intent_fanin_count, producer
-            )) {
-            SetFatal<Ops>(state, stats, task_id);
-            return SharedWriterIntentResult::Failed;
-        }
-    }
-    if (!CommitSymbolSharedWriterIntentSet<Ops>(
-            state->shared_map, args, task_id,
-            intent_fanin, intent_fanin_count, stats,
-            &state->fatal.value
-        )) {
-        SetFatal<Ops>(state, stats, task_id);
-        return SharedWriterIntentResult::Failed;
-    }
-    for (int32_t index = 0; index < args.tensor_count; ++index) {
-        const TensorArgType tag =
-            TaskTag(args, static_cast<uint32_t>(index));
-        if (!IsSharedWriterIntentTag(tag)) {
-            continue;
-        }
-        const TaskTensorRef &reference = args.tensors[index];
-        bool committed = false;
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            // 全部 symbol history 与 latest CAS 已由上面的 batch 完成；
-            // 这里仅保留 ordinary 参数的原顺序提交。
-            continue;
-        } else if (reference.kind == TensorRefKind::GmTensor) {
-            committed = CommitOrdinarySharedWriterIntent<Ops>(
-                state->shared_map, *reference.pointer.gm_tensor,
-                task_id, static_cast<int32_t>(state->heap_window),
-                intent_fanin, intent_fanin_count, stats
-            );
-        } else if (reference.kind == TensorRefKind::LocalTensor) {
-            committed = CommitOrdinarySharedWriterIntent<Ops>(
-                state->shared_map, *reference.pointer.local_tensor,
-                task_id, static_cast<int32_t>(state->heap_window),
-                intent_fanin, intent_fanin_count, stats
-            );
-        }
-        if (!committed) {
-            SetFatal<Ops>(state, stats, task_id);
-            return SharedWriterIntentResult::Failed;
-        }
-    }
-    for (uint32_t edge = 0; edge < intent_fanin_count; ++edge) {
-        context.fanin[edge] = intent_fanin[edge];
-    }
-    context.fanin_count =
-        static_cast<int32_t>(intent_fanin_count);
-    if (!PublishSharedWriterReady<Ops>(state, task_id)) {
-        SetFatal<Ops>(state, stats, task_id);
-        return SharedWriterIntentResult::Failed;
-    }
-    return SharedWriterIntentResult::Published;
-}
-
-// 默认路径在本地执行状态建立后提交 INOUT writer；PA non-final UP 的
-// intent 路径允许在 fanin/registration 已验证、winner Build 前提交，以
-// 便 loser 构造下一组。FetchMax 返回旧 writer；默认实例要求精确等于 descriptor producer，
-// 显式 ChainedWriter 实例按原 producer identity 选择链式 symbol，并要求
-// 其旧值精确等于调用方给出的前一 writer；其他 fresh symbol 仍匹配各自
-// producer。
-// 异常旧值即使被 FetchMax 推进也不回滚：该 RMW 已经线性化，多 symbol
-// 提交不是事务，伪造负向 RMW 会抹掉故障现场。调用者随后广播 fatal，
-// 整个调度不再继续消费该状态。
-template <typename Ops, bool ChainedWriter = false>
-PA_DEVICE bool CommitSharedFaninWriters(
-    PA_GM SharedTensorMapSidecar &map, const TaskArgs &args,
-    int32_t task_id, LocalStats &stats,
-    int32_t chained_producer_task_id = -1,
-    int32_t expected_shared_writer = -1
-) {
-    if (args.tensor_count < 0 ||
-        args.tensor_count > static_cast<int32_t>(kMaxTaskTensors)) {
-        return false;
-    }
-    if constexpr (ChainedWriter) {
-        if (chained_producer_task_id < 0 ||
-            chained_producer_task_id >= expected_shared_writer ||
-            expected_shared_writer >= task_id) {
-            return false;
-        }
-        // 先验证 selector 确实命中至少一个合法 shared 写引用，再执行任何
-        // FetchMax。调用参数错误不属于并发失败，不能留下半次 writer 推进。
-        bool matched_chain_writer = false;
-        for (int32_t index = 0; index < args.tensor_count; ++index) {
-            const TensorArgType tag =
-                TaskTag(args, static_cast<uint32_t>(index));
-            if (tag != TensorArgType::Inout &&
-                tag != TensorArgType::OutputExisting) {
-                continue;
-            }
-            const TaskTensorRef &reference = args.tensors[index];
-            if (reference.kind != TensorRefKind::SharedOutputRef) {
-                continue;
-            }
-            const FdwicOutputRef output_ref =
-                SharedOutputReference(reference);
-            if (!IsPlainSharedOutputRef(output_ref) ||
-                output_ref.producer_task_id < 0 ||
-                output_ref.producer_task_id >= task_id) {
-                return false;
-            }
-            matched_chain_writer |=
-                output_ref.producer_task_id ==
-                    chained_producer_task_id;
-        }
-        if (!matched_chain_writer) {
-            return false;
-        }
-    }
-    for (int32_t index = 0; index < args.tensor_count; ++index) {
-        const TensorArgType tag =
-            TaskTag(args, static_cast<uint32_t>(index));
-        if (tag != TensorArgType::Inout &&
-            tag != TensorArgType::OutputExisting) {
-            continue;
-        }
-        const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind != TensorRefKind::SharedOutputRef) {
-            continue;
-        }
-        const FdwicOutputRef output_ref =
-            SharedOutputReference(reference);
-        if (!IsPlainSharedOutputRef(output_ref) ||
-            output_ref.producer_task_id < 0 ||
-            output_ref.producer_task_id >= task_id) {
-            return false;
-        }
-        const bool chained_ref =
-            ChainedWriter &&
-            output_ref.producer_task_id == chained_producer_task_id;
-        const int32_t expected_writer =
-            chained_ref
-                ? expected_shared_writer
-                : output_ref.producer_task_id;
-        if (expected_writer < output_ref.producer_task_id ||
-            expected_writer >= task_id) {
-            return false;
-        }
-        uint64_t retries = 0;
-        const int64_t observed = Ops::FetchMax(
-            &map.shared_outputs[
-                 static_cast<uint32_t>(output_ref.producer_task_id)
-             ].last_writer[output_ref.output_slot].value,
-            static_cast<int64_t>(task_id), retries
-        );
-        stats.result.cas_retries += retries;
-        if (observed != expected_writer) {
-            return false;
-        }
-        ++stats.result.shared_symbol_inout_commits;
-    }
-    return true;
-}
-
-template <typename Ops, bool ChainedWriter = false>
-PA_DEVICE bool ValidatePaSharedWriterIntentShape(
-    PA_GM SchedulerState *state, const TaskArgs &args,
-    const SubmitContext &context, LocalStats &stats,
-    int32_t chained_producer_task_id = -1
-) {
-    const int32_t task_id = context.task_id;
-    if (state == nullptr || !context.won || task_id < 0 ||
-        task_id >= static_cast<int32_t>(kMaxTasks) ||
-        args.has_error ||
-        args.tensor_count < 0 ||
-        args.tensor_count > static_cast<int32_t>(kMaxTaskTensors) ||
-        args.scalar_count < 0 ||
-        args.scalar_count > static_cast<int32_t>(kMaxTaskScalars)) {
-        if (state != nullptr) {
-            SetFatal<Ops>(state, stats, task_id);
-        }
-        return false;
-    }
-
-    const int32_t accumulator_producer =
-        ChainedWriter
-            ? chained_producer_task_id
-            : task_id - 4;
-    bool accumulator_slots[3] = {false, false, false};
-    uint32_t shared_writer_refs = 0;
-    uint32_t manual_dep_writer_refs = 0;
-    for (int32_t index = 0; index < args.tensor_count; ++index) {
-        const TensorArgType tag =
-            TaskTag(args, static_cast<uint32_t>(index));
-        if (tag != TensorArgType::Inout &&
-            tag != TensorArgType::OutputExisting) {
-            continue;
-        }
-        const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            const FdwicOutputRef output_ref =
-                SharedOutputReference(reference);
-            if (!IsPlainSharedOutputRef(output_ref) ||
-                accumulator_producer < 0 ||
-                output_ref.producer_task_id != accumulator_producer ||
-                output_ref.output_slot < 0 ||
-                output_ref.output_slot >= 3 ||
-                accumulator_slots[
-                    static_cast<uint32_t>(output_ref.output_slot)
-                ]) {
-                SetFatal<Ops>(state, stats, task_id);
-                return false;
-            }
-            accumulator_slots[
-                static_cast<uint32_t>(output_ref.output_slot)
-            ] = true;
-            ++shared_writer_refs;
-            continue;
-        }
-        // PA UP 的真实参数还包含一个非 symbol、manual_dep 的 output
-        // view。这里不凭地址猜测具体 view 身份，但要求这类 writer 恰好
-        // 一条；任何普通 region writer 或重复 manual-dependency writer
-        // 都不能借这个 PA 专用快路越过登记。
-        bool manual_dep = false;
-        if (reference.kind == TensorRefKind::GmTensor &&
-            reference.pointer.gm_tensor != nullptr) {
-            manual_dep = reference.pointer.gm_tensor->manual_dep;
-        } else if (reference.kind == TensorRefKind::LocalTensor &&
-                   reference.pointer.local_tensor != nullptr) {
-            manual_dep = reference.pointer.local_tensor->manual_dep;
-        }
-        if (!manual_dep) {
-            SetFatal<Ops>(state, stats, task_id);
-            return false;
-        }
-        ++manual_dep_writer_refs;
-    }
-    // 这是 PA UP 专用快路，不是 ordinary-region writer 的通用替代品。
-    // 三个 shared writer 必须正好对应 output/sum/max accumulator；缺失或
-    // 多出任意一个都拒绝发布门，避免后继在 writer 状态不完整时前进。
-    if (shared_writer_refs != 3 ||
-        manual_dep_writer_refs != 1 ||
-        !accumulator_slots[0] ||
-        !accumulator_slots[1] ||
-        !accumulator_slots[2]) {
-        SetFatal<Ops>(state, stats, task_id);
-        return false;
-    }
-    return true;
-}
-
-// 调用者已经完成只读 fanin 解析和 ordinary registration 校验后，登记
-// 三个 accumulator writer，再发布 deps_prepared。它位于 winner Build
-// 之前；后续 Finish 必须复用 context.fanin，并在 Build 后跳过第二次
-// Commit。默认实例处理首组，ChainedWriter 处理中间组。
-template <typename Ops, bool ChainedWriter = false>
-PA_DEVICE bool CommitPaSharedWriterIntentAfterFanin(
-    PA_GM SchedulerState *state, const TaskArgs &args,
-    SubmitContext &context, LocalStats &stats,
-    int32_t chained_producer_task_id = -1,
-    int32_t expected_shared_writer = -1
-) {
-    const int32_t task_id = context.task_id;
-    if (!ValidatePaSharedWriterIntentShape<Ops, ChainedWriter>(
-            state, args, context, stats,
-            chained_producer_task_id
-        )) {
-        return false;
-    }
-    if (!CommitSharedFaninWriters<Ops, ChainedWriter>(
-            state->shared_map, args, task_id, stats,
-            chained_producer_task_id, expected_shared_writer
-        ) ||
-        !PublishSharedWriterReady<Ops>(state, task_id)) {
-        SetFatal<Ops>(state, stats, task_id);
-        return false;
-    }
-    return true;
-}
-
-// 隔离测试和无独立 Finish 阶段的调用点可一次完成 Collect + Commit +
-// gate。真实 shared Finish 先自行 Collect/计入依赖签名，完成 registration
-// 校验后只调用 CommitPaSharedWriterIntentAfterFanin，避免重复读 writer。
-template <typename Ops, bool ChainedWriter = false>
-PA_DEVICE bool PreparePaSharedWriterIntent(
-    PA_GM SchedulerState *state, const TaskArgs &args,
-    SubmitContext &context, LocalStats &stats,
-    int32_t chained_producer_task_id = -1,
-    int32_t expected_shared_writer = -1
-) {
-    const int32_t task_id = context.task_id;
-    if (!ValidatePaSharedWriterIntentShape<Ops, ChainedWriter>(
-            state, args, context, stats,
-            chained_producer_task_id
-        )) {
-        return false;
-    }
-
-    bool protocol_ok = false;
-    uint32_t ordinary_lookup_count = 0;
-    context.fanin_count =
-        static_cast<int32_t>(CollectSharedFanin<Ops, ChainedWriter>(
-            state->shared_map, args, task_id,
-            static_cast<int32_t>(state->heap_window), stats,
-            context.fanin, protocol_ok, ordinary_lookup_count,
-            &state->fatal.value, chained_producer_task_id,
-            expected_shared_writer
-        ));
-    if (!protocol_ok || ordinary_lookup_count != 0) {
-        SetFatal<Ops>(state, stats, task_id);
-        return false;
-    }
-    return CommitPaSharedWriterIntentAfterFanin<Ops, ChainedWriter>(
-            state, args, context, stats,
-            chained_producer_task_id, expected_shared_writer
-        );
-}
-
-// fresh descriptor 的内容写入每 task 独占的 shared-output cell，并通过
-// FlushRegion 让 descriptor 与 writer 起点先于 published 可见。published
-// 只表示后继可以读取 descriptor，不表示 producer 已 Build 或执行完成；
-// kernel completion 仍由独立 completion flag 表达。
-template <typename Ops>
-PA_DEVICE_NOINLINE void RollbackSharedTaskOutputs(
-    PA_GM SharedOutputCell &cell, uint32_t output_count
-) {
-    // 此入口只处理唯一 producer cell 出现非法竞争后的冷失败路径。先撤销发布位，
-    // 使任何非法越界 reader 都不能继续消费，再恢复 writer 与 descriptor
-    // 的未发布状态；正常 Submit 不执行这些额外 atomic/DCCI。
-    for (uint32_t output = 0; output < output_count; ++output) {
-        (void)Ops::Exchange(&cell.published[output].value, -1);
-    }
-    for (uint32_t output = 0; output < output_count; ++output) {
-        (void)Ops::Exchange(&cell.last_writer[output].value, -1);
-    }
-    for (uint32_t output = 0; output < output_count; ++output) {
-        PA_GM volatile uint8_t *descriptor =
-            reinterpret_cast<PA_GM volatile uint8_t *>(
-                &cell.tensors[output]
-            );
-        for (uint32_t byte = 0; byte < sizeof(TensorDesc); ++byte) {
-            descriptor[byte] = 0;
-        }
-    }
-    if (output_count != 0) {
-        Ops::FlushRegion(
-            &cell.tensors[0],
-            static_cast<uint64_t>(output_count) * sizeof(TensorDesc)
-        );
-    }
-}
-
-// 可选时间戳 out-param 只在正式 Materialize 泳道路径传入；单元测试与
-// 其它 helper 继续走默认空指针，不强制携带 LocalStats。
-template <typename Ops>
-PA_DEVICE bool PublishSharedTaskOutputs(
-    PA_GM SharedTensorMapSidecar &map, const SubmitContext &context,
-    uint32_t task_id, LocalStats *stats = nullptr,
-    uint64_t *copy_begin = nullptr, uint64_t *copy_end = nullptr,
-    uint64_t *flush_begin = nullptr, uint64_t *flush_end = nullptr
-) {
-    if (task_id >= kMaxTasks || context.result.task_id != task_id ||
-        context.result.count > kSharedOutputMaxPerTask) {
-        return false;
-    }
-    PA_GM SharedOutputCell &cell = map.shared_outputs[task_id];
-    // 先完整预检所有 slot；异常重复发布不能覆盖已对 consumer 可见的
-    // descriptor，也不能让多输出 task 留下前半段控制字。
-    for (uint32_t output = 0; output < context.result.count; ++output) {
-        PA_GM TensorDesc *source = context.result.tensors[output];
-        // cell 由该 task 的唯一 Claim winner 独占；其他 task 只能在
-        // published 就绪后读取，因此预检用普通 volatile GM load 即可。
-        if (source == nullptr ||
-            cell.published[output].value != -1 ||
-            cell.last_writer[output].value != -1) {
-            return false;
-        }
-    }
-    // task-cell 唯一 winner 使预检到写入之间不存在合法竞争。仍用
-    // FetchMax 预留全部 writer 控制字，并在异常旧值时撤回本次已预留项。
-    for (uint32_t output = 0; output < context.result.count; ++output) {
-        uint64_t retries = 0;
-        const int64_t observed = Ops::FetchMax(
-            &cell.last_writer[output].value,
-            static_cast<int64_t>(task_id), retries
-        );
-        if (observed != -1) {
-            // atomicMax 在 observed<task_id 时已经改写当前 slot；无论旧值
-            // 大小都显式恢复，前面已成功预留的 slot 则回到 -1。
-            (void)Ops::Exchange(
-                &cell.last_writer[output].value, observed
-            );
-            for (uint32_t previous = 0; previous < output; ++previous) {
-                (void)Ops::Exchange(&cell.last_writer[previous].value, -1);
-            }
-            return false;
-        }
-    }
-    // 把原先“每 slot copy 后立刻 flush”拆成两段整批动作，便于泳道单独
-    // 展示 copy 与 flush；语义不变：全部 desc 写完后再统一 flush，再
-    // barrier + published。零输出 task 也保留零时长边界，保证每个
-    // winner 的 raw 子层数量固定。
-#if !PA_BUILD_TRACE_FREE
-    if (copy_begin != nullptr) {
-        *copy_begin = stats != nullptr
-            ? TraceTimestamp<Ops>(stats->trace, stats->result)
-            : 0;
-    }
-#else
-    (void)stats;
-    if (copy_begin != nullptr) {
-        *copy_begin = 0;
-    }
-#endif
-    for (uint32_t output = 0; output < context.result.count; ++output) {
-        PA_GM TensorDesc *source = context.result.tensors[output];
-        CopyGmTensor(cell.tensors[output], *source);
-    }
-#if !PA_BUILD_TRACE_FREE
-    if (copy_end != nullptr || flush_begin != nullptr) {
-        const uint64_t boundary = stats != nullptr
-            ? TraceTimestamp<Ops>(stats->trace, stats->result)
-            : 0;
-        if (copy_end != nullptr) {
-            *copy_end = boundary;
-        }
-        if (flush_begin != nullptr) {
-            *flush_begin = boundary;
-        }
-    }
-#else
-    if (copy_end != nullptr) {
-        *copy_end = 0;
-    }
-    if (flush_begin != nullptr) {
-        *flush_begin = 0;
-    }
-#endif
-    if (context.result.count != 0) {
-        Ops::FlushRegion(
-            &cell.tensors[0],
-            static_cast<uint64_t>(context.result.count) *
-                sizeof(TensorDesc)
-        );
-    }
-#if !PA_BUILD_TRACE_FREE
-    if (flush_end != nullptr) {
-        *flush_end = stats != nullptr
-            ? TraceTimestamp<Ops>(stats->trace, stats->result)
-            : 0;
-    }
-#else
-    if (flush_end != nullptr) {
-        *flush_end = 0;
-    }
-#endif
-    Ops::StoreBarrier();
-    for (uint32_t output = 0; output < context.result.count; ++output) {
-        if (Ops::Exchange(
-                &cell.published[output].value, static_cast<int64_t>(task_id)
-            ) != -1) {
-            RollbackSharedTaskOutputs<Ops>(cell, context.result.count);
-            return false;
-        }
-    }
-    return true;
-}
-
-template <typename Ops>
-PA_DEVICE bool PublishSharedWinnerAfterBuild(
-    PA_GM SchedulerState *state, PA_GM WorkerState &worker,
-    const TaskArgs &args, const SubmitContext &context,
-    uint32_t task_id, TaskKind kind, LocalStats &stats,
-    bool writers_prepared = false,
-    bool chained_writer = false,
-    int32_t chained_producer_task_id = -1,
-    int32_t expected_shared_writer = -1
-) {
-    bool writers_committed = writers_prepared;
-    if (!writers_prepared) {
-        writers_committed = chained_writer
-            ? CommitSharedFaninWriters<Ops, true>(
-                  state->shared_map, args,
-                  static_cast<int32_t>(task_id), stats,
-                  chained_producer_task_id,
-                  expected_shared_writer
-              )
-            : CommitSharedFaninWriters<Ops>(
-                  state->shared_map, args,
-                  static_cast<int32_t>(task_id), stats
-              );
-    }
-    const bool outputs_published =
-        writers_committed &&
-        PublishSharedTaskOutputs<Ops>(
-            state->shared_map, context, task_id
-        );
-    if (outputs_published) {
-        return true;
-    }
-    if (kind != TaskKind::Alloc) {
-        // BuildWinner 已经占用本 worker slot；封口失败后必须撤销，
-        // 防止错误路径进入 FinalDrain 并执行未完成 shared 封口的任务。
-        (void)DiscardBuiltTask(worker, task_id);
-    }
-    // Alloc 的 CompleteTask 已经发布 ready flag，无法事务性撤回。该路径
-    // 只可能来自 shared invariant 损坏；fatal 使整轮结果无效，不能局部
-    // 回滚后继续调度。
-    SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-    return false;
-}
 #endif
 
 // compete-first callback 跨 split finish 边界只传递这个固定 16B POD。
@@ -2727,21 +1374,6 @@ PA_DEVICE void BeginCallbackSubmit(PA_GM WorkerState &worker, SubmitContext &con
     context.joint_slot = -1;
     context.joint_count = 0;
 }
-
-#if PTO_FDWIC_SHARED_MAP
-PA_DEVICE void BeginSharedCallbackSubmit(
-    PA_GM WorkerState &worker, SubmitContext &context
-) {
-    // shared replay 的 96 个 actor 都要先取得同一个逻辑 task_id，但只有
-    // Claim owner 会进入 Materialize/Build。loser 在 Claim 后只需要
-    // task 身份与稳定 output symbol，因此这里不再为每个 replay actor
-    // 清零整份 408-byte SubmitContext 的 winner-only 字段。
-    const uint32_t task_id =
-        static_cast<uint32_t>(worker.local_index++);
-    context.task_id = static_cast<int32_t>(task_id);
-}
-
-#endif
 
 #if defined(__CCE_AICORE__) || defined(__NPU_ARCH__)
 #define PA_CALLBACK_LAMBDA_DEVICE __aicore__
@@ -2996,78 +1628,10 @@ PA_DEVICE bool FinishCallbackSubmitBody(
     );
 #else
     const uint32_t task_id = ticket.task_id;
-#if PTO_FDWIC_SHARED_MAP
-    SharedPaTaskMeta shared_task_meta{};
-    if (!DecodeSharedPaTaskMeta(
-            ticket.reserved, task_id, shared_task_meta
-        )) {
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-    const TaskKind kind = shared_task_meta.kind;
-#else
     const TaskKind kind = GetTaskKind(task_id);
-#endif
     const int32_t function_id = static_cast<int32_t>(ticket.function_id);
     const bool winner = ticket.won != 0;
-#if PTO_FDWIC_SHARED_MAP
-    if (!SharedPaFunctionIdMatches(kind, winner, function_id)) {
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-    // shared loser 必须在 caller 的轻路径返回；跨 TU / 完整 Finish 只允许
-    // winner 进入。这样 Materialize、Fanin、Register 与 Build 的边界才与
-    // 实际 shared TensorMap 协议一致。
-    if (!winner) {
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-#endif
 
-#if PTO_FDWIC_SHARED_MAP
-    // callback 已经返回；只有 Claim winner 才把 CreateInfo 物化为 descriptor
-    // 并预留 shared heap。loser 已在 caller 轻路径返回，这里只处理 winner。
-    // PA Case1 的普通 region 恒为空，winner 不再等待全局 exact turn；
-    // 跨 task 顺序只由实际消费的 (producer,slot).published 建立。
-    // 删除 exact-turn 不能连带删除它成功出口的终止态检查：若其他核已经
-    // 广播 fatal，本 winner 不得继续预留 heap、构建 slot 或发布 symbol。
-    // 这里直接使用 Ops，不扩张 atomic 泳道记录，也不恢复任何全局前沿。
-    if (Ops::Load(&state->fatal.value) != 0) {
-        return false;
-    }
-    const uint64_t materialize_begin =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
-    BeginSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
-    const bool materialized = MaterializeTask<Ops, true>(
-        worker, task_id, args, context, state->shared_map,
-        state->heap_base, state->heap_size,
-        kind, shared_task_meta.batch_start,
-        shared_task_meta.group_index,
-        &stats.trace, &stats.result
-    );
-    if (materialized) {
-        stats.result.materialized_outputs += context.result.count;
-    }
-    if (!materialized) {
-        EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
-        SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-        return false;
-    }
-    // Materialize 只负责 shared heap reserve 与 descriptor 构造。fresh
-    // symbol 必须等本任务 CompleteTask/BuildWinner 成功后再封口，因此
-    // 这里不能提前写 published。
-    EndSubmitPmuPhase<SubmitPmuPhase::Materialize, Ops>(pmu_context);
-    const uint64_t materialize_end =
-        TraceTimestamp<Ops>(stats.trace, stats.result);
-    WriteTrace<Profile>(
-        stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
-        TracePhase::Materialize, ProfilePhase::Materialize,
-        materialize_begin, materialize_end, 0,
-        kind == TaskKind::Alloc ? 1U : 0U
-    );
-    // shared PA Case1 没有 ordinary-region PrepareMap；不再为兼容旧矩形
-    // 泳道写零时长 marker。host/analyzer 直接校验 shared 稀疏真实边界。
-#else
     // private 模式保持 S3.1 的 eager Materialize 与每核 heap 路径不变。
     const uint64_t materialize_begin =
         TraceTimestamp<Ops>(stats.trace, stats.result);
@@ -3101,61 +1665,13 @@ PA_DEVICE bool FinishCallbackSubmitBody(
         TracePhase::PrepareMap, ProfilePhase::PrepareMap,
         prepare_begin, prepare_end, 0, kind == TaskKind::Alloc ? 1U : 0U
     );
-#endif
 
-#if PTO_FDWIC_SHARED_MAP
-    bool shared_writers_prepared = false;
-#endif
-    uint64_t register_begin =
-#if PTO_FDWIC_SHARED_MAP
-        materialize_end;
-#else
-        prepare_end;
-#endif
-#if PTO_FDWIC_SHARED_MAP
-    if (kind != TaskKind::Alloc) {
-#else
+    uint64_t register_begin = prepare_end;
     if (kind != TaskKind::Alloc &&
         __builtin_expect(winner, 0)) {
-#endif
         const uint64_t fanin_begin = register_begin;
-#if PTO_FDWIC_SHARED_MAP
-        bool lookup_protocol_ok = false;
-        uint32_t ordinary_lookup_count = 0;
-        if (shared_task_meta.chained_writer) {
-            context.fanin_count = static_cast<int32_t>(
-                CollectSharedFanin<Ops, true>(
-                    state->shared_map, args,
-                    static_cast<int32_t>(task_id),
-                    static_cast<int32_t>(state->heap_window), stats,
-                    context.fanin, lookup_protocol_ok,
-                    ordinary_lookup_count, &state->fatal.value,
-                    static_cast<int32_t>(
-                        shared_task_meta.batch_start
-                    ),
-                    static_cast<int32_t>(task_id) - 4
-                )
-            );
-        } else {
-            context.fanin_count = static_cast<int32_t>(
-                CollectSharedFanin<Ops>(
-                    state->shared_map, args,
-                    static_cast<int32_t>(task_id),
-                    static_cast<int32_t>(state->heap_window), stats,
-                    context.fanin, lookup_protocol_ok,
-                    ordinary_lookup_count, &state->fatal.value
-                )
-            );
-        }
-        if (!lookup_protocol_ok) {
-            SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
-            return false;
-        }
-        stats.result.map_lookups += ordinary_lookup_count;
-#else
         context.fanin_count = static_cast<int32_t>(CollectFanin(worker.map, args, context.fanin));
         stats.result.map_lookups += static_cast<uint32_t>(args.tensor_count) - context.result.count;
-#endif
         for (int32_t edge = 0; edge < context.fanin_count; ++edge) {
             stats.result.dependency_signature ^=
                 DependencyEdgeSignature(
@@ -3173,18 +1689,10 @@ PA_DEVICE bool FinishCallbackSubmitBody(
     }
 
     BeginSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(pmu_context);
-#if PTO_FDWIC_SHARED_MAP
-    // 当前 standalone 只模拟 PA Case1：fresh symbol 直接寻址，
-    // output_view 又是 manual_dep，ordinary region 必须严格为空。
-    // 这里只读验证，不构造空 delta，也不触碰 region sequencer。
-    const bool registered =
-        ValidateEmptySharedRegistration(args, context);
-#else
     const bool registered = RegisterOutputs(context, args, kind != TaskKind::Alloc);
     if (registered && kind != TaskKind::Alloc) {
         stats.result.map_inserts += CountBits(context.register_mask);
     }
-#endif
     EndSubmitPmuPhase<SubmitPmuPhase::Register, Ops>(pmu_context);
     const uint64_t register_end = TraceTimestamp<Ops>(stats.trace, stats.result);
     WriteTrace<Profile>(
@@ -3193,75 +1701,19 @@ PA_DEVICE bool FinishCallbackSubmitBody(
         register_begin, register_end, 0, kind == TaskKind::Alloc ? 0U : 1U
     );
     if (!registered) {
-#if PTO_FDWIC_SHARED_MAP
-        // PA Case1 不接入 ordinary-region backend。非 manual-dep 的普通
-        // writer 或非法 register mask 会在 region append 前失败并广播
-        // fatal；此前 Materialize 和 fanin 仍可能读取 shared sidecar。
-#else
         // 固定桶容量不足时，InsertTensor 没有覆写任何 live 槽。沿用现有
         // fatal 广播终止所有 worker，禁止像旧 linked map 一样静默漏登记
         // hazard、随后带着不完整 fanin 继续执行。
-#endif
         SetFatal<Ops>(state, stats, static_cast<int32_t>(task_id));
         return false;
     }
 
-#if PTO_FDWIC_SHARED_MAP
-    if (shared_task_meta.has_following_group) {
-        // PA 的 non-final UP 固定有 SF/PV/accumulator 三条 fanin。先完成
-        // registration，再登记 writer intent并放行 loser；Build 后只做
-        // fresh-output 封口，绝不能重复 Collect/Commit。
-        if (kind != TaskKind::Up || context.fanin_count != 3) {
-            SetFatal<Ops>(
-                state, stats, static_cast<int32_t>(task_id)
-            );
-            return false;
-        }
-        const bool prepared = shared_task_meta.chained_writer
-            ? CommitPaSharedWriterIntentAfterFanin<Ops, true>(
-                  state, args, context, stats,
-                  static_cast<int32_t>(
-                      shared_task_meta.batch_start
-                  ),
-                  static_cast<int32_t>(task_id) - 4
-              )
-            : CommitPaSharedWriterIntentAfterFanin<Ops>(
-                  state, args, context, stats
-              );
-        if (!prepared) {
-            return false;
-        }
-        shared_writers_prepared = true;
-    }
-#endif
-
-#if PTO_FDWIC_SHARED_MAP
-    {
-#else
     if (__builtin_expect(winner, 0)) {
-#endif
         const uint64_t winner_build_begin = register_end;
-#if PTO_FDWIC_SHARED_MAP && \
-    defined(PA_TEST_SHARED_POST_GATE_BUILD_FAILURE)
-        // 只供 host 96-worker 故障门槛使用：non-final UP 已完成 writer
-        // intent 与 deps_prepared 发布后、建立可执行 slot 前注入失败。
-        // 普通 CPU/CCEC 不定义该宏，预处理后不保留调用或分支。
-        if (shared_writers_prepared &&
-            Ops::InjectSharedPostGateBuildFailure(
-                state, worker, task_id, kind
-            )) {
-            SetFatal<Ops>(
-                state, stats, static_cast<int32_t>(task_id)
-            );
-            return false;
-        }
-#endif
         if (kind == TaskKind::Alloc) {
-#if !PTO_FDWIC_SHARED_MAP
             if (!HeapGuard<Ops, Profile>(state, worker, task_id, context.output_bytes, stats)) {
                 return false;
             }
-#endif
             CompleteTask<Ops>(state, worker, task_id, stats);
         } else {
             if (!BuildWinner<Ops, Profile>(
@@ -3271,24 +1723,6 @@ PA_DEVICE bool FinishCallbackSubmitBody(
                 return false;
             }
         }
-        // 先建立可执行状态。普通/final task 随后提交本任务的 INOUT
-        // writer；non-final UP 已在 Build 前登记 writer intent，这里只
-        // 跳过重复 Commit。fresh outputs 最后封口；后继只等待自己实际
-        // 依赖的 published cell，不再经过全局 committed_tasks。
-        // published 成功之后只剩观察记录与 Submit 收尾。
-#if PTO_FDWIC_SHARED_MAP
-        if (!PublishSharedWinnerAfterBuild<Ops>(
-                state, worker, args, context, task_id, kind, stats,
-                shared_writers_prepared,
-                shared_task_meta.chained_writer,
-                static_cast<int32_t>(
-                    shared_task_meta.batch_start
-                ),
-                static_cast<int32_t>(task_id) - 4
-            )) {
-            return false;
-        }
-#endif
         const uint64_t winner_build_end = TraceTimestamp<Ops>(stats.trace, stats.result);
         WriteTrace<false>(
             stats.trace, stats.result, static_cast<int32_t>(task_id), function_id,
@@ -3297,12 +1731,6 @@ PA_DEVICE bool FinishCallbackSubmitBody(
         );
     }
 
-#if PTO_FDWIC_SHARED_MAP
-    (void)task_count;
-    return CloseSharedCallbackSubmit<Ops, Profile>(
-        state, stats, ticket, shared_task_meta
-    );
-#else
     ++stats.result.submits;
 #if PA_BUILD_PERF_CLOCK
     // 与真实 FDWIC perf-clock 相同：只有末个 Submit 完成全部尾动作后
@@ -3322,7 +1750,6 @@ PA_DEVICE bool FinishCallbackSubmitBody(
     );
     if (task_id + 1 == task_count) stats.result.submit_end = submit_end;
     return true;
-#endif
 #endif
 }
 
@@ -3737,8 +2164,6 @@ PA_DEVICE void PublishResult(PA_GM WorkerResult &destination, const WorkerResult
     PA_PUBLISH_FIELD(final_barrier_release);
     PA_PUBLISH_FIELD(final_barrier_end);
     PA_PUBLISH_FIELD(dependency_signature);
-    PA_PUBLISH_FIELD(shared_symbol_input_loads);
-    PA_PUBLISH_FIELD(shared_symbol_inout_commits);
 #if defined(PA_COMPETE_FIRST_SPLIT_FINISH)
     PA_PUBLISH_FIELD(compete_first_split_caller_state_address);
     PA_PUBLISH_FIELD(compete_first_split_finish_state_address);
@@ -3897,8 +2322,8 @@ PA_DEVICE void RunSchedulerImpl(PA_GM SchedulerState *state, uint32_t worker_id,
         // CCEC 可在这里开启本 worker 私有 PMU 窗口；CPU/AscendC 适配层是空实现。
         // 窗口覆盖本 worker 的全部调度期：从 orchestration 初始化前开始，
         // 依次包含 EfDrain、Claim、当前模式实际执行的参数构造与后续 Submit
-        // 阶段，到末次 Submit 返回。private 为全员 eager；shared 五类
-        // task 都只由 Claim owner 构参。
+        // 阶段，到末次 Submit 返回。private 与 shared 都由全部 replay
+        // actor 构参；shared 还会在 Claim 前完成本核确定性 Materialize。
         // 它与全局“首 Submit.begin～末 Submit.end”口径接近但不相同，host sidecar
         // 必须按 per-worker 累计解释。泳道父边界在 PMU-only 构建中会被编译为空，
         // 不应污染 Submit 取数。

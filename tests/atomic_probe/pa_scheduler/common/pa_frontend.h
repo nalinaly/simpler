@@ -13,9 +13,6 @@
 #define PA_SCHEDULER_COMMON_PA_FRONTEND_H
 
 #include "pa_model.h"
-#if PTO_FDWIC_SHARED_MAP
-#include "pa_shared_heap.h"
-#endif
 
 namespace pa_scheduler {
 
@@ -54,85 +51,9 @@ enum class TensorRefKind : uint8_t {
     LocalTensor = 0,
     GmTensor = 1,
     CreateInfo = 2,
-#if PTO_FDWIC_SHARED_MAP
-    SharedOutputRef = 3,
-#endif
 };
 
 #if PTO_FDWIC_SHARED_MAP
-// shared fresh Output 使用稳定的 (producer_task_id, output_slot) 符号，
-// 不把某个 worker 私有 payload 中的 TensorDesc 指针传给其他 worker。
-// 后四个字段预留真实 runtime 的一维 view ABI；PA Case1 本阶段只产生
-// flags/view 全零的直接引用，resolver 对其他形态显式 fail-closed。
-struct FdwicOutputRef {
-    int32_t producer_task_id;
-    int16_t output_slot;
-    uint8_t flags;
-    uint8_t view_ndims;
-    uint32_t view_shape0;
-    uint32_t view_offset0;
-};
-static_assert(sizeof(FdwicOutputRef) == 16, "FdwicOutputRef ABI size changed");
-static_assert(alignof(FdwicOutputRef) == 4, "FdwicOutputRef ABI alignment changed");
-static_assert(offsetof(FdwicOutputRef, producer_task_id) == 0, "shared output producer offset mismatch");
-static_assert(offsetof(FdwicOutputRef, output_slot) == 4, "shared output slot offset mismatch");
-static_assert(offsetof(FdwicOutputRef, flags) == 6, "shared output flags offset mismatch");
-static_assert(offsetof(FdwicOutputRef, view_ndims) == 7, "shared output view-rank offset mismatch");
-static_assert(offsetof(FdwicOutputRef, view_shape0) == 8, "shared output view-shape offset mismatch");
-static_assert(offsetof(FdwicOutputRef, view_offset0) == 12, "shared output view-offset mismatch");
-static_assert(
-    __is_trivially_constructible(FdwicOutputRef),
-    "FdwicOutputRef must remain trivial for CCEC block-local state"
-);
-
-PA_DEVICE FdwicOutputRef InvalidSharedOutputRef() {
-    return FdwicOutputRef{-1, -1, 0, 0, 0, 0};
-}
-
-// SubmitContext 在 replay 循环中被重复使用，因此 Reset 必须同时写 task id
-// 和 count；字段不能使用默认成员初始化，否则 SubmitContext 会产生非平凡
-// 构造函数，而 CCEC 禁止 [[block_local]] runtime state 带 ctor/dtor。
-struct SharedTaskOutputs {
-    int32_t producer_task_id;
-    uint32_t output_count;
-
-    PA_DEVICE void Reset(int32_t task_id) {
-        producer_task_id = task_id;
-        output_count = 0;
-    }
-
-    PA_DEVICE bool AddOutputRef(int32_t task_id, int16_t output_slot) {
-        if (task_id < 0 || task_id != producer_task_id ||
-            output_count >= kSharedOutputMaxPerTask ||
-            output_slot != static_cast<int16_t>(output_count)) {
-            return false;
-        }
-        ++output_count;
-        return true;
-    }
-
-    PA_DEVICE bool Empty() const { return output_count == 0; }
-    PA_DEVICE uint32_t Size() const { return output_count; }
-    PA_DEVICE int32_t TaskId() const { return producer_task_id; }
-
-    PA_DEVICE FdwicOutputRef OutputRef(uint32_t index) const {
-        if (index >= output_count) {
-            return InvalidSharedOutputRef();
-        }
-        return FdwicOutputRef{
-            producer_task_id, static_cast<int16_t>(index), 0, 0, 0, 0,
-        };
-    }
-};
-static_assert(sizeof(SharedTaskOutputs) == 8, "SharedTaskOutputs ABI size changed");
-static_assert(alignof(SharedTaskOutputs) == 4, "SharedTaskOutputs ABI alignment changed");
-static_assert(offsetof(SharedTaskOutputs, producer_task_id) == 0, "shared result task offset mismatch");
-static_assert(offsetof(SharedTaskOutputs, output_count) == 4, "shared result count offset mismatch");
-static_assert(
-    __is_trivially_constructible(SharedTaskOutputs),
-    "SharedTaskOutputs must remain trivial for CCEC block-local state"
-);
-
 // pa_model.h 可能先被 CCEC 的 host-side PMU 头包含，因此这里保留明确的
 // device 版本，避免 __aicore__ 路径调用先前已实例化的 host constexpr。
 PA_DEVICE uint32_t FrontendTaskOutputCount(TaskKind kind) {
@@ -254,24 +175,6 @@ PA_DEVICE bool SharedPaTaskKindInBatch(
 }
 #endif
 
-PA_DEVICE bool PrepareSharedTaskOutputs(
-    SharedTaskOutputs &outputs, int32_t task_id, TaskKind kind
-) {
-    // loser 也必须把同一组 (producer,slot) 句柄交给本核后续 orchestration；
-    // 这里仅声明稳定符号，不读取 winner 私有 payload，也不物化 descriptor。
-    if (task_id < 0 || outputs.TaskId() != task_id || !outputs.Empty()) {
-        return false;
-    }
-    const uint32_t output_count = FrontendTaskOutputCount(kind);
-    for (uint32_t slot = 0; slot < output_count; ++slot) {
-        if (!outputs.AddOutputRef(
-                task_id, static_cast<int16_t>(slot)
-            )) {
-            return false;
-        }
-    }
-    return outputs.Size() == output_count;
-}
 #endif
 
 // TaskArgs 同时容纳 orchestration 栈上的 descriptor、GM 中已物化的 descriptor，
@@ -280,24 +183,15 @@ union TensorPointer {
     const TensorDesc *local_tensor;
     PA_GM const TensorDesc *gm_tensor;
     const TensorCreateInfo *create_info;
-#if PTO_FDWIC_SHARED_MAP
-    FdwicOutputRef output_ref;
-#endif
 };
 
 struct TaskTensorRef {
     TensorPointer pointer;
     TensorRefKind kind;
 };
-#if PTO_FDWIC_SHARED_MAP
-static_assert(sizeof(TaskTensorRef) == 24, "shared TaskTensorRef must match the PA TensorRef ABI");
-static_assert(offsetof(TaskTensorRef, pointer) == 0, "shared TaskTensorRef pointer offset mismatch");
-static_assert(offsetof(TaskTensorRef, kind) == 16, "shared TaskTensorRef kind offset mismatch");
-#else
 static_assert(sizeof(TaskTensorRef) == 16, "TaskTensorRef must match the PA TensorRef ABI");
 static_assert(offsetof(TaskTensorRef, pointer) == 0, "TaskTensorRef pointer offset mismatch");
 static_assert(offsetof(TaskTensorRef, kind) == 8, "TaskTensorRef kind offset mismatch");
-#endif
 
 struct PaLaunchSpec {
     int16_t core_num;
@@ -362,24 +256,6 @@ struct TaskArgs {
     uint32_t explicit_dep_count;
     uint8_t cacheline_pad[48];
 };
-#if PTO_FDWIC_SHARED_MAP
-static_assert(sizeof(TaskArgs) == 1280, "shared TaskArgs must match the PA L0TaskArgs ABI size");
-static_assert(offsetof(TaskArgs, tags) == 0, "shared TaskArgs tag offset mismatch");
-static_assert(offsetof(TaskArgs, tensors) == 128, "shared TaskArgs tensor-ref offset mismatch");
-static_assert(offsetof(TaskArgs, scalars) == 896, "shared TaskArgs scalar offset mismatch");
-static_assert(offsetof(TaskArgs, tensor_count) == 1024, "shared TaskArgs tensor-count offset mismatch");
-static_assert(offsetof(TaskArgs, scalar_count) == 1028, "shared TaskArgs scalar-count offset mismatch");
-static_assert(offsetof(TaskArgs, has_error) == 1032, "shared TaskArgs error flag offset mismatch");
-static_assert(offsetof(TaskArgs, error_msg) == 1040, "shared TaskArgs error pointer offset mismatch");
-static_assert(offsetof(TaskArgs, launch_spec) == 1048, "shared TaskArgs launch-spec offset mismatch");
-static_assert(offsetof(TaskArgs, dump_arg_selection) == 1056, "shared TaskArgs dump-selection offset mismatch");
-static_assert(offsetof(TaskArgs, explicit_deps) == 1216, "shared TaskArgs dependency pointer offset mismatch");
-static_assert(offsetof(TaskArgs, explicit_dep_count) == 1224, "shared TaskArgs dependency count offset mismatch");
-static_assert(
-    __is_trivially_constructible(TaskArgs),
-    "shared TaskArgs must not introduce implicit initialization"
-);
-#else
 static_assert(sizeof(TaskArgs) == 1024, "TaskArgs must match the PA L0TaskArgs ABI size");
 static_assert(offsetof(TaskArgs, tags) == 0, "TaskArgs tag offset mismatch");
 static_assert(offsetof(TaskArgs, tensors) == 128, "TaskArgs tensor-ref offset mismatch");
@@ -392,7 +268,10 @@ static_assert(offsetof(TaskArgs, launch_spec) == 792, "TaskArgs launch-spec offs
 static_assert(offsetof(TaskArgs, dump_arg_selection) == 800, "TaskArgs dump-selection offset mismatch");
 static_assert(offsetof(TaskArgs, explicit_deps) == 960, "TaskArgs dependency pointer offset mismatch");
 static_assert(offsetof(TaskArgs, explicit_dep_count) == 968, "TaskArgs dependency count offset mismatch");
-#endif
+static_assert(
+    __is_trivially_constructible(TaskArgs),
+    "TaskArgs must not introduce implicit initialization"
+);
 
 struct TaskOutputs {
     uint64_t task_id;
@@ -585,42 +464,6 @@ PA_DEVICE void AppendGmTensor(TaskArgs &args, PA_GM const TensorDesc &tensor, Te
     args.tensors[index].kind = TensorRefKind::GmTensor;
     args.tags[index] = TagValue(tag);
 }
-
-#if PTO_FDWIC_SHARED_MAP
-PA_DEVICE void AppendSharedOutputRef(TaskArgs &args, FdwicOutputRef reference, TensorArgType tag) {
-    const uint32_t index = static_cast<uint32_t>(args.tensor_count++);
-    args.tensors[index].pointer.output_ref = reference;
-    args.tensors[index].kind = TensorRefKind::SharedOutputRef;
-    args.tags[index] = TagValue(tag);
-}
-
-PA_DEVICE bool IsValidSharedOutputRef(FdwicOutputRef reference) {
-    if (reference.producer_task_id < 0 ||
-        reference.producer_task_id >= static_cast<int32_t>(kMaxTasks) ||
-        reference.output_slot < 0 ||
-        reference.output_slot >= static_cast<int16_t>(kSharedOutputMaxPerTask) ||
-        (reference.flags & ~uint8_t{1}) != 0) {
-        return false;
-    }
-    if ((reference.flags & uint8_t{1}) == 0) {
-        return reference.view_ndims == 0 && reference.view_shape0 == 0 &&
-               reference.view_offset0 == 0;
-    }
-    return reference.view_ndims == 1 && reference.view_shape0 != 0;
-}
-
-PA_DEVICE bool IsPlainSharedOutputRef(FdwicOutputRef reference) {
-    return IsValidSharedOutputRef(reference) && reference.flags == 0;
-}
-
-PA_DEVICE bool IsSharedOutputReference(const TaskTensorRef &reference) {
-    return reference.kind == TensorRefKind::SharedOutputRef;
-}
-
-PA_DEVICE FdwicOutputRef SharedOutputReference(const TaskTensorRef &reference) {
-    return reference.pointer.output_ref;
-}
-#endif
 
 PA_DEVICE void AppendOutput(TaskArgs &args, const TensorCreateInfo &create_info) {
     const uint32_t index = static_cast<uint32_t>(args.tensor_count++);
@@ -1550,17 +1393,9 @@ PA_DEVICE void CopyGmTensor(PA_GM TensorDesc &destination, PA_GM const TensorDes
     }
 }
 
-#if PTO_FDWIC_SHARED_MAP
-template <typename SharedCopyOps, bool SharedDescriptorsDirect>
-PA_DEVICE void PopulateSlotPayloadImpl(
-#else
 PA_DEVICE void PopulateSlotPayload(
-#endif
     PA_GM LocalSlot &slot, const TaskArgs &args, const SubmitContext &context, const int32_t fanin[kMaxFanin],
     uint32_t fanin_count,
-#if PTO_FDWIC_SHARED_MAP
-    PA_GM SharedTensorMapSidecar *shared_map,
-#endif
     int32_t sub_block_id, bool is_multicore, int32_t won_block,
     int32_t won_slot
 ) {
@@ -1571,32 +1406,6 @@ PA_DEVICE void PopulateSlotPayload(
     for (int32_t index = 0; index < context.tensor_count; ++index) {
         if (TaskTag(args, static_cast<uint32_t>(index)) == TensorArgType::Output) {
             CopyGmTensor(slot.tensors[index], context.payload->tensors[index]);
-#if PTO_FDWIC_SHARED_MAP
-        } else if (IsSharedOutputReference(args.tensors[index])) {
-            if constexpr (SharedDescriptorsDirect) {
-                // Materialize + Collect 已验证该 ready ref。把 invalidate/copy
-                // 融入既有 slot tensor 扫描，避免独立 helper 再遍历一遍
-                // args；shared_map 非空是生产 BuildWinner 的内部前置条件。
-                const FdwicOutputRef output_ref =
-                    SharedOutputReference(args.tensors[index]);
-                PA_GM const TensorDesc &shared_tensor =
-                    shared_map->shared_outputs[
-                        static_cast<uint32_t>(
-                            output_ref.producer_task_id
-                        )
-                    ].tensors[output_ref.output_slot];
-                SharedCopyOps::InvalidateRegion(
-                    &shared_tensor, sizeof(shared_tensor)
-                );
-                CopyGmTensor(slot.tensors[index], shared_tensor);
-            } else {
-                // 兼容入口仍允许调用方预先把 descriptor 放进 TaskPayload；
-                // 编译期布尔量保证生产 direct-to-slot 实例不产生该分支。
-                CopyGmTensor(
-                    slot.tensors[index], context.payload->tensors[index]
-                );
-            }
-#endif
         } else {
             CopyTensorFromRef(slot.tensors[index], args.tensors[index]);
         }
@@ -1633,16 +1442,10 @@ PA_DEVICE void PopulateSlotPayload(
     slot.won_slot = won_slot;
 }
 
-#if PTO_FDWIC_SHARED_MAP
-template <typename SharedCopyOps, bool SharedDescriptorsDirect>
-#endif
 PA_DEVICE void BuildSlotPayload(
     PA_GM LocalSlot &slot, uint32_t task_id, uint32_t function_id, uint64_t function_address, const TaskArgs &args,
     const SubmitContext &context, const int32_t fanin[kMaxFanin],
     uint32_t fanin_count,
-#if PTO_FDWIC_SHARED_MAP
-    PA_GM SharedTensorMapSidecar &shared_map,
-#endif
     int32_t sub_block_id = 0,
     bool is_multicore = false, int32_t won_block = -1, int32_t won_slot = -1
 ) {
@@ -1655,17 +1458,10 @@ PA_DEVICE void BuildSlotPayload(
     slot.kind = function_id;
     slot.function_address = function_address;
     slot.built = 1;
-#if PTO_FDWIC_SHARED_MAP
-    PopulateSlotPayloadImpl<SharedCopyOps, SharedDescriptorsDirect>(
-        slot, args, context, fanin, fanin_count, &shared_map, sub_block_id,
-        is_multicore, won_block, won_slot
-    );
-#else
     PopulateSlotPayload(
         slot, args, context, fanin, fanin_count, sub_block_id, is_multicore,
         won_block, won_slot
     );
-#endif
 }
 
 // Compatibility overload for a core that has already populated the slot
@@ -1677,17 +1473,9 @@ PA_DEVICE void BuildSlotPayload(
     uint32_t fanin_count
 ) {
     slot.built = 1;
-#if PTO_FDWIC_SHARED_MAP
-    // false 实例按旧契约从 context.payload 取 shared descriptor，编译期
-    // 丢弃 direct 分支，因此内部空 map 不会产生读取或运行时判断。
-    PopulateSlotPayloadImpl<void, false>(
-        slot, args, context, fanin, fanin_count, nullptr, 0, false, -1, -1
-    );
-#else
     PopulateSlotPayload(
         slot, args, context, fanin, fanin_count, 0, false, -1, -1
     );
-#endif
 }
 
 }  // namespace pa_scheduler

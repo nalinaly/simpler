@@ -219,10 +219,10 @@ def _v5_shared_register_atomic_capture(
                     0,
                     task_id,
                     -1,
-                    "Claim",
+                    "Materialize",
                     base + 10,
                     base + 15,
-                    0x3,
+                    0,
                     1 if is_alloc else 0,
                 ],
                 [
@@ -230,12 +230,12 @@ def _v5_shared_register_atomic_capture(
                     0,
                     0,
                     task_id,
-                    function_id,
-                    "Materialize",
+                    -1,
+                    "Claim",
                     base + 15,
                     base + 20,
-                    0,
-                    1,
+                    0x3,
+                    1 if is_alloc else 0,
                 ],
                 [
                     0,
@@ -258,42 +258,6 @@ def _v5_shared_register_atomic_capture(
                     "SharedRegisterPublishMetadata",
                     base + 24,
                     base + 34,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    task_id,
-                    function_id,
-                    "SharedRegisterPublishTaskOutputs",
-                    base + 29,
-                    base + 32,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    task_id,
-                    function_id,
-                    "SharedRegisterPublishTaskOutputsCopy",
-                    base + 29,
-                    base + 30,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    task_id,
-                    function_id,
-                    "SharedRegisterPublishTaskOutputsFlush",
-                    base + 30,
-                    base + 32,
                     0,
                     0,
                 ],
@@ -457,10 +421,12 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must not contain PrepareMap"):
                 convert(input_path, output_path)
 
-    def test_v4_shared_register_detail_splits_parent_with_one_raw_row(self) -> None:
+    def test_v5_shared_register_detail_splits_metadata_only_parent(
+        self,
+    ) -> None:
         rows = [
+            [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
             [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
-            [0, 0, 0, 0, -1, "Materialize", 115, 120, 0, 1],
             [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
             [
                 0,
@@ -471,225 +437,6 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
                 "SharedRegisterPublishMetadata",
                 124,
                 134,
-                0,
-                0,
-            ],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedRegisterPublishTaskOutputs",
-                129,
-                132,
-                0,
-                0,
-            ],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedRegisterPublishTaskOutputsCopy",
-                129,
-                130,
-                0,
-                0,
-            ],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedRegisterPublishTaskOutputsFlush",
-                130,
-                132,
-                0,
-                0,
-            ],
-            [0, 0, 0, 0, -1, "AllocComplete", 140, 145, 0, 0],
-            [0, 0, 0, 0, -1, "Submit", 100, 150, 1, 1],
-        ]
-        capture = _v5_capture(rows, tensormap_mode="shared")
-        raw_rows = capture["fdwic_events"]
-        assert isinstance(raw_rows, list)
-        # 两条全核 parent 由 helper 加入；Register 使用 metadata 父 detail
-        # 加 task-outputs 及 copy/flush 两层子 detail。
-        self.assertEqual(len(raw_rows), len(rows) + 2)
-        self.assertEqual(
-            sum(row[5] == "SharedRegisterPublishMetadata" for row in raw_rows),
-            1,
-        )
-        self.assertEqual(
-            sum(
-                row[5] == "SharedRegisterPublishTaskOutputs"
-                for row in raw_rows
-            ),
-            1,
-        )
-        self.assertEqual(
-            sum(
-                row[5] == "SharedRegisterPublishTaskOutputsCopy"
-                for row in raw_rows
-            ),
-            1,
-        )
-        self.assertEqual(
-            sum(
-                row[5] == "SharedRegisterPublishTaskOutputsFlush"
-                for row in raw_rows
-            ),
-            1,
-        )
-
-        with tempfile.TemporaryDirectory() as directory:
-            input_path = Path(directory) / "raw.json"
-            output_path = Path(directory) / "merged.json"
-            input_path.write_text(json.dumps(capture), encoding="utf-8")
-            convert(input_path, output_path)
-            events = json.loads(output_path.read_text(encoding="utf-8"))["traceEvents"]
-
-        parent = next(event for event in events if event.get("name") == "register#0")
-        flat_child_names = (
-            "register.wait_predecessor_insert#0",
-            "register.publish_writer_metadata#0",
-            "register.publish_task_outputs#0",
-            "register.publish_metadata_epilogue#0",
-            "register.publish_insert_completion#0",
-        )
-        nested_output_names = (
-            "register.publish_task_outputs.copy#0",
-            "register.publish_task_outputs.flush#0",
-        )
-        metadata_name = "register.publish_metadata#0"
-        children = {
-            event["name"]: event
-            for event in events
-            if event.get("name")
-            in (*flat_child_names, metadata_name, *nested_output_names)
-        }
-        self.assertEqual(
-            set(children),
-            {*flat_child_names, metadata_name, *nested_output_names},
-        )
-        self.assertAlmostEqual(
-            children["register.publish_task_outputs.copy#0"]["ts"],
-            children["register.publish_task_outputs#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_task_outputs.copy#0"]["ts"]
-            + children["register.publish_task_outputs.copy#0"]["dur"],
-            children["register.publish_task_outputs.flush#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_task_outputs.flush#0"]["ts"]
-            + children["register.publish_task_outputs.flush#0"]["dur"],
-            children["register.publish_task_outputs#0"]["ts"]
-            + children["register.publish_task_outputs#0"]["dur"],
-        )
-        for child in children.values():
-            self.assertEqual(
-                set(child), {"ph", "name", "pid", "tid", "ts", "dur"}
-            )
-        self.assertEqual(
-            children["register.wait_predecessor_insert#0"]["ts"], parent["ts"]
-        )
-        self.assertAlmostEqual(
-            children["register.wait_predecessor_insert#0"]["ts"]
-            + children["register.wait_predecessor_insert#0"]["dur"],
-            children["register.publish_writer_metadata#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_writer_metadata#0"]["ts"]
-            + children["register.publish_writer_metadata#0"]["dur"],
-            children["register.publish_task_outputs#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_task_outputs#0"]["ts"]
-            + children["register.publish_task_outputs#0"]["dur"],
-            children["register.publish_metadata_epilogue#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_metadata_epilogue#0"]["ts"]
-            + children["register.publish_metadata_epilogue#0"]["dur"],
-            children["register.publish_insert_completion#0"]["ts"],
-        )
-        self.assertAlmostEqual(
-            children["register.publish_insert_completion#0"]["ts"]
-            + children["register.publish_insert_completion#0"]["dur"],
-            parent["ts"] + parent["dur"],
-        )
-        self.assertAlmostEqual(
-            sum(children[name]["dur"] for name in flat_child_names),
-            parent["dur"],
-        )
-        self.assertAlmostEqual(
-            sum(
-                children[name]["dur"]
-                for name in (
-                    "register.publish_writer_metadata#0",
-                    "register.publish_task_outputs#0",
-                    "register.publish_metadata_epilogue#0",
-                )
-            ),
-            children[metadata_name]["dur"],
-        )
-
-    def test_v5_materialize_output_detail_leaves_register_serial_only(
-        self,
-    ) -> None:
-        rows = [
-            [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
-            [0, 0, 0, 0, -1, "Materialize", 115, 125, 0, 1],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedMaterializePublishTaskOutputs",
-                120,
-                124,
-                0,
-                0,
-            ],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedMaterializePublishTaskOutputsCopy",
-                120,
-                121,
-                0,
-                0,
-            ],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedMaterializePublishTaskOutputsFlush",
-                121,
-                123,
-                0,
-                0,
-            ],
-            [0, 0, 0, 0, -1, "Register", 125, 140, 0, 0],
-            [
-                0,
-                0,
-                0,
-                0,
-                -1,
-                "SharedRegisterPublishMetadata",
-                129,
-                135,
                 0,
                 0,
             ],
@@ -706,24 +453,79 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
                 output_path.read_text(encoding="utf-8")
             )["traceEvents"]
 
-        names = {event.get("name") for event in events}
-        self.assertIn("materialize.publish_task_outputs#0", names)
-        self.assertIn(
-            "materialize.publish_task_outputs.copy#0", names
+        children = {
+            event["name"]: event
+            for event in events
+            if event.get("name")
+            in {
+                "register.wait_predecessor_insert#0",
+                "register.publish_metadata#0",
+                "register.publish_writer_metadata#0",
+                "register.publish_insert_completion#0",
+            }
+        }
+        self.assertEqual(
+            set(children),
+            {
+                "register.wait_predecessor_insert#0",
+                "register.publish_metadata#0",
+                "register.publish_writer_metadata#0",
+                "register.publish_insert_completion#0",
+            },
         )
-        self.assertIn(
-            "materialize.publish_task_outputs.flush#0", names
+        self.assertEqual(
+            children["register.wait_predecessor_insert#0"]["dur"], 0.004
         )
-        self.assertIn("register.wait_predecessor_insert#0", names)
-        self.assertIn("register.publish_writer_metadata#0", names)
-        self.assertIn("register.publish_insert_completion#0", names)
-        self.assertNotIn("register.publish_task_outputs#0", names)
-        self.assertNotIn("register.publish_metadata_epilogue#0", names)
+        self.assertEqual(
+            children["register.publish_writer_metadata#0"]["dur"], 0.01
+        )
+        self.assertEqual(
+            children["register.publish_insert_completion#0"]["dur"], 0.006
+        )
 
-    def test_v4_shared_register_detail_is_required_exactly_once_for_winner(
+    def test_v5_rejects_retired_shared_output_phases(self) -> None:
+        for phase in (
+            "SharedMaterializePublishTaskOutputs",
+            "SharedMaterializePublishTaskOutputsCopy",
+            "SharedMaterializePublishTaskOutputsFlush",
+        ):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                capture = _v5_capture(
+                    [
+                        [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
+                        [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
+                        [0, 0, 0, 0, -1, phase, 106, 107, 0, 0],
+                        [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
+                        [
+                            0,
+                            0,
+                            0,
+                            0,
+                            -1,
+                            "SharedRegisterPublishMetadata",
+                            124,
+                            134,
+                            0,
+                            0,
+                        ],
+                        [0, 0, 0, 0, -1, "AllocComplete", 140, 145, 0, 0],
+                        [0, 0, 0, 0, -1, "Submit", 100, 150, 1, 1],
+                    ],
+                    tensormap_mode="shared",
+                )
+                input_path = Path(directory) / "raw.json"
+                output_path = Path(directory) / "merged.json"
+                input_path.write_text(json.dumps(capture), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    ValueError, "retired shared-output phase"
+                ):
+                    convert(input_path, output_path)
+
+    def test_v5_shared_register_detail_is_required_exactly_once(
         self,
     ) -> None:
         base_rows = [
+            [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
             [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
             [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
             [0, 0, 0, 0, -1, "AllocComplete", 140, 145, 0, 0],
@@ -741,54 +543,49 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
             0,
             0,
         ]
-        cases = {
+        for label, rows in {
             "missing": base_rows,
             "duplicate": [*base_rows, detail, list(detail)],
-        }
-        for label, rows in cases.items():
+        }.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
                 capture = _v5_capture(rows, tensormap_mode="shared")
                 input_path = Path(directory) / "raw.json"
                 output_path = Path(directory) / "merged.json"
                 input_path.write_text(json.dumps(capture), encoding="utf-8")
                 with self.assertRaisesRegex(
-                    ValueError, "requires exactly one SharedRegisterPublishMetadata"
+                    ValueError,
+                    "requires exactly one SharedRegisterPublishMetadata",
                 ):
                     convert(input_path, output_path)
 
-    def test_v5_task_outputs_detail_is_strictly_nested_once(self) -> None:
-        for label in ("missing", "duplicate", "outside_metadata", "wrong_identity"):
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                capture = _v5_shared_register_atomic_capture()
-                rows = capture["fdwic_events"]
-                assert isinstance(rows, list)
-                output_detail = next(
-                    row
-                    for row in rows
-                    if row[0] == 0
-                    and row[3] == 0
-                    and row[5] == "SharedRegisterPublishTaskOutputs"
-                )
-                if label == "missing":
-                    rows.remove(output_detail)
-                elif label == "duplicate":
-                    rows.append(list(output_detail))
-                elif label == "outside_metadata":
-                    output_detail[6] = 123
-                else:
-                    output_detail[4] = 0
-                _refresh_summary(capture)
-                input_path = Path(directory) / "raw.json"
-                output_path = Path(directory) / "merged.json"
-                input_path.write_text(json.dumps(capture), encoding="utf-8")
-                expected = {
-                    "missing": "requires exactly one SharedRegisterPublishTaskOutputs",
-                    "duplicate": "requires exactly one SharedRegisterPublishTaskOutputs",
-                    "outside_metadata": "outside SharedRegisterPublishMetadata",
-                    "wrong_identity": "identity differs",
-                }[label]
-                with self.assertRaisesRegex(ValueError, expected):
-                    convert(input_path, output_path)
+    def test_v5_shared_not_attempted_actor_still_requires_materialize(
+        self,
+    ) -> None:
+        rows = [
+            [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
+            # attempted=0、won=0 仍是 replay actor，不可跳过本地物化。
+            [0, 0, 0, 0, -1, "Claim", 110, 115, 0, 1],
+            [0, 0, 0, 0, -1, "Submit", 100, 150, 0, 1],
+        ]
+        capture = _v5_capture(rows, tensormap_mode="shared")
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "raw.json"
+            output_path = Path(directory) / "merged.json"
+            input_path.write_text(json.dumps(capture), encoding="utf-8")
+            convert(input_path, output_path)
+            self.assertTrue(output_path.exists())
+
+            raw_rows = capture["fdwic_events"]
+            assert isinstance(raw_rows, list)
+            capture["fdwic_events"] = [
+                row for row in raw_rows if row[5] != "Materialize"
+            ]
+            _refresh_summary(capture)
+            input_path.write_text(json.dumps(capture), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "requires exactly one Materialize for every actor"
+            ):
+                convert(input_path, output_path)
 
     def test_v5_rejects_old_schema_v4_raw(self) -> None:
         capture = _v5_capture(
@@ -814,6 +611,7 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
         self,
     ) -> None:
         base_rows = [
+            [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
             [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
             [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
             [0, 0, 0, 0, -1, "AllocComplete", 140, 145, 0, 0],
@@ -847,20 +645,8 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
         }
         for label, detail in cases.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                output_detail = [
-                    detail[0],
-                    detail[1],
-                    detail[2],
-                    detail[3],
-                    detail[4],
-                    "SharedRegisterPublishTaskOutputs",
-                    129,
-                    132,
-                    0,
-                    0,
-                ]
                 capture = _v5_capture(
-                    [*base_rows, detail, output_detail],
+                    [*base_rows, detail],
                     tensormap_mode="shared",
                 )
                 input_path = Path(directory) / "raw.json"
@@ -891,30 +677,6 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
                     0,
                     0,
                 ],
-                [
-                    0,
-                    0,
-                    0,
-                    0,
-                    -1,
-                    "SharedRegisterPublishTaskOutputs",
-                    129,
-                    132,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    0,
-                    -1,
-                    "SharedRegisterPublishTaskOutputs",
-                    129,
-                    132,
-                    0,
-                    0,
-                ],
                 [0, 0, 0, 0, -1, "AllocComplete", 140, 145, 0, 0],
                 [0, 0, 0, 0, -1, "Submit", 100, 150, 1, 1],
             ]
@@ -931,6 +693,7 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
     def test_v4_shared_register_detail_is_forbidden_for_loser(self) -> None:
         capture = _v5_capture(
             [
+                [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
                 [0, 0, 0, 0, -1, "Claim", 110, 115, 0x2, 1],
                 [
                     0,
@@ -958,6 +721,7 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
     def test_v4_shared_register_parent_is_forbidden_for_loser(self) -> None:
         capture = _v5_capture(
             [
+                [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
                 [0, 0, 0, 0, -1, "Claim", 110, 115, 0x2, 1],
                 [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
                 [0, 0, 0, 0, -1, "Submit", 100, 150, 0, 1],
@@ -976,6 +740,7 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
     def test_v4_shared_rejects_register_parent_without_claim(self) -> None:
         capture = _v5_capture(
             [
+                [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
                 [0, 0, 0, 0, -1, "Claim", 110, 115, 0x3, 1],
                 [0, 0, 0, 0, -1, "Register", 120, 140, 0, 0],
                 [
@@ -987,42 +752,6 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
                     "SharedRegisterPublishMetadata",
                     124,
                     134,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    0,
-                    -1,
-                    "SharedRegisterPublishTaskOutputs",
-                    129,
-                    132,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    0,
-                    -1,
-                    "SharedRegisterPublishTaskOutputsCopy",
-                    129,
-                    130,
-                    0,
-                    0,
-                ],
-                [
-                    0,
-                    0,
-                    0,
-                    0,
-                    -1,
-                    "SharedRegisterPublishTaskOutputsFlush",
-                    130,
-                    132,
                     0,
                     0,
                 ],
@@ -1715,6 +1444,7 @@ class SwimlaneConverterLayoutTest(unittest.TestCase):
                 capture = _v5_capture(
                     [
                         # 唯一 task 明确是 Alloc loser：没有 Register owner。
+                        [0, 0, 0, 0, -1, "Materialize", 105, 110, 0, 1],
                         [0, 0, 0, 0, -1, "Claim", 110, 115, 0x2, 1],
                         [0, 0, 0, 0, -1, "Submit", 100, 150, 0, 1],
                     ],

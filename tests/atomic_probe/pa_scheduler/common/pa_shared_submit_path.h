@@ -18,17 +18,15 @@
 
 struct SharedTaskWriterDelta {
     // ordinary entry 先在 owner 私有上下文中完整准备；只有拿到 task 的
-    // exact insert turn 后才批量预检和发布。bucket/同桶序号及 symbol
-    // packed key 都在等待前计算；串行区只消费这份不可变提交计划。
+    // exact insert turn 后才批量预检和发布。bucket/同桶序号都在等待前
+    // 计算；串行区只消费这份不可变提交计划。
     // prepared_task_id 只在全部结构检查通过后写入；Publish 阶段据此确认
     // 这份 owner-local delta 属于当前 task，不再在串行区重复扫描 args。
     SharedRegionValue ordinary_entries[kMaxTaskTensors];
-    uint32_t symbol_keys[kMaxTaskTensors];
     uint16_t ordinary_buckets[kMaxTaskTensors];
     uint8_t ordinary_bucket_ordinals[kMaxTaskTensors];
     int32_t prepared_task_id;
     uint32_t ordinary_count;
-    uint32_t symbol_count;
     bool writer_intent_required;
 };
 static_assert(
@@ -46,7 +44,6 @@ PA_DEVICE bool PrepareSharedTaskWriterDelta(
 ) {
     delta.prepared_task_id = -1;
     delta.ordinary_count = 0;
-    delta.symbol_count = 0;
     delta.writer_intent_required = false;
     const int32_t task_id = context.task_id;
     if (!context.won || task_id < 0 ||
@@ -90,23 +87,7 @@ PA_DEVICE bool PrepareSharedTaskWriterDelta(
             return false;
         }
         const TaskTensorRef &reference = args.tensors[index];
-        if (reference.kind == TensorRefKind::SharedOutputRef) {
-            const FdwicOutputRef output_ref =
-                SharedOutputReference(reference);
-            uint32_t symbol_key = 0;
-            if (!SharedSymbolHistoryKey(output_ref, symbol_key) ||
-                delta.symbol_count >= kMaxTaskTensors) {
-                return false;
-            }
-            for (uint32_t previous = 0;
-                 previous < delta.symbol_count; ++previous) {
-                if (delta.symbol_keys[previous] == symbol_key) {
-                    return false;
-                }
-            }
-            delta.symbol_keys[delta.symbol_count] = symbol_key;
-            ++delta.symbol_count;
-        } else if (reference.kind == TensorRefKind::GmTensor) {
+        if (reference.kind == TensorRefKind::GmTensor) {
             PA_GM const TensorDesc &tensor =
                 *reference.pointer.gm_tensor;
             if (!tensor.manual_dep) {
@@ -188,11 +169,8 @@ PA_DEVICE bool PrepareSharedTaskWriterDelta(
     // Inspect/Validate 与 delta 构造都只读取同一个 const TaskArgs；两者对
     // “是否需要自动登记”必须给出相同结论。该同步 Finish 控制流在
     // Publish 前不会修改 args，delta 也只存在于 winner 的本地栈上。
-    const bool delta_requires_intent =
-        delta.ordinary_count != 0 || delta.symbol_count != 0;
-    if (writer_required != delta_requires_intent ||
-        delta.ordinary_count + delta.symbol_count >
-            kMaxTaskTensors) {
+    const bool delta_requires_intent = delta.ordinary_count != 0;
+    if (writer_required != delta_requires_intent) {
         return false;
     }
     delta.writer_intent_required = writer_required;
@@ -210,12 +188,8 @@ PA_DEVICE bool PublishSharedTaskWriterMetadata(
         task_id >= static_cast<int32_t>(kMaxTasks) ||
         delta.prepared_task_id != task_id ||
         delta.ordinary_count > kMaxTaskTensors ||
-        delta.symbol_count > kMaxTaskTensors ||
-        delta.ordinary_count + delta.symbol_count >
-            kMaxTaskTensors ||
         delta.writer_intent_required !=
-            (delta.ordinary_count != 0 ||
-             delta.symbol_count != 0) ||
+            (delta.ordinary_count != 0) ||
         Ops::Load(&state->fatal.value) != 0) {
         if (state != nullptr) {
             SetFatal<Ops>(state, stats, task_id);
@@ -236,14 +210,6 @@ PA_DEVICE bool PublishSharedTaskWriterMetadata(
         return false;
     }
 
-    if (delta.symbol_count != 0 &&
-        !CommitPreparedSymbolSharedWriterIntentSet<Ops>(
-            state->shared_map, delta.symbol_keys,
-            delta.symbol_count, task_id, &state->fatal.value
-        )) {
-        SetFatal<Ops>(state, stats, task_id);
-        return false;
-    }
     if (!SharedAppendPreparedTask<Ops>(
             state->shared_map, delta.ordinary_entries,
             delta.ordinary_buckets, delta.ordinary_count
@@ -261,7 +227,6 @@ PA_DEVICE void RecordCommittedSharedTaskWriterStats(
     // metadata 已写入但 CAS 失败的 terminal task 不计入成功统计；故障现场
     // 仍由 fatal、共享元数据与 CAS observed value 保留。
     stats.result.map_inserts += delta.ordinary_count;
-    stats.result.shared_symbol_inout_commits += delta.symbol_count;
 }
 
 template <typename Ops>
@@ -274,9 +239,9 @@ PA_DEVICE bool HandoffSharedTaskInsertTurn(
         cas_observed = INT64_MIN;
         return false;
     }
-    // ordinary payload 的 DCCI、symbol history/latest 与 fresh descriptor
-    // 都必须先于本 task 的插入完成字对 N+1 owner 可见。每个 task 使用
-    // 自己的 TaskCell，不再把一枚 baton 在 G 条 sidecar 线上轮换。
+    // ordinary payload 的 DCCI 必须先于本 task 的插入完成字对 N+1
+    // owner 可见。每个 task 使用自己的 TaskCell，不再把一枚 baton 在
+    // G 条 sidecar 线上轮换。
     Ops::StoreBarrier();
     cas_observed = Ops::CompareExchange(
         &state->tasks[static_cast<uint32_t>(task_id)]
@@ -617,16 +582,15 @@ PA_DEVICE bool FinishSharedWinnerSubmitBody(
         const uint64_t fanin_begin = register_end;
         bool lookup_protocol_ok = false;
         uint32_t ordinary_lookup_count = 0;
-        // 本 task 的 writer 已经进入 history/latest；lookup 必须从
-        // latest 沿不可变 history 回退到 max(writer < task_id)。这同时
-        // 覆盖首组与后续组，不再依赖 PA 专用 chained-writer 特判。
+        // 本 task 的 ordinary writer 已经进入共享 ring；lookup 以
+        // task_id 为上界，只接受真实前任并过滤 self/future writer。
         context.fanin_count = static_cast<int32_t>(
-            CollectSharedFanin<Ops, false, true>(
+            CollectSharedFanin<Ops>(
                 state->shared_map, args,
                 static_cast<int32_t>(task_id),
                 static_cast<int32_t>(state->heap_window),
-                stats, context.fanin, lookup_protocol_ok,
-                ordinary_lookup_count, &state->fatal.value
+                context.fanin, lookup_protocol_ok,
+                ordinary_lookup_count
             )
         );
         if (!lookup_protocol_ok) {
