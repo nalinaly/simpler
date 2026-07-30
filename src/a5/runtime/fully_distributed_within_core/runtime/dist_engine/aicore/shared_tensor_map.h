@@ -220,6 +220,19 @@ PTO_DEVICE_FUNC bool dist_shared_pa_publish_outputs_impl(
     }
     __gm__ SharedOutputCell &cell = state.shared_outputs[static_cast<uint32_t>(task_id)];
 
+    // The Claim winner exclusively owns these fresh descriptor lines. Start
+    // the store-side hint before reserving the control slots so the FetchMax
+    // operations provide useful lead time. Every descriptor byte is still
+    // overwritten by Tensor::copy; preload is not read as reset state and
+    // remains irrelevant to correctness.
+    const uint64_t output_bytes =
+        static_cast<uint64_t>(expected_output_count) * sizeof(Tensor);
+    for (uint64_t offset = 0; offset < output_bytes; offset += kCacheLine) {
+        Ops::PreloadDataCache(
+            reinterpret_cast<__gm__ uint8_t *>(&cell.tensors[0]) + offset
+        );
+    }
+
     // One Claim winner owns the whole task cell. Do not pre-read reset state
     // with ordinary cached GM loads: AICPU may reuse and reset the arena
     // between runs while resident AICores still retain an old line. FetchMax
@@ -254,7 +267,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_publish_outputs_impl(
 #endif
     if (expected_output_count != 0) {
         dist_shared_pa_trace_flush<Ops, Observe>(
-            &cell.tensors[0], static_cast<uint64_t>(expected_output_count) * sizeof(Tensor),
+            &cell.tensors[0], output_bytes,
             task_id, FdwicDcciSite::SharedOutputDescriptorFlush,
             /*defer_record=*/false, nullptr,
             trace == nullptr ? nullptr : &trace->flush_end, nullptr

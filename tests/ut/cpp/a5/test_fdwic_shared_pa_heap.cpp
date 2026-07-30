@@ -36,12 +36,18 @@ struct HostHeapOps {
     static inline uint32_t compare_exchange_calls = 0;
     static inline uint32_t flush_calls = 0;
     static inline uint32_t invalidate_calls = 0;
+    static inline uint32_t preload_calls = 0;
+    static inline uintptr_t preload_addresses[16] = {};
     static inline uint32_t store_barrier_calls = 0;
 
     static void ResetObservations() {
         compare_exchange_calls = 0;
         flush_calls = 0;
         invalidate_calls = 0;
+        preload_calls = 0;
+        for (uintptr_t &address : preload_addresses) {
+            address = 0;
+        }
         store_barrier_calls = 0;
     }
 
@@ -79,6 +85,11 @@ struct HostHeapOps {
     static void InvalidateRegion(const void *, uint64_t) { ++invalidate_calls; }
 
     static void FlushRegion(void *, uint64_t) { ++flush_calls; }
+
+    static void PreloadDataCache(void *address) {
+        ASSERT_LT(preload_calls, 16U);
+        preload_addresses[preload_calls++] = reinterpret_cast<uintptr_t>(address);
+    }
 
     static void StoreBarrier() {
         ++store_barrier_calls;
@@ -186,6 +197,15 @@ TEST(FdwicSharedPaOutputDescriptor, FreshPublicationCanBeCopiedAndDuplicatePubli
     HostHeapOps::ResetObservations();
     ASSERT_TRUE(dist_shared_pa_publish_outputs_impl<HostHeapOps>(*state, kTask, outputs, kOutputCount));
     EXPECT_EQ(HostHeapOps::flush_calls, 1U);
+    ASSERT_EQ(HostHeapOps::preload_calls, kOutputCount * sizeof(Tensor) / kCacheLine);
+    const uintptr_t tensor_base =
+        reinterpret_cast<uintptr_t>(&state->shared_outputs[kTask].tensors[0]);
+    for (uint32_t line = 0; line < HostHeapOps::preload_calls; ++line) {
+        EXPECT_EQ(
+            HostHeapOps::preload_addresses[line],
+            tensor_base + static_cast<uintptr_t>(line) * kCacheLine
+        ) << "line=" << line;
+    }
     EXPECT_EQ(HostHeapOps::store_barrier_calls, 1U);
     for (uint32_t slot = 0; slot < kOutputCount; ++slot) {
         EXPECT_EQ(state->shared_outputs[kTask].last_writer[slot].v, kTask) << "slot=" << slot;
@@ -205,6 +225,10 @@ TEST(FdwicSharedPaOutputDescriptor, FreshPublicationCanBeCopiedAndDuplicatePubli
     EXPECT_FALSE(dist_shared_pa_publish_outputs_impl<HostHeapOps>(
         *state, kTask, duplicate, kOutputCount
     ));
+    // The best-effort hint intentionally precedes authoritative reservation,
+    // so a protocol-violating duplicate may issue hints but still cannot
+    // overwrite any descriptor or publication control.
+    EXPECT_EQ(HostHeapOps::preload_calls, 2U * kOutputCount * sizeof(Tensor) / kCacheLine);
 
     Tensor copied_after_duplicate{};
     ASSERT_TRUE(dist_shared_pa_copy_output_descriptor_impl<HostHeapOps>(
