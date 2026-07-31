@@ -1,4 +1,4 @@
-# Shared PA Case1：standalone 2.3 ms 不是等价基线，五个微优化候选均未保留
+# Shared PA Case1：standalone 2.3 ms 不是等价基线，六个微优化候选均未保留
 
 **Date**: 2026-07-30
 **Verdict**: deferred-pending-equivalent-benchmark
@@ -52,9 +52,9 @@ standalone 的十个 fresh-process `perf-clock` 样本中位数为
 
 | Dimension | standalone | simpler real PA |
 | --------- | ---------- | --------------- |
-| Workload | synthetic fixed tiles/repeats | real BF16 PA tensors and dependencies |
+| Workload | fixed synthetic tiles | real BF16 PA tensors/deps |
 | Alloc candidates | 96 workers | 8 AIC workers |
-| Per-task candidate topology | synthetic fixed masks | Alloc8 / QK32 / SF64 / PV32 / UP64 |
+| Candidate topology | fixed masks | A8 / Q32 / S64 / P32 / U64 |
 | Total Claim attempts | 73,728 | 51,200 |
 | Arrival shape | synthetic orchestration | data-dependent PA orchestration |
 
@@ -242,7 +242,8 @@ QK/PV 完成并把耗时搬到其他阶段，不能作为完整 worker 优化。
 ## What was tried
 
 所有候选都先检查协议不变量。候选 1、2 由泳道图提出并做有界 A5 测量；
-候选 3–5 还用 whole-program O3 IR 证明预期指令或控制流确实发生变化。
+候选 3–5 还用 whole-program O3 IR 证明预期指令或控制流确实发生变化；
+候选 6 先由等价物理模型筛选，再用最终 CCEC object 尺寸证明 hint 进入热函数。
 代码候选最终均已撤回。
 
 ### Common validation and artifact identity
@@ -260,7 +261,8 @@ A5 fresh-process 测量命令：
 PTO_ISA_ROOT=<pto-isa-build> \
 PYTHONPATH="$PWD/python:$PWD/build/cp312-cp312-linux_x86_64/python/bindings" \
 .venv/bin/python -m pytest \
-  examples/a5/fully_distributed_within_core/paged_attention_unroll/test_paged_attention_unroll.py \
+  examples/a5/fully_distributed_within_core/paged_attention_unroll/\
+test_paged_attention_unroll.py \
   --platform=a5 --device=0 \
   --case=TestPagedAttentionUnroll::Case1 \
   --fdwic-tensormap=shared --fdwic-profile=perf-clock -q
@@ -285,6 +287,8 @@ baseline aicore_kernel.o sha256:
   9e6b0c5303d7fc72ae8c5277e597ee2dbf9342ae6c37cdf4af05e39e0bb27a78
 replay-pointer candidate aicore_kernel.o sha256:
   5becdffac8543fb10f18018871e48cb7d5bb7a4fabb3da4c887562dd55e7511c
+fresh-output preload candidate aicore_kernel.o sha256:
+  15f968a126550bf405817dc57da4420c2d05353933d311549c3a0fb9f95ac215
 ```
 
 候选 3、4、5 的 A5 输出目录分别为：
@@ -308,6 +312,12 @@ replay pointer:
   TestPagedAttentionUnroll_Case1_20260730_223957
   TestPagedAttentionUnroll_Case1_20260730_224054
   TestPagedAttentionUnroll_Case1_20260730_224148
+fresh-output preload:
+  TestPagedAttentionUnroll_Case1_20260730_235402
+  TestPagedAttentionUnroll_Case1_20260730_235516
+  TestPagedAttentionUnroll_Case1_20260730_235602
+  TestPagedAttentionUnroll_Case1_20260730_235649
+  TestPagedAttentionUnroll_Case1_20260730_235736
 ```
 
 候选 1、2 是未提交的早期原型，撤回时没有保留 source snapshot 与稳定的输出
@@ -408,18 +418,98 @@ mean   = 2750.06 us
 - IR 验收必须沿 CFG 确认成功 Begin 路径无加载，不能要求整个文件零
   `g_self`，因为 getter、winner revalidation 和冷错误路径仍应保留。
 
+### 6. Preload fresh shared-output destination lines
+
+独立 shared 物理模型已经证明：保持 descriptor clean-out 与 barrier 不变时，
+128 B 和 384 B fresh destination 的无额外 gap publish 分别稳定下降约
+`9%` 和 `25%`。这只能支持业务 A/B，不能直接外推为 Submit 收益。
+
+原型在参数校验后、authoritative writer reservation 前，按 64 B cacheline 对
+`shared_outputs[task_id].tensors[]` 发起 DCache preload。放置依据为：
+
+- 当前 task 的 Claim winner 独占整个 fresh descriptor cell；
+- `Tensor::copy` 会覆盖每个 128 B descriptor 的全部字节；
+- reservation 的一个或三个 FetchMax 可以给 hint 提供提前量；
+- 原有全 slot reservation、descriptor copy、DCCI clean-out、StoreBarrier 和
+  published Exchange 的顺序完全不变；
+- preload 只是 hint，失败路径和正确性都不消费其结果。
+
+focused heap/协议测试共 19 项通过，其中单测精确校验三个 descriptor 对应六条
+连续 cacheline。用同一 CCEC O3/Case1 unity 命令编译纯基线与候选：
+
+```text
+paged_attention_orch_aic.o generic .text: 0x8ad8 -> 0x8af8 (+32 B)
+dist_shared_pa_finish_winner:             0x5864 -> 0x5880 (+28 B)
+AIC/AIV orchestration entry size:         unchanged
+```
+
+所以该原型不是被编译器删除的空改动。A5 五个 fresh-process 样本为：
+
+```text
+2667.51, 2705.48, 2717.62, 2740.01, 2752.11 us
+median = 2717.62 us
+mean   = 2716.55 us
+range  =   84.60 us
+```
+
+相对冻结基线中位数只变化 `-28.41 us`（`-1.04%`）。当前既没有
+`perf_lock`，也没有同时段交错 baseline；这个差值小于既定的 `0.1 ms`
+正常波动边界，不能证明端到端收益。实验提交 `ff12278e` 已由
+`b3665903` 完整撤回。
+
+a5sim 还暴露了一个独立门禁问题：候选与撤回前基线的镜像
+`sizeof(Runtime)` 均为 71,104 B，但现有缓存组合仍由 AICore 报 build identity
+mismatch；只读基线 worktree 又没有已安装 runtime，无法完成同命令判别。
+真实 A5 的五次运行均通过 build identity、协议和 golden。因为 a5sim 失败没有
+证据指向本原型，且源码已完整撤回，本调查没有通过搬运或删除缓存掩盖该问题。
+
 ## Result
 
-| Candidate | Code/profile signal | A5 median versus baseline | Verdict |
-| --------- | ------------------- | ------------------------- | ------- |
-| Cursor relocation | Work moved; no retained IR identity | About `+4.2%` | Dropped |
-| Drain snapshot | Target drain phase did not improve | About `-1%`, within noise | Dropped |
-| Typed Claim | `ctpop` removed; MAX and `.text` unchanged | `+40.32 us` / `+1.47%` | Dropped |
-| Fixed geometry | `udiv` and one loop latch removed | `+60.73 us` / `+2.21%` | Dropped |
-| Replay pointer | Ten hot Begin loads removed; `.text` -1,280 B | `-6.60 us` / `-0.24%` | Dropped |
+| Candidate | Product signal | A5 delta | Verdict |
+| --------- | -------------- | -------- | ------- |
+| Cursor relocation | Work moved | About `+4.2%` | Dropped |
+| Drain snapshot | Target phase unchanged | About `-1%` | Dropped |
+| Typed Claim | Removed `ctpop` | `+40.32 us` | Dropped |
+| Fixed geometry | Removed `udiv`/latch | `+60.73 us` | Dropped |
+| Replay pointer | Removed 10 loads | `-6.60 us` | Dropped |
+| Fresh-output preload | Hot Finish +28 B | `-28.41 us` | Dropped |
 
-结论不是“生成代码没有变化”：候选 3–5 都有明确的 IR 变化。结论是这些变化在
+结论不是“生成代码没有变化”：候选 3–6 都有明确的产物变化。结论是这些变化在
 当前真实 PA 和未锁频 A5 上没有形成可重复、足以承担复杂度的 makespan 收益。
+
+## Why winner balancing and tail drain are not local fixes
+
+对主 trace 的 1,280 个 task 逐个排序后，winner 的 FetchMax 返回顺序
+`1280/1280` 都是第一名；开始顺序也有 `1186/1280` 是第一名。最明显的
+`QK#1276` 长尾为 `256.150 us`，但获胜 block22 的 FetchMax 开始时间仍比第二
+候选早 `2.780 us`。该核此前 11 个 QK 都只用 `44.670–47.334 us`，异常发生在
+获胜之后，Claim 前无法由在线累计负载预测。
+
+三份 full trace 的正常区间中位数稳定，末段最大值却漂移：
+
+| Kernel | Three-run median range | Three-run max range |
+| ------ | ---------------------: | ------------------: |
+| QK | `45.797–46.171 us` | `69.902–256.150 us` |
+| SF | `51.936–54.139 us` | `107.996–162.577 us` |
+| PV | `28.373–28.531 us` | `104.681–176.141 us` |
+
+长尾集中在最后约 62 个 task，但具体 task/core/幅度跨运行变化。真实 PA 每个
+QK/PV 会经随机 block table 读取大规模 K/V backing；standalone synthetic
+反复复用两块固定 input tile。这进一步说明末段设备/GM 竞争不能被归成一条
+稳定的 scheduler 软件税。
+
+当前 shared 正常路径只有两个可用 won slot；每次 Submit 在 Claim 前已经执行
+一次 drain，满槽时继续 drain，FinalDrain 又必须等待 global release、ring empty
+和无 pending won。代码中没有 last-N watermark、batch-aware throttle 或
+eager-drain 旋钮。额外末段 drain 只会移动 FinalDrain 边界；改变 slot、
+admission 或 winner 委托则会改变已经锁定的 first-winner 合同。
+
+Materialize 的 whole-program O3 审计确实发现重复扫描、第二次 `%5`、动态
+output-mask walk 和可折叠的 validated-no-init 冷分支。它适合以后合并成一次
+compact per-kind plan，但最终 lane 的整个 Materialize 也只有 `190.028 us`，
+其中昂贵的 heap atomic、完整 128 B descriptor、FetchMax、DCCI、barrier、
+Exchange 和 writer history 都不可删除。因此该方向不能静态支持
+`>=0.2 ms` 的墙钟候选，本轮没有为它继续跑设备。
 
 ## Trace evidence
 
@@ -450,7 +540,7 @@ lane 直接相加：
 
 ## Why not now
 
-候选 1 是工作搬移，候选 2 的目标 phase 没有改善，候选 3–5 的生成代码按预期
+候选 1 是工作搬移，候选 2 的目标 phase 没有改善，候选 3–6 的生成代码按预期
 变化；但没有一个得到稳定的 A5 cross-core Submit makespan 收益。继续在当前
 未锁频环境中堆叠微优化或增加重复次数，会把噪声当成结论。
 
