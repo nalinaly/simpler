@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cstring>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -472,13 +473,22 @@ TEST_F(FdwicSharedPaSubmitTest, MalformedCreateInfoFailsBeforeMutatingSharedHeap
     TensorCreateInfo scalar_ci(scalar_shape, 1, DataType::FLOAT32);
     // Corrupt the descriptor after construction so this exercises the
     // production validation boundary rather than the constructor assertion.
+    // Keep it last to prove all outputs are preflighted before the first
+    // descriptor is written.
     malformed.ndims = 0;
-    args.add_output(malformed, scalar_ci, scalar_ci);
+    args.add_output(scalar_ci, scalar_ci, malformed);
 
     DistSubmitCtx ctx;
     dist_submit_begin(g_self, args, ctx);
     ASSERT_EQ(ctx.task_id, 0);
-    EXPECT_FALSE(dist_submit_materialize_args(args, ctx, DistSubmitKind::Alloc));
+    std::memset(ctx.payload, 0xA5, sizeof(*ctx.payload));
+    std::vector<uint8_t> payload_before(sizeof(*ctx.payload));
+    std::memcpy(payload_before.data(), ctx.payload, payload_before.size());
+    DistSharedPaMaterializePlan plan;
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan
+    ));
+    EXPECT_FALSE(dist_shared_pa_materialize_args(args, ctx, plan));
 
     EXPECT_NE(g_dist.fatal, 0);
     EXPECT_EQ(g_dist.error_code, PTO2_ERROR_TENSORMAP_PROTOCOL);
@@ -488,6 +498,184 @@ TEST_F(FdwicSharedPaSubmitTest, MalformedCreateInfoFailsBeforeMutatingSharedHeap
         EXPECT_EQ(g_dist.shared_pa.shared_heap_cursor[shard].v, 0)
             << "shard=" << shard;
     }
+    for (uint32_t slot = 0; slot < kFdwicSharedOutputMaxPerTask; ++slot) {
+        EXPECT_EQ(g_dist.shared_pa.shared_outputs[0].published[slot].v, -1);
+        EXPECT_EQ(g_dist.shared_pa.shared_outputs[0].last_writer[slot].v, -1);
+    }
+    EXPECT_EQ(g_dist.shared_pa.writer_history[0].magic, 0U);
+    EXPECT_EQ(g_dist.tasks[0].deps_prepared, -1);
+    EXPECT_EQ(ctx.result.size(), 0U);
+    EXPECT_EQ(
+        std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0
+    );
+}
+
+TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
+    Tensor q = make_external(0x100000);
+    Tensor k = make_external(0x200000);
+    Tensor v = make_external(0x300000);
+    Tensor table = make_external(0x400000);
+    Tensor out = make_external(0x500000, true);
+    const uint32_t vector_shape[1] = {16};
+    TensorCreateInfo vector_ci(vector_shape, 1, DataType::FLOAT32);
+    const uint32_t scalar_shape[1] = {1};
+    TensorCreateInfo scalar_ci(scalar_shape, 1, DataType::FLOAT32);
+    FdwicOutputRef qk_sij{1, 0, 0, 0, 0, 0};
+    FdwicOutputRef sf_pij{2, 0, 0, 0, 0, 0};
+    FdwicOutputRef sf_mi{2, 1, 0, 0, 0, 0};
+    FdwicOutputRef sf_li{2, 2, 0, 0, 0, 0};
+    FdwicOutputRef pv_oi{3, 0, 0, 0, 0, 0};
+    FdwicOutputRef alloc_oi{0, 0, 0, 0, 0, 0};
+    FdwicOutputRef alloc_li{0, 1, 0, 0, 0, 0};
+    FdwicOutputRef alloc_mi{0, 2, 0, 0, 0, 0};
+
+    L0TaskArgs alloc;
+    alloc.reset();
+    alloc.add_output(vector_ci, scalar_ci, scalar_ci);
+    DistSharedPaMaterializePlan plan;
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        alloc, 0, DistSharedPaTaskKind::Alloc, plan
+    ));
+    EXPECT_EQ(plan.output_count, 3U);
+    EXPECT_EQ(plan.output_start, 0U);
+    EXPECT_EQ(plan.register_mask, 0U);
+
+    L0TaskArgs qk;
+    qk.reset();
+    qk.add_input(q, k, table);
+    qk.add_output(vector_ci);
+    qk.add_scalar(uint64_t{1}, uint64_t{0});
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        qk, 1, DistSharedPaTaskKind::Qk, plan
+    ));
+    EXPECT_EQ(plan.output_count, 1U);
+    EXPECT_EQ(plan.output_start, 3U);
+    EXPECT_EQ(plan.register_mask, 0U);
+
+    L0TaskArgs sf;
+    sf.reset();
+    sf.add_input(qk_sij);
+    sf.add_output(vector_ci, scalar_ci, scalar_ci);
+    sf.add_scalar(uint64_t{1}, uint64_t{1}, uint64_t{1});
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        sf, 2, DistSharedPaTaskKind::Sf, plan
+    ));
+    EXPECT_EQ(plan.output_count, 3U);
+    EXPECT_EQ(plan.output_start, 1U);
+    EXPECT_EQ(plan.register_mask, 0U);
+
+    L0TaskArgs pv;
+    pv.reset();
+    pv.add_input(sf_pij, v, table);
+    pv.add_output(vector_ci);
+    pv.add_scalar(uint64_t{1}, uint64_t{0});
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        pv, 3, DistSharedPaTaskKind::Pv, plan
+    ));
+    EXPECT_EQ(plan.output_count, 1U);
+    EXPECT_EQ(plan.output_start, 3U);
+    EXPECT_EQ(plan.register_mask, 0U);
+
+    L0TaskArgs up;
+    up.reset();
+    up.add_input(sf_mi, sf_li, pv_oi);
+    up.add_inout(alloc_mi, alloc_li, alloc_oi, out);
+    up.add_scalar(uint64_t{1}, uint64_t{1});
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        up, 4, DistSharedPaTaskKind::Up, plan
+    ));
+    EXPECT_EQ(plan.output_count, 0U);
+    EXPECT_EQ(plan.register_mask, (1U << 3) | (1U << 4) | (1U << 5));
+}
+
+TEST_F(FdwicSharedPaSubmitTest, InvalidStageSchemasDoNotProduceMaterializePlans) {
+    const uint32_t shape[1] = {16};
+    TensorCreateInfo ci(shape, 1, DataType::FLOAT32);
+    Tensor out_without_manual_dep = make_external(0x500000, false);
+    FdwicOutputRef wrong_qk_ref{1, 1, 0, 0, 0, 0};
+    FdwicOutputRef sf_mi{2, 1, 0, 0, 0, 0};
+    FdwicOutputRef sf_li{2, 2, 0, 0, 0, 0};
+    FdwicOutputRef pv_oi{3, 0, 0, 0, 0, 0};
+    FdwicOutputRef alloc_oi{0, 0, 0, 0, 0, 0};
+    FdwicOutputRef alloc_li{0, 1, 0, 0, 0, 0};
+    FdwicOutputRef alloc_mi{0, 2, 0, 0, 0, 0};
+    DistSharedPaMaterializePlan plan;
+
+    L0TaskArgs alloc_with_error;
+    alloc_with_error.reset();
+    alloc_with_error.add_output(ci, ci, ci);
+    alloc_with_error.has_error = true;
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
+        alloc_with_error, 0, DistSharedPaTaskKind::Alloc, plan
+    ));
+    EXPECT_EQ(plan.output_start, 0U);
+    EXPECT_EQ(plan.output_count, 0U);
+
+    L0TaskArgs sf_wrong_ref;
+    sf_wrong_ref.reset();
+    sf_wrong_ref.add_input(wrong_qk_ref);
+    sf_wrong_ref.add_output(ci, ci, ci);
+    sf_wrong_ref.add_scalar(uint64_t{1}, uint64_t{1}, uint64_t{1});
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
+        sf_wrong_ref, 2, DistSharedPaTaskKind::Sf, plan
+    ));
+    EXPECT_EQ(plan.output_start, 0U);
+    EXPECT_EQ(plan.output_count, 0U);
+
+    L0TaskArgs up_without_manual_dep;
+    up_without_manual_dep.reset();
+    up_without_manual_dep.add_input(sf_mi, sf_li, pv_oi);
+    up_without_manual_dep.add_inout(
+        alloc_mi, alloc_li, alloc_oi, out_without_manual_dep
+    );
+    up_without_manual_dep.add_scalar(uint64_t{1}, uint64_t{1});
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
+        up_without_manual_dep, 4, DistSharedPaTaskKind::Up, plan
+    ));
+    EXPECT_EQ(plan.output_start, 0U);
+    EXPECT_EQ(plan.output_count, 0U);
+    EXPECT_EQ(plan.register_mask, 0U);
+}
+
+TEST_F(FdwicSharedPaSubmitTest, OversizeOutputFailsBeforePayloadOrPublicationMutation) {
+    g_self = &g_dist.cores[0];
+    L0TaskArgs args;
+    args.reset();
+    const uint32_t oversize_shape[1] = {
+        static_cast<uint32_t>(kFdwicSharedHeapShardBytes / sizeof(float)) + 1U
+    };
+    TensorCreateInfo oversize(oversize_shape, 1, DataType::FLOAT32);
+    const uint32_t scalar_shape[1] = {1};
+    TensorCreateInfo scalar_ci(scalar_shape, 1, DataType::FLOAT32);
+    args.add_output(oversize, scalar_ci, scalar_ci);
+
+    DistSubmitCtx ctx;
+    dist_submit_begin(g_self, args, ctx);
+    ASSERT_EQ(ctx.task_id, 0);
+    std::memset(ctx.payload, 0x5A, sizeof(*ctx.payload));
+    std::vector<uint8_t> payload_before(sizeof(*ctx.payload));
+    std::memcpy(payload_before.data(), ctx.payload, payload_before.size());
+    DistSharedPaMaterializePlan plan;
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
+        args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan
+    ));
+    EXPECT_FALSE(dist_shared_pa_materialize_args(args, ctx, plan));
+
+    EXPECT_NE(g_dist.fatal, 0);
+    EXPECT_EQ(g_dist.error_code, PTO2_ERROR_TENSORMAP_CAPACITY);
+    EXPECT_EQ(g_dist.shared_pa.shared_heap_vend.v, 0);
+    for (uint32_t shard = 0; shard < kFdwicSharedHeapShards; ++shard) {
+        EXPECT_EQ(g_dist.shared_pa.shared_heap_cursor[shard].v, 0);
+    }
+    for (uint32_t slot = 0; slot < kFdwicSharedOutputMaxPerTask; ++slot) {
+        EXPECT_EQ(g_dist.shared_pa.shared_outputs[0].published[slot].v, -1);
+        EXPECT_EQ(g_dist.shared_pa.shared_outputs[0].last_writer[slot].v, -1);
+    }
+    EXPECT_EQ(g_dist.tasks[0].deps_prepared, -1);
+    EXPECT_EQ(ctx.result.size(), 0U);
+    EXPECT_EQ(
+        std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0
+    );
 }
 
 TEST_F(FdwicSharedPaSubmitTest, ExternalScalarReadDoesNotInvokeUnsupportedRegionLookup) {

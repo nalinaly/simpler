@@ -190,9 +190,32 @@ dist_shared_pa_ordinary_manual_dep(const L0TaskArgs &args, int32_t index) {
 #endif
 }
 
-PTO_DEVICE_FUNC bool dist_shared_pa_validate_args(
-    const L0TaskArgs &args, int32_t task_id, DistSharedPaTaskKind kind
+// Phase-1 PA has five fixed argument schemas and at most three created
+// outputs, always in one contiguous argument range. Decode that schema once
+// in ArgBuild, then carry only the range required by Materialize. This is
+// replay-local state, not a cross-image ABI.
+struct DistSharedPaMaterializePlan {
+    uint64_t output_bytes[3];
+    uint64_t total_output_bytes;
+    uint32_t output_start;
+    uint32_t output_count;
+    uint32_t register_mask;
+};
+
+PTO_DEVICE_FUNC void dist_shared_pa_reset_materialize_plan(
+    DistSharedPaMaterializePlan &plan
 ) {
+    plan.total_output_bytes = 0;
+    plan.output_start = 0;
+    plan.output_count = 0;
+    plan.register_mask = 0;
+}
+
+PTO_DEVICE_FUNC bool dist_shared_pa_validate_and_plan(
+    const L0TaskArgs &args, int32_t task_id, DistSharedPaTaskKind kind,
+    DistSharedPaMaterializePlan &plan
+) {
+    dist_shared_pa_reset_materialize_plan(plan);
     if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS ||
         args.scalar_count() < 0 || args.scalar_count() > MAX_SCALAR_ARGS ||
         args.has_error || args.explicit_dep_count() != 0 ||
@@ -201,54 +224,177 @@ PTO_DEVICE_FUNC bool dist_shared_pa_validate_args(
     }
     const int32_t batch_start =
         task_id - (task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
-    const uint32_t expected_outputs = dist_shared_pa_output_count(kind);
-    uint32_t actual_outputs = 0;
-    for (int32_t index = 0; index < args.tensor_count(); ++index) {
-        actual_outputs += args.tag(index) == TensorArgType::OUTPUT ? 1U : 0U;
-    }
-    if (actual_outputs != expected_outputs) return false;
 
     switch (kind) {
-    case DistSharedPaTaskKind::Alloc:
-        return args.tensor_count() == 3 && args.scalar_count() == 0 &&
-               args.tag(0) == TensorArgType::OUTPUT && args.tag(1) == TensorArgType::OUTPUT &&
-               args.tag(2) == TensorArgType::OUTPUT &&
-               args.tensor(0).has_create_info() && args.tensor(1).has_create_info() &&
-               args.tensor(2).has_create_info();
-    case DistSharedPaTaskKind::Qk:
-        return args.tensor_count() == 4 && args.scalar_count() == 2 &&
-               args.tag(0) == TensorArgType::INPUT && args.tag(1) == TensorArgType::INPUT &&
-               args.tag(2) == TensorArgType::INPUT && args.tag(3) == TensorArgType::OUTPUT &&
-               args.tensor(0).has_existing_tensor() && args.tensor(1).has_existing_tensor() &&
-               args.tensor(2).has_existing_tensor() && args.tensor(3).has_create_info();
-    case DistSharedPaTaskKind::Sf:
-        return args.tensor_count() == 4 && args.scalar_count() == 3 &&
-               dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 1, 0) &&
-               args.tag(1) == TensorArgType::OUTPUT && args.tag(2) == TensorArgType::OUTPUT &&
-               args.tag(3) == TensorArgType::OUTPUT &&
-               args.tensor(1).has_create_info() && args.tensor(2).has_create_info() &&
-               args.tensor(3).has_create_info();
-    case DistSharedPaTaskKind::Pv:
-        return args.tensor_count() == 4 && args.scalar_count() == 2 &&
-               dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 2, 0) &&
-               args.tag(1) == TensorArgType::INPUT && args.tag(2) == TensorArgType::INPUT &&
-               args.tensor(1).has_existing_tensor() && args.tensor(2).has_existing_tensor() &&
-               args.tag(3) == TensorArgType::OUTPUT && args.tensor(3).has_create_info();
-    case DistSharedPaTaskKind::Up:
-        return args.tensor_count() == 7 && args.scalar_count() == 2 &&
-               dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 2, 1) &&
-               dist_shared_pa_ref_is(args, 1, TensorArgType::INPUT, batch_start + 2, 2) &&
-               dist_shared_pa_ref_is(args, 2, TensorArgType::INPUT, batch_start + 3, 0) &&
-               dist_shared_pa_ref_is(args, 3, TensorArgType::INOUT, batch_start, 2) &&
-               dist_shared_pa_ref_is(args, 4, TensorArgType::INOUT, batch_start, 1) &&
-               dist_shared_pa_ref_is(args, 5, TensorArgType::INOUT, batch_start, 0) &&
-               args.tag(6) == TensorArgType::INOUT &&
-               args.tensor(6).has_existing_tensor() &&
-               dist_shared_pa_ordinary_manual_dep(args, 6);
+    case DistSharedPaTaskKind::Alloc: {
+        const bool valid =
+            args.tensor_count() == 3 && args.scalar_count() == 0 &&
+            args.tag(0) == TensorArgType::OUTPUT &&
+            args.tag(1) == TensorArgType::OUTPUT &&
+            args.tag(2) == TensorArgType::OUTPUT &&
+            args.tensor(0).has_create_info() &&
+            args.tensor(1).has_create_info() &&
+            args.tensor(2).has_create_info();
+        if (!valid) return false;
+        plan.output_start = 0;
+        plan.output_count = 3;
+        return true;
+    }
+    case DistSharedPaTaskKind::Qk: {
+        const bool valid =
+            args.tensor_count() == 4 && args.scalar_count() == 2 &&
+            args.tag(0) == TensorArgType::INPUT &&
+            args.tag(1) == TensorArgType::INPUT &&
+            args.tag(2) == TensorArgType::INPUT &&
+            args.tag(3) == TensorArgType::OUTPUT &&
+            args.tensor(0).has_existing_tensor() &&
+            args.tensor(1).has_existing_tensor() &&
+            args.tensor(2).has_existing_tensor() &&
+            args.tensor(3).has_create_info();
+        if (!valid) return false;
+        plan.output_start = 3;
+        plan.output_count = 1;
+        return true;
+    }
+    case DistSharedPaTaskKind::Sf: {
+        const bool valid =
+            args.tensor_count() == 4 && args.scalar_count() == 3 &&
+            dist_shared_pa_ref_is(
+                args, 0, TensorArgType::INPUT, batch_start + 1, 0
+            ) &&
+            args.tag(1) == TensorArgType::OUTPUT &&
+            args.tag(2) == TensorArgType::OUTPUT &&
+            args.tag(3) == TensorArgType::OUTPUT &&
+            args.tensor(1).has_create_info() &&
+            args.tensor(2).has_create_info() &&
+            args.tensor(3).has_create_info();
+        if (!valid) return false;
+        plan.output_start = 1;
+        plan.output_count = 3;
+        return true;
+    }
+    case DistSharedPaTaskKind::Pv: {
+        const bool valid =
+            args.tensor_count() == 4 && args.scalar_count() == 2 &&
+            dist_shared_pa_ref_is(
+                args, 0, TensorArgType::INPUT, batch_start + 2, 0
+            ) &&
+            args.tag(1) == TensorArgType::INPUT &&
+            args.tag(2) == TensorArgType::INPUT &&
+            args.tensor(1).has_existing_tensor() &&
+            args.tensor(2).has_existing_tensor() &&
+            args.tag(3) == TensorArgType::OUTPUT &&
+            args.tensor(3).has_create_info();
+        if (!valid) return false;
+        plan.output_start = 3;
+        plan.output_count = 1;
+        return true;
+    }
+    case DistSharedPaTaskKind::Up: {
+        const bool valid =
+            args.tensor_count() == 7 && args.scalar_count() == 2 &&
+            dist_shared_pa_ref_is(
+                args, 0, TensorArgType::INPUT, batch_start + 2, 1
+            ) &&
+            dist_shared_pa_ref_is(
+                args, 1, TensorArgType::INPUT, batch_start + 2, 2
+            ) &&
+            dist_shared_pa_ref_is(
+                args, 2, TensorArgType::INPUT, batch_start + 3, 0
+            ) &&
+            dist_shared_pa_ref_is(
+                args, 3, TensorArgType::INOUT, batch_start, 2
+            ) &&
+            dist_shared_pa_ref_is(
+                args, 4, TensorArgType::INOUT, batch_start, 1
+            ) &&
+            dist_shared_pa_ref_is(
+                args, 5, TensorArgType::INOUT, batch_start, 0
+            ) &&
+            args.tag(6) == TensorArgType::INOUT &&
+            args.tensor(6).has_existing_tensor() &&
+            dist_shared_pa_ordinary_manual_dep(args, 6);
+        if (!valid) return false;
+        plan.register_mask = (1U << 3) | (1U << 4) | (1U << 5);
+        return true;
+    }
     case DistSharedPaTaskKind::Count:
         return false;
     }
     return false;
+}
+
+PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
+    const L0TaskArgs &args, DistSubmitCtx &ctx,
+    DistSharedPaMaterializePlan &plan
+) {
+    // Complete every deterministic descriptor/layout check before the
+    // no-rollback heap cursors or payload are touched.
+    if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS ||
+        ctx.self == nullptr || ctx.payload == nullptr || ctx.task_id < 0 ||
+        static_cast<uint32_t>(ctx.task_id) >= kFdwicSharedPaTaskCapacity ||
+        ctx.result.size() != 0 || plan.output_count > 3 ||
+        plan.output_start > static_cast<uint32_t>(args.tensor_count()) ||
+        plan.output_count >
+            static_cast<uint32_t>(args.tensor_count()) - plan.output_start) {
+        return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
+    }
+    plan.total_output_bytes = 0;
+    for (uint32_t output = 0; output < plan.output_count; ++output) {
+        const uint32_t arg_index = plan.output_start + output;
+        uint64_t bytes = 0;
+        if (arg_index >= static_cast<uint32_t>(args.tensor_count()) ||
+            args.tag(static_cast<int32_t>(arg_index)) != TensorArgType::OUTPUT ||
+            !args.tensor(static_cast<int32_t>(arg_index)).has_create_info() ||
+            !dist_shared_pa_create_info_bytes(
+                args.tensor(static_cast<int32_t>(arg_index)).create_info(), bytes
+            ) ||
+            bytes > UINT64_MAX - (PTO2_PACKED_OUTPUT_ALIGN - 1U)) {
+            return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
+        }
+        const uint64_t aligned =
+            PTO2_ALIGN_UP(bytes, PTO2_PACKED_OUTPUT_ALIGN);
+        if (aligned < bytes ||
+            plan.total_output_bytes > UINT64_MAX - aligned) {
+            return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
+        }
+        plan.output_bytes[output] = bytes;
+        plan.total_output_bytes += aligned;
+    }
+    if (plan.total_output_bytes != 0 && g_dist.heap_base == nullptr) {
+        return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
+    }
+
+    DistSharedPaHeapReservation reservation;
+    if (!dist_shared_pa_reserve_heap(
+            g_dist.shared_pa, ctx.task_id, plan.total_output_bytes,
+            static_cast<uint64_t>(g_dist.heap_size), reservation
+        )) {
+        return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_CAPACITY);
+    }
+
+    uint64_t output_offset = 0;
+    for (uint32_t output = 0; output < plan.output_count; ++output) {
+        const uint32_t arg_index = plan.output_start + output;
+        const TensorCreateInfo &create_info =
+            args.tensor(static_cast<int32_t>(arg_index)).create_info();
+        __gm__ Tensor &slot = ctx.payload->tensors[arg_index];
+        init_tensor_from_create_info(
+            slot, create_info,
+            g_dist.heap_base + reservation.task_base + output_offset,
+            plan.output_bytes[output]
+        );
+        slot.owner_task_id.raw = ctx.result.task_id().raw;
+        ctx.result.materialize_output(slot);
+        output_offset +=
+            PTO2_ALIGN_UP(plan.output_bytes[output], PTO2_PACKED_OUTPUT_ALIGN);
+    }
+    ctx.tensor_count = args.tensor_count();
+    ctx.scalar_count = args.scalar_count();
+    ctx.register_mask = plan.register_mask;
+    ctx.self->heap_next = reservation.aggregate_vend;
+    ctx.output_bytes = plan.total_output_bytes;
+    return true;
 }
 
 PTO_DEVICE_FUNC bool dist_shared_pa_prepare_writer_history(
@@ -486,7 +632,10 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
         if (ctx.self != nullptr) ctx.self->local_index = kFlagCap;
         return false;
     }
-    if (!dist_shared_pa_validate_args(args, ctx.task_id, kind)) {
+    DistSharedPaMaterializePlan materialize_plan;
+    if (!dist_shared_pa_validate_and_plan(
+            args, ctx.task_id, kind, materialize_plan
+        )) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
     ctx.tensor_count = args.tensor_count();
@@ -495,11 +644,8 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::ArgBuild>();
     TRACE_TIMESTAMP(materialize_begin);
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::Materialize>();
-    if (!dist_submit_materialize_args(
-            args, ctx, kind == DistSharedPaTaskKind::Alloc ? DistSubmitKind::Alloc :
-                                                             DistSubmitKind::Kernel
-        ) ||
-        ctx.result.size() != dist_shared_pa_output_count(kind)) {
+    if (!dist_shared_pa_materialize_args(args, ctx, materialize_plan) ||
+        ctx.result.size() != materialize_plan.output_count) {
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Materialize>();
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
@@ -512,7 +658,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
     TRACE_TIMESTAMP(task_outputs_begin);
     const bool outputs_published = dist_shared_pa_publish_outputs(
         g_dist.shared_pa, ctx.task_id, ctx.result,
-        dist_shared_pa_output_count(kind), output_trace_ptr
+        materialize_plan.output_count, output_trace_ptr
     );
     TRACE_TIMESTAMP(task_outputs_end);
     if (!outputs_published) {
