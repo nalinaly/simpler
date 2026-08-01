@@ -174,7 +174,8 @@ enum class TracePhase : int32_t {
     SharedMaterializePublishTaskOutputsCopy = 22,
     SharedMaterializePublishTaskOutputsFlush = 23,
     Dcci = 24,
-    Count = 25,
+    SharedRegisterWaitInsertTurnBypassLoad = 25,
+    Count = 26,
     // Kept only so stale private code remains parsable during the compile-time
     // backend split. The selected raw ABI rejects this value in shared mode.
     LoserReplay = 0x7fff,

@@ -71,7 +71,6 @@ def _shared_capture(level=1):  # noqa: PLR0912
         1 + ordinal % 2 for ordinal in range(_SYNTHETIC_AIV_CORES)
     ]
     for core, (role, lane) in enumerate(zip(core_types, lanes)):
-        block = core if role == "aic" else (core - _SYNTHETIC_AIC_CORES) // 2
         orchestration_start = 1_000_000 + core * 2_000_000
         if level == 4:
             _append_row(rows, core, lane, -1, -1, "Dcci", orchestration_start - 40, orchestration_start - 30, 268, 9)
@@ -183,6 +182,18 @@ def _shared_capture(level=1):  # noqa: PLR0912
                     lane,
                     task,
                     func,
+                    "SharedRegisterWaitInsertTurnBypassLoad",
+                    submit_start + 100,
+                    submit_start + 110,
+                    0,
+                    0 if task == 0 else 1,
+                )
+                _append_row(
+                    rows,
+                    core,
+                    lane,
+                    task,
+                    func,
                     "SharedRegisterPublishMetadata",
                     submit_start + 110,
                     submit_start + 140,
@@ -214,19 +225,6 @@ def _shared_capture(level=1):  # noqa: PLR0912
                             submit_start + 80,
                             _dcci_flags(1, 1),
                             1,
-                        )
-                    if task > 0:
-                        _append_row(
-                            rows,
-                            core,
-                            lane,
-                            -1,
-                            -1,
-                            "Atomic",
-                            submit_start + 100,
-                            submit_start + 110,
-                            (1 << 4) | (1 << 7) | (1 << 8),
-                            19,
                         )
                     _append_row(
                         rows,
@@ -405,6 +403,8 @@ def test_shared_v5_level1_converts_and_closes_exclusive_model(shared_level1_raw,
     names = {event.get("name") for event in json.loads(merged.read_text(encoding="utf-8"))["traceEvents"]}
     assert "efdrain#0" in names
     assert "materialize.publish_shared_output_descriptors#0" in names
+    assert "register.wait_insert_turn.ld_dev×0#0" in names
+    assert "register.wait_insert_turn.ld_dev×1#1" in names
 
 
 def test_shared_v5_claim_attempted_matches_full_alloc_tournament_contract(shared_level1_raw):
@@ -447,6 +447,7 @@ def test_shared_v5_requires_one_global_winner_per_task(shared_level1_raw):
         "SharedMaterializePublishTaskOutputsCopy",
         "SharedMaterializePublishTaskOutputsFlush",
         "Register",
+        "SharedRegisterWaitInsertTurnBypassLoad",
         "SharedRegisterPublishMetadata",
         "Fanin",
         "WinnerBuild",
@@ -469,6 +470,26 @@ def test_shared_v5_requires_one_global_winner_per_task(shared_level1_raw):
     shared_level1_raw.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(ValueError, match="task 1 requires exactly one global winner, got 0"):
+        read_perf_data(shared_level1_raw)
+
+
+def test_shared_v5_requires_winner_bypass_wait_detail(shared_level1_raw):
+    raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
+    raw["fdwic_events"] = [
+        row
+        for row in raw["fdwic_events"]
+        if not (
+            row[0] == 0
+            and row[3] == 1
+            and row[5] == "SharedRegisterWaitInsertTurnBypassLoad"
+        )
+    ]
+    _write_mutated_capture(shared_level1_raw, raw)
+
+    with pytest.raises(
+        ValueError,
+        match=r"\(0, 1\) requires 1 bypass-load insert-turn wait detail row\(s\), got 0",
+    ):
         read_perf_data(shared_level1_raw)
 
 
@@ -550,15 +571,23 @@ def test_shared_v5_rejects_kernel_function_drift(shared_level1_raw):
         read_perf_data(shared_level1_raw)
 
 
-def test_shared_v5_level4_validates_insert_turn_atomic_and_dcci_closure(shared_level4_raw):
+def test_shared_v5_level4_validates_insert_turn_bypass_wait_atomic_handoff_and_dcci_closure(shared_level4_raw):
     data = read_perf_data(shared_level4_raw)
     report = analyze_data(data, shared_level4_raw)
+    bypass_waits = [
+        event
+        for event in data["fdwic_events"]
+        if event["phase"] == "SharedRegisterWaitInsertTurnBypassLoad"
+    ]
 
     assert report["validation"]["status"] == "PASS"
     assert data["l2_swimlane_level"] == 4
     assert report["overlays"]["Atomic"]["event_count"] > 0
-    assert report["overlays"]["Atomic"]["event_count"] == 19_967
+    assert report["overlays"]["Atomic"]["event_count"] == 18_688
     assert report["overlays"]["Dcci"]["event_count"] == 4_120
+    assert len(bypass_waits) == SHARED_V5_PHASE1_TASK_COUNT
+    assert sum(event["aux"] == 0 for event in bypass_waits) == 1
+    assert all(event["aux"] > 0 for event in bypass_waits if event["task_id"] != 0)
 
 
 def test_shared_v5_level4_rejects_missing_tournament_local(shared_level4_raw):

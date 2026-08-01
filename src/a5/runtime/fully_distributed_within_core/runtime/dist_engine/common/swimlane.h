@@ -25,12 +25,12 @@
 namespace {
 
 template <typename T>
-PTO_DEVICE_FUNC inline uint64_t fdwic_atomic_result_ready_tick(T value) {
+PTO_DEVICE_FUNC inline uint64_t fdwic_scalar_result_ready_tick(T value) {
 #if defined(__CCE_AICORE__)
-    static_assert(sizeof(T) == 4 || sizeof(T) == 8, "atomic dependency expects a scalar result");
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8, "result dependency expects a scalar value");
     uint64_t cycle = 0;
-    // 在读取 SYS_CNT 的同一汇编块中消费 atomic 返回值，形成局部
-    // return-ready 边界；这不是跨核可见性屏障，也不会引入 DSB。
+    // Consume a scalar result in the same asm block as SYS_CNT. This creates
+    // a local result-ready boundary; it is not a cross-core visibility barrier.
     asm volatile("MOV %0, %0\n"
                  "MOV %1, SYS_CNT\n"
                  : "+l"(value), "=&l"(cycle));
@@ -42,6 +42,11 @@ PTO_DEVICE_FUNC inline uint64_t fdwic_atomic_result_ready_tick(T value) {
     (void)value;
     return 0;
 #endif
+}
+
+template <typename T>
+PTO_DEVICE_FUNC inline uint64_t fdwic_atomic_result_ready_tick(T value) {
+    return fdwic_scalar_result_ready_tick(value);
 }
 
 #if DIST_TRACE_ENABLED

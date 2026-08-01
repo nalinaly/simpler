@@ -175,6 +175,71 @@ PTO_DEVICE_FUNC bool dist_shared_pa_claim(
     return dist_shared_pa_claim_tournament(candidate_rank, tournament_groups, kernel_id, state);
 }
 
+#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
+template <CoreType CompiledReplayRole, DistSharedPaTaskKind CompiledKind>
+PTO_DEVICE_FUNC inline __attribute__((always_inline)) bool dist_shared_pa_claim_fixed(
+    int32_t kernel_id, DistSharedPaBeginState &state
+) {
+    static_assert(
+        CompiledReplayRole == CoreType::AIC || CompiledReplayRole == CoreType::AIV,
+        "shared PA unity replay role must be AIC or AIV"
+    );
+    static_assert(CompiledKind != DistSharedPaTaskKind::Count, "shared PA unity task kind must be concrete");
+
+    state.kernel_id = INVALID_KERNEL_ID;
+    state.won = false;
+    state.claim_attempted = false;
+    if (state.self == nullptr || state.task_id < 0 ||
+        static_cast<uint32_t>(state.task_id) >= kFdwicSharedPaTaskCapacity) {
+        return false;
+    }
+
+    const int32_t core_idx = state.self->core_idx;
+    uint32_t candidate_rank = 0;
+    uint32_t tournament_groups = 0;
+    if constexpr (CompiledKind == DistSharedPaTaskKind::Alloc) {
+        // The role-specific orchestration image already carries the replay
+        // role as a template argument. Keep the attach-owned core-index check,
+        // but do not rebuild a runtime MixedKernels shape on all 96 actors.
+        if constexpr (CompiledReplayRole == CoreType::AIC) {
+            if (core_idx < 0 || static_cast<uint32_t>(core_idx) >= kFdwicSharedAicWorkers) return false;
+        } else {
+            if (core_idx < static_cast<int32_t>(kFdwicSharedAicWorkers) ||
+                static_cast<uint32_t>(core_idx) >= kFdwicSharedWorkers) {
+                return false;
+            }
+        }
+        candidate_rank = static_cast<uint32_t>(core_idx);
+        tournament_groups = kFdwicSharedAllocClaimTournamentGroups;
+    } else if constexpr (CompiledKind == DistSharedPaTaskKind::Qk ||
+                         CompiledKind == DistSharedPaTaskKind::Pv) {
+        if constexpr (CompiledReplayRole != CoreType::AIC) {
+            return false;
+        } else {
+            if (core_idx < 0 || static_cast<uint32_t>(core_idx) >= kFdwicSharedAicWorkers) return false;
+            candidate_rank = static_cast<uint32_t>(core_idx);
+            tournament_groups = kFdwicSharedAicClaimTournamentGroups;
+        }
+    } else {
+        static_assert(
+            CompiledKind == DistSharedPaTaskKind::Sf || CompiledKind == DistSharedPaTaskKind::Up,
+            "unsupported shared PA unity task kind"
+        );
+        if constexpr (CompiledReplayRole != CoreType::AIV) {
+            return false;
+        } else {
+            if (core_idx < static_cast<int32_t>(kFdwicSharedAicWorkers) ||
+                static_cast<uint32_t>(core_idx) >= kFdwicSharedWorkers) {
+                return false;
+            }
+            candidate_rank = static_cast<uint32_t>(core_idx) - kFdwicSharedAicWorkers;
+            tournament_groups = kFdwicSharedAivClaimTournamentGroups;
+        }
+    }
+    return dist_shared_pa_claim_tournament(candidate_rank, tournament_groups, kernel_id, state);
+}
+#endif
+
 PTO_DEVICE_FUNC void dist_shared_pa_restore_winner_ticket(const DistCompeteFirstTicket &ticket, DistSubmitCtx &ctx) {
     ctx.self = g_self;
     ctx.task_id = ticket.task_id;
@@ -420,18 +485,35 @@ PTO_DEVICE_FUNC bool dist_shared_pa_prepare_writer_history(
     return dist_shared_pa_prepare_up_history(g_dist.shared_pa, ctx.task_id, batch_start, symbol_keys, trace);
 }
 
+// The predecessor publishes only after StoreBarrier has sealed its metadata;
+// later payload consumers perform their own descriptor/history invalidation.
+// A bypass load can therefore observe the monotonic {-1, task_id} completion
+// word directly, without queuing an identity RMW in front of the publisher.
+PTO_DEVICE_FUNC inline __attribute__((always_inline)) int64_t
+dist_shared_pa_load_insert_turn_bypass(__gm__ volatile int64_t &value) {
+#if defined(__CCE_AICORE__)
+    __gm__ int64_t *signed_address = const_cast<__gm__ int64_t *>(&value);
+    __gm__ uint64_t *address = reinterpret_cast<__gm__ uint64_t *>(signed_address);
+    return static_cast<int64_t>(static_cast<uint64_t>(__builtin_cce_ld_dev(address, 0)));
+#else
+    return atomic_load(value, __ATOMIC_RELAXED);
+#endif
+}
+
 PTO_DEVICE_FUNC bool
-dist_shared_pa_wait_insert_turn(DistSubmitCtx &ctx, int64_t &ready_observed, uint32_t &load_count) {
+dist_shared_pa_wait_insert_turn(DistSubmitCtx &ctx, int64_t &ready_observed, uint32_t &bypass_load_count) {
     ready_observed = -1;
-    load_count = 0;
+    bypass_load_count = 0;
     if (ctx.task_id == 0) return true;
     __gm__ volatile int64_t &predecessor = g_dist.tasks[static_cast<uint32_t>(ctx.task_id - 1)].deps_prepared;
     uint32_t polls = 0;
     while (true) {
-        const int64_t observed = atomic_load(predecessor);
+        const int64_t observed = dist_shared_pa_load_insert_turn_bypass(predecessor);
+#if DIST_TRACE_ENABLED
+        if (bypass_load_count < kFdwicCompactTraceAuxMask) ++bypass_load_count;
+#endif
         if (observed == ctx.task_id - 1) {
             ready_observed = observed;
-            load_count = polls + 1U;
             return true;
         }
         if (observed != -1) return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
@@ -452,16 +534,18 @@ dist_shared_pa_wait_insert_turn(DistSubmitCtx &ctx, int64_t &ready_observed, uin
 
 PTO_DEVICE_FUNC bool dist_shared_pa_publish_metadata_and_handoff(
     DistSubmitCtx &ctx, DistSharedPaTaskKind kind, DistSharedPaMetadataTrace *metadata_trace, int64_t &ready_observed,
-    uint32_t &load_count, uint64_t &metadata_begin, uint64_t &metadata_end, DistSharedPaHandoffTrace &handoff_trace
+    uint32_t &bypass_load_count, uint64_t &metadata_begin, uint64_t &metadata_end,
+    DistSharedPaHandoffTrace &handoff_trace
 ) {
     handoff_trace.begin = 0;
     handoff_trace.end = 0;
     handoff_trace.observed = INT64_MIN;
     handoff_trace.captured = false;
-    if (!dist_shared_pa_wait_insert_turn(ctx, ready_observed, load_count)) return false;
+    if (!dist_shared_pa_wait_insert_turn(ctx, ready_observed, bypass_load_count)) return false;
 #if DIST_TRACE_ENABLED
     if (fdwic_swimlane_enabled()) {
-        metadata_begin = load_count != 0 ? fdwic_atomic_result_ready_tick(ready_observed) : fdwic_swimlane_detail_now();
+        metadata_begin = bypass_load_count != 0 ? fdwic_scalar_result_ready_tick(ready_observed)
+                                                : fdwic_swimlane_detail_now();
     } else {
         metadata_begin = 0;
     }
@@ -512,19 +596,20 @@ PTO_DEVICE_FUNC bool dist_shared_pa_close_loser(__gm__ DistCore *self, const Dis
 }
 
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-template <CoreType CompiledReplayRole>
+template <CoreType CompiledReplayRole, DistSharedPaTaskKind CompiledKind>
 PTO_DEVICE_FUNC inline __attribute__((always_inline)) DistCompeteFirstTicket dist_shared_pa_begin_ticket(
 #else
 PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
 #endif
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-    DistSharedPaReplayContext replay, DistSharedPaTaskKind kind, const MixedKernels *mixed
+    DistSharedPaReplayContext replay, int32_t expected_task_id, int32_t kernel_id
 #else
     DistSharedPaReplayContext replay, DistSharedPaTaskKind kind, const MixedKernels *mixed
 #endif
 ) {
     DistSharedPaBeginState state{};
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
+    constexpr DistSharedPaTaskKind kind = CompiledKind;
     const bool replay_ready = replay.ready() && replay.role() == CompiledReplayRole && g_self != nullptr;
 #else
     const bool replay_ready = replay.ready() && g_self != nullptr;
@@ -556,6 +641,21 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
     // pair Submit.begin -> Claim.begin. Do not spend a compact generic row on
     // the same interval; the host deliberately rejects such duplicate rows.
 
+#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
+    // Phase-1 orchestration computes the authoritative five-task batch
+    // sequence once and passes the exact expected id. The single winner still
+    // repeats the full kind/MixedKernels validation in Finish before publishing
+    // shared state; the 95 losers no longer pay task_id%5, three kernel-field
+    // loads, active-mask construction, and popcount on every Submit.
+    bool ready = expected_task_id >= 0 &&
+                 static_cast<uint32_t>(expected_task_id) < kFdwicSharedPaTaskCapacity &&
+                 state.task_id == expected_task_id;
+    if constexpr (CompiledKind == DistSharedPaTaskKind::Alloc) {
+        ready = ready && kernel_id == INVALID_KERNEL_ID;
+    } else {
+        ready = ready && kernel_id >= 0 && kernel_id < RUNTIME_MAX_FUNC_ID && kernel_id <= INT16_MAX;
+    }
+#else
     bool ready = dist_shared_pa_kind_matches_task(state.task_id, kind);
     const DistSubmitKind submit_kind =
         kind == DistSharedPaTaskKind::Alloc ? DistSubmitKind::Alloc : DistSubmitKind::Kernel;
@@ -564,13 +664,18 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
     } else if (ready) {
         ready = mixed == nullptr;
     }
+#endif
     if (!ready) {
         (void)dist_shared_pa_fail(state.self, PTO2_ERROR_DIST_CONFIG_INVALID);
     }
 
     const uint64_t claim_begin = efdrain_end;
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::Claim>();
+#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
+    const bool won = ready && dist_shared_pa_claim_fixed<CompiledReplayRole, CompiledKind>(kernel_id, state);
+#else
     const bool won = ready && dist_shared_pa_claim(replay.role(), replay.block_id(), kind, mixed, state);
+#endif
     const uint32_t claim_flags = (won ? kFdwicClaimWon : 0U) | (state.claim_attempted ? kFdwicClaimAttempted : 0U);
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Claim>();
     TRACE_TIMESTAMP(claim_end);
@@ -663,12 +768,12 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
 
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::Register>();
     int64_t ready_observed = -1;
-    uint32_t insert_turn_load_count = 0;
+    uint32_t insert_turn_bypass_load_count = 0;
     uint64_t metadata_begin = 0;
     uint64_t metadata_end = 0;
     DistSharedPaHandoffTrace handoff_trace{};
     if (!dist_shared_pa_publish_metadata_and_handoff(
-            ctx, kind, metadata_trace_ptr, ready_observed, insert_turn_load_count, metadata_begin, metadata_end,
+            ctx, kind, metadata_trace_ptr, ready_observed, insert_turn_bypass_load_count, metadata_begin, metadata_end,
             handoff_trace
         )) {
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Register>();
@@ -721,16 +826,14 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
 #endif
     TRACE_SPAN_RECORD(materialize_end, register_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Register, 0, 0);
     TRACE_SPAN_RECORD(
+        materialize_end, metadata_begin, ctx.self, ctx.task_id, ctx.kernel_id,
+        TracePhase::SharedRegisterWaitInsertTurnBypassLoad, 0, insert_turn_bypass_load_count
+    );
+    TRACE_SPAN_RECORD(
         metadata_begin, metadata_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::SharedRegisterPublishMetadata,
         0, 0
     );
 #if DIST_TRACE_ENABLED
-    if (insert_turn_load_count != 0) {
-        (void)fdwic_swimlane_record_aggregate_atomic_poll(
-            FdwicAtomicSite::SharedInsertTurnPoll, materialize_end, metadata_begin, insert_turn_load_count,
-            fdwic_atomic_return_ready_observed()
-        );
-    }
     if (handoff_trace.captured) {
         (void)fdwic_swimlane_record_captured_atomic(
             ctx.task_id, FdwicAtomicSite::SharedInsertTurnHandoff, FdwicAtomicOp::CompareExchange, handoff_trace.begin,

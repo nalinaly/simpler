@@ -521,27 +521,47 @@ PTO_DEVICE_FUNC void dist_submit_drain_to_completion(__gm__ DistCore *self) {
     bool root_released = false;
     bool leaf_released = false;
     bool global_release_observed = false;
+#if PTO_FDWIC_SHARED_MAP
+    uint32_t idle_polls = 0;
+#endif
     while (true) {
+#if !PTO_FDWIC_SHARED_MAP
         drain_block_won(self);
+#endif
         const int32_t freed = drain_phase_b(self);
         if (!global_release_observed) {
             global_release_observed = dist_final_barrier_progress(self, leaf_forwarded, root_released, leaf_released);
         }
         const bool ring_empty = self->occupied_count == 0;
+#if PTO_FDWIC_SHARED_MAP
+        // Phase-1 shared PA rejects joint/multilane tasks before Claim, so no
+        // BlockWon state can exist. Avoid polling those generic block slots on
+        // every FinalDrain iteration; the private/AICPU-capable path below is
+        // unchanged. Successful shared completion is exactly barrier release
+        // plus this worker's two usable private slots becoming empty.
+        if (global_release_observed && ring_empty) break;
+#else
         const bool pending = has_pending_won(self);
         if (global_release_observed && ring_empty && !pending) break;
+#endif
         if (freed == 0) {
 #if PTO_FDWIC_SHARED_MAP
             // A worker that reaches FinalDrain before a remote fatal cannot
             // wait for the missing worker's barrier arrival: core_main skips
-            // FinalDrain after observing fatal. Poll only on an idle drain
-            // iteration so successful progress does not pay an extra load.
-            if (fdwic_trace_is_fatal()) {
+            // FinalDrain after observing fatal. As in standalone, batch this
+            // diagnostic poll instead of issuing a contended fatal load on
+            // every successful-run spin iteration.
+            ++idle_polls;
+            if ((idle_polls & 1023U) == 0 && fdwic_trace_is_fatal()) {
                 self->local_index = kFlagCap;
                 break;
             }
 #endif
             SPIN_WAIT_HINT();
+#if PTO_FDWIC_SHARED_MAP
+        } else {
+            idle_polls = 0;
+#endif
         }
     }
     fdwic_atomic_poll_region_end(final_poll_region);

@@ -49,7 +49,8 @@ static_assert(sizeof(FdwicSwimlaneRecord) == 32);
 static_assert(!std::is_same_v<FdwicSwimlaneStorageRecord, FdwicSwimlaneRecord>);
 static_assert(kFdwicSwimlaneWorkerBytes == 593920);
 static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::Dcci) == 24);
-static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::Count) == 25);
+static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad) == 25);
+static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::Count) == 26);
 static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedInsertTurnPoll) == 19);
 static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedInsertTurnHandoff) == 20);
 static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedClaimTournamentLocal) == 40);
@@ -205,9 +206,10 @@ SharedTraceFault shared_trace_task_fault(SharedTraceFault fault, uint32_t core, 
 }
 
 bool write_shared_generic_span(
-    DistCore *self, int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint64_t begin, uint64_t end
+    DistCore *self, int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint64_t begin, uint64_t end,
+    uint32_t aux = 0
 ) {
-    return fdwic_swimlane_detail_write_record(self, task_id, func_id, phase, begin, end, /*flags=*/0, /*aux=*/0);
+    return fdwic_swimlane_detail_write_record(self, task_id, func_id, phase, begin, end, /*flags=*/0, aux);
 }
 
 bool write_shared_business_dcci(
@@ -337,13 +339,10 @@ bool populate_shared_trace_core(Runtime *runtime, uint32_t core, SharedTraceFaul
             ) ||
             !write_shared_generic_span(
                 self, task_id, func_id, FdwicSwimlanePhase::Register, submit_begin + 35U, submit_begin + 65U
-            )) {
-            return false;
-        }
-        if (detailed && task_id != 0 &&
-            !fdwic_swimlane_record_aggregate_atomic_poll(
-                FdwicAtomicSite::SharedInsertTurnPoll, submit_begin + 35U, submit_begin + 40U,
-                /*call_count=*/1, /*return_ready_end=*/false
+            ) ||
+            !write_shared_generic_span(
+                self, task_id, func_id, FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad,
+                submit_begin + 35U, submit_begin + 40U, task_id == 0 ? 0U : 1U
             )) {
             return false;
         }

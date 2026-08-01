@@ -73,6 +73,8 @@ PTO_DEVICE_FUNC inline FdwicSwimlanePhase trace_phase_to_swimlane_phase(TracePha
         return FdwicSwimlanePhase::SharedMaterializePublishTaskOutputsFlush;
     case TracePhase::Dcci:
         return FdwicSwimlanePhase::Dcci;
+    case TracePhase::SharedRegisterWaitInsertTurnBypassLoad:
+        return FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad;
     case TracePhase::Count:
         break;
 #endif

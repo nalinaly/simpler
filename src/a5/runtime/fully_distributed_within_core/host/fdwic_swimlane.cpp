@@ -110,6 +110,8 @@ const char *phase_name(int32_t phase) {
         return "SharedMaterializePublishTaskOutputsFlush";
     case FdwicSwimlanePhase::Dcci:
         return "Dcci";
+    case FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad:
+        return "SharedRegisterWaitInsertTurnBypassLoad";
 #else
     case FdwicSwimlanePhase::LoserReplay:
         return "LoserReplay";
@@ -419,6 +421,8 @@ bool ordinary_record_schema_valid(const FdwicSwimlaneRecord &record) {
     case FdwicSwimlanePhase::SharedMaterializePublishTaskOutputsCopy:
     case FdwicSwimlanePhase::SharedMaterializePublishTaskOutputsFlush:
         return record.flags == 0 && record.aux == 0;
+    case FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad:
+        return record.flags == 0;
 #endif
     case FdwicSwimlanePhase::OrchestrationReplay:
     case FdwicSwimlanePhase::FinalDrain:
@@ -890,6 +894,7 @@ struct SharedTaskTraceShape {
     uint32_t copy_count = 0;
     uint32_t flush_count = 0;
     uint32_t register_count = 0;
+    uint32_t wait_insert_turn_count = 0;
     uint32_t metadata_count = 0;
     uint32_t fanin_count = 0;
     uint32_t tail_count = 0;
@@ -905,6 +910,7 @@ struct SharedTaskTraceShape {
     FdwicSwimlaneRecord copy{};
     FdwicSwimlaneRecord flush{};
     FdwicSwimlaneRecord reg{};
+    FdwicSwimlaneRecord wait_insert_turn{};
     FdwicSwimlaneRecord metadata{};
     FdwicSwimlaneRecord fanin{};
     FdwicSwimlaneRecord tail{};
@@ -1079,6 +1085,7 @@ bool validate_and_write_shared_core(
                 phase == FdwicSwimlanePhase::Materialize || phase == FdwicSwimlanePhase::Register ||
                 phase == FdwicSwimlanePhase::Fanin || phase == FdwicSwimlanePhase::WinnerBuild ||
                 phase == FdwicSwimlanePhase::AllocComplete ||
+                phase == FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad ||
                 phase == FdwicSwimlanePhase::SharedRegisterPublishMetadata ||
                 phase == FdwicSwimlanePhase::SharedMaterializePublishTaskOutputs ||
                 phase == FdwicSwimlanePhase::SharedMaterializePublishTaskOutputsCopy ||
@@ -1113,6 +1120,10 @@ bool validate_and_write_shared_core(
                         case FdwicSwimlanePhase::Register:
                             shape.reg = record;
                             valid = ++shape.register_count == 1;
+                            break;
+                        case FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad:
+                            shape.wait_insert_turn = record;
+                            valid = ++shape.wait_insert_turn_count == 1;
                             break;
                         case FdwicSwimlanePhase::SharedRegisterPublishMetadata:
                             shape.metadata = record;
@@ -1206,12 +1217,17 @@ bool validate_and_write_shared_core(
         if (shape.winner) {
             shape_valid =
                 shape_valid && shape.materialize_count == 1 && shape.output_count == 1 && shape.copy_count == 1 &&
-                shape.flush_count == 1 && shape.register_count == 1 && shape.metadata_count == 1 &&
+                shape.flush_count == 1 && shape.register_count == 1 && shape.wait_insert_turn_count == 1 &&
+                shape.metadata_count == 1 &&
                 shape.fanin_count == (is_alloc ? 0U : 1U) && shape.tail_count == 1 &&
                 interval_contains(shape.submit, shape.materialize) && interval_contains(shape.materialize, shape.output) &&
                 interval_contains(shape.output, shape.copy) && interval_contains(shape.output, shape.flush) &&
                 shape.copy.end_cycle == shape.flush.start_cycle && interval_contains(shape.submit, shape.reg) &&
-                interval_contains(shape.reg, shape.metadata) &&
+                interval_contains(shape.reg, shape.wait_insert_turn) && interval_contains(shape.reg, shape.metadata) &&
+                shape.wait_insert_turn.start_cycle == shape.reg.start_cycle &&
+                shape.wait_insert_turn.end_cycle == shape.metadata.start_cycle &&
+                ((task_id == 0 && shape.wait_insert_turn.aux == 0) ||
+                 (task_id != 0 && shape.wait_insert_turn.aux != 0)) &&
                 shape.materialize.end_cycle == shape.reg.start_cycle &&
                 (is_alloc ? shape.reg.end_cycle == shape.tail.start_cycle
                           : shape.reg.end_cycle == shape.fanin.start_cycle &&
@@ -1222,40 +1238,34 @@ bool validate_and_write_shared_core(
         } else {
             shape_valid =
                 shape_valid && shape.materialize_count == 0 && shape.output_count == 0 && shape.copy_count == 0 &&
-                shape.flush_count == 0 && shape.register_count == 0 && shape.metadata_count == 0 &&
+                shape.flush_count == 0 && shape.register_count == 0 && shape.wait_insert_turn_count == 0 &&
+                shape.metadata_count == 0 &&
                 shape.fanin_count == 0 && shape.tail_count == 0;
         }
         if (!shape_valid) {
             LOG_ERROR(
                 "fdwic shared swimlane sparse task closure failed: worker=%u task=%u winner=%d "
-                "materialize=%u output=%u/%u/%u register=%u/%u fanin=%u tail=%u",
+                "materialize=%u output=%u/%u/%u register=%u/%u/%u fanin=%u tail=%u",
                 core, task_id, shape.winner ? 1 : 0, shape.materialize_count, shape.output_count, shape.copy_count,
-                shape.flush_count, shape.register_count, shape.metadata_count, shape.fanin_count, shape.tail_count
+                shape.flush_count, shape.register_count, shape.wait_insert_turn_count, shape.metadata_count,
+                shape.fanin_count, shape.tail_count
             );
             return false;
         }
         if (shape.winner) ++winner_counts[task_id];
     }
     if (level >= kFdwicAtomicSwimlaneLevel) {
-        uint32_t expected_poll_records = 0;
         uint32_t expected_handoff_records = 0;
+        if (!insert_turn_polls.empty()) {
+            LOG_ERROR(
+                "fdwic shared bypass-load insert turn forbids atomic PollBatch rows: records=%zu",
+                insert_turn_polls.size()
+            );
+            return false;
+        }
         for (uint32_t task_id = 0; task_id < kFdwicSharedTracePhase1TaskCount; ++task_id) {
             const SharedTaskTraceShape &shape = shapes[task_id];
             if (!shape.winner) continue;
-            const uint32_t matching_polls = static_cast<uint32_t>(std::count_if(
-                insert_turn_polls.begin(), insert_turn_polls.end(), [&shape](const FdwicSwimlaneRecord &poll) {
-                    return poll.start_cycle == shape.reg.start_cycle && poll.end_cycle == shape.metadata.start_cycle;
-                }
-            ));
-            const uint32_t task_expected_polls = task_id == 0 ? 0U : 1U;
-            expected_poll_records += task_expected_polls;
-            if (matching_polls != task_expected_polls) {
-                LOG_ERROR(
-                    "fdwic shared task %u insert-turn PollBatch closure failed: records=%u expected=%u",
-                    task_id, matching_polls, task_expected_polls
-                );
-                return false;
-            }
             const uint32_t matching_handoffs = static_cast<uint32_t>(std::count_if(
                 insert_turn_handoffs.begin(), insert_turn_handoffs.end(),
                 [task_id, &shape](const FdwicSwimlaneRecord &handoff) {
@@ -1273,11 +1283,10 @@ bool validate_and_write_shared_core(
                 return false;
             }
         }
-        if (insert_turn_polls.size() != expected_poll_records ||
-            insert_turn_handoffs.size() != expected_handoff_records) {
+        if (insert_turn_handoffs.size() != expected_handoff_records) {
             LOG_ERROR(
-                "fdwic shared insert-turn orphan records: polls=%zu/%u handoffs=%zu/%u",
-                insert_turn_polls.size(), expected_poll_records, insert_turn_handoffs.size(), expected_handoff_records
+                "fdwic shared insert-turn orphan records: handoffs=%zu/%u",
+                insert_turn_handoffs.size(), expected_handoff_records
             );
             return false;
         }
@@ -1690,7 +1699,13 @@ extern "C" int fdwic_swimlane_host_export(Runtime *runtime) {
         }
         for (uint32_t index = 0; index < count; ++index) {
             if (!decode_shared_compact_record(physical_scratch[index], decode_anchor, decoded_scratch[index])) {
-                LOG_ERROR("fdwic shared swimlane core %u has invalid compact record %u", c, index);
+                const FdwicCompactSwimlaneRecord &compact = physical_scratch[index];
+                LOG_ERROR(
+                    "fdwic shared swimlane core %u has invalid compact record %u: "
+                    "start_low=0x%08x end_low=0x%08x flags=0x%08x packed=0x%08x anchor=%llu",
+                    c, index, compact.start_cycle_low, compact.end_cycle_low, compact.flags, compact.packed,
+                    static_cast<unsigned long long>(decode_anchor)
+                );
                 return fail_export();
             }
         }

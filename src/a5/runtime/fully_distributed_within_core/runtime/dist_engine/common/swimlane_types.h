@@ -90,7 +90,10 @@ enum class FdwicSwimlanePhase : int32_t {
     SharedMaterializePublishTaskOutputsCopy = 22,
     SharedMaterializePublishTaskOutputsFlush = 23,
     Dcci = 24,
-    Count = 25,
+    // Non-atomic ld_dev wait that observes the predecessor's monotonic
+    // completion word before this winner enters ordered metadata publication.
+    SharedRegisterWaitInsertTurnBypassLoad = 25,
+    Count = 26,
     // Compile-only poison value for stale schema-v4 shared call sites. It is
     // deliberately outside Count and cannot be encoded by compact-v5.
     LoserReplay = 0x7fff,

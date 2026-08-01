@@ -49,9 +49,15 @@
 #include "pto_orchestration_api.h"
 
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-#define PTO_FDWIC_SHARED_PA_CALL(name) name<ReplayRole>
+#define PTO_FDWIC_SHARED_PA_ALLOC_CALL(name) name<ReplayRole>
+#define PTO_FDWIC_SHARED_PA_TASK_CALL(name, kind) name<ReplayRole, kind>
+#define PTO_FDWIC_SHARED_PA_ALLOC_IDENTITY(expected_task_id) expected_task_id,
+#define PTO_FDWIC_SHARED_PA_TASK_IDENTITY(kind, expected_task_id) expected_task_id,
 #else
-#define PTO_FDWIC_SHARED_PA_CALL(name) name
+#define PTO_FDWIC_SHARED_PA_ALLOC_CALL(name) name
+#define PTO_FDWIC_SHARED_PA_TASK_CALL(name, kind) name
+#define PTO_FDWIC_SHARED_PA_ALLOC_IDENTITY(expected_task_id)
+#define PTO_FDWIC_SHARED_PA_TASK_IDENTITY(kind, expected_task_id) kind,
 #endif
 
 #define N_UNROLL 64
@@ -343,6 +349,12 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
                 Tensor qi;
                 Tensor out_view;
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
+                // The Case1 gate proves one five-task group per batch. Carry
+                // its exact task-id prefix into each typed Submit so all 96
+                // replay actors do an equality check instead of rebuilding
+                // task kind from task_id%5 on the Claim hot path.
+                const int32_t shared_batch_task_start =
+                    static_cast<int32_t>(b_idx * kFdwicSharedPaTasksPerBatch);
                 // Deliberately uninitialized: each retained symbol is
                 // assigned by an earlier successful Submit in this task
                 // group before its role-matched winner callback consumes it.
@@ -373,8 +385,9 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
                 CYCLE_COUNT_LAP(prof_param_setup);
 #if PTO_FDWIC_SHARED_MAP
                 SharedTaskOutputs alloc_outs =
-                    PTO_FDWIC_SHARED_PA_CALL(shared_pa_alloc_tensors_compete_first)(
-                        replay, params, [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
+                    PTO_FDWIC_SHARED_PA_ALLOC_CALL(shared_pa_alloc_tensors_compete_first)(
+                        replay, PTO_FDWIC_SHARED_PA_ALLOC_IDENTITY(shared_batch_task_start)
+                        params, [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
                             // Alloc has no executable lane.  Its two-level
                             // tournament deliberately admits all 96 workers,
                             // so either compiled role must be able to build
@@ -444,8 +457,12 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
 #endif
 
 #if PTO_FDWIC_SHARED_MAP
-                    SharedTaskOutputs qk_outs = PTO_FDWIC_SHARED_PA_CALL(shared_pa_submit_aic_compete_first)(
-                        replay, DistSharedPaTaskKind::Qk, FUNC_QK_MATMUL, params,
+                    SharedTaskOutputs qk_outs = PTO_FDWIC_SHARED_PA_TASK_CALL(
+                        shared_pa_submit_aic_compete_first, DistSharedPaTaskKind::Qk
+                    )(
+                        replay, PTO_FDWIC_SHARED_PA_TASK_IDENTITY(
+                            DistSharedPaTaskKind::Qk, shared_batch_task_start + 1
+                        ) FUNC_QK_MATMUL, params,
                         [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
                             if constexpr (ReplayRole == CoreType::AIC) {
@@ -525,8 +542,12 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
 #endif
 
 #if PTO_FDWIC_SHARED_MAP
-                    SharedTaskOutputs sf_outs = PTO_FDWIC_SHARED_PA_CALL(shared_pa_submit_aiv_compete_first)(
-                        replay, DistSharedPaTaskKind::Sf, FUNC_SOFTMAX_PREPARE, params,
+                    SharedTaskOutputs sf_outs = PTO_FDWIC_SHARED_PA_TASK_CALL(
+                        shared_pa_submit_aiv_compete_first, DistSharedPaTaskKind::Sf
+                    )(
+                        replay, PTO_FDWIC_SHARED_PA_TASK_IDENTITY(
+                            DistSharedPaTaskKind::Sf, shared_batch_task_start + 2
+                        ) FUNC_SOFTMAX_PREPARE, params,
                         [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
                             if constexpr (ReplayRole == CoreType::AIV) {
@@ -601,8 +622,12 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
 
                     // === Task 3: SplitK PV matmul (accumulated P @ V) ===
 #if PTO_FDWIC_SHARED_MAP
-                    SharedTaskOutputs pv_outs = PTO_FDWIC_SHARED_PA_CALL(shared_pa_submit_aic_compete_first)(
-                        replay, DistSharedPaTaskKind::Pv, FUNC_PV_MATMUL, params,
+                    SharedTaskOutputs pv_outs = PTO_FDWIC_SHARED_PA_TASK_CALL(
+                        shared_pa_submit_aic_compete_first, DistSharedPaTaskKind::Pv
+                    )(
+                        replay, PTO_FDWIC_SHARED_PA_TASK_IDENTITY(
+                            DistSharedPaTaskKind::Pv, shared_batch_task_start + 3
+                        ) FUNC_PV_MATMUL, params,
                         [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
                             if constexpr (ReplayRole == CoreType::AIC) {
@@ -664,8 +689,12 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
 #endif
 
 #if PTO_FDWIC_SHARED_MAP
-                    SharedTaskOutputs up_outs = PTO_FDWIC_SHARED_PA_CALL(shared_pa_submit_aiv_compete_first)(
-                        replay, DistSharedPaTaskKind::Up, FUNC_ONLINE_UPDATE, params,
+                    SharedTaskOutputs up_outs = PTO_FDWIC_SHARED_PA_TASK_CALL(
+                        shared_pa_submit_aiv_compete_first, DistSharedPaTaskKind::Up
+                    )(
+                        replay, PTO_FDWIC_SHARED_PA_TASK_IDENTITY(
+                            DistSharedPaTaskKind::Up, shared_batch_task_start + 4
+                        ) FUNC_ONLINE_UPDATE, params,
                         [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
                             if constexpr (ReplayRole == CoreType::AIV) {
@@ -796,7 +825,10 @@ aicpu_orchestration_entry_aiv(const L2TaskArgs &orch_args) {
 }
 #endif
 
-#undef PTO_FDWIC_SHARED_PA_CALL
+#undef PTO_FDWIC_SHARED_PA_TASK_IDENTITY
+#undef PTO_FDWIC_SHARED_PA_ALLOC_IDENTITY
+#undef PTO_FDWIC_SHARED_PA_TASK_CALL
+#undef PTO_FDWIC_SHARED_PA_ALLOC_CALL
 
 #endif  // PTO_FDWIC_SHARED_PA_EMIT_ORCHESTRATION
 

@@ -99,6 +99,7 @@ _FDWIC_PHASE_NAMES = {
     "SharedMaterializePublishTaskOutputs": "materialize.publish_shared_output_descriptors",
     "SharedMaterializePublishTaskOutputsCopy": "materialize.publish_shared_output_descriptors.copy_tensor_descs",
     "SharedMaterializePublishTaskOutputsFlush": "materialize.publish_shared_output_descriptors.flush_tensor_descs",
+    "SharedRegisterWaitInsertTurnBypassLoad": "register.wait_insert_turn.ld_dev",
     "Dcci": "dcci",
 }
 
@@ -481,6 +482,9 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
             dcci_site = _FDWIC_SHARED_V5_DCCI_SITE_NAMES.get(aux, f"site_{aux}")
             dcci_op = _FDWIC_SHARED_V5_DCCI_OP_NAMES.get(flags & 0x3, f"op_{flags & 0x3}")
             name = f"dcci.{dcci_site}.{dcci_op}#{task_id}"
+            tid = lane
+        elif phase == "register.wait_insert_turn.ld_dev":
+            name = f"{phase}×{aux}#{task_id}"
             tid = lane
         elif phase == "kernel" and func_id >= 0:
             name = f"{kernel_name(func_id)}#{task_id}"
@@ -1054,6 +1058,12 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                 "SharedMaterializePublishTaskOutputsFlush",
             }:
                 valid_v5_fields = task_id >= 0 and flags == 0 and aux == 0
+            elif phase == "SharedRegisterWaitInsertTurnBypassLoad":
+                valid_v5_fields = (
+                    task_id >= 0
+                    and flags == 0
+                    and ((task_id == 0 and aux == 0) or (task_id > 0 and aux > 0))
+                )
             elif phase in {"OrchestrationReplay", "FinalDrain"}:
                 valid_v5_fields = task_id == -1 and func_id == -1 and flags == 0 and aux == 0
             else:

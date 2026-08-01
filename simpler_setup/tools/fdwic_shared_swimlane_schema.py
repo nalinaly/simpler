@@ -41,6 +41,7 @@ SHARED_V5_PHASES = frozenset(
         "SharedMaterializePublishTaskOutputs",
         "SharedMaterializePublishTaskOutputsCopy",
         "SharedMaterializePublishTaskOutputsFlush",
+        "SharedRegisterWaitInsertTurnBypassLoad",
         "Dcci",
     }
 )
@@ -399,6 +400,12 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             expected = 1 if winner else 0
             materialize = _one(by_phase["Materialize"], key, "Materialize", expected)
             register = _one(by_phase["Register"], key, "Register", expected)
+            wait_insert_turn = _one(
+                by_phase["SharedRegisterWaitInsertTurnBypassLoad"],
+                key,
+                "bypass-load insert-turn wait detail",
+                expected,
+            )
             metadata = _one(by_phase["SharedRegisterPublishMetadata"], key, "metadata detail", expected)
             output = _one(by_phase["SharedMaterializePublishTaskOutputs"], key, "task-output detail", expected)
             copy = _one(by_phase["SharedMaterializePublishTaskOutputsCopy"], key, "task-output copy detail", expected)
@@ -433,12 +440,13 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             if winner:
                 assert materialize is not None
                 assert register is not None
+                assert wait_insert_turn is not None
                 assert metadata is not None
                 assert output is not None
                 assert copy is not None
                 assert flush is not None
                 assert tail is not None
-                business_rows = (materialize, register, metadata, output, copy, flush, tail)
+                business_rows = (materialize, register, wait_insert_turn, metadata, output, copy, flush, tail)
                 if fanin is not None:
                     business_rows += (fanin,)
                 if any(row.function_id != expected_func for row in business_rows):
@@ -450,7 +458,14 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
                     and _contains(output, flush)
                     and copy.end_cycle == flush.start_cycle
                     and _contains(submit, register)
+                    and _contains(register, wait_insert_turn)
                     and _contains(register, metadata)
+                    and wait_insert_turn.start_cycle == register.start_cycle
+                    and wait_insert_turn.end_cycle == metadata.start_cycle
+                    and (
+                        (submit.task_id == 0 and wait_insert_turn.auxiliary == 0)
+                        or (submit.task_id != 0 and wait_insert_turn.auxiliary > 0)
+                    )
                     and claim.end_cycle <= materialize.start_cycle
                     and materialize.end_cycle == register.start_cycle
                     and tail.end_cycle <= submit.end_cycle
@@ -494,17 +509,6 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
                                 f"core {core_id} task {submit.task_id} Dcci site "
                                 f"{row.auxiliary} is outside its business phase"
                             )
-                    matching_polls = [
-                        poll
-                        for poll in polls_by_core.get(core_id, [])
-                        if poll.start_cycle == register.start_cycle and poll.end_cycle == metadata.start_cycle
-                    ]
-                    expected_polls = 0 if submit.task_id == 0 else 1
-                    if len(matching_polls) != expected_polls:
-                        raise ValueError(
-                            f"core {core_id} task {submit.task_id} requires {expected_polls} "
-                            f"SharedInsertTurnPoll row(s), got {len(matching_polls)}"
-                        )
                     task_handoffs = handoffs.get(key, [])
                     if len(task_handoffs) != 1 or not (
                         metadata.end_cycle <= task_handoffs[0].start_cycle
@@ -622,17 +626,11 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
                 "shared schema-v5 business Dcci rows have no matching Submit: "
                 f"{sorted(orphaned_business_dcci)[:8]}"
             )
-        expected_poll_total = sum(
-            1
-            for core in core_partitions
-            for partition in core.submits
-            if partition.submit.flags & 1 and partition.submit.task_id > 0
-        )
         expected_handoff_total = sum(
             1 for core in core_partitions for partition in core.submits if partition.submit.flags & 1
         )
-        if sum(map(len, polls_by_core.values())) != expected_poll_total:
-            raise ValueError("shared schema-v5 has orphan or duplicate insert-turn PollBatch rows")
+        if sum(map(len, polls_by_core.values())) != 0:
+            raise ValueError("shared schema-v5 bypass-load insert turn forbids atomic PollBatch rows")
         if sum(map(len, handoffs.values())) != expected_handoff_total:
             raise ValueError("shared schema-v5 has orphan or duplicate insert-turn handoff rows")
 
