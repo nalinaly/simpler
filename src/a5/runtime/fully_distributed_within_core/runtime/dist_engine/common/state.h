@@ -319,12 +319,6 @@ static_assert(offsetof(DistCore, slots) % 64 == 0, "DistCore slots must be cache
 static_assert(offsetof(DistCore, task_payloads) % 64 == 0, "DistCore task_payloads must be cacheline-aligned");
 
 constexpr int32_t kCursorShards = 4;
-#if PTO_FDWIC_SHARED_MAP
-static_assert(
-    kCursorShards == static_cast<int32_t>(kFdwicSharedAllocClaimShards),
-    "shared Alloc trace reconstruction must match the device cursor topology"
-);
-#endif
 constexpr int32_t kFinalBarrierGroups = 16;
 constexpr size_t kCacheLine = 64;
 static_assert(PTO2_PACKED_OUTPUT_ALIGN >= kCacheLine);
@@ -350,6 +344,13 @@ constexpr uint64_t kFdwicSharedHeapShardBytes = kFdwicSharedHeapBytes / kFdwicSh
 constexpr uint32_t kFdwicSharedWriterHistoryMagic = 0x57484953U;  // "WHIS"
 
 static_assert(kFdwicSharedPaTaskCapacity == 1280, "phase-1 shared PA task capacity changed");
+static_assert(kFdwicSharedWorkers == 96, "phase-1 shared PA worker topology changed");
+static_assert(
+    kFdwicSharedAllocClaimTournamentGroups <= kFdwicSharedWorkers &&
+        kFdwicSharedAicClaimTournamentGroups <= kFdwicSharedAicWorkers &&
+        kFdwicSharedAivClaimTournamentGroups <= kFdwicSharedAivWorkers,
+    "every shared Claim tournament group must have a candidate"
+);
 static_assert(kFdwicSharedHeapShardBytes == (32ULL << 20), "shared PA heap shard size changed");
 static_assert(
     (kFdwicSharedHeapShards & (kFdwicSharedHeapShards - 1U)) == 0,
@@ -397,22 +398,52 @@ static_assert(
     "shared writer-history records must immediately follow their header"
 );
 
+// Every task owns fresh, never-reused Claim nodes. All legal candidates first
+// contend on one of G local nodes; only each local winner reaches the root.
+// The 512B stride is the A5 probe-selected address spacing and keeps the hot
+// atomic word isolated from descriptor/history cache lines.
+struct alignas(kCacheLine) SharedClaimTournamentNode {
+    PaddedCursor owner;
+    uint8_t padding[kFdwicSharedClaimTournamentNodeStride - sizeof(PaddedCursor)];
+};
+static_assert(
+    sizeof(SharedClaimTournamentNode) == kFdwicSharedClaimTournamentNodeStride,
+    "shared Claim tournament node stride changed"
+);
+static_assert(offsetof(SharedClaimTournamentNode, owner) == 0);
+
+struct alignas(kCacheLine) SharedClaimTournamentTask {
+    SharedClaimTournamentNode root;
+    SharedClaimTournamentNode local[kFdwicSharedClaimTournamentMaxGroups];
+};
+static_assert(
+    sizeof(SharedClaimTournamentTask) ==
+        kFdwicSharedClaimTournamentNodeStride * (1U + kFdwicSharedClaimTournamentMaxGroups),
+    "shared per-task Claim tournament layout changed"
+);
+static_assert(
+    offsetof(SharedClaimTournamentTask, local) == kFdwicSharedClaimTournamentNodeStride,
+    "shared Claim local nodes must follow the root"
+);
+
 // The old shared region ring is intentionally absent. Phase 1 keeps only
-// stable output symbols, no-wrap heap controls, retained 8-way Vector Claim,
-// and immutable writer history.
+// stable output symbols, no-wrap heap controls, immutable writer history, and
+// the per-task two-level Claim tournament.
 struct alignas(kCacheLine) SharedPaTensorMapState {
     SharedOutputCell shared_outputs[kFdwicSharedPaTaskCapacity];
     PaddedCursor shared_heap_cursor[kFdwicSharedHeapShards];
     PaddedCursor shared_heap_vend;
     PaddedCursor shared_vector_cursor[kFdwicSharedVectorCursorShards];
     SharedWriterHistoryCell writer_history[kFdwicSharedPaTaskCapacity];
+    SharedClaimTournamentTask claim_tournament[kFdwicSharedPaTaskCapacity];
 };
 static_assert(offsetof(SharedPaTensorMapState, shared_outputs) == 0);
 static_assert(offsetof(SharedPaTensorMapState, shared_heap_cursor) == 2621440);
 static_assert(offsetof(SharedPaTensorMapState, shared_heap_vend) == 2621952);
 static_assert(offsetof(SharedPaTensorMapState, shared_vector_cursor) == 2622016);
 static_assert(offsetof(SharedPaTensorMapState, writer_history) == 2622528);
-static_assert(sizeof(SharedPaTensorMapState) == 3032128, "shared PA TensorMap sidecar size changed");
+static_assert(offsetof(SharedPaTensorMapState, claim_tournament) == 3032128);
+static_assert(sizeof(SharedPaTensorMapState) == 8930368, "shared PA TensorMap sidecar size changed");
 static_assert(alignof(SharedPaTensorMapState) == kCacheLine, "shared PA TensorMap alignment changed");
 
 struct DistTaskCell {
@@ -531,8 +562,8 @@ static_assert(
     "shared PA TensorMap sidecar must append after the frozen DistGlobal tail"
 );
 static_assert(
-    sizeof(DistGlobal) == 1010058176,
-    "shared DistGlobal must contain exactly the phase-1 PA TensorMap sidecar"
+    sizeof(DistGlobal) == 1015956416,
+    "shared DistGlobal must contain exactly the phase-1 PA TensorMap and Claim sidecar"
 );
 #else
 static_assert(

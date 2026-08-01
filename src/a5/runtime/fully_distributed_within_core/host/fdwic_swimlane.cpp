@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -162,6 +163,8 @@ const char *atomic_site_name(uint32_t site) {
         "SharedMapAppendSeqPublishExchange",
         "SharedMapAppendTailExchange",
         "SharedOutputRollbackExchange",
+        "SharedClaimTournamentLocal",
+        "SharedClaimTournamentRoot",
 #else
         "WonSlotClaimMax",
         "WonRemainingExchange",
@@ -608,13 +611,39 @@ bool shared_claim_attempted(
     bool is_aic, int32_t block_id, uint32_t task_id,
     SharedPaTaskKind kind
 ) {
+    (void)block_id;
+    (void)task_id;
     if (kind == SharedPaTaskKind::Alloc) {
-        return is_aic && block_id >= 0 &&
-               static_cast<uint32_t>(block_id) % kFdwicSharedAllocClaimShards ==
-                   task_id % kFdwicSharedAllocClaimShards;
+        return true;
     }
     return is_aic ? kind == SharedPaTaskKind::Qk || kind == SharedPaTaskKind::Pv
                   : kind == SharedPaTaskKind::Sf || kind == SharedPaTaskKind::Up;
+}
+
+uint32_t shared_claim_tournament_groups(SharedPaTaskKind kind) {
+    if (kind == SharedPaTaskKind::Alloc) return kFdwicSharedAllocClaimTournamentGroups;
+    if (kind == SharedPaTaskKind::Qk || kind == SharedPaTaskKind::Pv) {
+        return kFdwicSharedAicClaimTournamentGroups;
+    }
+    return kFdwicSharedAivClaimTournamentGroups;
+}
+
+bool shared_claim_tournament_group(
+    uint32_t core, SharedPaTaskKind kind, uint32_t &group
+) {
+    uint32_t candidate_rank = 0;
+    if (kind == SharedPaTaskKind::Alloc) {
+        if (core >= kFdwicSharedWorkers) return false;
+        candidate_rank = core;
+    } else if (kind == SharedPaTaskKind::Qk || kind == SharedPaTaskKind::Pv) {
+        if (core >= kFdwicSharedAicWorkers) return false;
+        candidate_rank = core;
+    } else {
+        if (core < kFdwicSharedAicWorkers || core >= kFdwicSharedWorkers) return false;
+        candidate_rank = core - kFdwicSharedAicWorkers;
+    }
+    group = candidate_rank % shared_claim_tournament_groups(kind);
+    return true;
 }
 
 int32_t shared_task_function_id(SharedPaTaskKind kind) {
@@ -854,7 +883,8 @@ struct SharedTaskTraceShape {
     bool claim_seen = false;
     bool submit_seen = false;
     bool winner = false;
-    uint32_t claim_max_count = 0;
+    uint32_t claim_local_count = 0;
+    uint32_t claim_root_count = 0;
     uint32_t materialize_count = 0;
     uint32_t output_count = 0;
     uint32_t copy_count = 0;
@@ -866,7 +896,8 @@ struct SharedTaskTraceShape {
     uint32_t dcci_records[kDcciSiteCount]{};
     uint32_t dcci_calls[kDcciSiteCount]{};
     uint32_t dcci_lines[kDcciSiteCount]{};
-    FdwicSwimlaneRecord claim_max{};
+    FdwicSwimlaneRecord claim_local{};
+    FdwicSwimlaneRecord claim_root{};
     FdwicSwimlaneRecord claim{};
     FdwicSwimlaneRecord submit{};
     FdwicSwimlaneRecord materialize{};
@@ -886,7 +917,8 @@ bool interval_contains(const FdwicSwimlaneRecord &outer, const FdwicSwimlaneReco
 bool validate_and_write_shared_core(
     const FdwicSwimlaneHeader *header, const FdwicSwimlaneRecord *records, uint32_t logical_count, uint32_t core,
     int32_t expected_block, int32_t expected_lane, uint32_t level, std::ofstream &out, bool &first,
-    TraceSummary &observed, std::vector<uint32_t> &winner_counts
+    TraceSummary &observed, std::vector<uint32_t> &winner_counts,
+    std::vector<std::array<uint32_t, kFdwicSharedClaimTournamentMaxGroups>> &root_group_counts
 ) {
     const FdwicSwimlaneCoreState &core_state = header->cores[core];
     if (core_state.core_idx != static_cast<int32_t>(core) || core_state.block_id != expected_block ||
@@ -939,12 +971,26 @@ bool validate_and_write_shared_core(
                 record.task_id < 0) {
                 valid = false;
             }
-            if (valid && record.aux == static_cast<uint16_t>(FdwicAtomicSite::ClaimMax)) {
+            if (valid &&
+                (record.aux == static_cast<uint16_t>(FdwicAtomicSite::SharedClaimTournamentLocal) ||
+                 record.aux == static_cast<uint16_t>(FdwicAtomicSite::SharedClaimTournamentRoot))) {
                 valid = record.task_id >= 0 &&
                         static_cast<uint32_t>(record.task_id) < kFdwicSharedTracePhase1TaskCount;
                 if (valid) {
-                    SharedTaskTraceShape &shape = shapes[static_cast<uint32_t>(record.task_id)];
-                    if (++shape.claim_max_count == 1) shape.claim_max = record;
+                    const uint32_t task_id = static_cast<uint32_t>(record.task_id);
+                    const auto kind = shared_pa_task_kind(task_id);
+                    uint32_t group = 0;
+                    valid = shared_claim_tournament_group(core, kind, group);
+                    if (valid) {
+                        SharedTaskTraceShape &shape = shapes[task_id];
+                        if (record.aux ==
+                            static_cast<uint16_t>(FdwicAtomicSite::SharedClaimTournamentLocal)) {
+                            if (++shape.claim_local_count == 1) shape.claim_local = record;
+                        } else {
+                            if (++shape.claim_root_count == 1) shape.claim_root = record;
+                            ++root_group_counts[task_id][group];
+                        }
+                    }
                 }
             }
         } else if (phase == FdwicSwimlanePhase::Dcci) {
@@ -1117,19 +1163,22 @@ bool validate_and_write_shared_core(
         if (level >= kFdwicAtomicSwimlaneLevel) {
             const bool attempted =
                 shared_claim_attempted(expected_lane == 0, expected_block, task_id, kind);
-            const uint32_t expected_claim_max = attempted ? 1U : 0U;
-            const bool claim_max_valid =
-                shape.claim_max_count == expected_claim_max &&
-                (!attempted || interval_contains(shape.claim, shape.claim_max));
-            if (!claim_max_valid) {
+            const uint32_t expected_local = attempted ? 1U : 0U;
+            const bool tournament_valid =
+                shape.claim_local_count == expected_local &&
+                (!attempted || interval_contains(shape.claim, shape.claim_local)) &&
+                shape.claim_root_count <= 1U &&
+                (shape.claim_root_count == 0U ||
+                 (shape.claim_local_count == 1U && interval_contains(shape.claim, shape.claim_root))) &&
+                (!shape.winner || shape.claim_root_count == 1U);
+            if (!tournament_valid) {
                 LOG_ERROR(
-                    "fdwic shared ClaimMax closure failed: worker=%u task=%u attempted=%d records=%u "
-                    "claim=[%llu,%llu] atomic=[%llu,%llu]",
-                    core, task_id, attempted ? 1 : 0, shape.claim_max_count,
+                    "fdwic shared Claim tournament closure failed: worker=%u task=%u attempted=%d "
+                    "local=%u root=%u winner=%d claim=[%llu,%llu]",
+                    core, task_id, attempted ? 1 : 0, shape.claim_local_count,
+                    shape.claim_root_count, shape.winner ? 1 : 0,
                     static_cast<unsigned long long>(shape.claim.start_cycle),
-                    static_cast<unsigned long long>(shape.claim.end_cycle),
-                    static_cast<unsigned long long>(shape.claim_max.start_cycle),
-                    static_cast<unsigned long long>(shape.claim_max.end_cycle)
+                    static_cast<unsigned long long>(shape.claim.end_cycle)
                 );
                 return false;
             }
@@ -1502,6 +1551,8 @@ extern "C" int fdwic_swimlane_host_export(Runtime *runtime) {
     std::vector<FdwicSharedSubmitClaimRecord> submit_claim_scratch(kFdwicSharedTracePhase1TaskCount);
     std::vector<FdwicSwimlaneRecord> logical_scratch;
     std::vector<uint32_t> winner_counts(kFdwicSharedTracePhase1TaskCount);
+    std::vector<std::array<uint32_t, kFdwicSharedClaimTournamentMaxGroups>>
+        root_group_counts(kFdwicSharedTracePhase1TaskCount);
 #else
     FdwicSwimlaneRecord *scratch = nullptr;
     if (max_core_records != 0) {
@@ -1658,7 +1709,7 @@ extern "C" int fdwic_swimlane_host_export(Runtime *runtime) {
                 header, logical_scratch.data(),
                 static_cast<uint32_t>(logical_scratch.size()), c,
                 expected_blocks[c], expected_lanes[c], level, out, first,
-                observed, winner_counts
+                observed, winner_counts, root_group_counts
             )) {
             LOG_ERROR(
                 "fdwic shared swimlane core %u schema-v5 validation failed: logical_records=%zu",
@@ -1696,6 +1747,28 @@ extern "C" int fdwic_swimlane_host_export(Runtime *runtime) {
                 task_id, winner_counts[task_id]
             );
             return fail_export();
+        }
+        if (level >= kFdwicAtomicSwimlaneLevel) {
+            const uint32_t groups =
+                shared_claim_tournament_groups(shared_pa_task_kind(task_id));
+            for (uint32_t group = 0; group < groups; ++group) {
+                if (root_group_counts[task_id][group] != 1) {
+                    LOG_ERROR(
+                        "fdwic shared Claim tournament task %u group %u must have exactly one root contender; got %u",
+                        task_id, group, root_group_counts[task_id][group]
+                    );
+                    return fail_export();
+                }
+            }
+            for (uint32_t group = groups; group < kFdwicSharedClaimTournamentMaxGroups; ++group) {
+                if (root_group_counts[task_id][group] != 0) {
+                    LOG_ERROR(
+                        "fdwic shared Claim tournament task %u inactive group %u has %u root contenders",
+                        task_id, group, root_group_counts[task_id][group]
+                    );
+                    return fail_export();
+                }
+            }
         }
     }
 #endif

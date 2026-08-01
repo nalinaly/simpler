@@ -223,6 +223,8 @@ _FDWIC_SHARED_V5_ATOMIC_SITE_NAMES = {
     37: "shared_tensormap_append_seq_publish_exchange",
     38: "shared_tensormap_append_tail_exchange",
     39: "shared_output_rollback_exchange",
+    40: "shared_claim_tournament_local",
+    41: "shared_claim_tournament_root",
 }
 _FDWIC_SHARED_V5_ATOMIC_OP_NAMES = {
     0: "load",

@@ -91,6 +91,8 @@ SHARED_V5_ATOMIC_SITE_NAMES = (
     "SharedMapAppendSeqPublishExchange",
     "SharedMapAppendTailExchange",
     "SharedOutputRollbackExchange",
+    "SharedClaimTournamentLocal",
+    "SharedClaimTournamentRoot",
 )
 SHARED_V5_ATOMIC_OP_NAMES = ("Load", "Exchange", "FetchAdd", "FetchMax", "CompareExchange")
 SHARED_V5_ATOMIC_SITE_OP_IDS = {
@@ -134,6 +136,8 @@ SHARED_V5_ATOMIC_SITE_OP_IDS = {
     37: 1,
     38: 1,
     39: 1,
+    40: 4,
+    41: 4,
 }
 SHARED_V5_ATOMIC_RESULT_UNUSED_SITE_IDS = frozenset({0, 3, 6, 7, 13, 39})
 SHARED_V5_POLL_BATCH_SITE_OP_IDS = {1: 0, 2: 0, 5: 0, 11: 0, 12: 0, 14: 0, 19: 0}
@@ -216,8 +220,21 @@ def _task_function_id(task_id: int) -> int:
 def _claim_attempted(role: str, block_id: int, task_id: int) -> bool:
     kind = task_id % 5
     if kind == 0:
-        return role == "aic" and block_id % 4 == task_id % 4
+        return True
     return kind in ({1, 3} if role == "aic" else {2, 4})
+
+
+def _claim_tournament_groups(task_id: int, aic_count: int) -> int:
+    kind = task_id % 5
+    if kind == 0:
+        return min(8, 3 * aic_count)
+    return min(6, aic_count) if kind in (1, 3) else min(8, 2 * aic_count)
+
+
+def _claim_tournament_group(core_id: int, aic_count: int, task_id: int) -> int:
+    kind = task_id % 5
+    candidate_rank = core_id if kind in (0, 1, 3) else core_id - aic_count
+    return candidate_rank % _claim_tournament_groups(task_id, aic_count)
 
 
 def _one(events: dict[tuple[int, int], list[Event]], key: tuple[int, int], phase: str, expected: int) -> Event | None:
@@ -257,7 +274,8 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
     kernels_by_task: dict[int, list[Event]] = defaultdict(list)
     polls_by_core: dict[int, list[Event]] = defaultdict(list)
     handoffs: dict[tuple[int, int], list[Event]] = defaultdict(list)
-    claim_maxes: dict[tuple[int, int], list[Event]] = defaultdict(list)
+    claim_tournament_locals: dict[tuple[int, int], list[Event]] = defaultdict(list)
+    claim_tournament_roots: dict[tuple[int, int], list[Event]] = defaultdict(list)
     business_dcci: dict[tuple[int, int], list[Event]] = defaultdict(list)
     overlay_statistics = {
         phase: {"event_count": 0, "aggregate_duration_cycles": 0}
@@ -287,8 +305,10 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             kernels.append(event)
             kernels_by_task[event.task_id].append(event)
         elif event.phase == "Atomic":
-            if event.auxiliary == 4:
-                claim_maxes[(event.core_id, event.task_id)].append(event)
+            if event.auxiliary == 40:
+                claim_tournament_locals[(event.core_id, event.task_id)].append(event)
+            elif event.auxiliary == 41:
+                claim_tournament_roots[(event.core_id, event.task_id)].append(event)
             elif event.auxiliary == 19:
                 polls_by_core[event.core_id].append(event)
             elif event.auxiliary == 20:
@@ -352,16 +372,28 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             if not _contains(orchestration, submit) or submit.duration <= 0:
                 raise ValueError(f"core {core_id} task {submit.task_id} Submit is outside OrchestrationReplay")
             if level == 4:
-                task_claim_maxes = claim_maxes.get(key, [])
-                expected_claim_maxes = 1 if attempted else 0
-                if len(task_claim_maxes) != expected_claim_maxes:
+                task_locals = claim_tournament_locals.get(key, [])
+                expected_locals = 1 if attempted else 0
+                if len(task_locals) != expected_locals:
                     raise ValueError(
-                        f"core {core_id} task {submit.task_id} requires {expected_claim_maxes} "
-                        f"ClaimMax row(s), got {len(task_claim_maxes)}"
+                        f"core {core_id} task {submit.task_id} requires {expected_locals} "
+                        f"Claim tournament local row(s), got {len(task_locals)}"
                     )
-                if any(not _contains(claim, row) for row in task_claim_maxes):
+                if any(not _contains(claim, row) for row in task_locals):
                     raise ValueError(
-                        f"core {core_id} task {submit.task_id} ClaimMax must be contained by Claim"
+                        f"core {core_id} task {submit.task_id} Claim tournament local must be contained by Claim"
+                    )
+                task_roots = claim_tournament_roots.get(key, [])
+                if len(task_roots) > 1 or (task_roots and not task_locals) or (
+                    winner and len(task_roots) != 1
+                ):
+                    raise ValueError(
+                        f"core {core_id} task {submit.task_id} has invalid Claim tournament root count "
+                        f"{len(task_roots)} for winner={winner}"
+                    )
+                if any(not _contains(claim, row) for row in task_roots):
+                    raise ValueError(
+                        f"core {core_id} task {submit.task_id} Claim tournament root must be contained by Claim"
                     )
 
             expected = 1 if winner else 0
@@ -516,6 +548,17 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             f"{invalid_kernel_task_ids[:8]}"
         )
 
+    aic_count = sum(role == "aic" for role in core_types)
+    root_groups_by_task: list[Counter[int]] = [
+        Counter() for _ in range(SHARED_V5_PHASE1_TASK_COUNT)
+    ]
+    if level == 4:
+        for (root_core, root_task), rows in claim_tournament_roots.items():
+            if 0 <= root_task < SHARED_V5_PHASE1_TASK_COUNT:
+                root_groups_by_task[root_task][
+                    _claim_tournament_group(root_core, aic_count, root_task)
+                ] += len(rows)
+
     for task_id in range(SHARED_V5_PHASE1_TASK_COUNT):
         winner_cores = [
             core
@@ -526,6 +569,15 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
             raise ValueError(
                 f"shared schema-v5 task {task_id} requires exactly one global winner, got {len(winner_cores)}"
             )
+        if level == 4:
+            groups = _claim_tournament_groups(task_id, aic_count)
+            root_groups = root_groups_by_task[task_id]
+            expected_groups = Counter({group: 1 for group in range(groups)})
+            if root_groups != expected_groups:
+                raise ValueError(
+                    f"shared schema-v5 task {task_id} has invalid Claim tournament root groups: "
+                    f"expected={dict(expected_groups)} observed={dict(root_groups)}"
+                )
         task_kernels = kernels_by_task.get(task_id, [])
         if task_id % 5 == 0:
             if task_kernels:
@@ -556,11 +608,13 @@ def validate_and_partition_v5(  # noqa: PLR0912, PLR0915
         if orphaned:
             raise ValueError(f"shared schema-v5 {phase} rows have no matching Submit: {sorted(orphaned)[:8]}")
     if level == 4:
-        orphaned_claim_maxes = set(claim_maxes) - valid_task_keys
-        if orphaned_claim_maxes:
+        orphaned_tournament = (
+            set(claim_tournament_locals) | set(claim_tournament_roots)
+        ) - valid_task_keys
+        if orphaned_tournament:
             raise ValueError(
-                "shared schema-v5 ClaimMax rows have no matching Submit: "
-                f"{sorted(orphaned_claim_maxes)[:8]}"
+                "shared schema-v5 Claim tournament rows have no matching Submit: "
+                f"{sorted(orphaned_tournament)[:8]}"
             )
         orphaned_business_dcci = set(business_dcci) - valid_task_keys
         if orphaned_business_dcci:

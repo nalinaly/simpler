@@ -44,21 +44,90 @@ struct DistSharedPaHandoffTrace {
     bool captured;
 };
 
-PTO_DEVICE_FUNC int32_t
-dist_shared_pa_expected_kernel_id(const MixedKernels &mixed, DistSharedPaTaskKind kind) {
-    const int32_t kernel_id =
-        kind == DistSharedPaTaskKind::Qk || kind == DistSharedPaTaskKind::Pv ?
-            mixed.aic_kernel_id :
-            mixed.aiv0_kernel_id;
-    return kernel_id >= 0 && kernel_id < RUNTIME_MAX_FUNC_ID && kernel_id <= INT16_MAX ?
-               kernel_id :
-               INVALID_KERNEL_ID;
+constexpr uint32_t kFdwicSharedEfDrainSkipBudgetByte = 0;
+constexpr uint32_t kFdwicSharedEfDrainNoProgressByte = 1;
+constexpr uint8_t kFdwicSharedEfDrainNoProgressSkipSubmits = 1;
+constexpr uint8_t kFdwicSharedEfDrainLongWaitSkipSubmits = 2;
+constexpr uint8_t kFdwicSharedEfDrainLongWaitPollThreshold = 24;
+
+// Submit-entry EfDrain is opportunistic: explicit ring backpressure and
+// FinalDrain still call drain_phase_b() directly and remain responsible for
+// progress. A single long-waiting slot therefore need not reload the same
+// not-ready fanin on every adjacent Submit. Two occupied slots always poll,
+// because the next winner may immediately enter WaitForSlot.
+PTO_DEVICE_FUNC int32_t dist_shared_pa_opportunistic_drain(__gm__ DistCore *self) {
+    if (self == nullptr) return 0;
+    __gm__ uint8_t &skip_budget = self->slots_pad[kFdwicSharedEfDrainSkipBudgetByte];
+    __gm__ uint8_t &no_progress_polls = self->slots_pad[kFdwicSharedEfDrainNoProgressByte];
+    if (self->occupied_count == 0) {
+        skip_budget = 0;
+        no_progress_polls = 0;
+        return 0;
+    }
+    const bool single_slot = self->occupied_count == 1;
+    if (single_slot && skip_budget != 0) {
+        --skip_budget;
+        return 0;
+    }
+    skip_budget = 0;
+    if (!single_slot) no_progress_polls = 0;
+    const int32_t freed = drain_phase_b(self);
+    if (single_slot && freed == 0 && self->occupied_count == 1) {
+        if (no_progress_polls < kFdwicSharedEfDrainLongWaitPollThreshold) {
+            ++no_progress_polls;
+        }
+        skip_budget = no_progress_polls == kFdwicSharedEfDrainLongWaitPollThreshold ?
+                          kFdwicSharedEfDrainLongWaitSkipSubmits :
+                          kFdwicSharedEfDrainNoProgressSkipSubmits;
+    } else {
+        no_progress_polls = 0;
+    }
+    return freed;
+}
+
+PTO_DEVICE_FUNC int32_t dist_shared_pa_expected_kernel_id(const MixedKernels &mixed, DistSharedPaTaskKind kind) {
+    const int32_t kernel_id = kind == DistSharedPaTaskKind::Qk || kind == DistSharedPaTaskKind::Pv ?
+                                  mixed.aic_kernel_id :
+                                  mixed.aiv0_kernel_id;
+    return kernel_id >= 0 && kernel_id < RUNTIME_MAX_FUNC_ID && kernel_id <= INT16_MAX ? kernel_id : INVALID_KERNEL_ID;
+}
+
+PTO_DEVICE_FUNC inline __attribute__((always_inline)) bool dist_shared_pa_claim_tournament(
+    uint32_t candidate_rank, uint32_t tournament_groups, int32_t kernel_id, DistSharedPaBeginState &state
+) {
+    state.claim_attempted = true;
+    __gm__ SharedClaimTournamentTask &tournament =
+        g_dist.shared_pa.claim_tournament[static_cast<uint32_t>(state.task_id)];
+    const uint32_t group = candidate_rank % tournament_groups;
+    const int64_t expected = -1;
+    const int64_t desired = static_cast<int64_t>(state.task_id);
+    const int64_t local_observed = fdwic_trace_atomic_compare_exchange<int64_t>(
+        state.task_id, FdwicAtomicSite::SharedClaimTournamentLocal, tournament.local[group].owner.v, expected, desired,
+        /*result_used=*/true
+    );
+    if (local_observed != expected) {
+        if (local_observed != desired) {
+            return dist_shared_pa_fail(state.self, PTO2_ERROR_TENSORMAP_PROTOCOL);
+        }
+        return false;
+    }
+    const int64_t root_observed = fdwic_trace_atomic_compare_exchange<int64_t>(
+        state.task_id, FdwicAtomicSite::SharedClaimTournamentRoot, tournament.root.owner.v, expected, desired,
+        /*result_used=*/true
+    );
+    if (root_observed != expected && root_observed != desired) {
+        return dist_shared_pa_fail(state.self, PTO2_ERROR_TENSORMAP_PROTOCOL);
+    }
+    state.won = root_observed == expected;
+    if (state.won) state.kernel_id = kernel_id;
+    return state.won;
 }
 
 PTO_DEVICE_FUNC bool dist_shared_pa_claim(
-    CoreType replay_role, int32_t replay_block_id, DistSharedPaTaskKind kind,
-    const MixedKernels *mixed, DistSharedPaBeginState &state
+    CoreType replay_role, int32_t replay_block_id, DistSharedPaTaskKind kind, const MixedKernels *mixed,
+    DistSharedPaBeginState &state
 ) {
+    (void)replay_block_id;
     state.kernel_id = INVALID_KERNEL_ID;
     state.won = false;
     state.claim_attempted = false;
@@ -66,54 +135,53 @@ PTO_DEVICE_FUNC bool dist_shared_pa_claim(
         static_cast<uint32_t>(state.task_id) >= kFdwicSharedPaTaskCapacity) {
         return false;
     }
-    __gm__ volatile int64_t *cursor = nullptr;
     int32_t kernel_id = INVALID_KERNEL_ID;
+    const int32_t core_idx = state.self->core_idx;
+    uint32_t candidate_rank = 0;
+    uint32_t tournament_groups = 0;
     if (kind == DistSharedPaTaskKind::Alloc) {
-        // Alloc has no executable lane and publishes role-independent shared
-        // output descriptors. Stripe the 32 AIC workers by the existing four
-        // task-id shards: one task still has eight dynamic first-winner
-        // candidates, while four consecutive Alloc tasks rotate across all
-        // AIC blocks. This removes redundant 96-way contention without
-        // concentrating all descriptor construction on a fixed small subset.
-        if (replay_role != CoreType::AIC ||
-            replay_block_id % kCursorShards !=
-                state.task_id % kCursorShards) {
+        // Alloc has no executable lane. All 96 workers remain legal takeover
+        // candidates; the tournament reduces same-address contention without
+        // removing idle workers from the ownership population.
+        if (core_idx < 0 || static_cast<uint32_t>(core_idx) >= kFdwicSharedWorkers ||
+            (core_idx < static_cast<int32_t>(kFdwicSharedAicWorkers) ? replay_role != CoreType::AIC :
+                                                                       replay_role != CoreType::AIV)) {
             return false;
         }
-        cursor = &g_dist.alloc_cursor[state.task_id % kCursorShards].v;
+        candidate_rank = static_cast<uint32_t>(core_idx);
+        tournament_groups = kFdwicSharedAllocClaimTournamentGroups;
     } else {
         if (mixed == nullptr) return false;
         kernel_id = dist_shared_pa_expected_kernel_id(*mixed, kind);
         if (kernel_id == INVALID_KERNEL_ID) return false;
         if (kind == DistSharedPaTaskKind::Qk || kind == DistSharedPaTaskKind::Pv) {
-            if (replay_role != CoreType::AIC) return false;
-            cursor = &g_dist.cube_cursor[state.task_id % kCursorShards].v;
+            if (replay_role != CoreType::AIC || core_idx < 0 ||
+                static_cast<uint32_t>(core_idx) >= kFdwicSharedAicWorkers) {
+                return false;
+            }
+            candidate_rank = static_cast<uint32_t>(core_idx);
+            tournament_groups = kFdwicSharedAicClaimTournamentGroups;
         } else if (kind == DistSharedPaTaskKind::Sf || kind == DistSharedPaTaskKind::Up) {
-            if (replay_role != CoreType::AIV) return false;
-            cursor =
-                &g_dist.shared_pa
-                     .shared_vector_cursor[
-                         state.task_id % static_cast<int32_t>(kFdwicSharedVectorCursorShards)
-                     ]
-                     .v;
+            if (replay_role != CoreType::AIV || core_idx < static_cast<int32_t>(kFdwicSharedAicWorkers) ||
+                static_cast<uint32_t>(core_idx) >= kFdwicSharedWorkers) {
+                return false;
+            }
+            candidate_rank = static_cast<uint32_t>(core_idx) - kFdwicSharedAicWorkers;
+            tournament_groups = kFdwicSharedAivClaimTournamentGroups;
         } else {
             return false;
         }
     }
-    state.claim_attempted = true;
-    state.won = claim(*cursor, state.task_id);
-    if (state.won) state.kernel_id = kernel_id;
-    return state.won;
+    return dist_shared_pa_claim_tournament(candidate_rank, tournament_groups, kernel_id, state);
 }
 
-PTO_DEVICE_FUNC void
-dist_shared_pa_restore_winner_ticket(const DistCompeteFirstTicket &ticket, DistSubmitCtx &ctx) {
+PTO_DEVICE_FUNC void dist_shared_pa_restore_winner_ticket(const DistCompeteFirstTicket &ticket, DistSubmitCtx &ctx) {
     ctx.self = g_self;
     ctx.task_id = ticket.task_id;
-    ctx.payload = ctx.self != nullptr && ctx.task_id >= 0 &&
-                          static_cast<uint32_t>(ctx.task_id) < kFdwicSharedPaTaskCapacity ?
-                      &ctx.self->task_payloads[ctx.task_id & kTaskPayloadMask] :
-                      nullptr;
+    ctx.payload =
+        ctx.self != nullptr && ctx.task_id >= 0 && static_cast<uint32_t>(ctx.task_id) < kFdwicSharedPaTaskCapacity ?
+            &ctx.self->task_payloads[ctx.task_id & kTaskPayloadMask] :
+            nullptr;
     ctx.result.set_task_id(PTO2TaskId::make(0, static_cast<uint32_t>(ctx.task_id)));
     ctx.tensor_count = 0;
     ctx.scalar_count = 0;
@@ -130,40 +198,32 @@ dist_shared_pa_restore_winner_ticket(const DistCompeteFirstTicket &ticket, DistS
     ctx.claim_attempted = true;
 }
 
-PTO_DEVICE_FUNC bool
-dist_shared_pa_kind_matches_task(int32_t task_id, DistSharedPaTaskKind kind) {
+PTO_DEVICE_FUNC bool dist_shared_pa_kind_matches_task(int32_t task_id, DistSharedPaTaskKind kind) {
     return task_id >= 0 && static_cast<uint32_t>(task_id) < kFdwicSharedPaTaskCapacity &&
-           static_cast<uint32_t>(task_id) % kFdwicSharedPaTasksPerBatch ==
-               static_cast<uint32_t>(kind) &&
+           static_cast<uint32_t>(task_id) % kFdwicSharedPaTasksPerBatch == static_cast<uint32_t>(kind) &&
            kind != DistSharedPaTaskKind::Count;
 }
 
-PTO_DEVICE_FUNC bool dist_shared_pa_kernel_shape(
-    const MixedKernels &mixed, DistSharedPaTaskKind kind
-) {
+PTO_DEVICE_FUNC bool dist_shared_pa_kernel_shape(const MixedKernels &mixed, DistSharedPaTaskKind kind) {
     const ActiveMask active = mixed.to_active_mask();
     if (__builtin_popcount(active.core_mask()) != 1) return false;
     if (kind == DistSharedPaTaskKind::Qk || kind == DistSharedPaTaskKind::Pv) {
-        return lane_active(active, LANE_AIC) &&
-               dist_shared_pa_expected_kernel_id(mixed, kind) != INVALID_KERNEL_ID;
+        return lane_active(active, LANE_AIC) && dist_shared_pa_expected_kernel_id(mixed, kind) != INVALID_KERNEL_ID;
     }
     if (kind == DistSharedPaTaskKind::Sf || kind == DistSharedPaTaskKind::Up) {
-        return lane_active(active, LANE_AIV0) &&
-               dist_shared_pa_expected_kernel_id(mixed, kind) != INVALID_KERNEL_ID;
+        return lane_active(active, LANE_AIV0) && dist_shared_pa_expected_kernel_id(mixed, kind) != INVALID_KERNEL_ID;
     }
     return false;
 }
 
-PTO_DEVICE_FUNC bool dist_shared_pa_ref_is(
-    const L0TaskArgs &args, int32_t index, TensorArgType tag, int32_t producer, int16_t slot
-) {
+PTO_DEVICE_FUNC bool
+dist_shared_pa_ref_is(const L0TaskArgs &args, int32_t index, TensorArgType tag, int32_t producer, int16_t slot) {
     if (index < 0 || index >= args.tensor_count() || args.tag(index) != tag ||
         !args.tensor(index).tensor_from_shared_output()) {
         return false;
     }
     const FdwicOutputRef ref = args.tensor(index).shared_output_ref();
-    return dist_shared_pa_output_ref_valid(ref) && ref.producer_task_id == producer &&
-           ref.output_slot == slot;
+    return dist_shared_pa_output_ref_valid(ref) && ref.producer_task_id == producer && ref.output_slot == slot;
 }
 
 // CCEC 15.0.5 vector codegen must not merge the LM TensorRef::ref() and GM
@@ -176,8 +236,7 @@ __attribute__((noinline))
 #endif
 bool
 dist_shared_pa_ordinary_manual_dep(const L0TaskArgs &args, int32_t index) {
-    if (index < 0 || index >= args.tensor_count() ||
-        !args.tensor(index).has_existing_tensor()) {
+    if (index < 0 || index >= args.tensor_count() || !args.tensor(index).has_existing_tensor()) {
         return false;
     }
 #if defined(__CCE_AICORE__)
@@ -202,9 +261,7 @@ struct DistSharedPaMaterializePlan {
     uint32_t register_mask;
 };
 
-PTO_DEVICE_FUNC void dist_shared_pa_reset_materialize_plan(
-    DistSharedPaMaterializePlan &plan
-) {
+PTO_DEVICE_FUNC void dist_shared_pa_reset_materialize_plan(DistSharedPaMaterializePlan &plan) {
     plan.total_output_bytes = 0;
     plan.output_start = 0;
     plan.output_count = 0;
@@ -212,108 +269,70 @@ PTO_DEVICE_FUNC void dist_shared_pa_reset_materialize_plan(
 }
 
 PTO_DEVICE_FUNC bool dist_shared_pa_validate_and_plan(
-    const L0TaskArgs &args, int32_t task_id, DistSharedPaTaskKind kind,
-    DistSharedPaMaterializePlan &plan
+    const L0TaskArgs &args, int32_t task_id, DistSharedPaTaskKind kind, DistSharedPaMaterializePlan &plan
 ) {
     dist_shared_pa_reset_materialize_plan(plan);
-    if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS ||
-        args.scalar_count() < 0 || args.scalar_count() > MAX_SCALAR_ARGS ||
-        args.has_error || args.explicit_dep_count() != 0 ||
+    if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS || args.scalar_count() < 0 ||
+        args.scalar_count() > MAX_SCALAR_ARGS || args.has_error || args.explicit_dep_count() != 0 ||
         !dist_shared_pa_kind_matches_task(task_id, kind)) {
         return false;
     }
-    const int32_t batch_start =
-        task_id - (task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
+    const int32_t batch_start = task_id - (task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
 
     switch (kind) {
     case DistSharedPaTaskKind::Alloc: {
-        const bool valid =
-            args.tensor_count() == 3 && args.scalar_count() == 0 &&
-            args.tag(0) == TensorArgType::OUTPUT &&
-            args.tag(1) == TensorArgType::OUTPUT &&
-            args.tag(2) == TensorArgType::OUTPUT &&
-            args.tensor(0).has_create_info() &&
-            args.tensor(1).has_create_info() &&
-            args.tensor(2).has_create_info();
+        const bool valid = args.tensor_count() == 3 && args.scalar_count() == 0 &&
+                           args.tag(0) == TensorArgType::OUTPUT && args.tag(1) == TensorArgType::OUTPUT &&
+                           args.tag(2) == TensorArgType::OUTPUT && args.tensor(0).has_create_info() &&
+                           args.tensor(1).has_create_info() && args.tensor(2).has_create_info();
         if (!valid) return false;
         plan.output_start = 0;
         plan.output_count = 3;
         return true;
     }
     case DistSharedPaTaskKind::Qk: {
-        const bool valid =
-            args.tensor_count() == 4 && args.scalar_count() == 2 &&
-            args.tag(0) == TensorArgType::INPUT &&
-            args.tag(1) == TensorArgType::INPUT &&
-            args.tag(2) == TensorArgType::INPUT &&
-            args.tag(3) == TensorArgType::OUTPUT &&
-            args.tensor(0).has_existing_tensor() &&
-            args.tensor(1).has_existing_tensor() &&
-            args.tensor(2).has_existing_tensor() &&
-            args.tensor(3).has_create_info();
+        const bool valid = args.tensor_count() == 4 && args.scalar_count() == 2 &&
+                           args.tag(0) == TensorArgType::INPUT && args.tag(1) == TensorArgType::INPUT &&
+                           args.tag(2) == TensorArgType::INPUT && args.tag(3) == TensorArgType::OUTPUT &&
+                           args.tensor(0).has_existing_tensor() && args.tensor(1).has_existing_tensor() &&
+                           args.tensor(2).has_existing_tensor() && args.tensor(3).has_create_info();
         if (!valid) return false;
         plan.output_start = 3;
         plan.output_count = 1;
         return true;
     }
     case DistSharedPaTaskKind::Sf: {
-        const bool valid =
-            args.tensor_count() == 4 && args.scalar_count() == 3 &&
-            dist_shared_pa_ref_is(
-                args, 0, TensorArgType::INPUT, batch_start + 1, 0
-            ) &&
-            args.tag(1) == TensorArgType::OUTPUT &&
-            args.tag(2) == TensorArgType::OUTPUT &&
-            args.tag(3) == TensorArgType::OUTPUT &&
-            args.tensor(1).has_create_info() &&
-            args.tensor(2).has_create_info() &&
-            args.tensor(3).has_create_info();
+        const bool valid = args.tensor_count() == 4 && args.scalar_count() == 3 &&
+                           dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 1, 0) &&
+                           args.tag(1) == TensorArgType::OUTPUT && args.tag(2) == TensorArgType::OUTPUT &&
+                           args.tag(3) == TensorArgType::OUTPUT && args.tensor(1).has_create_info() &&
+                           args.tensor(2).has_create_info() && args.tensor(3).has_create_info();
         if (!valid) return false;
         plan.output_start = 1;
         plan.output_count = 3;
         return true;
     }
     case DistSharedPaTaskKind::Pv: {
-        const bool valid =
-            args.tensor_count() == 4 && args.scalar_count() == 2 &&
-            dist_shared_pa_ref_is(
-                args, 0, TensorArgType::INPUT, batch_start + 2, 0
-            ) &&
-            args.tag(1) == TensorArgType::INPUT &&
-            args.tag(2) == TensorArgType::INPUT &&
-            args.tensor(1).has_existing_tensor() &&
-            args.tensor(2).has_existing_tensor() &&
-            args.tag(3) == TensorArgType::OUTPUT &&
-            args.tensor(3).has_create_info();
+        const bool valid = args.tensor_count() == 4 && args.scalar_count() == 2 &&
+                           dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 2, 0) &&
+                           args.tag(1) == TensorArgType::INPUT && args.tag(2) == TensorArgType::INPUT &&
+                           args.tensor(1).has_existing_tensor() && args.tensor(2).has_existing_tensor() &&
+                           args.tag(3) == TensorArgType::OUTPUT && args.tensor(3).has_create_info();
         if (!valid) return false;
         plan.output_start = 3;
         plan.output_count = 1;
         return true;
     }
     case DistSharedPaTaskKind::Up: {
-        const bool valid =
-            args.tensor_count() == 7 && args.scalar_count() == 2 &&
-            dist_shared_pa_ref_is(
-                args, 0, TensorArgType::INPUT, batch_start + 2, 1
-            ) &&
-            dist_shared_pa_ref_is(
-                args, 1, TensorArgType::INPUT, batch_start + 2, 2
-            ) &&
-            dist_shared_pa_ref_is(
-                args, 2, TensorArgType::INPUT, batch_start + 3, 0
-            ) &&
-            dist_shared_pa_ref_is(
-                args, 3, TensorArgType::INOUT, batch_start, 2
-            ) &&
-            dist_shared_pa_ref_is(
-                args, 4, TensorArgType::INOUT, batch_start, 1
-            ) &&
-            dist_shared_pa_ref_is(
-                args, 5, TensorArgType::INOUT, batch_start, 0
-            ) &&
-            args.tag(6) == TensorArgType::INOUT &&
-            args.tensor(6).has_existing_tensor() &&
-            dist_shared_pa_ordinary_manual_dep(args, 6);
+        const bool valid = args.tensor_count() == 7 && args.scalar_count() == 2 &&
+                           dist_shared_pa_ref_is(args, 0, TensorArgType::INPUT, batch_start + 2, 1) &&
+                           dist_shared_pa_ref_is(args, 1, TensorArgType::INPUT, batch_start + 2, 2) &&
+                           dist_shared_pa_ref_is(args, 2, TensorArgType::INPUT, batch_start + 3, 0) &&
+                           dist_shared_pa_ref_is(args, 3, TensorArgType::INOUT, batch_start, 2) &&
+                           dist_shared_pa_ref_is(args, 4, TensorArgType::INOUT, batch_start, 1) &&
+                           dist_shared_pa_ref_is(args, 5, TensorArgType::INOUT, batch_start, 0) &&
+                           args.tag(6) == TensorArgType::INOUT && args.tensor(6).has_existing_tensor() &&
+                           dist_shared_pa_ordinary_manual_dep(args, 6);
         if (!valid) return false;
         plan.register_mask = (1U << 3) | (1U << 4) | (1U << 5);
         return true;
@@ -324,19 +343,15 @@ PTO_DEVICE_FUNC bool dist_shared_pa_validate_and_plan(
     return false;
 }
 
-PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
-    const L0TaskArgs &args, DistSubmitCtx &ctx,
-    DistSharedPaMaterializePlan &plan
-) {
+PTO_DEVICE_FUNC bool
+dist_shared_pa_materialize_args(const L0TaskArgs &args, DistSubmitCtx &ctx, DistSharedPaMaterializePlan &plan) {
     // Complete every deterministic descriptor/layout check before the
     // no-rollback heap cursors or payload are touched.
-    if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS ||
-        ctx.self == nullptr || ctx.payload == nullptr || ctx.task_id < 0 ||
-        static_cast<uint32_t>(ctx.task_id) >= kFdwicSharedPaTaskCapacity ||
+    if (args.tensor_count() < 0 || args.tensor_count() > MAX_TENSOR_ARGS || ctx.self == nullptr ||
+        ctx.payload == nullptr || ctx.task_id < 0 || static_cast<uint32_t>(ctx.task_id) >= kFdwicSharedPaTaskCapacity ||
         ctx.result.size() != 0 || plan.output_count > 3 ||
         plan.output_start > static_cast<uint32_t>(args.tensor_count()) ||
-        plan.output_count >
-            static_cast<uint32_t>(args.tensor_count()) - plan.output_start) {
+        plan.output_count > static_cast<uint32_t>(args.tensor_count()) - plan.output_start) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
     plan.total_output_bytes = 0;
@@ -346,16 +361,12 @@ PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
         if (arg_index >= static_cast<uint32_t>(args.tensor_count()) ||
             args.tag(static_cast<int32_t>(arg_index)) != TensorArgType::OUTPUT ||
             !args.tensor(static_cast<int32_t>(arg_index)).has_create_info() ||
-            !dist_shared_pa_create_info_bytes(
-                args.tensor(static_cast<int32_t>(arg_index)).create_info(), bytes
-            ) ||
+            !dist_shared_pa_create_info_bytes(args.tensor(static_cast<int32_t>(arg_index)).create_info(), bytes) ||
             bytes > UINT64_MAX - (PTO2_PACKED_OUTPUT_ALIGN - 1U)) {
             return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         }
-        const uint64_t aligned =
-            PTO2_ALIGN_UP(bytes, PTO2_PACKED_OUTPUT_ALIGN);
-        if (aligned < bytes ||
-            plan.total_output_bytes > UINT64_MAX - aligned) {
+        const uint64_t aligned = PTO2_ALIGN_UP(bytes, PTO2_PACKED_OUTPUT_ALIGN);
+        if (aligned < bytes || plan.total_output_bytes > UINT64_MAX - aligned) {
             return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         }
         plan.output_bytes[output] = bytes;
@@ -367,8 +378,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
 
     DistSharedPaHeapReservation reservation;
     if (!dist_shared_pa_reserve_heap(
-            g_dist.shared_pa, ctx.task_id, plan.total_output_bytes,
-            static_cast<uint64_t>(g_dist.heap_size), reservation
+            g_dist.shared_pa, ctx.task_id, plan.total_output_bytes, static_cast<uint64_t>(g_dist.heap_size), reservation
         )) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_CAPACITY);
     }
@@ -376,18 +386,14 @@ PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
     uint64_t output_offset = 0;
     for (uint32_t output = 0; output < plan.output_count; ++output) {
         const uint32_t arg_index = plan.output_start + output;
-        const TensorCreateInfo &create_info =
-            args.tensor(static_cast<int32_t>(arg_index)).create_info();
+        const TensorCreateInfo &create_info = args.tensor(static_cast<int32_t>(arg_index)).create_info();
         __gm__ Tensor &slot = ctx.payload->tensors[arg_index];
         init_tensor_from_create_info(
-            slot, create_info,
-            g_dist.heap_base + reservation.task_base + output_offset,
-            plan.output_bytes[output]
+            slot, create_info, g_dist.heap_base + reservation.task_base + output_offset, plan.output_bytes[output]
         );
         slot.owner_task_id.raw = ctx.result.task_id().raw;
         ctx.result.materialize_output(slot);
-        output_offset +=
-            PTO2_ALIGN_UP(plan.output_bytes[output], PTO2_PACKED_OUTPUT_ALIGN);
+        output_offset += PTO2_ALIGN_UP(plan.output_bytes[output], PTO2_PACKED_OUTPUT_ALIGN);
     }
     ctx.tensor_count = args.tensor_count();
     ctx.scalar_count = args.scalar_count();
@@ -398,33 +404,28 @@ PTO_DEVICE_FUNC bool dist_shared_pa_materialize_args(
 }
 
 PTO_DEVICE_FUNC bool dist_shared_pa_prepare_writer_history(
-    const L0TaskArgs &args, DistSubmitCtx &ctx, DistSharedPaTaskKind kind,
-    DistSharedPaMetadataTrace *trace = nullptr
+    const L0TaskArgs &args, DistSubmitCtx &ctx, DistSharedPaTaskKind kind, DistSharedPaMetadataTrace *trace = nullptr
 ) {
     if (kind != DistSharedPaTaskKind::Up) return ctx.register_mask == 0;
     if (ctx.register_mask != ((1U << 3) | (1U << 4) | (1U << 5))) return false;
     uint32_t symbol_keys[3] = {};
     for (uint32_t index = 0; index < 3; ++index) {
-        if (!dist_shared_pa_output_key(args.tensor(static_cast<int32_t>(index + 3)).shared_output_ref(),
-                                       symbol_keys[index])) {
+        if (!dist_shared_pa_output_key(
+                args.tensor(static_cast<int32_t>(index + 3)).shared_output_ref(), symbol_keys[index]
+            )) {
             return false;
         }
     }
-    const int32_t batch_start =
-        ctx.task_id - (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
-    return dist_shared_pa_prepare_up_history(
-        g_dist.shared_pa, ctx.task_id, batch_start, symbol_keys, trace
-    );
+    const int32_t batch_start = ctx.task_id - (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
+    return dist_shared_pa_prepare_up_history(g_dist.shared_pa, ctx.task_id, batch_start, symbol_keys, trace);
 }
 
-PTO_DEVICE_FUNC bool dist_shared_pa_wait_insert_turn(
-    DistSubmitCtx &ctx, int64_t &ready_observed, uint32_t &load_count
-) {
+PTO_DEVICE_FUNC bool
+dist_shared_pa_wait_insert_turn(DistSubmitCtx &ctx, int64_t &ready_observed, uint32_t &load_count) {
     ready_observed = -1;
     load_count = 0;
     if (ctx.task_id == 0) return true;
-    __gm__ volatile int64_t &predecessor =
-        g_dist.tasks[static_cast<uint32_t>(ctx.task_id - 1)].deps_prepared;
+    __gm__ volatile int64_t &predecessor = g_dist.tasks[static_cast<uint32_t>(ctx.task_id - 1)].deps_prepared;
     uint32_t polls = 0;
     while (true) {
         const int64_t observed = atomic_load(predecessor);
@@ -441,8 +442,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_wait_insert_turn(
         ++polls;
         if ((polls & 1023U) == 0 &&
             fdwic_trace_atomic_load(
-                ctx.task_id, FdwicAtomicSite::SharedMetadataFatalGuardLoad,
-                g_dist.fatal, /*result_used=*/true
+                ctx.task_id, FdwicAtomicSite::SharedMetadataFatalGuardLoad, g_dist.fatal, /*result_used=*/true
             ) != 0) {
             if (ctx.self != nullptr) ctx.self->local_index = kFlagCap;
             return false;
@@ -450,12 +450,9 @@ PTO_DEVICE_FUNC bool dist_shared_pa_wait_insert_turn(
     }
 }
 
-PTO_DEVICE_FUNC bool
-dist_shared_pa_publish_metadata_and_handoff(
-    DistSubmitCtx &ctx, DistSharedPaTaskKind kind,
-    DistSharedPaMetadataTrace *metadata_trace, int64_t &ready_observed,
-    uint32_t &load_count, uint64_t &metadata_begin, uint64_t &metadata_end,
-    DistSharedPaHandoffTrace &handoff_trace
+PTO_DEVICE_FUNC bool dist_shared_pa_publish_metadata_and_handoff(
+    DistSubmitCtx &ctx, DistSharedPaTaskKind kind, DistSharedPaMetadataTrace *metadata_trace, int64_t &ready_observed,
+    uint32_t &load_count, uint64_t &metadata_begin, uint64_t &metadata_end, DistSharedPaHandoffTrace &handoff_trace
 ) {
     handoff_trace.begin = 0;
     handoff_trace.end = 0;
@@ -464,21 +461,16 @@ dist_shared_pa_publish_metadata_and_handoff(
     if (!dist_shared_pa_wait_insert_turn(ctx, ready_observed, load_count)) return false;
 #if DIST_TRACE_ENABLED
     if (fdwic_swimlane_enabled()) {
-        metadata_begin =
-            load_count != 0 ? fdwic_atomic_result_ready_tick(ready_observed) :
-                              fdwic_swimlane_detail_now();
+        metadata_begin = load_count != 0 ? fdwic_atomic_result_ready_tick(ready_observed) : fdwic_swimlane_detail_now();
     } else {
         metadata_begin = 0;
     }
 #else
     metadata_begin = 0;
 #endif
-    const int32_t batch_start =
-        ctx.task_id - (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
+    const int32_t batch_start = ctx.task_id - (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
     if (kind == DistSharedPaTaskKind::Up &&
-        !dist_shared_pa_commit_up_group_writer(
-            g_dist.shared_pa, ctx.task_id, batch_start, metadata_trace
-        )) {
+        !dist_shared_pa_commit_up_group_writer(g_dist.shared_pa, ctx.task_id, batch_start, metadata_trace)) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
 #if DIST_TRACE_ENABLED
@@ -487,25 +479,18 @@ dist_shared_pa_publish_metadata_and_handoff(
     metadata_end = 0;
 #endif
     store_barrier();
-    __gm__ volatile int64_t &completion =
-        g_dist.tasks[static_cast<uint32_t>(ctx.task_id)].deps_prepared;
+    __gm__ volatile int64_t &completion = g_dist.tasks[static_cast<uint32_t>(ctx.task_id)].deps_prepared;
 #if DIST_TRACE_ENABLED
     if (fdwic_atomic_swimlane_enabled()) {
         handoff_trace.begin = fdwic_swimlane_detail_now();
-        handoff_trace.observed = atomic_compare_exchange(
-            completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id)
-        );
+        handoff_trace.observed = atomic_compare_exchange(completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id));
         handoff_trace.end = fdwic_atomic_result_ready_tick(handoff_trace.observed);
         handoff_trace.captured = true;
     } else {
-        handoff_trace.observed = atomic_compare_exchange(
-            completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id)
-        );
+        handoff_trace.observed = atomic_compare_exchange(completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id));
     }
 #else
-    handoff_trace.observed = atomic_compare_exchange(
-        completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id)
-    );
+    handoff_trace.observed = atomic_compare_exchange(completion, int64_t{-1}, static_cast<int64_t>(ctx.task_id));
 #endif
     if (handoff_trace.observed != -1) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
@@ -513,8 +498,7 @@ dist_shared_pa_publish_metadata_and_handoff(
     return true;
 }
 
-PTO_DEVICE_FUNC bool
-dist_shared_pa_close_loser(__gm__ DistCore *self, const DistCompeteFirstTicket &ticket) {
+PTO_DEVICE_FUNC bool dist_shared_pa_close_loser(__gm__ DistCore *self, const DistCompeteFirstTicket &ticket) {
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::ArgBuild>();
     // Phase-1 shared PA accepts only single-lane tasks, so no BlockWon
     // deposit can exist for a loser to progress here.
@@ -522,8 +506,7 @@ dist_shared_pa_close_loser(__gm__ DistCore *self, const DistCompeteFirstTicket &
     fdwic_perf_clock_submit_end(ticket.task_id);
     fdwic_submit_pmu_submit_end(ticket.task_id);
     TRACE_SPAN_RECORD(
-        ticket.submit_begin, submit_end, self, ticket.task_id, ticket.kernel_id,
-        TracePhase::Submit, 0, 0
+        ticket.submit_begin, submit_end, self, ticket.task_id, ticket.kernel_id, TracePhase::Submit, 0, 0
     );
     return true;
 }
@@ -534,13 +517,15 @@ PTO_DEVICE_FUNC inline __attribute__((always_inline)) DistCompeteFirstTicket dis
 #else
 PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
 #endif
+#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
     DistSharedPaReplayContext replay, DistSharedPaTaskKind kind, const MixedKernels *mixed
+#else
+    DistSharedPaReplayContext replay, DistSharedPaTaskKind kind, const MixedKernels *mixed
+#endif
 ) {
     DistSharedPaBeginState state{};
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-    const bool replay_ready =
-        replay.ready() && replay.role() == CompiledReplayRole &&
-        g_self != nullptr;
+    const bool replay_ready = replay.ready() && replay.role() == CompiledReplayRole && g_self != nullptr;
 #else
     const bool replay_ready = replay.ready() && g_self != nullptr;
 #endif
@@ -564,16 +549,16 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::EfDrainControl>();
     // Generic shared submits are rejected and every supported PA task is
     // single-lane. EfDrain therefore only has local ring work to progress.
-    drain_phase_b(state.self);
+    dist_shared_pa_opportunistic_drain(state.self);
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::EfDrainControl>();
     TRACE_TIMESTAMP(efdrain_end);
     // Shared schema-v5 reconstructs EfDrain exactly from the fixed endpoint
     // pair Submit.begin -> Claim.begin. Do not spend a compact generic row on
     // the same interval; the host deliberately rejects such duplicate rows.
 
+    bool ready = dist_shared_pa_kind_matches_task(state.task_id, kind);
     const DistSubmitKind submit_kind =
         kind == DistSharedPaTaskKind::Alloc ? DistSubmitKind::Alloc : DistSubmitKind::Kernel;
-    bool ready = dist_shared_pa_kind_matches_task(state.task_id, kind);
     if (ready && submit_kind == DistSubmitKind::Kernel) {
         ready = mixed != nullptr && dist_shared_pa_kernel_shape(*mixed, kind);
     } else if (ready) {
@@ -585,24 +570,15 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
 
     const uint64_t claim_begin = efdrain_end;
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::Claim>();
-    const bool won = ready && dist_shared_pa_claim(
-#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-        CompiledReplayRole,
-#else
-        replay.role(),
-#endif
-        replay.block_id(), kind, mixed, state
-    );
-    const uint32_t claim_flags =
-        (won ? kFdwicClaimWon : 0U) |
-        (state.claim_attempted ? kFdwicClaimAttempted : 0U);
+    const bool won = ready && dist_shared_pa_claim(replay.role(), replay.block_id(), kind, mixed, state);
+    const uint32_t claim_flags = (won ? kFdwicClaimWon : 0U) | (state.claim_attempted ? kFdwicClaimAttempted : 0U);
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Claim>();
     TRACE_TIMESTAMP(claim_end);
     fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::ArgBuild>();
     fdwic_submit_pmu_empty_bracket_calibrate();
     TRACE_SPAN_RECORD(
-        claim_begin, claim_end, state.self, state.task_id, state.kernel_id,
-        TracePhase::Claim, claim_flags, static_cast<uint32_t>(kind)
+        claim_begin, claim_end, state.self, state.task_id, state.kernel_id, TracePhase::Claim, claim_flags,
+        static_cast<uint32_t>(kind)
     );
     DistCompeteFirstTicket ticket{};
     ticket.submit_begin = submit_begin;
@@ -620,22 +596,19 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
 }
 
 PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
-    DistSubmitCtx &ctx, const DistCompeteFirstTicket &ticket, const MixedKernels *mixed,
-    DistSharedPaTaskKind kind, const L0TaskArgs &args
+    DistSubmitCtx &ctx, const DistCompeteFirstTicket &ticket, const MixedKernels *mixed, DistSharedPaTaskKind kind,
+    const L0TaskArgs &args
 ) {
     // One winner-side guard per task preserves fail-closed convergence without
     // adding a contended global atomic load to every one of the 95 losers.
     if (fdwic_trace_atomic_load(
-            ctx.task_id, FdwicAtomicSite::SharedWinnerFatalGuardLoad,
-            g_dist.fatal, /*result_used=*/true
+            ctx.task_id, FdwicAtomicSite::SharedWinnerFatalGuardLoad, g_dist.fatal, /*result_used=*/true
         ) != 0) {
         if (ctx.self != nullptr) ctx.self->local_index = kFlagCap;
         return false;
     }
     DistSharedPaMaterializePlan materialize_plan;
-    if (!dist_shared_pa_validate_and_plan(
-            args, ctx.task_id, kind, materialize_plan
-        )) {
+    if (!dist_shared_pa_validate_and_plan(args, ctx.task_id, kind, materialize_plan)) {
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
     ctx.tensor_count = args.tensor_count();
@@ -657,8 +630,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
 #endif
     TRACE_TIMESTAMP(task_outputs_begin);
     const bool outputs_published = dist_shared_pa_publish_outputs(
-        g_dist.shared_pa, ctx.task_id, ctx.result,
-        materialize_plan.output_count, output_trace_ptr
+        g_dist.shared_pa, ctx.task_id, ctx.result, materialize_plan.output_count, output_trace_ptr
     );
     TRACE_TIMESTAMP(task_outputs_end);
     if (!outputs_published) {
@@ -673,23 +645,17 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
 #else
     DistSharedPaMetadataTrace *metadata_trace_ptr = nullptr;
 #endif
-    if (!dist_shared_pa_prepare_writer_history(
-            args, ctx, kind, metadata_trace_ptr
-        )) {
+    if (!dist_shared_pa_prepare_writer_history(args, ctx, kind, metadata_trace_ptr)) {
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Materialize>();
         return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
     }
     if (kind == DistSharedPaTaskKind::Up) {
-        const int32_t batch_start =
-            ctx.task_id -
-            (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
+        const int32_t batch_start = ctx.task_id - (ctx.task_id % static_cast<int32_t>(kFdwicSharedPaTasksPerBatch));
         // The history clean-out above provides the predecessor-wait lead time
         // for this performance hint. Correctness still depends on the
         // return-ready group CAS in Register.
         DistSharedPaAicoreOps::PreloadDataCache(
-            &g_dist.shared_pa
-                 .shared_outputs[static_cast<uint32_t>(batch_start)]
-                 .last_writer[0]
+            &g_dist.shared_pa.shared_outputs[static_cast<uint32_t>(batch_start)].last_writer[0]
         );
     }
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Materialize>();
@@ -702,8 +668,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
     uint64_t metadata_end = 0;
     DistSharedPaHandoffTrace handoff_trace{};
     if (!dist_shared_pa_publish_metadata_and_handoff(
-            ctx, kind, metadata_trace_ptr, ready_observed,
-            insert_turn_load_count, metadata_begin, metadata_end,
+            ctx, kind, metadata_trace_ptr, ready_observed, insert_turn_load_count, metadata_begin, metadata_end,
             handoff_trace
         )) {
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Register>();
@@ -711,10 +676,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
     }
     fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Register>();
 #if DIST_TRACE_ENABLED
-    const uint64_t register_end =
-        fdwic_swimlane_enabled() ?
-            fdwic_atomic_result_ready_tick(handoff_trace.observed) :
-            0;
+    const uint64_t register_end = fdwic_swimlane_enabled() ? fdwic_atomic_result_ready_tick(handoff_trace.observed) : 0;
 #else
     const uint64_t register_end = 0;
 #endif
@@ -725,63 +687,54 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
     // so trace stores never extend the serialized metadata publication chain.
     if (metadata_trace.history_dcci_lines != 0) {
         (void)fdwic_swimlane_record_dcci(
-            ctx.self, ctx.task_id, -1,
-            FdwicDcciSite::SharedWriterHistoryFlush,
-            FdwicDcciOp::CleanOut, /*trailing_dsb=*/true,
-            /*call_count=*/1, metadata_trace.history_dcci_lines,
-            metadata_trace.history_dcci_begin,
+            ctx.self, ctx.task_id, -1, FdwicDcciSite::SharedWriterHistoryFlush, FdwicDcciOp::CleanOut,
+            /*trailing_dsb=*/true,
+            /*call_count=*/1, metadata_trace.history_dcci_lines, metadata_trace.history_dcci_begin,
             metadata_trace.history_dcci_end
         );
     }
     if (metadata_trace.group_cas_captured) {
         (void)fdwic_swimlane_record_captured_atomic(
-            ctx.task_id, FdwicAtomicSite::SharedMetadataLastWriterCommit,
-            FdwicAtomicOp::CompareExchange,
+            ctx.task_id, FdwicAtomicSite::SharedMetadataLastWriterCommit, FdwicAtomicOp::CompareExchange,
             metadata_trace.group_cas_begin, metadata_trace.group_cas_end,
             /*result_used=*/true, fdwic_atomic_return_ready_observed()
         );
     }
 #endif
     TRACE_SPAN_RECORD(
-        materialize_begin, materialize_end, ctx.self, ctx.task_id, ctx.kernel_id,
-        TracePhase::Materialize, 0,
+        materialize_begin, materialize_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Materialize, 0,
         kind == DistSharedPaTaskKind::Alloc ? 1U : 0U
     );
     TRACE_SPAN_RECORD(
-        task_outputs_begin, task_outputs_end, ctx.self, ctx.task_id,
-        ctx.kernel_id, TracePhase::SharedMaterializePublishTaskOutputs, 0, 0
+        task_outputs_begin, task_outputs_end, ctx.self, ctx.task_id, ctx.kernel_id,
+        TracePhase::SharedMaterializePublishTaskOutputs, 0, 0
     );
 #if DIST_TRACE_ENABLED
     TRACE_SPAN_RECORD(
-        output_trace.copy_begin, output_trace.copy_end, ctx.self, ctx.task_id,
-        ctx.kernel_id, TracePhase::SharedMaterializePublishTaskOutputsCopy, 0, 0
+        output_trace.copy_begin, output_trace.copy_end, ctx.self, ctx.task_id, ctx.kernel_id,
+        TracePhase::SharedMaterializePublishTaskOutputsCopy, 0, 0
     );
     TRACE_SPAN_RECORD(
-        output_trace.flush_begin, output_trace.flush_end, ctx.self, ctx.task_id,
-        ctx.kernel_id, TracePhase::SharedMaterializePublishTaskOutputsFlush, 0, 0
+        output_trace.flush_begin, output_trace.flush_end, ctx.self, ctx.task_id, ctx.kernel_id,
+        TracePhase::SharedMaterializePublishTaskOutputsFlush, 0, 0
     );
 #endif
+    TRACE_SPAN_RECORD(materialize_end, register_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Register, 0, 0);
     TRACE_SPAN_RECORD(
-        materialize_end, register_end, ctx.self, ctx.task_id, ctx.kernel_id,
-        TracePhase::Register, 0, 0
-    );
-    TRACE_SPAN_RECORD(
-        metadata_begin, metadata_end, ctx.self, ctx.task_id, ctx.kernel_id,
-        TracePhase::SharedRegisterPublishMetadata, 0, 0
+        metadata_begin, metadata_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::SharedRegisterPublishMetadata,
+        0, 0
     );
 #if DIST_TRACE_ENABLED
     if (insert_turn_load_count != 0) {
         (void)fdwic_swimlane_record_aggregate_atomic_poll(
-            FdwicAtomicSite::SharedInsertTurnPoll,
-            materialize_end, metadata_begin, insert_turn_load_count,
+            FdwicAtomicSite::SharedInsertTurnPoll, materialize_end, metadata_begin, insert_turn_load_count,
             fdwic_atomic_return_ready_observed()
         );
     }
     if (handoff_trace.captured) {
         (void)fdwic_swimlane_record_captured_atomic(
-            ctx.task_id, FdwicAtomicSite::SharedInsertTurnHandoff,
-            FdwicAtomicOp::CompareExchange,
-            handoff_trace.begin, handoff_trace.end,
+            ctx.task_id, FdwicAtomicSite::SharedInsertTurnHandoff, FdwicAtomicOp::CompareExchange, handoff_trace.begin,
+            handoff_trace.end,
             /*result_used=*/true, fdwic_atomic_return_ready_observed()
         );
     }
@@ -794,8 +747,8 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::Fanin>();
         TRACE_TIMESTAMP(fanin_end);
         TRACE_SPAN_RECORD(
-            register_end, fanin_end, ctx.self, ctx.task_id, ctx.kernel_id,
-            TracePhase::Fanin, 0, static_cast<uint32_t>(ctx.fanin_count)
+            register_end, fanin_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Fanin, 0,
+            static_cast<uint32_t>(ctx.fanin_count)
         );
         if (!fanin_ok) return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         build_begin = fanin_end;
@@ -807,10 +760,7 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::AllocComplete>();
         if (!completed) return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         TRACE_TIMESTAMP(build_end);
-        TRACE_SPAN_RECORD(
-            build_begin, build_end, ctx.self, ctx.task_id, -1,
-            TracePhase::AllocComplete, 0, 0
-        );
+        TRACE_SPAN_RECORD(build_begin, build_end, ctx.self, ctx.task_id, -1, TracePhase::AllocComplete, 0, 0);
     } else {
         if (mixed == nullptr) return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         fdwic_submit_pmu_phase_begin<FdwicSubmitPmuPhase::WinnerBuild>();
@@ -818,17 +768,14 @@ PTO_DEVICE_FUNC bool dist_shared_pa_finish_winner(
         fdwic_submit_pmu_phase_end<FdwicSubmitPmuPhase::WinnerBuild>();
         if (!built) return dist_shared_pa_fail(ctx, PTO2_ERROR_TENSORMAP_PROTOCOL);
         TRACE_TIMESTAMP(build_end);
-        TRACE_SPAN_RECORD(
-            build_begin, build_end, ctx.self, ctx.task_id, ctx.kernel_id,
-            TracePhase::WinnerBuild, 0, 0
-        );
+        TRACE_SPAN_RECORD(build_begin, build_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::WinnerBuild, 0, 0);
     }
     TRACE_TIMESTAMP(submit_end);
     fdwic_perf_clock_submit_end(ctx.task_id);
     fdwic_submit_pmu_submit_end(ctx.task_id);
     TRACE_SPAN_RECORD(
-        ticket.submit_begin, submit_end, ctx.self, ctx.task_id, ctx.kernel_id,
-        TracePhase::Submit, 1, static_cast<uint32_t>(kind)
+        ticket.submit_begin, submit_end, ctx.self, ctx.task_id, ctx.kernel_id, TracePhase::Submit, 1,
+        static_cast<uint32_t>(kind)
     );
     return true;
 }

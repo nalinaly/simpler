@@ -91,17 +91,24 @@ def _shared_capture(level=1):  # noqa: PLR0912
         for task in range(SHARED_V5_PHASE1_TASK_COUNT):
             kind = task % 5
             task_func = -1 if kind == 0 else kind - 1
-            attempted = (
-                (kind == 0 and role == "aic" and block % 4 == task % 4)
-                or (role == "aic" and kind in (1, 3))
+            attempted = kind == 0 or (
+                (role == "aic" and kind in (1, 3))
                 or (role == "aiv" and kind in (2, 4))
             )
+            root_contender = (
+                (kind == 0 and core < 8)
+                or (kind in (1, 3) and core < min(6, _SYNTHETIC_AIC_CORES))
+                or (
+                    kind in (2, 4)
+                    and _SYNTHETIC_AIC_CORES <= core < _SYNTHETIC_AIC_CORES + min(8, _SYNTHETIC_AIV_CORES)
+                )
+            )
             winner_core = {
-                0: task % 4,
+                0: 0,
                 1: 0,
                 2: _SYNTHETIC_AIC_CORES,
                 3: 0,
-                4: _SYNTHETIC_AIC_CORES + 1,
+                4: _SYNTHETIC_AIC_CORES,
             }[kind]
             winner = core == winner_core
             func = task_func if winner else -1
@@ -120,9 +127,22 @@ def _shared_capture(level=1):  # noqa: PLR0912
                     -1,
                     "Atomic",
                     claim_start + 2,
+                    claim_start + 4,
+                    4 | (1 << 4),
+                    40,
+                )
+            if level == 4 and root_contender:
+                _append_row(
+                    rows,
+                    core,
+                    lane,
+                    task,
+                    -1,
+                    "Atomic",
+                    claim_start + 5,
                     claim_end - 2,
-                    3 | (1 << 4),
-                    4,
+                    4 | (1 << 4),
+                    41,
                 )
             if winner:
                 _append_row(rows, core, lane, task, func, "Materialize", submit_start + 30, submit_start + 100)
@@ -387,19 +407,16 @@ def test_shared_v5_level1_converts_and_closes_exclusive_model(shared_level1_raw,
     assert "materialize.publish_shared_output_descriptors#0" in names
 
 
-def test_shared_v5_claim_attempted_matches_striped_alloc_contract(shared_level1_raw):
+def test_shared_v5_claim_attempted_matches_full_alloc_tournament_contract(shared_level1_raw):
     raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
     claims = [row for row in raw["fdwic_events"] if row[5] == "Claim"]
     attempted = [row for row in claims if row[8] & (1 << 1)]
     alloc_attempted = [row for row in attempted if row[3] % 5 == 0]
 
     assert len(claims) == _SYNTHETIC_CORE_COUNT * SHARED_V5_PHASE1_TASK_COUNT
-    assert len(attempted) == 6_400
-    assert len(alloc_attempted) == 256
-    assert all(
-        row[2] == 0 and row[1] % 4 == row[3] % 4
-        for row in alloc_attempted
-    )
+    assert len(attempted) == 9_216
+    assert len(alloc_attempted) == 3_072
+    assert {row[0] for row in alloc_attempted} == set(range(_SYNTHETIC_CORE_COUNT))
 
     production_attempts = 0
     for task in range(SHARED_V5_PHASE1_TASK_COUNT):
@@ -411,7 +428,7 @@ def test_shared_v5_claim_attempted_matches_striped_alloc_contract(shared_level1_
             for block in range(32)
             for _lane in range(2)
         )
-    assert production_attempts == 51_200
+    assert production_attempts == 73_728
 
 
 def test_shared_v5_rejects_atomic_name_table_drift(shared_level1_raw):
@@ -540,24 +557,24 @@ def test_shared_v5_level4_validates_insert_turn_atomic_and_dcci_closure(shared_l
     assert report["validation"]["status"] == "PASS"
     assert data["l2_swimlane_level"] == 4
     assert report["overlays"]["Atomic"]["event_count"] > 0
-    assert report["overlays"]["Atomic"]["event_count"] == 8_959
+    assert report["overlays"]["Atomic"]["event_count"] == 19_967
     assert report["overlays"]["Dcci"]["event_count"] == 4_120
 
 
-def test_shared_v5_level4_rejects_missing_claim_max(shared_level4_raw):
+def test_shared_v5_level4_rejects_missing_tournament_local(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     raw["fdwic_events"] = [
         row
         for row in raw["fdwic_events"]
-        if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 4)
+        if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 40)
     ]
     _write_mutated_capture(shared_level4_raw, raw)
 
-    with pytest.raises(ValueError, match="ClaimMax"):
+    with pytest.raises(ValueError, match="tournament local"):
         read_perf_data(shared_level4_raw)
 
 
-def test_shared_v5_level4_rejects_claim_max_for_nonattempted_core(shared_level4_raw):
+def test_shared_v5_level4_rejects_tournament_local_for_nonattempted_core(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     claim = next(
         row
@@ -574,12 +591,42 @@ def test_shared_v5_level4_rejects_claim_max_for_nonattempted_core(shared_level4_
         "Atomic",
         claim[6] + 2,
         claim[7] - 2,
-        3 | (1 << 4),
-        4,
+        4 | (1 << 4),
+        40,
     )
     _write_mutated_capture(shared_level4_raw, raw)
 
-    with pytest.raises(ValueError, match="ClaimMax"):
+    with pytest.raises(ValueError, match="tournament local"):
+        read_perf_data(shared_level4_raw)
+
+
+def test_shared_v5_level4_rejects_missing_tournament_root_group(shared_level4_raw):
+    raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
+    raw["fdwic_events"] = [
+        row
+        for row in raw["fdwic_events"]
+        if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 41)
+    ]
+    _write_mutated_capture(shared_level4_raw, raw)
+
+    with pytest.raises(ValueError, match="tournament root"):
+        read_perf_data(shared_level4_raw)
+
+
+def test_shared_v5_level4_rejects_duplicate_tournament_root_group(shared_level4_raw):
+    raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
+    claim = next(
+        row
+        for row in raw["fdwic_events"]
+        if row[0] == 0 and row[3] == 1 and row[5] == "Claim"
+    )
+    _append_row(
+        raw["fdwic_events"], claim[0], claim[2], claim[3], -1,
+        "Atomic", claim[6] + 5, claim[7] - 2, 4 | (1 << 4), 41,
+    )
+    _write_mutated_capture(shared_level4_raw, raw)
+
+    with pytest.raises(ValueError, match="tournament root count"):
         read_perf_data(shared_level4_raw)
 
 

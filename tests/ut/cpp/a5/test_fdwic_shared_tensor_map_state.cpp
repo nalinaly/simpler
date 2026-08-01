@@ -18,12 +18,24 @@
 #include <type_traits>
 
 #include "dist_engine/aicpu/shared_tensor_map_init.h"
+#include "dist_engine/common/submit_pmu_types.h"
 
 namespace {
 
 #if PTO_FDWIC_SHARED_MAP
 
 constexpr uint8_t kPayloadPattern = 0xa5;
+
+TEST(FdwicSharedSubmitPmuShape, MaterializeAndRegisterAreWinnerDistributed) {
+    constexpr uint32_t kTasks = 1280;
+    for (FdwicSubmitPmuPhase phase : {FdwicSubmitPmuPhase::Materialize, FdwicSubmitPmuPhase::Register}) {
+        EXPECT_TRUE(fdwic_submit_pmu_phase_has_dynamic_calls(phase));
+        EXPECT_FALSE(fdwic_submit_pmu_dynamic_calls_have_fixed_roles(phase));
+        EXPECT_EQ(fdwic_submit_pmu_expected_dynamic_calls_all(phase, kTasks), kTasks);
+        EXPECT_EQ(fdwic_submit_pmu_dynamic_calls_max_per_core(phase, kTasks), kTasks);
+        EXPECT_EQ(fdwic_submit_pmu_expected_phase_calls(phase, kTasks), 0U);
+    }
+}
 
 bool bytes_keep_pattern(const void *object, size_t offset, size_t bytes) {
     const auto *data = static_cast<const uint8_t *>(object);
@@ -40,6 +52,11 @@ TEST(FdwicSharedPaTensorMapState, ExactLayoutAppendsAfterTheFrozenPrivateTail) {
     EXPECT_EQ(kFdwicSharedOutputMaxPerTask, 8U);
     EXPECT_EQ(kFdwicSharedHeapShards, 8U);
     EXPECT_EQ(kFdwicSharedVectorCursorShards, 8U);
+    EXPECT_EQ(kFdwicSharedWorkers, 96U);
+    EXPECT_EQ(kFdwicSharedAllocClaimTournamentGroups, 8U);
+    EXPECT_EQ(kFdwicSharedAicClaimTournamentGroups, 6U);
+    EXPECT_EQ(kFdwicSharedAivClaimTournamentGroups, 8U);
+    EXPECT_EQ(kFdwicSharedClaimTournamentNodeStride, 512U);
     EXPECT_EQ(kFdwicSharedHeapBytes, 256ULL << 20);
     EXPECT_EQ(kFdwicSharedHeapShardBytes, 32ULL << 20);
 
@@ -53,13 +70,17 @@ TEST(FdwicSharedPaTensorMapState, ExactLayoutAppendsAfterTheFrozenPrivateTail) {
     EXPECT_EQ(sizeof(SharedWriterHistoryCell), 320U);
     EXPECT_EQ(alignof(SharedWriterHistoryCell), kCacheLine);
     EXPECT_EQ(offsetof(SharedWriterHistoryCell, entries), 16U);
+    EXPECT_EQ(sizeof(SharedClaimTournamentNode), 512U);
+    EXPECT_EQ(sizeof(SharedClaimTournamentTask), 4608U);
+    EXPECT_EQ(offsetof(SharedClaimTournamentTask, local), 512U);
 
     EXPECT_EQ(offsetof(SharedPaTensorMapState, shared_outputs), 0U);
     EXPECT_EQ(offsetof(SharedPaTensorMapState, shared_heap_cursor), 2621440U);
     EXPECT_EQ(offsetof(SharedPaTensorMapState, shared_heap_vend), 2621952U);
     EXPECT_EQ(offsetof(SharedPaTensorMapState, shared_vector_cursor), 2622016U);
     EXPECT_EQ(offsetof(SharedPaTensorMapState, writer_history), 2622528U);
-    EXPECT_EQ(sizeof(SharedPaTensorMapState), 3032128U);
+    EXPECT_EQ(offsetof(SharedPaTensorMapState, claim_tournament), 3032128U);
+    EXPECT_EQ(sizeof(SharedPaTensorMapState), 8930368U);
     EXPECT_EQ(alignof(SharedPaTensorMapState), kCacheLine);
 
     EXPECT_EQ(offsetof(DistTaskCell, deps_prepared), 16U);
@@ -85,6 +106,13 @@ TEST(FdwicSharedPaTensorMapState, AicpuResetOnlyReinitializesPublishedControlAnd
             sizeof(SharedOutputCell) - offsetof(SharedOutputCell, tensors)
         )) << "task="
            << task;
+
+        const SharedClaimTournamentTask &tournament = state->claim_tournament[task];
+        EXPECT_EQ(tournament.root.owner.v, -1) << "task=" << task;
+        for (uint32_t group = 0; group < kFdwicSharedClaimTournamentMaxGroups; ++group) {
+            EXPECT_EQ(tournament.local[group].owner.v, -1)
+                << "task=" << task << ", group=" << group;
+        }
 
         const SharedWriterHistoryCell &history = state->writer_history[task];
         EXPECT_EQ(history.magic, 0U) << "task=" << task;
@@ -113,6 +141,8 @@ TEST(FdwicSharedPaTensorMapState, AicpuResetOnlyReinitializesPublishedControlAnd
     state->writer_history[kFdwicSharedPaTaskCapacity - 1].magic = kFdwicSharedWriterHistoryMagic;
     state->writer_history[kFdwicSharedPaTaskCapacity - 1].writer_task = 1279;
     state->writer_history[kFdwicSharedPaTaskCapacity - 1].count = 3;
+    state->claim_tournament[kFdwicSharedPaTaskCapacity - 1].root.owner.v = 1279;
+    state->claim_tournament[kFdwicSharedPaTaskCapacity - 1].local[7].owner.v = 1279;
 
     dist_shared_pa_tensor_map_reset(*state);
 
@@ -124,6 +154,8 @@ TEST(FdwicSharedPaTensorMapState, AicpuResetOnlyReinitializesPublishedControlAnd
     EXPECT_EQ(state->writer_history[kFdwicSharedPaTaskCapacity - 1].magic, 0U);
     EXPECT_EQ(state->writer_history[kFdwicSharedPaTaskCapacity - 1].writer_task, -1);
     EXPECT_EQ(state->writer_history[kFdwicSharedPaTaskCapacity - 1].count, 0U);
+    EXPECT_EQ(state->claim_tournament[kFdwicSharedPaTaskCapacity - 1].root.owner.v, -1);
+    EXPECT_EQ(state->claim_tournament[kFdwicSharedPaTaskCapacity - 1].local[7].owner.v, -1);
 }
 
 TEST(FdwicSharedPaOutputRef, PlainAndInvalidFormsAreUnambiguous) {
@@ -172,6 +204,15 @@ TEST(FdwicSharedPaOutputRef, PlainAndInvalidFormsAreUnambiguous) {
 TEST(FdwicPrivateTensorMapState, SharedSidecarDoesNotMoveThePrivateLayout) {
     EXPECT_EQ(sizeof(DistGlobal), kFdwicSharedTensorMapOffset);
     EXPECT_LE(sizeof(DistGlobal), kDistEngineGlobalStateSize);
+}
+
+TEST(FdwicPrivateSubmitPmuShape, MaterializeAndRegisterRemainPerCoreFixed) {
+    constexpr uint32_t kTasks = 1280;
+    for (FdwicSubmitPmuPhase phase : {FdwicSubmitPmuPhase::Materialize, FdwicSubmitPmuPhase::Register}) {
+        EXPECT_FALSE(fdwic_submit_pmu_phase_has_dynamic_calls(phase));
+        EXPECT_EQ(fdwic_submit_pmu_expected_phase_calls(phase, kTasks), kTasks);
+        EXPECT_EQ(fdwic_submit_pmu_expected_phase_boundary_reads(phase, kTasks, 7U), kTasks + 7U);
+    }
 }
 
 #endif

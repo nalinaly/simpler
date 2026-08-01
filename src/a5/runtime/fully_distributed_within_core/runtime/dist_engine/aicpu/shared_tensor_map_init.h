@@ -31,6 +31,12 @@ inline void dist_shared_pa_tensor_map_reset(SharedPaTensorMapState &state) {
         state.writer_history[task].writer_task = -1;
         state.writer_history[task].count = 0;
         state.writer_history[task].reserved = 0;
+        atomic_exchange(state.claim_tournament[task].root.owner.v, int64_t{-1}, __ATOMIC_RELAXED);
+        for (uint32_t group = 0; group < kFdwicSharedClaimTournamentMaxGroups; ++group) {
+            atomic_exchange(
+                state.claim_tournament[task].local[group].owner.v, int64_t{-1}, __ATOMIC_RELAXED
+            );
+        }
     }
     for (uint32_t shard = 0; shard < kFdwicSharedHeapShards; ++shard) {
         atomic_exchange(state.shared_heap_cursor[shard].v, int64_t{0}, __ATOMIC_RELAXED);

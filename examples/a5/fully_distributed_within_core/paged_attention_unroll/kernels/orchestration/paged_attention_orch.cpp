@@ -375,20 +375,16 @@ aicpu_orchestration_entry(const L2TaskArgs &orch_args) {
                 SharedTaskOutputs alloc_outs =
                     PTO_FDWIC_SHARED_PA_CALL(shared_pa_alloc_tensors_compete_first)(
                         replay, params, [&](L0TaskArgs &submit_args) PTO_DEVICE_FUNC {
-#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-                            if constexpr (ReplayRole == CoreType::AIC) {
-#endif
+                            // Alloc has no executable lane.  Its two-level
+                            // tournament deliberately admits all 96 workers,
+                            // so either compiled role must be able to build
+                            // the same three output descriptors when it wins.
                             CYCLE_COUNT_LAP(prof_submit_task);
                             submit_args.reset();
                             submit_args.add_output(tile2d_ci);
                             submit_args.add_output(scalar_ci);
                             submit_args.add_output(scalar_ci);
                             CYCLE_COUNT_LAP(prof_param_setup);
-#if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
-                            } else {
-                                shared_pa_report_unexpected_winner_role();
-                            }
-#endif
                         }
                     );
                 if (alloc_outs.size() != 3) return;

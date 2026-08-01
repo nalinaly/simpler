@@ -18,6 +18,19 @@
 #include "fdwic_build_identity.h"
 
 constexpr uint32_t kFdwicSwimlaneMagic = 0x4653574Cu;  // FSWL
+// Production PA worker and per-task tournament topology.  Keep these layout
+// constants visible in every translation unit: state.h is shared by the
+// generic AArch64 orchestration build, which can include this header before
+// the selected TensorMap mode is known.  The shared-only state and hot path
+// remain guarded by PTO_FDWIC_SHARED_MAP below.
+constexpr uint32_t kFdwicSharedAicWorkers = 32;
+constexpr uint32_t kFdwicSharedAivWorkers = 64;
+constexpr uint32_t kFdwicSharedWorkers = kFdwicSharedAicWorkers + kFdwicSharedAivWorkers;
+constexpr uint32_t kFdwicSharedAllocClaimTournamentGroups = 8;
+constexpr uint32_t kFdwicSharedAicClaimTournamentGroups = 6;
+constexpr uint32_t kFdwicSharedAivClaimTournamentGroups = 8;
+constexpr uint32_t kFdwicSharedClaimTournamentMaxGroups = kFdwicSharedAivClaimTournamentGroups;
+constexpr uint32_t kFdwicSharedClaimTournamentNodeStride = 512;
 #if PTO_FDWIC_SHARED_MAP
 constexpr uint32_t kFdwicSwimlaneVersion = 5;
 constexpr uint32_t kFdwicSwimlaneTraceSchemaVersion = 5;
@@ -26,7 +39,6 @@ constexpr uint32_t kFdwicSwimlaneTraceSchemaVersion = 5;
 // capacity so the raw ABI can later admit PA-G4/B256 without being changed.
 constexpr uint32_t kFdwicSharedTraceTaskCapacity = 4352;
 constexpr uint32_t kFdwicSharedTracePhase1TaskCount = 1280;
-constexpr uint32_t kFdwicSharedAllocClaimShards = 4;
 constexpr uint32_t kFdwicSharedSubmitClaimRecordSizeBytes = 32;
 constexpr uint32_t kFdwicSwimlaneDefaultRecordsPerCore = 28416;
 constexpr uint32_t kFdwicSwimlaneRecordSizeBytes = 16;
@@ -136,7 +148,9 @@ enum class FdwicAtomicSite : uint32_t {
     SharedMapAppendSeqPublishExchange = 37,
     SharedMapAppendTailExchange = 38,
     SharedOutputRollbackExchange = 39,
-    Count = 40,
+    SharedClaimTournamentLocal = 40,
+    SharedClaimTournamentRoot = 41,
+    Count = 42,
     // Stale private BlockWon helpers still have to parse while the shared
     // submit path is compiled from the same translation unit. Values outside
     // Count are intentionally unencodable: executing one makes the trace
@@ -291,6 +305,8 @@ PTO_DEVICE_FUNC constexpr FdwicAtomicOp fdwic_atomic_site_op(FdwicAtomicSite sit
 #if PTO_FDWIC_SHARED_MAP
     case FdwicAtomicSite::SharedInsertTurnHandoff:
     case FdwicAtomicSite::SharedMetadataLastWriterCommit:
+    case FdwicAtomicSite::SharedClaimTournamentLocal:
+    case FdwicAtomicSite::SharedClaimTournamentRoot:
         return FdwicAtomicOp::CompareExchange;
 #else
     case FdwicAtomicSite::WonRemainingFetchSub:
@@ -354,7 +370,7 @@ PTO_DEVICE_FUNC constexpr bool fdwic_atomic_site_result_used(FdwicAtomicSite sit
 }
 
 #if PTO_FDWIC_SHARED_MAP
-constexpr uint32_t kFdwicAtomicReturnReadySiteCount = 34;
+constexpr uint32_t kFdwicAtomicReturnReadySiteCount = 36;
 constexpr uint32_t kFdwicAtomicSourceIssueSiteCount = 6;
 #else
 constexpr uint32_t kFdwicAtomicReturnReadySiteCount = 16;

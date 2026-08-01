@@ -81,7 +81,7 @@ protected:
         dist_core_reset(g_dist.cores[0], CoreType::AIC, 0, LANE_AIC);
         g_dist.cores[0].core_idx = 0;
         dist_core_reset(g_dist.cores[1], CoreType::AIV, 0, LANE_AIV0);
-        g_dist.cores[1].core_idx = 1;
+        g_dist.cores[1].core_idx = 32;
     }
 
     void TearDown() override {
@@ -298,7 +298,7 @@ TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeWithExactlyFiveWinnerCal
     }
 }
 
-TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesEightAicCandidatesPerTask) {
+TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesAllWorkersThroughEightLocalGroups) {
     reset_ninety_six_workers();
 
     uint32_t total_attempts = 0;
@@ -321,12 +321,7 @@ TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesEightAicCandidatesPerTask) {
                     replay.role(), replay.block_id(),
                     DistSharedPaTaskKind::Alloc, nullptr, state
                 );
-            const bool expected_attempt =
-                core < 32 &&
-                static_cast<uint32_t>(g_dist.cores[core].block_id) %
-                        kFdwicSharedAllocClaimShards ==
-                    static_cast<uint32_t>(task_id) %
-                        kFdwicSharedAllocClaimShards;
+            const bool expected_attempt = true;
             EXPECT_EQ(state.claim_attempted, expected_attempt)
                 << "task=" << task_id << " core=" << core;
             EXPECT_EQ(won, state.won);
@@ -340,17 +335,17 @@ TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesEightAicCandidatesPerTask) {
                 winner_core = core;
             }
         }
-        EXPECT_EQ(task_attempts, 8U) << "task=" << task_id;
+        EXPECT_EQ(task_attempts, kFdwicSharedWorkers) << "task=" << task_id;
         EXPECT_EQ(task_winners, 1U) << "task=" << task_id;
         ASSERT_GE(winner_core, 0);
-        EXPECT_LT(winner_core, 32);
-        EXPECT_EQ(
-            static_cast<uint32_t>(g_dist.cores[winner_core].block_id) %
-                kFdwicSharedAllocClaimShards,
-            static_cast<uint32_t>(task_id) % kFdwicSharedAllocClaimShards
-        );
+        EXPECT_LT(winner_core, static_cast<int32_t>(kFdwicSharedWorkers));
+        EXPECT_EQ(g_dist.shared_pa.claim_tournament[task_id].root.owner.v, task_id);
+        for (uint32_t group = 0; group < kFdwicSharedAllocClaimTournamentGroups; ++group) {
+            EXPECT_EQ(g_dist.shared_pa.claim_tournament[task_id].local[group].owner.v, task_id)
+                << "task=" << task_id << " group=" << group;
+        }
     }
-    EXPECT_EQ(total_attempts, kFdwicSharedPaBatches * 8U);
+    EXPECT_EQ(total_attempts, kFdwicSharedPaBatches * kFdwicSharedWorkers);
     EXPECT_EQ(total_winners, kFdwicSharedPaBatches);
     EXPECT_EQ(g_dist.fatal, 0);
 }
@@ -718,6 +713,51 @@ TEST_F(FdwicSharedPaSubmitTest, SharedDrainDropsReadyPrefixAndSkipsReserveSlots)
     EXPECT_EQ(drain_phase_b(g_self), 0);
     EXPECT_TRUE(reserve.occupied);
     EXPECT_EQ(g_self->occupied_count, 1);
+}
+
+TEST_F(FdwicSharedPaSubmitTest, OpportunisticEfDrainBacksOffOnlyForOneStalledSlot) {
+    DistCore &worker = g_dist.cores[0];
+    worker.occupied_count = 1;
+    worker.slots[0].occupied = true;
+    worker.slots[0].built = false;
+    worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte] = 0;
+    worker.slots_pad[kFdwicSharedEfDrainNoProgressByte] = 0;
+
+    EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
+    EXPECT_EQ(
+        worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte],
+        kFdwicSharedEfDrainNoProgressSkipSubmits
+    );
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 1);
+
+    // The next Submit skips; the following one polls again.
+    EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 1);
+
+    worker.slots_pad[kFdwicSharedEfDrainNoProgressByte] =
+        kFdwicSharedEfDrainLongWaitPollThreshold - 1;
+    EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
+    EXPECT_EQ(
+        worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte],
+        kFdwicSharedEfDrainLongWaitSkipSubmits
+    );
+    EXPECT_EQ(
+        worker.slots_pad[kFdwicSharedEfDrainNoProgressByte],
+        kFdwicSharedEfDrainLongWaitPollThreshold
+    );
+
+    worker.occupied_count = 2;
+    worker.slots[1].occupied = true;
+    worker.slots[1].built = false;
+    EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 0);
+
+    worker.occupied_count = 0;
+    EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], 0);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 0);
 }
 
 }  // namespace

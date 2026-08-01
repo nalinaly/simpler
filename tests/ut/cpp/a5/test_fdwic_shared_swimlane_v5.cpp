@@ -52,7 +52,9 @@ static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::Dcci) == 24);
 static_assert(static_cast<uint32_t>(FdwicSwimlanePhase::Count) == 25);
 static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedInsertTurnPoll) == 19);
 static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedInsertTurnHandoff) == 20);
-static_assert(static_cast<uint32_t>(FdwicAtomicSite::Count) == 40);
+static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedClaimTournamentLocal) == 40);
+static_assert(static_cast<uint32_t>(FdwicAtomicSite::SharedClaimTournamentRoot) == 41);
+static_assert(static_cast<uint32_t>(FdwicAtomicSite::Count) == 42);
 static_assert(static_cast<uint32_t>(FdwicAtomicOp::CompareExchange) == 4);
 
 class FdwicSharedSwimlaneV5Test : public ::testing::Test {
@@ -147,14 +149,14 @@ private:
 bool shared_trace_task_winner(uint32_t core, uint32_t task_id) {
     switch (task_id % 5U) {
     case 0:
-        return core == task_id % kFdwicSharedAllocClaimShards;
+        return core == 0;
     case 1:
     case 3:
         return core == 0;
     case 2:
         return core == 32;
     case 4:
-        return core == 33;
+        return core == 32;
     default:
         return false;
     }
@@ -168,25 +170,38 @@ int32_t shared_trace_task_func(uint32_t task_id) {
 bool shared_trace_task_attempted(uint32_t core, uint32_t task_id) {
     const uint32_t kind = task_id % 5U;
     if (kind == 0) {
-        return core < 32U && core % kFdwicSharedAllocClaimShards == task_id % kFdwicSharedAllocClaimShards;
+        return core < kFdwicSharedWorkers;
     }
     return core < 32U ? kind == 1U || kind == 3U : kind == 2U || kind == 4U;
 }
 
+bool shared_trace_task_root_contender(uint32_t core, uint32_t task_id) {
+    const uint32_t kind = task_id % 5U;
+    if (!shared_trace_task_attempted(core, task_id)) return false;
+    if (kind == 0) return core < kFdwicSharedAllocClaimTournamentGroups;
+    if (kind == 1 || kind == 3) return core < kFdwicSharedAicClaimTournamentGroups;
+    return core >= kFdwicSharedAicWorkers &&
+           core < kFdwicSharedAicWorkers + kFdwicSharedAivClaimTournamentGroups;
+}
+
 enum class SharedTraceFault {
     None,
-    MissingClaimMax,
-    ExtraClaimMax,
+    MissingTournamentLocal,
+    ExtraTournamentLocal,
+    MissingTournamentRoot,
+    ExtraTournamentRoot,
     MissingDcci,
     WrongDcciLines,
 };
 
 SharedTraceFault shared_trace_task_fault(SharedTraceFault fault, uint32_t core, uint32_t task_id) {
-    if (core != 0) return SharedTraceFault::None;
-    if (fault == SharedTraceFault::ExtraClaimMax) {
-        return task_id == 2 ? fault : SharedTraceFault::None;
+    if (fault == SharedTraceFault::ExtraTournamentLocal) {
+        return core == 32 && task_id == 1 ? fault : SharedTraceFault::None;
     }
-    return task_id == 1 ? fault : SharedTraceFault::None;
+    if (fault == SharedTraceFault::ExtraTournamentRoot) {
+        return core == 6 && task_id == 1 ? fault : SharedTraceFault::None;
+    }
+    return core == 0 && task_id == 1 ? fault : SharedTraceFault::None;
 }
 
 bool write_shared_generic_span(
@@ -281,13 +296,25 @@ bool populate_shared_trace_core(Runtime *runtime, uint32_t core, SharedTraceFaul
             !fdwic_swimlane_record_shared_submit(self, task_id, submit_begin, submit_end)) {
             return false;
         }
-        bool write_claim_max = attempted;
-        if (task_fault == SharedTraceFault::MissingClaimMax) write_claim_max = false;
-        if (task_fault == SharedTraceFault::ExtraClaimMax) write_claim_max = true;
-        if (detailed && write_claim_max &&
+        bool write_local = attempted;
+        if (task_fault == SharedTraceFault::MissingTournamentLocal) write_local = false;
+        if (task_fault == SharedTraceFault::ExtraTournamentLocal) write_local = true;
+        if (detailed && write_local &&
             !fdwic_swimlane_record_captured_atomic(
-                static_cast<int32_t>(task_id), FdwicAtomicSite::ClaimMax, FdwicAtomicOp::FetchMax,
-                claim_begin + 1U, claim_end - 1U, /*result_used=*/true, /*return_ready=*/false
+                static_cast<int32_t>(task_id), FdwicAtomicSite::SharedClaimTournamentLocal,
+                FdwicAtomicOp::CompareExchange, claim_begin + 1U, claim_begin + 2U,
+                /*result_used=*/true, /*return_ready=*/false
+            )) {
+            return false;
+        }
+        bool write_root = shared_trace_task_root_contender(core, task_id);
+        if (task_fault == SharedTraceFault::MissingTournamentRoot) write_root = false;
+        if (task_fault == SharedTraceFault::ExtraTournamentRoot) write_root = true;
+        if (detailed && write_root &&
+            !fdwic_swimlane_record_captured_atomic(
+                static_cast<int32_t>(task_id), FdwicAtomicSite::SharedClaimTournamentRoot,
+                FdwicAtomicOp::CompareExchange, claim_begin + 3U, claim_begin + 4U,
+                /*result_used=*/true, /*return_ready=*/false
             )) {
             return false;
         }
@@ -437,9 +464,10 @@ TEST_F(FdwicSharedSwimlaneV5Test, ProductionSharedBeginLeavesEfDrainOutOfGeneric
     g_dist_ptr = &g_dist_fallback;
     g_dist.fatal = 0;
     g_dist.error_code = PTO2_ERROR_NONE;
-    // Pretend another actor already claimed task 0 so Begin also exercises
-    // the production nonwinner close and writes both fixed endpoint pairs.
-    g_dist.alloc_cursor[0].v = 0;
+    // Pretend this local group and the root already selected task 0 so Begin
+    // also exercises the production nonwinner close and fixed endpoints.
+    g_dist.shared_pa.claim_tournament[0].local[0].owner.v = 0;
+    g_dist.shared_pa.claim_tournament[0].root.owner.v = 0;
     self_.role = CoreType::AIC;
     self_.local_index = 0;
     self_.occupied_count = 0;
@@ -630,12 +658,20 @@ TEST(FdwicSharedSwimlaneV5HostTest, Level1ClosesWithoutAtomicOrDcciRecords) {
     fdwic_swimlane_host_finalize(&runtime);
 }
 
-TEST(FdwicSharedSwimlaneV5HostTest, RejectsMissingClaimMaxForAttemptedClaim) {
-    expect_shared_trace_fault_rejected(SharedTraceFault::MissingClaimMax);
+TEST(FdwicSharedSwimlaneV5HostTest, RejectsMissingTournamentLocalForAttemptedClaim) {
+    expect_shared_trace_fault_rejected(SharedTraceFault::MissingTournamentLocal);
 }
 
-TEST(FdwicSharedSwimlaneV5HostTest, RejectsClaimMaxForNonattemptedClaim) {
-    expect_shared_trace_fault_rejected(SharedTraceFault::ExtraClaimMax);
+TEST(FdwicSharedSwimlaneV5HostTest, RejectsTournamentLocalForNonattemptedClaim) {
+    expect_shared_trace_fault_rejected(SharedTraceFault::ExtraTournamentLocal);
+}
+
+TEST(FdwicSharedSwimlaneV5HostTest, RejectsMissingTournamentRootGroup) {
+    expect_shared_trace_fault_rejected(SharedTraceFault::MissingTournamentRoot);
+}
+
+TEST(FdwicSharedSwimlaneV5HostTest, RejectsDuplicateTournamentRootGroup) {
+    expect_shared_trace_fault_rejected(SharedTraceFault::ExtraTournamentRoot);
 }
 
 TEST(FdwicSharedSwimlaneV5HostTest, RejectsMissingWinnerBusinessDcci) {
