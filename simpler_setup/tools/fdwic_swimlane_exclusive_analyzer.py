@@ -196,6 +196,7 @@ def analyze_data(  # noqa: PLR0912, PLR0915
             int(data.get("num_cores", 0)),
             data.get("core_types") or [],
             int(data.get("l2_swimlane_level", 0)),
+            int(data.get("claim_participation_interval", 1)),
         )
     frequency_hz = int(data.get("clock_freq_hz", 0))
     if frequency_hz <= 0:
@@ -410,12 +411,7 @@ def analyze_data(  # noqa: PLR0912, PLR0915
         "semantics": {
             "cycle_arithmetic": "raw_integer_cycles",
             "exclusive_submit_children": sorted(
-                {
-                    child.phase
-                    for core in model.cores
-                    for partition in core.submits
-                    for child in partition.children
-                }
+                {child.phase for core in model.cores for partition in core.submits for child in partition.children}
             ),
             "kernel_execution_submit_children": sorted(KERNEL_EXECUTION_CHILD_PHASES),
             "kernel_execution_top_level_residual": "OrchestrationReplay outside Submit, or FinalDrain",

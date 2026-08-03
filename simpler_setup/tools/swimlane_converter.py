@@ -115,6 +115,7 @@ def _fdwic_kernel_thread_id(lane):
 
     return int(lane) + 4
 
+
 # IDs 0..14 are the standalone PA ABI. Real PA only appends IDs so archived
 # captures and the standalone calibration keep the same names.
 _FDWIC_ATOMIC_SITE_NAMES = {
@@ -336,6 +337,7 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
     clock_freq_hz=0,
     num_cores=0,
     core_types=None,
+    claim_participation_interval=1,
 ):
     """Append fully_distributed_within_core AICore-runtime spans.
 
@@ -378,9 +380,8 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
                 fdwic_events,
                 int(num_cores),
                 list(core_types),
-                4
-                if any(str(event["phase"]) in {"Atomic", "ClockBaseline", "Dcci"} for event in fdwic_events)
-                else 1,
+                4 if any(str(event["phase"]) in {"Atomic", "ClockBaseline", "Dcci"} for event in fdwic_events) else 1,
+                claim_participation_interval,
             )
         )
         residual_factor = 1_000_000.0 / float(clock_freq_hz)
@@ -487,6 +488,21 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
         aux = int(e["aux"])
         if phase == "claim":
             claim_won = bool(flags & 0x1)
+            core_id = int(e["core_id"])
+            role = (
+                core_types[core_id]
+                if core_types is not None and 0 <= core_id < len(core_types)
+                else ("aic" if lane == 0 else "aiv")
+            )
+            kind = task_id % 5
+            claim_eligible = kind == 0 or (role == "aic" and kind in (1, 3)) or (role == "aiv" and kind in (2, 4))
+            participation_selected = None
+            if trace_schema_version == 5 and core_types is not None:
+                aic_count = sum(core_role == "aic" for core_role in core_types)
+                candidate_rank = core_id if kind in (0, 1, 3) else core_id - aic_count
+                participation_selected = claim_eligible and (
+                    task_id % claim_participation_interval == candidate_rank % claim_participation_interval
+                )
             if trace_schema_version >= 2:
                 claim_attempted = bool(flags & 0x2)
                 claim_attempted_source = "raw_flag"
@@ -504,7 +520,11 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
                 claim_attempted = None
                 claim_attempted_source = "unknown_v1_without_atomic_trace"
             if claim_attempted is False:
-                name = f"claim.not_attempted#{task_id}"
+                name = (
+                    f"claim.participation_skipped#{task_id}"
+                    if participation_selected is False and claim_eligible
+                    else f"claim.not_attempted#{task_id}"
+                )
             elif claim_attempted is True:
                 name = f"claim.{'won' if claim_won else 'lost'}#{task_id}"
             else:
@@ -513,16 +533,8 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
         elif phase == "atomic":
             atomic_site_id = aux
             atomic_op_id = flags & 0xF
-            site_names = (
-                _FDWIC_SHARED_V5_ATOMIC_SITE_NAMES
-                if trace_schema_version == 5
-                else _FDWIC_ATOMIC_SITE_NAMES
-            )
-            op_names = (
-                _FDWIC_SHARED_V5_ATOMIC_OP_NAMES
-                if trace_schema_version == 5
-                else _FDWIC_ATOMIC_OP_NAMES
-            )
+            site_names = _FDWIC_SHARED_V5_ATOMIC_SITE_NAMES if trace_schema_version == 5 else _FDWIC_ATOMIC_SITE_NAMES
+            op_names = _FDWIC_SHARED_V5_ATOMIC_OP_NAMES if trace_schema_version == 5 else _FDWIC_ATOMIC_OP_NAMES
             atomic_site = site_names.get(atomic_site_id, f"site_{atomic_site_id}")
             atomic_op = op_names.get(atomic_op_id, f"op_{atomic_op_id}")
             atomic_poll_batch = trace_schema_version >= 3 and bool(flags & (1 << 7))
@@ -633,6 +645,14 @@ def _append_fdwic_dist_engine_events(  # noqa: PLR0912, PLR0915
                 "claim_attempted": claim_attempted,
                 "claim_won": claim_won,
                 "claim_attempted_source": claim_attempted_source,
+                "claim_eligible": claim_eligible,
+                "claim_participating": claim_attempted,
+                "local_cas_issued": claim_attempted,
+                "participation_selected": participation_selected,
+                "participation_skipped": (
+                    participation_selected is False and claim_eligible and claim_attempted is False
+                ),
+                "claim_participation_interval": claim_participation_interval,
                 "claim_path": "alloc" if aux == 1 else "kernel",
                 "execution_unit": "scalar",
                 "flags": flags,
@@ -854,8 +874,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     trace_schema_version = int(metadata.get("trace_schema_version", 1))
     if trace_schema_version not in (1, 2, 3, 4, 5):
         raise ValueError(
-            f"Unsupported metadata.trace_schema_version: {trace_schema_version} "
-            "(expected 1, 2, 3, 4, or 5)"
+            f"Unsupported metadata.trace_schema_version: {trace_schema_version} (expected 1, 2, 3, 4, or 5)"
         )
     num_cores = int(metadata.get("num_cores") or 0)
     core_types = list(metadata.get("core_types") or [])
@@ -867,6 +886,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     orch_phases_raw = data.get("aicpu_orchestrator_phases") or []
     fdwic_rows = data.get("fdwic_events") or []
     fdwic_summary = metadata.get("fdwic_summary")
+    claim_participation_interval = int(metadata.get("claim_participation_interval", 1))
     if trace_schema_version == 3 and level != 4:
         raise ValueError("metadata.trace_schema_version=3 requires l2_swimlane_level=4")
     if trace_schema_version == 5:
@@ -874,6 +894,8 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             raise ValueError("metadata.trace_schema_version=5 requires l2_swimlane_level=1 or 4")
         if metadata.get("tensormap_mode") != "shared":
             raise ValueError("metadata.trace_schema_version=5 requires metadata.tensormap_mode='shared'")
+        if claim_participation_interval not in (1, 2, 4, 8):
+            raise ValueError("shared schema-v5 requires metadata.claim_participation_interval in {1,2,4,8}")
         expected_identity = {
             "raw_trace_version": 5,
             "record_size_bytes": 16,
@@ -1164,9 +1186,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
                 valid_v5_fields = task_id >= 0 and flags == 0 and aux == 0
             elif phase == "SharedRegisterWaitInsertTurnBypassLoad":
                 valid_v5_fields = (
-                    task_id >= 0
-                    and flags == 0
-                    and ((task_id == 0 and aux == 0) or (task_id > 0 and aux > 0))
+                    task_id >= 0 and flags == 0 and ((task_id == 0 and aux == 0) or (task_id > 0 and aux > 0))
                 )
             elif phase in {"OrchestrationReplay", "FinalDrain"}:
                 valid_v5_fields = task_id == -1 and func_id == -1 and flags == 0 and aux == 0
@@ -1183,9 +1203,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         if phase == "Atomic" and flags & (1 << 7):
             call_count = (flags >> 8) & 0xFFFFFF
             poll_site_ops = (
-                SHARED_V5_POLL_BATCH_SITE_OP_IDS
-                if trace_schema_version == 5
-                else _FDWIC_POLL_BATCH_SITE_OP_IDS
+                SHARED_V5_POLL_BATCH_SITE_OP_IDS if trace_schema_version == 5 else _FDWIC_POLL_BATCH_SITE_OP_IDS
             )
             return_ready = bool(flags & (1 << 6))
             return_ready_valid = not return_ready or (trace_schema_version == 5 and aux == 19)
@@ -1366,7 +1384,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     if trace_schema_version == 4:
         validate_and_partition_v4(fdwic_events, num_cores, core_types)
     elif trace_schema_version == 5:
-        validate_and_partition_v5(fdwic_events, num_cores, core_types, level)
+        validate_and_partition_v5(fdwic_events, num_cores, core_types, level, claim_participation_interval)
 
     out = {
         "l2_swimlane_level": level,
@@ -1390,6 +1408,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
         out["core_types"] = core_types
     if trace_schema_version == 5:
         out["tensormap_mode"] = "shared"
+        out["claim_participation_interval"] = claim_participation_interval
     return out
 
 
@@ -1895,6 +1914,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     clock_freq_hz=0,
     fdwic_num_cores=0,
     fdwic_core_types=None,
+    fdwic_claim_participation_interval=1,
 ):
     """Generate Chrome Trace Event Format JSON from task data.
 
@@ -1966,6 +1986,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             clock_freq_hz=clock_freq_hz,
             num_cores=fdwic_num_cores,
             core_types=fdwic_core_types,
+            claim_participation_interval=fdwic_claim_participation_interval,
         )
         with open(output_path, "w") as f:
             json.dump({"displayTimeUnit": "ns", "traceEvents": events}, f, indent=2)
@@ -3398,6 +3419,7 @@ def main():
             clock_freq_hz=data.get("clock_freq_hz", 0),
             fdwic_num_cores=data.get("num_cores", 0),
             fdwic_core_types=data.get("core_types"),
+            fdwic_claim_participation_interval=data.get("claim_participation_interval", 1),
         )
         exclusive_output = None
         if data.get("trace_schema_version") in (4, 5) and data.get("fdwic_events"):

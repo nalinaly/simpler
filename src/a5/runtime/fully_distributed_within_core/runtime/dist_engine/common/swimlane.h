@@ -190,8 +190,7 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_detail_write_record(
     __gm__ FdwicSwimlaneCoreState *core = g_fdwic_swimlane_core;
     if (core == nullptr || g_fdwic_swimlane_records == nullptr || records_per_core == 0) return false;
 #if PTO_FDWIC_SHARED_MAP
-    if (end_cycle < start_cycle ||
-        end_cycle - start_cycle > UINT32_MAX ||
+    if (end_cycle < start_cycle || end_cycle - start_cycle > UINT32_MAX ||
         !fdwic_compact_trace_fields_fit(task_id, func_id, phase, aux)) {
         if (g_fdwic_swimlane_dropped_records != UINT32_MAX) ++g_fdwic_swimlane_dropped_records;
         return false;
@@ -228,38 +227,38 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_detail_write_record(
 
 #if PTO_FDWIC_SHARED_MAP
 PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_shared_claim(
-    __gm__ DistCore *self, int32_t task_id, uint64_t start_cycle, uint64_t end_cycle, bool winner
+    __gm__ DistCore *self, int32_t task_id, uint64_t start_cycle, uint64_t end_cycle, bool winner, bool attempted
 ) {
-    if (!fdwic_swimlane_enabled() || self == nullptr || g_fdwic_swimlane_records == nullptr ||
-        task_id < 0 || task_id >= static_cast<int32_t>(kFdwicSharedTraceTaskCapacity) ||
-        start_cycle == 0 || end_cycle < start_cycle || (end_cycle & kFdwicSharedClaimWinnerBit) != 0) {
+    if (!fdwic_swimlane_enabled() || self == nullptr || g_fdwic_swimlane_records == nullptr || task_id < 0 ||
+        task_id >= static_cast<int32_t>(kFdwicSharedTraceTaskCapacity) || start_cycle == 0 || end_cycle < start_cycle ||
+        (start_cycle & kFdwicSharedEndpointMetadataBit) != 0 || (end_cycle & kFdwicSharedEndpointMetadataBit) != 0 ||
+        (winner && !attempted)) {
         if (fdwic_swimlane_enabled() && g_fdwic_swimlane_dropped_records != UINT32_MAX) {
             ++g_fdwic_swimlane_dropped_records;
         }
         return false;
     }
-    __gm__ FdwicSharedSubmitClaimRecord *records =
-        fdwic_swimlane_shared_submit_claim_records(g_fdwic_swimlane_records);
-    records[task_id].claim_begin = start_cycle;
+    __gm__ FdwicSharedSubmitClaimRecord *records = fdwic_swimlane_shared_submit_claim_records(g_fdwic_swimlane_records);
+    records[task_id].claim_begin = start_cycle | (attempted ? kFdwicSharedClaimAttemptedBit : 0U);
     records[task_id].claim_end_and_winner = end_cycle | (winner ? kFdwicSharedClaimWinnerBit : 0U);
     return true;
 }
 
-PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_shared_submit(
-    __gm__ DistCore *self, int32_t task_id, uint64_t start_cycle, uint64_t end_cycle
-) {
-    if (!fdwic_swimlane_enabled() || self == nullptr || g_fdwic_swimlane_records == nullptr ||
-        task_id < 0 || task_id >= static_cast<int32_t>(kFdwicSharedTraceTaskCapacity) ||
-        start_cycle == 0 || end_cycle < start_cycle || (end_cycle & kFdwicSharedClaimWinnerBit) != 0) {
+PTO_DEVICE_FUNC inline bool
+fdwic_swimlane_record_shared_submit(__gm__ DistCore *self, int32_t task_id, uint64_t start_cycle, uint64_t end_cycle) {
+    if (!fdwic_swimlane_enabled() || self == nullptr || g_fdwic_swimlane_records == nullptr || task_id < 0 ||
+        task_id >= static_cast<int32_t>(kFdwicSharedTraceTaskCapacity) || start_cycle == 0 || end_cycle < start_cycle ||
+        (start_cycle & kFdwicSharedEndpointMetadataBit) != 0 || (end_cycle & kFdwicSharedEndpointMetadataBit) != 0) {
         if (fdwic_swimlane_enabled() && g_fdwic_swimlane_dropped_records != UINT32_MAX) {
             ++g_fdwic_swimlane_dropped_records;
         }
         return false;
     }
-    __gm__ FdwicSharedSubmitClaimRecord *records =
-        fdwic_swimlane_shared_submit_claim_records(g_fdwic_swimlane_records);
-    records[task_id].submit_begin = start_cycle;
-    records[task_id].submit_end = end_cycle;
+    __gm__ FdwicSharedSubmitClaimRecord *records = fdwic_swimlane_shared_submit_claim_records(g_fdwic_swimlane_records);
+    records[task_id].submit_begin =
+        start_cycle | fdwic_shared_claim_participation_interval_begin_bit(kFdwicSharedClaimParticipationInterval);
+    records[task_id].submit_end =
+        end_cycle | fdwic_shared_claim_participation_interval_end_bit(kFdwicSharedClaimParticipationInterval);
     const uint32_t next = static_cast<uint32_t>(task_id) + 1U;
     if (next > g_fdwic_swimlane_shared_submit_count) g_fdwic_swimlane_shared_submit_count = next;
     return true;
@@ -273,7 +272,7 @@ PTO_DEVICE_FUNC inline void fdwic_swimlane_detail_record(
 #if PTO_FDWIC_SHARED_MAP
     if (phase == FdwicSwimlanePhase::Claim) {
         (void)fdwic_swimlane_record_shared_claim(
-            self, task_id, start_cycle, end_cycle, (flags & kFdwicClaimWon) != 0
+            self, task_id, start_cycle, end_cycle, (flags & kFdwicClaimWon) != 0, (flags & kFdwicClaimAttempted) != 0
         );
         return;
     }
@@ -413,9 +412,8 @@ PTO_DEVICE_FUNC inline void fdwic_swimlane_accumulate_poll_call(FdwicAtomicSite 
 }
 
 #if PTO_FDWIC_SHARED_MAP
-PTO_DEVICE_FUNC inline uint32_t fdwic_dcci_trace_flags(
-    FdwicDcciOp op, bool trailing_dsb, uint32_t call_count, uint32_t line_count
-) {
+PTO_DEVICE_FUNC inline uint32_t
+fdwic_dcci_trace_flags(FdwicDcciOp op, bool trailing_dsb, uint32_t call_count, uint32_t line_count) {
     return static_cast<uint32_t>(op) | (trailing_dsb ? kFdwicDcciTrailingDsb : 0U) |
            (call_count << kFdwicDcciCallCountShift) | (line_count << kFdwicDcciLineCountShift);
 }
@@ -432,19 +430,17 @@ PTO_DEVICE_FUNC inline uint32_t fdwic_dcci_region_cache_line_count(Pointer addre
 }
 
 PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_dcci(
-    __gm__ DistCore *self, int32_t task_id, int32_t func_id, FdwicDcciSite site, FdwicDcciOp op,
-    bool trailing_dsb, uint32_t call_count, uint32_t line_count, uint64_t start_cycle, uint64_t end_cycle
+    __gm__ DistCore *self, int32_t task_id, int32_t func_id, FdwicDcciSite site, FdwicDcciOp op, bool trailing_dsb,
+    uint32_t call_count, uint32_t line_count, uint64_t start_cycle, uint64_t end_cycle
 ) {
     if (!fdwic_atomic_swimlane_enabled()) return false;
-    const bool shape_valid =
-        static_cast<uint32_t>(site) < static_cast<uint32_t>(FdwicDcciSite::Count) &&
-        static_cast<uint32_t>(op) < static_cast<uint32_t>(FdwicDcciOp::Count) &&
-        op == fdwic_dcci_site_op(site) && call_count > 0 && call_count <= kFdwicDcciCallCountMask &&
-        line_count >= call_count && line_count <= kFdwicDcciLineCountMax && trailing_dsb &&
-        end_cycle >= start_cycle;
-    const bool counters_fit =
-        g_fdwic_dcci_calls <= UINT32_MAX - call_count && g_fdwic_dcci_lines <= UINT32_MAX - line_count &&
-        g_fdwic_dcci_records != UINT32_MAX;
+    const bool shape_valid = static_cast<uint32_t>(site) < static_cast<uint32_t>(FdwicDcciSite::Count) &&
+                             static_cast<uint32_t>(op) < static_cast<uint32_t>(FdwicDcciOp::Count) &&
+                             op == fdwic_dcci_site_op(site) && call_count > 0 &&
+                             call_count <= kFdwicDcciCallCountMask && line_count >= call_count &&
+                             line_count <= kFdwicDcciLineCountMax && trailing_dsb && end_cycle >= start_cycle;
+    const bool counters_fit = g_fdwic_dcci_calls <= UINT32_MAX - call_count &&
+                              g_fdwic_dcci_lines <= UINT32_MAX - line_count && g_fdwic_dcci_records != UINT32_MAX;
     if (!shape_valid || !counters_fit) {
         g_fdwic_dcci_counter_overflow = true;
         return false;
@@ -461,8 +457,8 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_dcci(
 }
 
 PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_dcci(
-    __gm__ DistCore *self, int32_t task_id, int32_t func_id, FdwicDcciSite site, bool trailing_dsb,
-    uint32_t line_count, uint64_t start_cycle, uint64_t end_cycle
+    __gm__ DistCore *self, int32_t task_id, int32_t func_id, FdwicDcciSite site, bool trailing_dsb, uint32_t line_count,
+    uint64_t start_cycle, uint64_t end_cycle
 ) {
     return fdwic_swimlane_record_dcci(
         self, task_id, func_id, site, fdwic_dcci_site_op(site), trailing_dsb, 1, line_count, start_cycle, end_cycle
@@ -495,8 +491,8 @@ PTO_DEVICE_FUNC inline void fdwic_swimlane_flush_core(__gm__ DistCore *self) {
         if (total_lines > kFdwicDcciLineCountMax ||
             !fdwic_swimlane_record_dcci(
                 self, -1, -1, FdwicDcciSite::ObserverTraceExport, FdwicDcciOp::CleanOut,
-                /*trailing_dsb=*/true, /*call_count=*/3, static_cast<uint32_t>(total_lines),
-                observer_cycle, observer_cycle
+                /*trailing_dsb=*/true, /*call_count=*/3, static_cast<uint32_t>(total_lines), observer_cycle,
+                observer_cycle
             )) {
             g_fdwic_dcci_counter_overflow = true;
         } else {
@@ -579,18 +575,17 @@ PTO_DEVICE_FUNC __attribute__((noinline)) void fdwic_swimlane_detail_record_atom
 // API after the surrounding scheduler state has been published. The call
 // writes one raw row immediately; it does not defer or retain the endpoints.
 PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_captured_atomic(
-    int32_t task_id, FdwicAtomicSite site, FdwicAtomicOp op, uint64_t start_cycle, uint64_t end_cycle,
-    bool result_used, bool return_ready, bool value_zero = false, uint64_t retries = 0
+    int32_t task_id, FdwicAtomicSite site, FdwicAtomicOp op, uint64_t start_cycle, uint64_t end_cycle, bool result_used,
+    bool return_ready, bool value_zero = false, uint64_t retries = 0
 ) {
     if (!fdwic_atomic_swimlane_enabled()) return false;
-    const bool shape_valid =
-        static_cast<uint32_t>(site) < static_cast<uint32_t>(FdwicAtomicSite::Count) &&
-        static_cast<uint32_t>(op) <= static_cast<uint32_t>(FdwicAtomicOp::CompareExchange) &&
-        site != FdwicAtomicSite::SharedInsertTurnPoll && op == fdwic_atomic_site_op(site) &&
-        result_used == fdwic_atomic_site_result_used(site) &&
-        return_ready == (result_used && fdwic_atomic_return_ready_observed()) &&
-        (!value_zero || op == FdwicAtomicOp::Load) &&
-        (retries == 0 || op == FdwicAtomicOp::FetchMax) && end_cycle >= start_cycle;
+    const bool shape_valid = static_cast<uint32_t>(site) < static_cast<uint32_t>(FdwicAtomicSite::Count) &&
+                             static_cast<uint32_t>(op) <= static_cast<uint32_t>(FdwicAtomicOp::CompareExchange) &&
+                             site != FdwicAtomicSite::SharedInsertTurnPoll && op == fdwic_atomic_site_op(site) &&
+                             result_used == fdwic_atomic_site_result_used(site) &&
+                             return_ready == (result_used && fdwic_atomic_return_ready_observed()) &&
+                             (!value_zero || op == FdwicAtomicOp::Load) &&
+                             (retries == 0 || op == FdwicAtomicOp::FetchMax) && end_cycle >= start_cycle;
     if (!shape_valid) {
         g_fdwic_atomic_counter_overflow = true;
         return false;
@@ -606,16 +601,15 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_aggregate_atomic_poll(
     FdwicAtomicSite site, uint64_t start_cycle, uint64_t end_cycle, uint32_t call_count, bool return_ready_end
 ) {
     if (!fdwic_atomic_swimlane_enabled()) return false;
-    if (site != FdwicAtomicSite::SharedInsertTurnPoll || call_count == 0 ||
-        call_count > kFdwicAtomicPollCountMax || end_cycle < start_cycle ||
-        return_ready_end != fdwic_atomic_return_ready_observed() ||
+    if (site != FdwicAtomicSite::SharedInsertTurnPoll || call_count == 0 || call_count > kFdwicAtomicPollCountMax ||
+        end_cycle < start_cycle || return_ready_end != fdwic_atomic_return_ready_observed() ||
         g_fdwic_atomic_calls > UINT32_MAX - call_count || g_fdwic_poll_calls > UINT32_MAX - call_count) {
         g_fdwic_atomic_counter_overflow = true;
         return false;
     }
-    const uint32_t flags =
-        static_cast<uint32_t>(FdwicAtomicOp::Load) | kFdwicAtomicResultUsed | kFdwicAtomicPollBatch |
-        (return_ready_end ? kFdwicAtomicReturnReady : 0U) | (call_count << kFdwicAtomicPollCountShift);
+    const uint32_t flags = static_cast<uint32_t>(FdwicAtomicOp::Load) | kFdwicAtomicResultUsed | kFdwicAtomicPollBatch |
+                           (return_ready_end ? kFdwicAtomicReturnReady : 0U) |
+                           (call_count << kFdwicAtomicPollCountShift);
     const bool written = fdwic_swimlane_detail_write_record(
         g_self, -1, -1, FdwicSwimlanePhase::Atomic, start_cycle, end_cycle, flags, static_cast<uint32_t>(site)
     );
@@ -741,8 +735,8 @@ PTO_DEVICE_FUNC inline T fdwic_trace_atomic_fetch_max(
 #if PTO_FDWIC_SHARED_MAP
 template <typename T>
 PTO_DEVICE_FUNC inline T fdwic_trace_atomic_compare_exchange(
-    int32_t task_id, FdwicAtomicSite site, __gm__ volatile T &value, T expected, T desired,
-    bool result_used = true, int success_memorder = __ATOMIC_ACQ_REL, int failure_memorder = __ATOMIC_ACQUIRE
+    int32_t task_id, FdwicAtomicSite site, __gm__ volatile T &value, T expected, T desired, bool result_used = true,
+    int success_memorder = __ATOMIC_ACQ_REL, int failure_memorder = __ATOMIC_ACQUIRE
 ) {
     if (!fdwic_atomic_swimlane_enabled()) {
         return atomic_compare_exchange(value, expected, desired, success_memorder, failure_memorder);
@@ -895,15 +889,12 @@ PTO_DEVICE_FUNC inline T fdwic_trace_atomic_compare_exchange(
     return old;
 }
 
-PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_shared_claim(
-    __gm__ DistCore *, int32_t, uint64_t, uint64_t, bool
-) {
+PTO_DEVICE_FUNC inline bool
+fdwic_swimlane_record_shared_claim(__gm__ DistCore *, int32_t, uint64_t, uint64_t, bool, bool) {
     return false;
 }
 
-PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_shared_submit(
-    __gm__ DistCore *, int32_t, uint64_t, uint64_t
-) {
+PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_shared_submit(__gm__ DistCore *, int32_t, uint64_t, uint64_t) {
     return false;
 }
 
@@ -913,9 +904,8 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_captured_atomic(
     return false;
 }
 
-PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_aggregate_atomic_poll(
-    FdwicAtomicSite, uint64_t, uint64_t, uint32_t, bool
-) {
+PTO_DEVICE_FUNC inline bool
+fdwic_swimlane_record_aggregate_atomic_poll(FdwicAtomicSite, uint64_t, uint64_t, uint32_t, bool) {
     return false;
 }
 
@@ -925,9 +915,8 @@ PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_dcci(
     return false;
 }
 
-PTO_DEVICE_FUNC inline bool fdwic_swimlane_record_dcci(
-    __gm__ DistCore *, int32_t, int32_t, FdwicDcciSite, bool, uint32_t, uint64_t, uint64_t
-) {
+PTO_DEVICE_FUNC inline bool
+fdwic_swimlane_record_dcci(__gm__ DistCore *, int32_t, int32_t, FdwicDcciSite, bool, uint32_t, uint64_t, uint64_t) {
     return false;
 }
 #endif

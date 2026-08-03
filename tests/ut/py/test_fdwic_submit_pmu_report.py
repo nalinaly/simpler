@@ -721,6 +721,7 @@ def _fake_build_identity(
     compile_definitions.append("PTO_FDWIC_TRACE_ENABLED=0")
     if tensormap_mode == "shared":
         compile_definitions.append("PTO_FDWIC_SHARED_PA_UNITY=1")
+        compile_definitions.append("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL=1")
     frozen_compile_definitions = tuple(compile_definitions)
     definitions_sha256 = hashlib.sha256(repr(compile_definitions).encode()).hexdigest()
     source_state = f"source-v2:{'1' * 40}:{'2' * 64}:{definitions_sha256}"
@@ -741,7 +742,13 @@ def _fake_build_identity(
     monkeypatch.setattr(report_module, "_inspect_build_artifact", inspect_fake_artifact)
     return capture_build_identity(
         profile=profile,
-        profiled_cache_key=("a5", "fdwic", tensormap_mode, profile),
+        profiled_cache_key=(
+            "a5",
+            "fdwic",
+            *((1,) if tensormap_mode == "shared" else ()),
+            tensormap_mode,
+            profile,
+        ),
         aicore_extra_cache_key=extra_cache_key,
         compile_definitions=frozen_compile_definitions,
         aicore_kernel=kernel,
@@ -1096,12 +1103,12 @@ def test_phase_recording_reference_subtracts_only_the_phase_numerator_by_role(
     assert reference["exact_correction"] is False
     assert reference["raw_whole_denominator_is_unchanged"] is True
     assert reference["whole_recording_cost_is_not_measured"] is True
+    assert target.phase_summary is not None
+    assert empty.phase_summary is not None
     for group_name in ("aic", "aiv"):
         group = reference["groups"][group_name]
         target_phase = target.phase_summary[group_name]
         empty_phase = empty.phase_summary[group_name]
-        assert target_phase is not None
-        assert empty_phase is not None
         assert group["target_record_pairs"] == target_phase["phase_end_reads"]
         assert group["empty_record_pairs"] == empty_phase["phase_end_reads"]
         for metric_name, phase_field, whole_field in (
@@ -2435,7 +2442,10 @@ def test_shared_tensormap_provenance_closes_cache_key_definitions_and_html(
     assert provenance["build"]["tensormap_mode"] == "shared"
     assert provenance["build"]["profiled_cache_key"][-2:] == ["shared", "submit-pmu-none"]
     assert provenance["build"]["compile_definitions"][0] == "PTO_FDWIC_SHARED_MAP=1"
-    assert provenance["build"]["compile_definitions"][-1] == "PTO_FDWIC_SHARED_PA_UNITY=1"
+    assert provenance["build"]["compile_definitions"][-2:] == [
+        "PTO_FDWIC_SHARED_PA_UNITY=1",
+        "PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL=1",
+    ]
     assert "<code>shared</code>" in output_path.read_text(encoding="utf-8")
 
 
@@ -2545,8 +2555,8 @@ def test_provenance_pair_publish_failure_restores_the_exact_previous_pair(
     identity = _fake_build_identity(tmp_path, monkeypatch)
     output_path = tmp_path / DEFAULT_OUTPUT_NAME
     provenance_path = tmp_path / DEFAULT_PROVENANCE_NAME
-    old_output = b"old-report" if old_pair_exists else None
-    old_provenance = b"old-provenance" if old_pair_exists else None
+    old_output = b"old-report"
+    old_provenance = b"old-provenance"
     if old_pair_exists:
         output_path.write_bytes(old_output)
         provenance_path.write_bytes(old_provenance)

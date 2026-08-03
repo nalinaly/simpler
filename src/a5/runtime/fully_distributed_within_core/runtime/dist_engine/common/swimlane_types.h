@@ -17,6 +17,10 @@
 #include "data_type.h"
 #include "fdwic_build_identity.h"
 
+#ifndef PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL
+#define PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL 1
+#endif
+
 constexpr uint32_t kFdwicSwimlaneMagic = 0x4653574Cu;  // FSWL
 // Production PA worker and per-task tournament topology.  Keep these layout
 // constants visible in every translation unit: state.h is shared by the
@@ -26,11 +30,36 @@ constexpr uint32_t kFdwicSwimlaneMagic = 0x4653574Cu;  // FSWL
 constexpr uint32_t kFdwicSharedAicWorkers = 32;
 constexpr uint32_t kFdwicSharedAivWorkers = 64;
 constexpr uint32_t kFdwicSharedWorkers = kFdwicSharedAicWorkers + kFdwicSharedAivWorkers;
+constexpr uint32_t kFdwicSharedClaimParticipationInterval = PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL;
 constexpr uint32_t kFdwicSharedAllocClaimTournamentGroups = 8;
 constexpr uint32_t kFdwicSharedAicClaimTournamentGroups = 6;
 constexpr uint32_t kFdwicSharedAivClaimTournamentGroups = 8;
 constexpr uint32_t kFdwicSharedClaimTournamentMaxGroups = kFdwicSharedAivClaimTournamentGroups;
 constexpr uint32_t kFdwicSharedClaimTournamentNodeStride = 512;
+PTO_DEVICE_FUNC constexpr bool fdwic_shared_claim_participation_interval_supported(uint32_t interval) {
+    return interval == 1 || interval == 2 || interval == 4 || interval == 8;
+}
+
+PTO_DEVICE_FUNC constexpr bool
+fdwic_shared_claim_participates(uint32_t task_id, uint32_t role_local_worker_id, uint32_t interval) {
+    return fdwic_shared_claim_participation_interval_supported(interval) &&
+           task_id % interval == role_local_worker_id % interval;
+}
+
+PTO_DEVICE_FUNC constexpr bool fdwic_shared_claim_population_covers_interval(uint32_t workers, uint32_t interval) {
+    return fdwic_shared_claim_participation_interval_supported(interval) && workers >= interval;
+}
+
+static_assert(
+    fdwic_shared_claim_participation_interval_supported(kFdwicSharedClaimParticipationInterval),
+    "shared Claim participation interval must be one of 1, 2, 4, or 8"
+);
+static_assert(
+    fdwic_shared_claim_population_covers_interval(kFdwicSharedAicWorkers, kFdwicSharedClaimParticipationInterval) &&
+        fdwic_shared_claim_population_covers_interval(kFdwicSharedAivWorkers, kFdwicSharedClaimParticipationInterval) &&
+        fdwic_shared_claim_population_covers_interval(kFdwicSharedWorkers, kFdwicSharedClaimParticipationInterval),
+    "every shared Claim task residue must have a role-local participant"
+);
 #if PTO_FDWIC_SHARED_MAP
 constexpr uint32_t kFdwicSwimlaneVersion = 5;
 constexpr uint32_t kFdwicSwimlaneTraceSchemaVersion = 5;
@@ -642,20 +671,17 @@ constexpr uint32_t kFdwicCompactTraceAuxShift = 21;
 constexpr uint32_t kFdwicCompactTraceAuxBits = 11;
 constexpr uint32_t kFdwicCompactTraceAuxMask = (1U << kFdwicCompactTraceAuxBits) - 1U;
 
-PTO_DEVICE_FUNC constexpr bool fdwic_compact_trace_fields_fit(
-    int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint32_t aux
-) {
+PTO_DEVICE_FUNC constexpr bool
+fdwic_compact_trace_fields_fit(int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint32_t aux) {
     return task_id >= -1 && task_id < static_cast<int32_t>(kFdwicSharedTraceTaskCapacity) && func_id >= -1 &&
            func_id <= 3 && static_cast<uint32_t>(phase) < static_cast<uint32_t>(FdwicSwimlanePhase::Count) &&
            aux <= kFdwicCompactTraceAuxMask;
 }
 
-PTO_DEVICE_FUNC constexpr uint32_t fdwic_pack_compact_trace_fields(
-    int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint32_t aux
-) {
+PTO_DEVICE_FUNC constexpr uint32_t
+fdwic_pack_compact_trace_fields(int32_t task_id, int32_t func_id, FdwicSwimlanePhase phase, uint32_t aux) {
     return (static_cast<uint32_t>(task_id) & kFdwicCompactTraceTaskMask) |
-           ((static_cast<uint32_t>(func_id) & kFdwicCompactTraceFunctionMask)
-            << kFdwicCompactTraceFunctionShift) |
+           ((static_cast<uint32_t>(func_id) & kFdwicCompactTraceFunctionMask) << kFdwicCompactTraceFunctionShift) |
            (static_cast<uint32_t>(phase) << kFdwicCompactTracePhaseShift) | (aux << kFdwicCompactTraceAuxShift);
 }
 
@@ -666,7 +692,30 @@ struct FdwicSharedSubmitClaimRecord {
     uint64_t submit_end;
 } __attribute__((aligned(32)));
 
-constexpr uint64_t kFdwicSharedClaimWinnerBit = 1ULL << 63;
+constexpr uint64_t kFdwicSharedEndpointMetadataBit = 1ULL << 63;
+// These bits occupy different 64-bit endpoint fields. Every timestamp keeps
+// the pre-existing 63-bit range instead of reserving several bits in one field.
+constexpr uint64_t kFdwicSharedClaimWinnerBit = kFdwicSharedEndpointMetadataBit;
+constexpr uint64_t kFdwicSharedClaimAttemptedBit = kFdwicSharedEndpointMetadataBit;
+
+PTO_DEVICE_FUNC constexpr uint32_t fdwic_shared_claim_participation_interval_code(uint32_t interval) {
+    return interval == 1 ? 0U : interval == 2 ? 1U : interval == 4 ? 2U : 3U;
+}
+
+PTO_DEVICE_FUNC constexpr uint64_t fdwic_shared_claim_participation_interval_begin_bit(uint32_t interval) {
+    return (fdwic_shared_claim_participation_interval_code(interval) & 1U) != 0 ? kFdwicSharedEndpointMetadataBit : 0U;
+}
+
+PTO_DEVICE_FUNC constexpr uint64_t fdwic_shared_claim_participation_interval_end_bit(uint32_t interval) {
+    return (fdwic_shared_claim_participation_interval_code(interval) & 2U) != 0 ? kFdwicSharedEndpointMetadataBit : 0U;
+}
+
+PTO_DEVICE_FUNC constexpr uint32_t
+fdwic_shared_claim_participation_interval_from_bits(uint64_t submit_begin, uint64_t submit_end) {
+    const uint32_t code = ((submit_begin & kFdwicSharedEndpointMetadataBit) != 0 ? 1U : 0U) |
+                          ((submit_end & kFdwicSharedEndpointMetadataBit) != 0 ? 2U : 0U);
+    return 1U << code;
+}
 static_assert(
     sizeof(FdwicSharedSubmitClaimRecord) == kFdwicSharedSubmitClaimRecordSizeBytes &&
         alignof(FdwicSharedSubmitClaimRecord) == 32,
@@ -679,8 +728,7 @@ constexpr size_t kFdwicSharedSubmitClaimBytesPerCore =
     static_cast<size_t>(kFdwicSharedTraceTaskCapacity) * sizeof(FdwicSharedSubmitClaimRecord);
 constexpr size_t kFdwicSwimlaneGenericBytesPerCore =
     static_cast<size_t>(kFdwicSwimlaneDefaultRecordsPerCore) * sizeof(FdwicSwimlaneStorageRecord);
-constexpr size_t kFdwicSwimlaneWorkerBytes =
-    kFdwicSharedSubmitClaimBytesPerCore + kFdwicSwimlaneGenericBytesPerCore;
+constexpr size_t kFdwicSwimlaneWorkerBytes = kFdwicSharedSubmitClaimBytesPerCore + kFdwicSwimlaneGenericBytesPerCore;
 static_assert(kFdwicSwimlaneWorkerBytes == 593920, "shared trace worker stride changed");
 #else
 using FdwicSwimlaneStorageRecord = FdwicSwimlaneRecord;

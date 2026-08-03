@@ -27,10 +27,22 @@ repos:
           entry: python tests/lint/check_english_only.py
           language: python
           language_version: python3
-          # The atomic-probe tree contains standalone probes, usage guides and
-          # investigation records that are intentionally maintained in Chinese
-          # for the A5 device-performance workflow.
-          exclude: ^(3rdparty/|docs/zh-cn/|README\.zh-CN\.md|tests/atomic_probe/)
+          # The atomic-probe tree and the Submit-PMU report are intentionally
+          # maintained in Chinese for the A5 device-performance workflow. The
+          # listed FDWIC sources already contain the corresponding Chinese
+          # diagnostic annotations on the branch baseline.
+          exclude: |
+            (?x)^(
+              3rdparty/|
+              docs/zh-cn/|
+              README\.zh-CN\.md|
+              tests/atomic_probe/|
+              simpler_setup/tools/fdwic_submit_pmu_report\.py|
+              tests/ut/py/test_fdwic_submit_pmu_report\.py|
+              src/a5/runtime/fully_distributed_within_core/host/fdwic_swimlane\.cpp|
+              src/a5/runtime/fully_distributed_within_core/runtime/dist_engine/common/swimlane\.h|
+              src/a5/runtime/fully_distributed_within_core/runtime/dist_engine/common/swimlane_types\.h
+            )
 
     - repo: https://github.com/pre-commit/pre-commit-hooks
       rev: v4.6.0

@@ -25,7 +25,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 if __package__:
     from ..fdwic_build_config import fdwic_tensormap_ring_cap_definition
@@ -195,9 +195,15 @@ FIXED_ROLE_DYNAMIC_PHASE_CAPTURE_MODES = frozenset(
 KERNEL_EXCLUDING_PHASE_CAPTURE_MODES = frozenset(PHASE_CONFIG_BY_MODE)
 
 
-def _expected_compile_definitions(profile: str, tensormap_mode: str = "private") -> tuple[str, ...]:
+def _expected_compile_definitions(
+    profile: str,
+    tensormap_mode: str = "private",
+    claim_participation_interval: int = 1,
+) -> tuple[str, ...]:
     if tensormap_mode not in {"private", "shared"}:
         _fail(f"unsupported FDWIC TensorMap mode {tensormap_mode!r}")
+    if claim_participation_interval not in {1, 2, 4, 8}:
+        _fail("shared Claim participation interval must be one of 1, 2, 4, or 8")
     definitions = [
         f"PTO_FDWIC_SHARED_MAP={1 if tensormap_mode == 'shared' else 0}",
         fdwic_tensormap_ring_cap_definition(),
@@ -212,7 +218,22 @@ def _expected_compile_definitions(profile: str, tensormap_mode: str = "private")
         # must be covered by the same fail-closed provenance equality as the
         # mode/profile gates above.
         definitions.append("PTO_FDWIC_SHARED_PA_UNITY=1")
+        definitions.append(f"PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL={claim_participation_interval}")
     return tuple(definitions)
+
+
+def _claim_participation_interval_from_cache_key(cache_key: Sequence[str], tensormap_mode: str) -> int:
+    if tensormap_mode != "shared":
+        return 1
+    if len(cache_key) < 3:
+        _fail("shared profiled cache key must carry Claim interval before TensorMap mode/profile")
+    try:
+        interval = int(cache_key[-3])
+    except ValueError as exc:
+        raise ValueError("shared profiled cache key must carry Claim interval before TensorMap mode/profile") from exc
+    if interval not in {1, 2, 4, 8}:
+        _fail("shared profiled cache key Claim interval must be one of 1, 2, 4, or 8")
+    return interval
 
 
 def _expected_core_status_mask(mode: str) -> int:
@@ -349,7 +370,7 @@ class SubmitPmuBuildIdentity:
     artifacts: tuple[tuple[str, BuildArtifactIdentity], ...]
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise ValueError(message)
 
 
@@ -432,8 +453,9 @@ def capture_build_identity(
     tensormap_mode = cache_key[-2]
     if tensormap_mode not in {"private", "shared"}:
         _fail("profiled cache key must carry private/shared immediately before the selected profile")
+    claim_participation_interval = _claim_participation_interval_from_cache_key(cache_key, tensormap_mode)
     definitions = tuple(compile_definitions)
-    if definitions != _expected_compile_definitions(profile, tensormap_mode):
+    if definitions != _expected_compile_definitions(profile, tensormap_mode, claim_participation_interval):
         _fail("Submit-PMU provenance compile definitions do not match the selected profile")
     kernel = Path(aicore_kernel).resolve()
     build_dir = Path(aicore_build_dir).resolve()
@@ -740,6 +762,8 @@ def _validate_phase_read_shape(
             _fail(f"{prefix} dynamic phase begin/end reads must be balanced")
         return business_begin_calls
 
+    if expected_calls is None:
+        _fail(f"{prefix} fixed phase requires an expected call count")
     expected_reads = expected_calls + excluded_kernel_calls
     if begin_reads != expected_reads or end_reads != expected_reads:
         if excluded_kernel_calls:
@@ -1670,6 +1694,7 @@ def _validate_provenance_data(data: dict[str, Any], capture: SubmitPmuCapture) -
         or cache_key[-2:] != [build["tensormap_mode"], build["profile"]]
     ):
         _fail("provenance.build.profiled_cache_key must end with TensorMap mode and selected profile")
+    claim_participation_interval = _claim_participation_interval_from_cache_key(cache_key, build["tensormap_mode"])
     if (
         not isinstance(build["aicore_extra_cache_key"], str)
         or _HEX_16_PATTERN.fullmatch(build["aicore_extra_cache_key"]) is None
@@ -1678,7 +1703,9 @@ def _validate_provenance_data(data: dict[str, Any], capture: SubmitPmuCapture) -
     definitions = build["compile_definitions"]
     if not isinstance(definitions, list) or not definitions or not all(isinstance(value, str) for value in definitions):
         _fail("provenance.build.compile_definitions must be a non-empty string array")
-    if tuple(definitions) != _expected_compile_definitions(build["profile"], build["tensormap_mode"]):
+    if tuple(definitions) != _expected_compile_definitions(
+        build["profile"], build["tensormap_mode"], claim_participation_interval
+    ):
         _fail("provenance.build compile definitions do not match the selected profile")
     if hashlib.sha256(repr(definitions).encode("utf-8")).hexdigest() != definitions_sha256:
         _fail("provenance.build compile definitions do not match definitions_sha256")

@@ -25,6 +25,7 @@ import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from _task_interface import ArgDirection, ChipCallable  # pyright: ignore[reportMissingImports]
@@ -46,6 +47,7 @@ from simpler_setup.scene_test import (
     _fdwic_build_identity_cache,
     _fdwic_compile_definitions,
     _fdwic_profile,
+    _fdwic_shared_claim_participation_interval,
     _fdwic_tensormap_compile_definitions,
     _fdwic_tensormap_mode,
     _profiled_cache_key,
@@ -86,7 +88,8 @@ def test_clear_compile_cache_drops_cached_chip_callables():
     for i in range(3):
         _compile_cache[("t", "plat", f"rt{i}")] = _build_chip_callable(f"n{i}")
     _aicore_override_cache[("t", "plat", "rt0", "private", "none")] = Path("/tmp/fake-aicore.o")
-    _fdwic_build_identity_cache[("t", "plat", "rt0", "private", "submit-pmu-none")] = object()
+    fake_identity: Any = object()
+    _fdwic_build_identity_cache[("t", "plat", "rt0", "private", "submit-pmu-none")] = fake_identity
     assert len(_compile_cache) == 3
     assert len(_aicore_override_cache) == 1
     assert len(_fdwic_build_identity_cache) == 1
@@ -168,7 +171,9 @@ def test_fdwic_profile_partitions_compile_cache(monkeypatch):
     assert _profiled_cache_key(base) == (*base, "private", "submit-pmu-loser-replay")
 
     monkeypatch.setenv("PTO_FDWIC_TENSORMAP_MODE", "shared")
-    assert _profiled_cache_key(base) == (*base, "shared", "submit-pmu-loser-replay")
+    assert _profiled_cache_key(base) == (*base, 1, "shared", "submit-pmu-loser-replay")
+    monkeypatch.setenv("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL", "4")
+    assert _profiled_cache_key(base) == (*base, 4, "shared", "submit-pmu-loser-replay")
 
 
 def test_fdwic_tensormap_mode_and_compile_definition_contract(monkeypatch):
@@ -184,13 +189,25 @@ def test_fdwic_tensormap_mode_and_compile_definition_contract(monkeypatch):
     assert _fdwic_tensormap_compile_definitions("a5sim", "fully_distributed_within_core") == [
         "PTO_FDWIC_SHARED_MAP=1",
         "PTO_FDWIC_TENSORMAP_RING_CAP=128",
+        "PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL=1",
     ]
+    monkeypatch.setenv("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL", "8")
+    assert _fdwic_shared_claim_participation_interval() == 8
+    definitions = _fdwic_tensormap_compile_definitions("a5", "fully_distributed_within_core")
+    assert definitions is not None
+    assert definitions[-1] == ("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL=8")
     with pytest.raises(ValueError, match="only supported"):
         _fdwic_tensormap_compile_definitions("a5", "host_build_graph")
 
     monkeypatch.setenv("PTO_FDWIC_TENSORMAP_MODE", "typo")
     with pytest.raises(ValueError, match="Unsupported PTO_FDWIC_TENSORMAP_MODE"):
         _fdwic_tensormap_mode()
+
+
+def test_shared_claim_participation_interval_rejects_unsupported_environment(monkeypatch):
+    monkeypatch.setenv("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL", "3")
+    with pytest.raises(ValueError, match="expected one of: 1, 2, 4, 8"):
+        _fdwic_shared_claim_participation_interval()
 
 
 def test_fdwic_evidence_profiles_have_isolated_compile_definitions():
@@ -406,6 +423,7 @@ def test_submit_pmu_override_registers_build_identity_after_elf_gate(
 
     binary = maybe_build_aicore_override(profiled_key, "a5", runtime, str(orch), [], pto_isa_root="/pto")
 
+    assert binary is not None
     extra_key = binary.parent.name
     expected_build_dir = (
         FakeRuntimeBuilder._CACHE_DIR / "a5" / "onboard" / runtime / "private" / "aicore-extra" / extra_key / "aicore"
@@ -433,7 +451,7 @@ def test_submit_pmu_render_publishes_bound_provenance_and_html(monkeypatch, tmp_
     report_module = importlib.import_module("simpler_setup.tools.fdwic_submit_pmu_report")
     raw = tmp_path / report_module.DEFAULT_INPUT_NAME
     raw.write_text("{}")
-    identity = object()
+    identity: Any = object()
     called = []
 
     def fake_write_report_with_provenance(input_path, build_identity, output_path):
@@ -496,7 +514,7 @@ def test_submit_pmu_run_resolves_profiled_identity_for_render(monkeypatch, tmp_p
 
     profile = "submit-pmu-none"
     key = (IdentityCase.__qualname__, "a5", IdentityCase._st_runtime, "private", profile)
-    identity = object()
+    identity: Any = object()
     rendered = []
     monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
     monkeypatch.setenv("PTO_FDWIC_PROFILE", profile)
@@ -1159,10 +1177,34 @@ def test_perf_clock_kernel_profile_publishes_environment(monkeypatch):
 
 def test_shared_tensormap_mode_publishes_environment(monkeypatch):
     monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL", raising=False)
 
-    _configure_fdwic_tensormap(_FakePytestConfig(**{"--fdwic-tensormap": "shared"}))
+    _configure_fdwic_tensormap(
+        _FakePytestConfig(
+            **{
+                "--fdwic-tensormap": "shared",
+                "--fdwic-shared-claim-participation-interval": 4,
+            }
+        )
+    )
 
     assert _fdwic_tensormap_mode() == "shared"
+    assert _fdwic_shared_claim_participation_interval() == 4
+
+
+def test_private_tensormap_rejects_selective_claim_interval():
+    with pytest.raises(
+        pytest.UsageError,
+        match="--fdwic-shared-claim-participation-interval requires --fdwic-tensormap shared",
+    ):
+        _configure_fdwic_tensormap(
+            _FakePytestConfig(
+                **{
+                    "--fdwic-tensormap": "private",
+                    "--fdwic-shared-claim-participation-interval": 2,
+                }
+            )
+        )
 
 
 @pytest.mark.parametrize(

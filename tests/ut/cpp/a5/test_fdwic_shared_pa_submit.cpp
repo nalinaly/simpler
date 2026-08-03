@@ -25,18 +25,18 @@
 #include "dist_engine/aicpu/shared_tensor_map_init.h"
 #include "pto_orchestration_api.h"
 
-[[noreturn]] void assert_impl(const char *condition, const char *, int) {
-    throw std::logic_error(condition);
-}
+[[noreturn]] void assert_impl(const char *condition, const char *, int) { throw std::logic_error(condition); }
 
 extern "C" void aicpu_orchestration_entry(const L2TaskArgs &) {}
 volatile uint8_t *sim_get_reg_base() { return nullptr; }
 uint32_t sim_get_physical_core_id() { return 0; }
 
 Runtime::Runtime() {
-    for (uint64_t &address : func_id_to_addr_) address = 0;
+    for (uint64_t &address : func_id_to_addr_)
+        address = 0;
     use_example_exec_time_ = false;
-    for (int32_t &duration : example_exec_time_ns_) duration = 0;
+    for (int32_t &duration : example_exec_time_ns_)
+        duration = 0;
 }
 
 namespace {
@@ -92,15 +92,10 @@ protected:
 
     static Tensor make_external(uintptr_t address, bool manual_dep = false) {
         const uint32_t shape[1] = {16};
-        return make_tensor_external(
-            reinterpret_cast<void *>(address), shape, 1, DataType::FLOAT32, manual_dep
-        );
+        return make_tensor_external(reinterpret_cast<void *>(address), shape, 1, DataType::FLOAT32, manual_dep);
     }
 
-    static void replay_one(
-        CoreType role, int32_t worker_index, SharedPaRunResult &result,
-        uint32_t batches = 1
-    ) {
+    static void replay_one(CoreType role, int32_t worker_index, SharedPaRunResult &result, uint32_t batches = 1) {
         g_dist_ptr = &g_dist_fallback;
         g_self = &g_dist.cores[worker_index];
         g_fdwic_joint_submit_seen = false;
@@ -121,13 +116,11 @@ protected:
             const uint32_t stage_base = batch * kFdwicSharedPaTasksPerBatch;
             L0TaskArgs args;
             args.reset();
-            SharedTaskOutputs alloc = shared_pa_alloc_tensors_compete_first(
-                replay, args, [&](L0TaskArgs &winner_args) {
-                    ++result.callbacks;
-                    result.callback_mask |= 1U << 0;
-                    winner_args.add_output(vector_ci, scalar_ci, scalar_ci);
-                }
-            );
+            SharedTaskOutputs alloc = shared_pa_alloc_tensors_compete_first(replay, args, [&](L0TaskArgs &winner_args) {
+                ++result.callbacks;
+                result.callback_mask |= 1U << 0;
+                winner_args.add_output(vector_ci, scalar_ci, scalar_ci);
+            });
             if (alloc.size() != 3) return;
             result.completed_stage = stage_base + 1U;
             const FdwicOutputRef oi = alloc.output_ref(0);
@@ -188,9 +181,7 @@ protected:
                     winner_args.add_scalar(uint64_t{1}, uint64_t{1});
                 }
             );
-            if (up.producer_task_id !=
-                    static_cast<int32_t>(stage_base + 4U) ||
-                !up.empty()) {
+            if (up.producer_task_id != static_cast<int32_t>(stage_base + 4U) || !up.empty()) {
                 return;
             }
             result.completed_stage = stage_base + 5U;
@@ -240,8 +231,12 @@ protected:
 TEST_F(FdwicSharedPaSubmitTest, TwoRolesPublishOneFiveTaskBatchAndOnlyWinnersBuildArgs) {
     SharedPaRunResult aic;
     SharedPaRunResult aiv;
-    std::thread aic_thread([&] { replay_one(CoreType::AIC, 0, aic); });
-    std::thread aiv_thread([&] { replay_one(CoreType::AIV, 1, aiv); });
+    std::thread aic_thread([&] {
+        replay_one(CoreType::AIC, 0, aic);
+    });
+    std::thread aiv_thread([&] {
+        replay_one(CoreType::AIV, 1, aiv);
+    });
     aic_thread.join();
     aiv_thread.join();
 
@@ -280,13 +275,13 @@ TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeWithExactlyFiveWinnerCal
             replay_one(core < 32 ? CoreType::AIC : CoreType::AIV, core, results[core]);
         });
     }
-    for (std::thread &worker : workers) worker.join();
+    for (std::thread &worker : workers)
+        worker.join();
 
     uint32_t callback_count = 0;
     for (int32_t core = 0; core < 96; ++core) {
-        EXPECT_TRUE(results[core].ok)
-            << "core=" << core << " stage=" << results[core].completed_stage
-            << " callbacks=" << results[core].callback_mask;
+        EXPECT_TRUE(results[core].ok) << "core=" << core << " stage=" << results[core].completed_stage
+                                      << " callbacks=" << results[core].callback_mask;
         callback_count += results[core].callbacks;
     }
     EXPECT_EQ(callback_count, 5U);
@@ -298,14 +293,13 @@ TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeWithExactlyFiveWinnerCal
     }
 }
 
-TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesAllWorkersThroughEightLocalGroups) {
+TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesSelectedWorkersAcrossActiveLocalGroups) {
     reset_ninety_six_workers();
 
     uint32_t total_attempts = 0;
     uint32_t total_winners = 0;
     for (uint32_t batch = 0; batch < kFdwicSharedPaBatches; ++batch) {
-        const int32_t task_id =
-            static_cast<int32_t>(batch * kFdwicSharedPaTasksPerBatch);
+        const int32_t task_id = static_cast<int32_t>(batch * kFdwicSharedPaTasksPerBatch);
         uint32_t task_attempts = 0;
         uint32_t task_winners = 0;
         int32_t winner_core = -1;
@@ -317,13 +311,11 @@ TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesAllWorkersThroughEightLocalGroups)
             const DistSharedPaReplayContext replay = dist_shared_pa_replay_context();
             ASSERT_TRUE(replay.ready());
             const bool won =
-                dist_shared_pa_claim(
-                    replay.role(), replay.block_id(),
-                    DistSharedPaTaskKind::Alloc, nullptr, state
-                );
-            const bool expected_attempt = true;
-            EXPECT_EQ(state.claim_attempted, expected_attempt)
-                << "task=" << task_id << " core=" << core;
+                dist_shared_pa_claim(replay.role(), replay.block_id(), DistSharedPaTaskKind::Alloc, nullptr, state);
+            const bool expected_attempt = fdwic_shared_claim_participates(
+                static_cast<uint32_t>(task_id), static_cast<uint32_t>(core), kFdwicSharedClaimParticipationInterval
+            );
+            EXPECT_EQ(state.claim_attempted, expected_attempt) << "task=" << task_id << " core=" << core;
             EXPECT_EQ(won, state.won);
             if (state.claim_attempted) {
                 ++task_attempts;
@@ -335,26 +327,88 @@ TEST_F(FdwicSharedPaSubmitTest, AllocClaimUsesAllWorkersThroughEightLocalGroups)
                 winner_core = core;
             }
         }
-        EXPECT_EQ(task_attempts, kFdwicSharedWorkers) << "task=" << task_id;
+        EXPECT_EQ(task_attempts, kFdwicSharedWorkers / kFdwicSharedClaimParticipationInterval) << "task=" << task_id;
         EXPECT_EQ(task_winners, 1U) << "task=" << task_id;
         ASSERT_GE(winner_core, 0);
         EXPECT_LT(winner_core, static_cast<int32_t>(kFdwicSharedWorkers));
         EXPECT_EQ(g_dist.shared_pa.claim_tournament[task_id].root.owner.v, task_id);
         for (uint32_t group = 0; group < kFdwicSharedAllocClaimTournamentGroups; ++group) {
-            EXPECT_EQ(g_dist.shared_pa.claim_tournament[task_id].local[group].owner.v, task_id)
+            bool active = false;
+            for (uint32_t candidate = 0; candidate < kFdwicSharedWorkers; ++candidate) {
+                active |= candidate % kFdwicSharedAllocClaimTournamentGroups == group &&
+                          fdwic_shared_claim_participates(
+                              static_cast<uint32_t>(task_id), candidate, kFdwicSharedClaimParticipationInterval
+                          );
+            }
+            EXPECT_EQ(g_dist.shared_pa.claim_tournament[task_id].local[group].owner.v, active ? task_id : -1)
                 << "task=" << task_id << " group=" << group;
         }
     }
-    EXPECT_EQ(total_attempts, kFdwicSharedPaBatches * kFdwicSharedWorkers);
+    EXPECT_EQ(total_attempts, kFdwicSharedPaBatches * kFdwicSharedWorkers / kFdwicSharedClaimParticipationInterval);
     EXPECT_EQ(total_winners, kFdwicSharedPaBatches);
     EXPECT_EQ(g_dist.fatal, 0);
 }
 
+TEST_F(FdwicSharedPaSubmitTest, ProductionTopologyHasParticipantsAndExpectedCasCounts) {
+    struct Topology {
+        uint32_t workers;
+        uint32_t groups;
+    };
+    constexpr Topology topologies[] = {
+        {kFdwicSharedWorkers, kFdwicSharedAllocClaimTournamentGroups},
+        {kFdwicSharedAicWorkers, kFdwicSharedAicClaimTournamentGroups},
+        {kFdwicSharedAivWorkers, kFdwicSharedAivClaimTournamentGroups},
+        {kFdwicSharedAicWorkers, kFdwicSharedAicClaimTournamentGroups},
+        {kFdwicSharedAivWorkers, kFdwicSharedAivClaimTournamentGroups},
+    };
+    uint32_t local_cas = 0;
+    uint32_t root_cas = 0;
+    for (uint32_t task = 0; task < kFdwicSharedPaTaskCapacity; ++task) {
+        const Topology topology = topologies[task % kFdwicSharedPaTasksPerBatch];
+        bool active_groups[kFdwicSharedClaimTournamentMaxGroups]{};
+        uint32_t participants = 0;
+        for (uint32_t candidate = 0; candidate < topology.workers; ++candidate) {
+            if (!fdwic_shared_claim_participates(task, candidate, kFdwicSharedClaimParticipationInterval)) {
+                continue;
+            }
+            ++participants;
+            ++local_cas;
+            active_groups[candidate % topology.groups] = true;
+        }
+        EXPECT_GT(participants, 0U) << "task=" << task;
+        for (uint32_t group = 0; group < topology.groups; ++group) {
+            root_cas += active_groups[group] ? 1U : 0U;
+        }
+    }
+
+    uint32_t expected_local_cas = 0;
+    uint32_t expected_root_cas = 0;
+    switch (kFdwicSharedClaimParticipationInterval) {
+    case 1:
+        expected_local_cas = 73728;
+        expected_root_cas = 9216;
+        break;
+    case 2:
+        expected_local_cas = 36864;
+        expected_root_cas = 4608;
+        break;
+    case 4:
+        expected_local_cas = 18432;
+        expected_root_cas = 3072;
+        break;
+    case 8:
+        expected_local_cas = 9216;
+        expected_root_cas = 2304;
+        break;
+    default:
+        FAIL() << "unsupported interval=" << kFdwicSharedClaimParticipationInterval;
+    }
+    EXPECT_EQ(local_cas, expected_local_cas);
+    EXPECT_EQ(root_cas, expected_root_cas);
+}
+
 TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeAcrossFullB256TaskSequence) {
-    static_assert(
-        kFdwicSharedPaBatches * kFdwicSharedPaTasksPerBatch ==
-        kFdwicSharedPaTaskCapacity
-    );
+    static_assert(kFdwicSharedPaBatches * kFdwicSharedPaTasksPerBatch == kFdwicSharedPaTaskCapacity);
     reset_ninety_six_workers();
 
     std::vector<SharedPaRunResult> results(96);
@@ -362,19 +416,16 @@ TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeAcrossFullB256TaskSequen
     workers.reserve(96);
     for (int32_t core = 0; core < 96; ++core) {
         workers.emplace_back([&, core] {
-            replay_one(
-                core < 32 ? CoreType::AIC : CoreType::AIV, core,
-                results[core], kFdwicSharedPaBatches
-            );
+            replay_one(core < 32 ? CoreType::AIC : CoreType::AIV, core, results[core], kFdwicSharedPaBatches);
         });
     }
-    for (std::thread &worker : workers) worker.join();
+    for (std::thread &worker : workers)
+        worker.join();
 
     uint32_t callback_count = 0;
     for (int32_t core = 0; core < 96; ++core) {
-        EXPECT_TRUE(results[core].ok)
-            << "core=" << core << " stage=" << results[core].completed_stage
-            << " callbacks=" << results[core].callbacks;
+        EXPECT_TRUE(results[core].ok) << "core=" << core << " stage=" << results[core].completed_stage
+                                      << " callbacks=" << results[core].callbacks;
         EXPECT_EQ(results[core].completed_stage, kFdwicSharedPaTaskCapacity);
         callback_count += results[core].callbacks;
     }
@@ -382,15 +433,11 @@ TEST_F(FdwicSharedPaSubmitTest, NinetySixWorkersConvergeAcrossFullB256TaskSequen
     EXPECT_EQ(g_dist.fatal, 0);
     EXPECT_EQ(g_dist.error_code, PTO2_ERROR_NONE);
     for (uint32_t task = 0; task < kFdwicSharedPaTaskCapacity; ++task) {
-        EXPECT_EQ(g_dist.tasks[task].deps_prepared, static_cast<int64_t>(task))
-            << "task=" << task;
+        EXPECT_EQ(g_dist.tasks[task].deps_prepared, static_cast<int64_t>(task)) << "task=" << task;
         EXPECT_EQ(g_dist.tasks[task].flag, 1) << "task=" << task;
     }
     const uint32_t last_up = kFdwicSharedPaTaskCapacity - 1U;
-    EXPECT_EQ(
-        g_dist.shared_pa.writer_history[last_up].magic,
-        kFdwicSharedWriterHistoryMagic
-    );
+    EXPECT_EQ(g_dist.shared_pa.writer_history[last_up].magic, kFdwicSharedWriterHistoryMagic);
     EXPECT_EQ(g_dist.shared_pa.writer_history[last_up].writer_task, last_up);
 }
 
@@ -480,9 +527,7 @@ TEST_F(FdwicSharedPaSubmitTest, MalformedCreateInfoFailsBeforeMutatingSharedHeap
     std::vector<uint8_t> payload_before(sizeof(*ctx.payload));
     std::memcpy(payload_before.data(), ctx.payload, payload_before.size());
     DistSharedPaMaterializePlan plan;
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan));
     EXPECT_FALSE(dist_shared_pa_materialize_args(args, ctx, plan));
 
     EXPECT_NE(g_dist.fatal, 0);
@@ -490,8 +535,7 @@ TEST_F(FdwicSharedPaSubmitTest, MalformedCreateInfoFailsBeforeMutatingSharedHeap
     EXPECT_EQ(g_self->local_index, kFlagCap);
     EXPECT_EQ(g_dist.shared_pa.shared_heap_vend.v, 0);
     for (uint32_t shard = 0; shard < kFdwicSharedHeapShards; ++shard) {
-        EXPECT_EQ(g_dist.shared_pa.shared_heap_cursor[shard].v, 0)
-            << "shard=" << shard;
+        EXPECT_EQ(g_dist.shared_pa.shared_heap_cursor[shard].v, 0) << "shard=" << shard;
     }
     for (uint32_t slot = 0; slot < kFdwicSharedOutputMaxPerTask; ++slot) {
         EXPECT_EQ(g_dist.shared_pa.shared_outputs[0].published[slot].v, -1);
@@ -500,9 +544,7 @@ TEST_F(FdwicSharedPaSubmitTest, MalformedCreateInfoFailsBeforeMutatingSharedHeap
     EXPECT_EQ(g_dist.shared_pa.writer_history[0].magic, 0U);
     EXPECT_EQ(g_dist.tasks[0].deps_prepared, -1);
     EXPECT_EQ(ctx.result.size(), 0U);
-    EXPECT_EQ(
-        std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0
-    );
+    EXPECT_EQ(std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0);
 }
 
 TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
@@ -528,9 +570,7 @@ TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
     alloc.reset();
     alloc.add_output(vector_ci, scalar_ci, scalar_ci);
     DistSharedPaMaterializePlan plan;
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        alloc, 0, DistSharedPaTaskKind::Alloc, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(alloc, 0, DistSharedPaTaskKind::Alloc, plan));
     EXPECT_EQ(plan.output_count, 3U);
     EXPECT_EQ(plan.output_start, 0U);
     EXPECT_EQ(plan.register_mask, 0U);
@@ -540,9 +580,7 @@ TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
     qk.add_input(q, k, table);
     qk.add_output(vector_ci);
     qk.add_scalar(uint64_t{1}, uint64_t{0});
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        qk, 1, DistSharedPaTaskKind::Qk, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(qk, 1, DistSharedPaTaskKind::Qk, plan));
     EXPECT_EQ(plan.output_count, 1U);
     EXPECT_EQ(plan.output_start, 3U);
     EXPECT_EQ(plan.register_mask, 0U);
@@ -552,9 +590,7 @@ TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
     sf.add_input(qk_sij);
     sf.add_output(vector_ci, scalar_ci, scalar_ci);
     sf.add_scalar(uint64_t{1}, uint64_t{1}, uint64_t{1});
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        sf, 2, DistSharedPaTaskKind::Sf, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(sf, 2, DistSharedPaTaskKind::Sf, plan));
     EXPECT_EQ(plan.output_count, 3U);
     EXPECT_EQ(plan.output_start, 1U);
     EXPECT_EQ(plan.register_mask, 0U);
@@ -564,9 +600,7 @@ TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
     pv.add_input(sf_pij, v, table);
     pv.add_output(vector_ci);
     pv.add_scalar(uint64_t{1}, uint64_t{0});
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        pv, 3, DistSharedPaTaskKind::Pv, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(pv, 3, DistSharedPaTaskKind::Pv, plan));
     EXPECT_EQ(plan.output_count, 1U);
     EXPECT_EQ(plan.output_start, 3U);
     EXPECT_EQ(plan.register_mask, 0U);
@@ -576,9 +610,7 @@ TEST_F(FdwicSharedPaSubmitTest, FixedStageSchemasProduceExactMaterializePlans) {
     up.add_input(sf_mi, sf_li, pv_oi);
     up.add_inout(alloc_mi, alloc_li, alloc_oi, out);
     up.add_scalar(uint64_t{1}, uint64_t{1});
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        up, 4, DistSharedPaTaskKind::Up, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(up, 4, DistSharedPaTaskKind::Up, plan));
     EXPECT_EQ(plan.output_count, 0U);
     EXPECT_EQ(plan.register_mask, (1U << 3) | (1U << 4) | (1U << 5));
 }
@@ -600,9 +632,7 @@ TEST_F(FdwicSharedPaSubmitTest, InvalidStageSchemasDoNotProduceMaterializePlans)
     alloc_with_error.reset();
     alloc_with_error.add_output(ci, ci, ci);
     alloc_with_error.has_error = true;
-    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
-        alloc_with_error, 0, DistSharedPaTaskKind::Alloc, plan
-    ));
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(alloc_with_error, 0, DistSharedPaTaskKind::Alloc, plan));
     EXPECT_EQ(plan.output_start, 0U);
     EXPECT_EQ(plan.output_count, 0U);
 
@@ -611,22 +641,16 @@ TEST_F(FdwicSharedPaSubmitTest, InvalidStageSchemasDoNotProduceMaterializePlans)
     sf_wrong_ref.add_input(wrong_qk_ref);
     sf_wrong_ref.add_output(ci, ci, ci);
     sf_wrong_ref.add_scalar(uint64_t{1}, uint64_t{1}, uint64_t{1});
-    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
-        sf_wrong_ref, 2, DistSharedPaTaskKind::Sf, plan
-    ));
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(sf_wrong_ref, 2, DistSharedPaTaskKind::Sf, plan));
     EXPECT_EQ(plan.output_start, 0U);
     EXPECT_EQ(plan.output_count, 0U);
 
     L0TaskArgs up_without_manual_dep;
     up_without_manual_dep.reset();
     up_without_manual_dep.add_input(sf_mi, sf_li, pv_oi);
-    up_without_manual_dep.add_inout(
-        alloc_mi, alloc_li, alloc_oi, out_without_manual_dep
-    );
+    up_without_manual_dep.add_inout(alloc_mi, alloc_li, alloc_oi, out_without_manual_dep);
     up_without_manual_dep.add_scalar(uint64_t{1}, uint64_t{1});
-    EXPECT_FALSE(dist_shared_pa_validate_and_plan(
-        up_without_manual_dep, 4, DistSharedPaTaskKind::Up, plan
-    ));
+    EXPECT_FALSE(dist_shared_pa_validate_and_plan(up_without_manual_dep, 4, DistSharedPaTaskKind::Up, plan));
     EXPECT_EQ(plan.output_start, 0U);
     EXPECT_EQ(plan.output_count, 0U);
     EXPECT_EQ(plan.register_mask, 0U);
@@ -636,9 +660,7 @@ TEST_F(FdwicSharedPaSubmitTest, OversizeOutputFailsBeforePayloadOrPublicationMut
     g_self = &g_dist.cores[0];
     L0TaskArgs args;
     args.reset();
-    const uint32_t oversize_shape[1] = {
-        static_cast<uint32_t>(kFdwicSharedHeapShardBytes / sizeof(float)) + 1U
-    };
+    const uint32_t oversize_shape[1] = {static_cast<uint32_t>(kFdwicSharedHeapShardBytes / sizeof(float)) + 1U};
     TensorCreateInfo oversize(oversize_shape, 1, DataType::FLOAT32);
     const uint32_t scalar_shape[1] = {1};
     TensorCreateInfo scalar_ci(scalar_shape, 1, DataType::FLOAT32);
@@ -651,9 +673,7 @@ TEST_F(FdwicSharedPaSubmitTest, OversizeOutputFailsBeforePayloadOrPublicationMut
     std::vector<uint8_t> payload_before(sizeof(*ctx.payload));
     std::memcpy(payload_before.data(), ctx.payload, payload_before.size());
     DistSharedPaMaterializePlan plan;
-    ASSERT_TRUE(dist_shared_pa_validate_and_plan(
-        args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan
-    ));
+    ASSERT_TRUE(dist_shared_pa_validate_and_plan(args, ctx.task_id, DistSharedPaTaskKind::Alloc, plan));
     EXPECT_FALSE(dist_shared_pa_materialize_args(args, ctx, plan));
 
     EXPECT_NE(g_dist.fatal, 0);
@@ -668,17 +688,14 @@ TEST_F(FdwicSharedPaSubmitTest, OversizeOutputFailsBeforePayloadOrPublicationMut
     }
     EXPECT_EQ(g_dist.tasks[0].deps_prepared, -1);
     EXPECT_EQ(ctx.result.size(), 0U);
-    EXPECT_EQ(
-        std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0
-    );
+    EXPECT_EQ(std::memcmp(payload_before.data(), ctx.payload, payload_before.size()), 0);
 }
 
 TEST_F(FdwicSharedPaSubmitTest, ExternalScalarReadDoesNotInvokeUnsupportedRegionLookup) {
     g_self = &g_dist.cores[0];
     int32_t values[2] = {17, 29};
     const uint32_t shape[1] = {2};
-    const Tensor external =
-        make_tensor_external(values, shape, 1, DataType::INT32, false);
+    const Tensor external = make_tensor_external(values, shape, 1, DataType::INT32, false);
     const uint32_t index[1] = {1};
     EXPECT_EQ(dist_get_tensor_data_impl(nullptr, external, 1, index), 29U);
     EXPECT_EQ(g_dist.fatal, 0);
@@ -724,10 +741,7 @@ TEST_F(FdwicSharedPaSubmitTest, OpportunisticEfDrainBacksOffOnlyForOneStalledSlo
     worker.slots_pad[kFdwicSharedEfDrainNoProgressByte] = 0;
 
     EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
-    EXPECT_EQ(
-        worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte],
-        kFdwicSharedEfDrainNoProgressSkipSubmits
-    );
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], kFdwicSharedEfDrainNoProgressSkipSubmits);
     EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 1);
 
     // The next Submit skips; the following one polls again.
@@ -735,17 +749,10 @@ TEST_F(FdwicSharedPaSubmitTest, OpportunisticEfDrainBacksOffOnlyForOneStalledSlo
     EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], 0);
     EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], 1);
 
-    worker.slots_pad[kFdwicSharedEfDrainNoProgressByte] =
-        kFdwicSharedEfDrainLongWaitPollThreshold - 1;
+    worker.slots_pad[kFdwicSharedEfDrainNoProgressByte] = kFdwicSharedEfDrainLongWaitPollThreshold - 1;
     EXPECT_EQ(dist_shared_pa_opportunistic_drain(&worker), 0);
-    EXPECT_EQ(
-        worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte],
-        kFdwicSharedEfDrainLongWaitSkipSubmits
-    );
-    EXPECT_EQ(
-        worker.slots_pad[kFdwicSharedEfDrainNoProgressByte],
-        kFdwicSharedEfDrainLongWaitPollThreshold
-    );
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainSkipBudgetByte], kFdwicSharedEfDrainLongWaitSkipSubmits);
+    EXPECT_EQ(worker.slots_pad[kFdwicSharedEfDrainNoProgressByte], kFdwicSharedEfDrainLongWaitPollThreshold);
 
     worker.occupied_count = 2;
     worker.slots[1].occupied = true;

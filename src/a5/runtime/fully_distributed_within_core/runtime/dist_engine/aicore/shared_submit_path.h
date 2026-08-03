@@ -95,6 +95,17 @@ PTO_DEVICE_FUNC int32_t dist_shared_pa_expected_kernel_id(const MixedKernels &mi
 PTO_DEVICE_FUNC inline __attribute__((always_inline)) bool dist_shared_pa_claim_tournament(
     uint32_t candidate_rank, uint32_t tournament_groups, int32_t kernel_id, DistSharedPaBeginState &state
 ) {
+    // Selective Participation is a pre-filter, not a third tournament level.
+    // The caller has already established logical eligibility and candidate_rank
+    // is role-local (Alloc 0..95, AIC 0..31, AIV 0..63).  Interval 1 is the
+    // exact legacy path: if constexpr removes both the modulo and the branch.
+    if constexpr (kFdwicSharedClaimParticipationInterval != 1) {
+        if (!fdwic_shared_claim_participates(
+                static_cast<uint32_t>(state.task_id), candidate_rank, kFdwicSharedClaimParticipationInterval
+            )) {
+            return false;
+        }
+    }
     state.claim_attempted = true;
     __gm__ SharedClaimTournamentTask &tournament =
         g_dist.shared_pa.claim_tournament[static_cast<uint32_t>(state.task_id)];
@@ -177,9 +188,8 @@ PTO_DEVICE_FUNC bool dist_shared_pa_claim(
 
 #if PTO_FDWIC_SHARED_PA_UNITY && defined(__CCE_AICORE__)
 template <CoreType CompiledReplayRole, DistSharedPaTaskKind CompiledKind>
-PTO_DEVICE_FUNC inline __attribute__((always_inline)) bool dist_shared_pa_claim_fixed(
-    int32_t kernel_id, DistSharedPaBeginState &state
-) {
+PTO_DEVICE_FUNC inline
+    __attribute__((always_inline)) bool dist_shared_pa_claim_fixed(int32_t kernel_id, DistSharedPaBeginState &state) {
     static_assert(
         CompiledReplayRole == CoreType::AIC || CompiledReplayRole == CoreType::AIV,
         "shared PA unity replay role must be AIC or AIV"
@@ -211,8 +221,7 @@ PTO_DEVICE_FUNC inline __attribute__((always_inline)) bool dist_shared_pa_claim_
         }
         candidate_rank = static_cast<uint32_t>(core_idx);
         tournament_groups = kFdwicSharedAllocClaimTournamentGroups;
-    } else if constexpr (CompiledKind == DistSharedPaTaskKind::Qk ||
-                         CompiledKind == DistSharedPaTaskKind::Pv) {
+    } else if constexpr (CompiledKind == DistSharedPaTaskKind::Qk || CompiledKind == DistSharedPaTaskKind::Pv) {
         if constexpr (CompiledReplayRole != CoreType::AIC) {
             return false;
         } else {
@@ -299,8 +308,7 @@ PTO_DEVICE_FUNC
 #if defined(__CCE_AICORE__) && defined(__DAV_VEC__)
 __attribute__((noinline))
 #endif
-bool
-dist_shared_pa_ordinary_manual_dep(const L0TaskArgs &args, int32_t index) {
+bool dist_shared_pa_ordinary_manual_dep(const L0TaskArgs &args, int32_t index) {
     if (index < 0 || index >= args.tensor_count() || !args.tensor(index).has_existing_tensor()) {
         return false;
     }
@@ -544,8 +552,8 @@ PTO_DEVICE_FUNC bool dist_shared_pa_publish_metadata_and_handoff(
     if (!dist_shared_pa_wait_insert_turn(ctx, ready_observed, bypass_load_count)) return false;
 #if DIST_TRACE_ENABLED
     if (fdwic_swimlane_enabled()) {
-        metadata_begin = bypass_load_count != 0 ? fdwic_scalar_result_ready_tick(ready_observed)
-                                                : fdwic_swimlane_detail_now();
+        metadata_begin =
+            bypass_load_count != 0 ? fdwic_scalar_result_ready_tick(ready_observed) : fdwic_swimlane_detail_now();
     } else {
         metadata_begin = 0;
     }
@@ -647,8 +655,7 @@ PTO_DEVICE_FUNC DistCompeteFirstTicket dist_shared_pa_begin_ticket(
     // repeats the full kind/MixedKernels validation in Finish before publishing
     // shared state; the 95 losers no longer pay task_id%5, three kernel-field
     // loads, active-mask construction, and popcount on every Submit.
-    bool ready = expected_task_id >= 0 &&
-                 static_cast<uint32_t>(expected_task_id) < kFdwicSharedPaTaskCapacity &&
+    bool ready = expected_task_id >= 0 && static_cast<uint32_t>(expected_task_id) < kFdwicSharedPaTaskCapacity &&
                  state.task_id == expected_task_id;
     if constexpr (CompiledKind == DistSharedPaTaskKind::Alloc) {
         ready = ready && kernel_id == INVALID_KERNEL_ID;

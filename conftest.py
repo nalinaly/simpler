@@ -158,6 +158,14 @@ def pytest_addoption(parser):
         "fully_distributed_within_core runtime. The default is private.",
     )
     parser.addoption(
+        "--fdwic-shared-claim-participation-interval",
+        action="store",
+        choices=[1, 2, 4, 8],
+        type=int,
+        default=1,
+        help="Select the role-local shared-PA Claim participation interval (default: 1).",
+    )
+    parser.addoption(
         "--fdwic-profile",
         action="store",
         choices=[
@@ -543,8 +551,12 @@ def _configure_fdwic_profile(config):
 def _configure_fdwic_tensormap(config):
     """Validate and publish the explicit FDWIC TensorMap artifact family."""
     mode = config.getoption("--fdwic-tensormap", default="private")
+    participation_interval = config.getoption("--fdwic-shared-claim-participation-interval", default=1)
     if mode == "private":
+        if participation_interval != 1:
+            raise pytest.UsageError("--fdwic-shared-claim-participation-interval requires --fdwic-tensormap shared")
         os.environ.pop("PTO_FDWIC_TENSORMAP_MODE", None)
+        os.environ.pop("PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL", None)
         return
     if mode != "shared":
         raise pytest.UsageError(f"unsupported --fdwic-tensormap {mode!r}")
@@ -559,6 +571,7 @@ def _configure_fdwic_tensormap(config):
     if level not in {None, 2}:
         raise pytest.UsageError(f"--fdwic-tensormap {mode} only supports SceneTest level 2")
     os.environ["PTO_FDWIC_TENSORMAP_MODE"] = mode
+    os.environ["PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL"] = str(participation_interval)
 
 
 def pytest_configure(config):
@@ -1469,7 +1482,7 @@ def _fdwic_worker_build_config(cls, platform, runtime):
     cache_key = (cls.__qualname__, platform, runtime)
     cls.compile_chip_callable(platform)
     tensormap_mode = _fdwic_tensormap_mode()
-    kwargs = {"fdwic_tensormap_mode": tensormap_mode}
+    kwargs: dict[str, typing.Any] = {"fdwic_tensormap_mode": tensormap_mode}
     pool_token = f"{tensormap_mode}:"
     aicore_override = get_aicore_path_override(cache_key)
     if aicore_override is not None:

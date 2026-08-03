@@ -5649,3 +5649,219 @@ cycles/次，即 1.65 GHz 下约 2.43 ns/次。该数字是紧循环吞吐口径
 已完成；`try_wait` 只负责选择何时恢复 continuation，恢复后继续执行原
 `wait_flag` 再发布 completion。当前四 ID 用例只给同一个最终 TSTORE 叠加
 四个 token，尚未证明四个不同 engine task 同时在途。
+
+## 16. 2026-08-03 Selective Participation：收益上限与二次分组试验
+
+### 16.1 目标、基线和裁决口径
+
+本阶段只分析并优化
+`selective_two_level_per_task_cas_tournament.md` 第 18 章的 Claim 候选预筛，
+不改 TensorMap、`deps_prepared`、Register、slot、Kernel 或 FinalDrain 合同。
+生产人口和既有两级 tournament 固定为：
+
+| task kind | 合法候选 `N` | local group 上限 `G` |
+| --- | ---: | ---: |
+| Alloc | 96 | 8 |
+| QK / PV（AIC） | 32 | 6 |
+| SF / UP（AIV） | 64 | 8 |
+
+第一版严格实现第 18 章的角色内余数预筛：
+
+```text
+task_id % I == role_local_candidate_rank % I, I ∈ {1, 2, 4, 8}
+```
+
+过滤发生在 local CAS 前；被过滤者仍是合法候选，但本 task 不参与、
+不发 local/root CAS，也不等待。`I=1` 通过 `if constexpr` 保持原热路径。
+四档都使用独立编译缓存身份，泳道 endpoint 同时记录 interval、
+`attempted` 和 `winner`，没有扩展原 32 B/task/core endpoint ABI。
+
+真实 A5 device 0、Case1、B256、shared TensorMap、同一 PTO ISA
+`ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8` 的第一版无泳道
+`perf-clock` 结果为：
+
+| interval | 4 次 Submit span（us） | 中位数（us） | 相对 I=1 |
+| ---: | --- | ---: | ---: |
+| 1 | 1472.480 / 1470.080 / 1481.591 / 1508.547 | 1477.035 | 基线 |
+| 2 | 1471.342 / 1448.757 / 1463.777 / 1466.701 | 1465.240 | -11.795 us（-0.80%） |
+| 4 | 1461.788 / 1453.636 / 1460.918 / 1451.974 | **1457.280** | **-19.755 us（-1.34%）** |
+| 8 | 1566.823 / 1495.444 / 1548.072 / 1522.834 | 1535.450 | +58.415 us（+3.96%） |
+
+上述 16 个原始产物依次位于：
+
+```text
+outputs/TestPagedAttentionUnroll_Case1_20260803_041830/  # I=4
+outputs/TestPagedAttentionUnroll_Case1_20260803_042004/  # I=1
+outputs/TestPagedAttentionUnroll_Case1_20260803_042050/  # I=2
+outputs/TestPagedAttentionUnroll_Case1_20260803_042136/  # I=8
+outputs/TestPagedAttentionUnroll_Case1_20260803_042240/  # I=1
+outputs/TestPagedAttentionUnroll_Case1_20260803_042324/  # I=4
+outputs/TestPagedAttentionUnroll_Case1_20260803_042409/  # I=2
+outputs/TestPagedAttentionUnroll_Case1_20260803_042453/  # I=8
+outputs/TestPagedAttentionUnroll_Case1_20260803_042625/  # I=8
+outputs/TestPagedAttentionUnroll_Case1_20260803_042710/  # I=2
+outputs/TestPagedAttentionUnroll_Case1_20260803_042753/  # I=4
+outputs/TestPagedAttentionUnroll_Case1_20260803_042837/  # I=1
+outputs/TestPagedAttentionUnroll_Case1_20260803_042922/  # I=2
+outputs/TestPagedAttentionUnroll_Case1_20260803_043005/  # I=1
+outputs/TestPagedAttentionUnroll_Case1_20260803_043049/  # I=8
+outputs/TestPagedAttentionUnroll_Case1_20260803_043134/  # I=4
+```
+
+环境没有 `npu-smi`、`task-submit` 或频率锁，因此只作同卡方向裁决；
+四档正式样本均为独立 pytest 进程并交错执行，不能把亚微秒差值包装成
+确定收益。
+
+### 16.2 为什么 CAS 总数大降，墙钟只改善约 20 us
+
+第一版 B256 精确 CAS 数为：
+
+| interval | local CAS | root CAS | 总 CAS | 相对 I=1 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 73,728 | 9,216 | 82,944 | 100.00% |
+| 2 | 36,864 | 4,608 | 41,472 | 50.00% |
+| 4 | 18,432 | 3,072 | 21,504 | 25.92% |
+| 8 | 9,216 | 2,304 | 11,520 | 13.89% |
+
+`I=1 -> I=4` 删除 61,440 次物理 CAS。即使按约 160 ns/次粗算，
+`61,440 × 160 ns = 9.8304 ms` 也只是**跨 96 个 core、1,280 个独立
+per-task 地址累加的服务量**，不是可从 1.477 ms 端到端墙钟直接相减的
+串行关键路径。不同 task、不同 local node 和不同 core 上的大量 CAS 并行，
+多数 loser 也不决定最晚完成核。
+
+更关键的是，预筛和 local group 都使用同一个 `candidate_rank` 做取模：
+
+```text
+参与：candidate_rank % I == task_id % I
+分组：group = candidate_rank % G
+```
+
+因此有效 local group 数近似为 `G / gcd(G, I)`，每个有效热点内的人数为：
+
+```text
+(N / I) / (G / gcd(G, I)) = N * gcd(G, I) / (I * G)
+```
+
+对 Alloc/AIV 的 `G=8` 和 `I=2/4/8`，`gcd(G,I)=I`，所以预筛只是
+依次关闭整组；剩余 local 热点的 fan-in 仍分别是 Alloc 12、AIV 8，
+并没有随 interval 缩到 1/2、1/4、1/8。按第 10 章
+`max(local fan-in, root fan-in + 1)` 的简化尾部模型，第一版各角色为：
+
+| interval | Alloc：local/root/尾部 | AIC：local/root/尾部 | AIV：local/root/尾部 |
+| ---: | --- | --- | --- |
+| 1 | 12 / 8 / **12** | 6 / 6 / **7** | 8 / 8 / **9** |
+| 2 | 12 / 4 / **12** | 6 / 3 / **6** | 8 / 4 / **8** |
+| 4 | 12 / 2 / **12** | 3 / 3 / **4** | 8 / 2 / **8** |
+| 8 | 12 / 1 / **12** | 2 / 3 / **4** | 8 / 1 / **8** |
+
+这解释了收益上限：Alloc 关键宽度完全不变，AIV 只从 9 降到 8 后即
+到平台，只有占 512/1,280 task 的 AIC 明显收窄。与此同时，每个 core
+仍要 replay 全部 1,280 个 Submit；Materialize、Register、EfDrain、
+fanin、Kernel 和 FinalDrain 都没有被删除。Claim 变短后，最慢核还会转移到
+后续严格 metadata 链或 Kernel/FinalDrain 尾部。
+
+`I=8` 的回退也不能仅归因于 atomic。它把每 task 的 owner 候选压到
+Alloc/AIC/AIV 的 12/4/8 人，arrival-based 仲裁只能在该静态余数类内选择；
+其它更早空闲的 core 无权接管。第一版 I=8 的 AIC/AIV 最慢核中位数分别为
+1495.079/1528.840 us，AIV 尾部已经成为主要限制，这与第 18.5 节的
+winner bias / 动态性下降一致。
+
+### 16.3 二次候选：压密参与者序号并按串行尾部重分组
+
+为区分“总 CAS 减少但热点不变”和“热点真正变窄”，实现并实测过一个
+二次候选。通过预筛的 rank 先压成连续序号：
+
+```text
+participant_rank = candidate_rank / I
+```
+
+然后在不超过原 group 上限的范围内选择 `H`，最小化：
+
+```text
+max(ceil((N / I) / H), H + 1)
+```
+
+相同尾部优先较小 `H`，减少 root CAS；`I=1` 仍直接使用旧
+`candidate_rank % G`，不进入新增逻辑。得到的 Alloc/AIC/AIV 有效组数为：
+
+| interval | Alloc | AIC | AIV |
+| ---: | ---: | ---: | ---: |
+| 1 | 8 | 6 | 8 |
+| 2 | 6 | 4 | 5 |
+| 4 | 4 | 2 | 4 |
+| 8 | 3 | 2 | 2 |
+
+对应 local 最大 fan-in 分别从第一版的 `12/6/8` 降为：
+
+| interval | Alloc | AIC | AIV |
+| ---: | ---: | ---: | ---: |
+| 2 | 8 | 4 | 7 |
+| 4 | 6 | 4 | 4 |
+| 8 | 4 | 2 | 4 |
+
+代价是激活更多 local winner，root CAS 略增：
+
+| interval | local CAS | root CAS | 总 CAS | 相对 I=1 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 73,728 | 9,216 | 82,944 | 100.00% |
+| 2 | 36,864 | 6,144 | 43,008 | 51.85% |
+| 4 | 18,432 | 4,096 | 22,528 | 27.16% |
+| 8 | 9,216 | 2,816 | 12,032 | 14.51% |
+
+候选没有修改共享内存布局和协议。四个 interval 的 production CPU Submit
+目标全部通过，包括 96 worker 并发、完整 B256、唯一 owner、精确 local/root
+CAS 和 metadata 顺序；Python schema 定向测试 28/28 通过。真实 PA I=4
+smoke 也通过，预热不计统计。
+
+随后用和第一版相同的 Case1、device 0、PTO ISA、`perf-clock` 和独立进程
+口径交错运行 16 轮：
+
+| interval | 4 次 Submit span（us） | 中位数（us） | 相对本轮 I=1 | 相对第一版同 interval |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | 1488.504 / 1476.337 / 1479.369 / 1469.157 | 1477.853 | 基线 | +0.818 us |
+| 2 | 1469.225 / 1468.582 / 1460.324 / 1457.464 | 1464.453 | -13.400 us（-0.91%） | -0.787 us |
+| 4 | 1455.974 / 1473.903 / 1459.739 / 1456.062 | **1457.900** | **-19.953 us（-1.35%）** | +0.620 us |
+| 8 | 1503.777 / 1485.746 / 1491.118 / 1542.696 | 1497.447 | +19.594 us（+1.33%） | -38.003 us |
+
+四档总体标准差分别为 6.941/5.111/7.366/22.266 us。最慢 AIC/AIV
+核中位数分别为：I=1 1475.005/1465.050，I=2 1458.060/1442.402，
+I=4 1452.420/1451.273，I=8 1487.044/1493.524 us。
+
+正式产物为：
+
+```text
+I=1: outputs/TestPagedAttentionUnroll_Case1_20260803_053804/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054233/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054448/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_055014/
+I=2: outputs/TestPagedAttentionUnroll_Case1_20260803_053849/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054317/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054403/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054918/
+I=4: outputs/TestPagedAttentionUnroll_Case1_20260803_053933/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054103/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054629/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054821/
+I=8: outputs/TestPagedAttentionUnroll_Case1_20260803_054019/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054147/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054533/
+     outputs/TestPagedAttentionUnroll_Case1_20260803_054725/
+```
+
+### 16.4 裁决：重分组撤回，Selective 暂停继续扩张
+
+二次候选确实把 I=8 中位数拉回 38.003 us，证明旧 I=8 同时存在 local
+热点集中；但 I=8 仍比本轮 I=1 慢 19.594 us，且 AIV 长尾和方差仍最大，
+静态候选收窄没有被解决。真正有意义的最优档 I=4 与第一版只差
+`+0.620 us`，I=2 只差 `-0.787 us`，都远小于同构建波动，不能声称新收益。
+
+因此该二次 group 映射及对应 host/Python 校验和测试已全部撤回；正式代码
+继续保留第一版第 18 章实现，默认仍为 I=1，I=4 只是当前实测候选。
+
+本阶段也到达了 Selective Participation 自身的优化边界：继续增大 interval
+会继续丢失 arrival-based owner 自由度；只重排 local group 则无法缩短
+Register、严格 metadata 链、Kernel 和 FinalDrain。若继续追求端到端收益，
+下一步应针对已经单独取证的 scalar/engine 尾部重叠或其它真实关键路径，
+而不是把“CAS 总数更少”继续当成充分条件。任何按角色设置不同 interval、
+超时后二次开放候选类或回看旧 task 的方案都会引入新的调度语义和状态，
+必须另立合同与测试，不能作为第 18 章的小改动直接进入生产路径。

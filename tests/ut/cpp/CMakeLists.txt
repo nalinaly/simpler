@@ -553,23 +553,37 @@ target_include_directories(test_fdwic_shared_pa_register BEFORE PRIVATE
 set_tests_properties(test_fdwic_shared_pa_register PROPERTIES LABELS "no_hardware")
 
 # Compile the production shared PA Submit TU and replay one five-task batch
-# concurrently on representative AIC/AIV workers. This locks winner-only
-# argument construction, direct descriptor publication, ordered metadata
-# handoff, symbol fanin, and explicit rejection of the generic shared API.
-add_a5_test(test_fdwic_shared_pa_submit a5/test_fdwic_shared_pa_submit.cpp)
-target_compile_definitions(test_fdwic_shared_pa_submit PRIVATE
-    __CPU_SIM=1
-    PTO_FDWIC_SHARED_MAP=1
-    PTO_FDWIC_TENSORMAP_RING_CAP=128
-)
-target_include_directories(test_fdwic_shared_pa_submit BEFORE PRIVATE
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/runtime
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/orchestration
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/common
-    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime
-)
-set_tests_properties(test_fdwic_shared_pa_submit PROPERTIES LABELS "no_hardware")
+# concurrently on representative AIC/AIV workers. Interval 1 runs the full
+# contract suite. The three selective variants reuse the same production TU
+# and run the topology/count/full-B256 tests that require all 96 workers.
+function(add_fdwic_shared_pa_submit_test name participation_interval)
+    add_a5_test(${name} a5/test_fdwic_shared_pa_submit.cpp)
+    target_compile_definitions(${name} PRIVATE
+        __CPU_SIM=1
+        PTO_FDWIC_SHARED_MAP=1
+        PTO_FDWIC_TENSORMAP_RING_CAP=128
+        PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL=${participation_interval}
+    )
+    target_include_directories(${name} BEFORE PRIVATE
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/runtime
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/orchestration
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/common
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime
+    )
+    set_tests_properties(${name} PROPERTIES LABELS "no_hardware")
+    if(NOT participation_interval EQUAL 1)
+        set_property(
+            TEST ${name} APPEND PROPERTY ENVIRONMENT
+            "GTEST_FILTER=FdwicSharedPaSubmitTest.AllocClaimUsesSelectedWorkersAcrossActiveLocalGroups:FdwicSharedPaSubmitTest.ProductionTopologyHasParticipantsAndExpectedCasCounts:FdwicSharedPaSubmitTest.NinetySixWorkersConvergeAcrossFullB256TaskSequence"
+        )
+    endif()
+endfunction()
+
+add_fdwic_shared_pa_submit_test(test_fdwic_shared_pa_submit 1)
+add_fdwic_shared_pa_submit_test(test_fdwic_shared_pa_submit_interval2 2)
+add_fdwic_shared_pa_submit_test(test_fdwic_shared_pa_submit_interval4 4)
+add_fdwic_shared_pa_submit_test(test_fdwic_shared_pa_submit_interval8 8)
 
 # Exercise the production shared PA lifecycle waits under real host threads.
 # The test-only SPIN_WAIT_HINT hook observes entry into each blocking loop;

@@ -52,6 +52,8 @@ _FDWIC_TENSORMAP_MODE_ENV = "PTO_FDWIC_TENSORMAP_MODE"
 _FDWIC_TENSORMAP_PRIVATE = "private"
 _FDWIC_TENSORMAP_SHARED = "shared"
 _FDWIC_TENSORMAP_MODES = frozenset({_FDWIC_TENSORMAP_PRIVATE, _FDWIC_TENSORMAP_SHARED})
+_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV = "PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL"
+_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVALS = frozenset({1, 2, 4, 8})
 _FDWIC_PROFILE_ENV = "PTO_FDWIC_PROFILE"
 _FDWIC_PROFILE_NONE = "none"
 _FDWIC_PROFILE_PERF_CLOCK = "perf-clock"
@@ -105,6 +107,24 @@ def _fdwic_tensormap_mode() -> str:
     return mode
 
 
+def _fdwic_shared_claim_participation_interval() -> int:
+    raw = os.environ.get(_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV, "1") or "1"
+    try:
+        interval = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported {_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV}={raw!r}") from exc
+    if interval not in _FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVALS:
+        choices = ", ".join(str(value) for value in sorted(_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVALS))
+        raise ValueError(
+            f"Unsupported {_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV}={raw!r}; expected one of: {choices}"
+        )
+    return interval
+
+
+def _fdwic_shared_claim_participation_definition() -> str:
+    return f"PTO_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL={_fdwic_shared_claim_participation_interval()}"
+
+
 def _validate_fdwic_tensormap_test_classes(mode: str, selected_by_cls) -> None:
     """Reject every shared selection outside the explicitly supported PA cases."""
     if mode != _FDWIC_TENSORMAP_SHARED:
@@ -146,6 +166,7 @@ def _fdwic_tensormap_compile_definitions(platform: str, runtime: str) -> list[st
     return [
         f"PTO_FDWIC_SHARED_MAP={1 if mode == _FDWIC_TENSORMAP_SHARED else 0}",
         fdwic_tensormap_ring_cap_definition(),
+        *([_fdwic_shared_claim_participation_definition()] if mode == _FDWIC_TENSORMAP_SHARED else []),
     ]
 
 
@@ -245,7 +266,15 @@ def _fdwic_compile_definitions(profile: str) -> list[str] | None:
 
 def _profiled_cache_key(cache_key) -> tuple[Any, ...]:
     base = cache_key if isinstance(cache_key, tuple) else (cache_key,)
-    return (*base, _fdwic_tensormap_mode(), _fdwic_profile())
+    mode = _fdwic_tensormap_mode()
+    if mode == _FDWIC_TENSORMAP_SHARED:
+        return (
+            *base,
+            _fdwic_shared_claim_participation_interval(),
+            mode,
+            _fdwic_profile(),
+        )
+    return (*base, mode, _fdwic_profile())
 
 
 def clear_compile_cache() -> None:
@@ -514,9 +543,7 @@ def _assert_fdwic_shared_pa_role_entries(binary: Path) -> None:
     symbol_rows = _fdwic_elf_symbol_rows(binary)
     required = ("aicpu_orchestration_entry_aic", "aicpu_orchestration_entry_aiv")
     definition_counts = {
-        symbol: sum(
-            kind == "FUNC" and ndx != "UND" and name == symbol for kind, ndx, name in symbol_rows
-        )
+        symbol: sum(kind == "FUNC" and ndx != "UND" and name == symbol for kind, ndx, name in symbol_rows)
         for symbol in required
     }
     invalid = [f"{symbol}={definition_counts[symbol]}" for symbol in required if definition_counts[symbol] != 1]
@@ -587,6 +614,7 @@ def maybe_build_aicore_override(
         # bodies; the AIV orchestration translation unit is intentionally empty.
         # The runtime dispatches to two distinct role entry symbols after attach.
         compile_definitions.append("PTO_FDWIC_SHARED_PA_UNITY=1")
+        compile_definitions.append(_fdwic_shared_claim_participation_definition())
     builder = RuntimeBuilder(platform, fdwic_tensormap_mode=tensormap_mode)
     binary = builder.build_aicore_with_extra_sources(
         runtime,
@@ -1709,7 +1737,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
     callable_spec = getattr(type(cls_inst), "CALLABLE", None)
     fdwic_profile = _fdwic_profile()
     isolated_profile_on = fdwic_profile in _FDWIC_ISOLATED_PROFILES
-    submit_pmu_build_identity = None
+    submit_pmu_build_identity: SubmitPmuBuildIdentity | None = None
     if fdwic_profile in _FDWIC_SUBMIT_PMU_PROFILES:
         platform = worker._config.get("platform")
         runtime = getattr(type(cls_inst), "_st_runtime", None)
@@ -1793,6 +1821,7 @@ def run_class_cases(  # noqa: PLR0913 -- shared layer-5 entry; kwargs mirror CLI
             if enable_scope_stats:
                 _plot_case_scope_stats(case_label, prefix)
             if case_succeeded and fdwic_profile in _FDWIC_SUBMIT_PMU_PROFILES:
+                assert submit_pmu_build_identity is not None
                 _render_case_fdwic_submit_pmu(case_label, prefix, submit_pmu_build_identity)
             if case_succeeded and fdwic_profile in _FDWIC_PERF_CLOCK_PROFILES:
                 _validate_case_fdwic_perf_clock(case_label, prefix, fdwic_profile)
@@ -1957,7 +1986,7 @@ class SceneTestCase:
         cache_key = (cls.__qualname__, platform, cls._st_runtime)
         cls.compile_chip_callable(platform)
         aicore_override = get_aicore_path_override(cache_key)
-        kwargs = {"fdwic_tensormap_mode": _fdwic_tensormap_mode()}
+        kwargs: dict[str, Any] = {"fdwic_tensormap_mode": _fdwic_tensormap_mode()}
         if aicore_override is not None:
             kwargs["aicore_path_override"] = aicore_override
         w = Worker(level=2, device_id=device_id, platform=platform, runtime=cls._st_runtime, **kwargs)
@@ -2377,9 +2406,7 @@ class SceneTestCase:
 
             pytest.skip(f"No cases matched {cls_name} (platform={st_platform}, manual={manual_mode})")
 
-        _validate_fdwic_tensormap_test_classes(
-            _fdwic_tensormap_mode(), {type(self): matched}
-        )
+        _validate_fdwic_tensormap_test_classes(_fdwic_tensormap_mode(), {type(self): matched})
         callable_obj = self.build_callable(st_platform)
         sub_handles = getattr(type(self), "_st_sub_handles", {})
         # For L3, use registered chip handles instead of raw ChipCallable
@@ -2429,6 +2456,13 @@ class SceneTestCase:
             default="private",
             help="Select the compile-time TensorMap artifact family for the "
             "a5/a5sim fully_distributed_within_core runtime.",
+        )
+        parser.add_argument(
+            "--fdwic-shared-claim-participation-interval",
+            choices=sorted(_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVALS),
+            type=int,
+            default=1,
+            help="Select the role-local shared-PA Claim participation interval (1/2/4/8).",
         )
         parser.add_argument(
             "-d",
@@ -2568,8 +2602,14 @@ class SceneTestCase:
             if args.platform not in {"a5", "a5sim"}:
                 parser.error("--fdwic-tensormap shared requires -p a5 or a5sim")
             os.environ[_FDWIC_TENSORMAP_MODE_ENV] = _FDWIC_TENSORMAP_SHARED
+            os.environ[_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV] = str(
+                args.fdwic_shared_claim_participation_interval
+            )
         else:
+            if args.fdwic_shared_claim_participation_interval != 1:
+                parser.error("--fdwic-shared-claim-participation-interval requires --fdwic-tensormap shared")
             os.environ.pop(_FDWIC_TENSORMAP_MODE_ENV, None)
+            os.environ.pop(_FDWIC_SHARED_CLAIM_PARTICIPATION_INTERVAL_ENV, None)
 
         # Match the per-test kernel/orchestration compile to the runtime's
         # sanitizer, and require the runtime preloaded — same as conftest, since
@@ -2777,6 +2817,11 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
     common = ["-p", args.platform, "--manual", args.manual, "--log-level", args.log_level]
     if args.fdwic_tensormap != "private":
         common += ["--fdwic-tensormap", args.fdwic_tensormap]
+    if args.fdwic_shared_claim_participation_interval != 1:
+        common += [
+            "--fdwic-shared-claim-participation-interval",
+            str(args.fdwic_shared_claim_participation_interval),
+        ]
     if args.sanitizer != "none":
         common += ["--sanitizer", args.sanitizer]
     if args.rounds != 1:

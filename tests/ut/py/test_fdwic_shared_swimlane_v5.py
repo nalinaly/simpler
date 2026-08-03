@@ -19,6 +19,8 @@ from simpler_setup.tools.fdwic_shared_swimlane_schema import (
     SHARED_V5_DCCI_SITE_OP_IDS,
     SHARED_V5_PHASE1_TASK_COUNT,
     _claim_attempted,
+    _claim_tournament_active_groups,
+    validate_and_partition_v5,
 )
 from simpler_setup.tools.fdwic_swimlane_exclusive_analyzer import analyze_data
 from simpler_setup.tools.swimlane_converter import generate_chrome_trace_json, read_perf_data
@@ -46,10 +48,7 @@ def _refresh_summary(raw):
         "records": len(rows),
         "atomic_records": len(atomic_rows),
         "clock_baseline_records": sum(row[5] == "ClockBaseline" for row in rows),
-        "atomic_calls": sum(
-            (row[8] >> 8) & 0xFFFFFF if row[8] & (1 << 7) else 1
-            for row in atomic_rows
-        ),
+        "atomic_calls": sum((row[8] >> 8) & 0xFFFFFF if row[8] & (1 << 7) else 1 for row in atomic_rows),
         "batched_poll_calls": sum((row[8] >> 8) & 0xFFFFFF for row in poll_rows),
         "poll_batch_records": len(poll_rows),
         "dcci_records": len(dcci_rows),
@@ -64,12 +63,10 @@ def _write_mutated_capture(path, raw):
     path.write_text(json.dumps(raw), encoding="utf-8")
 
 
-def _shared_capture(level=1):  # noqa: PLR0912
+def _shared_capture(level=1, participation_interval=1):  # noqa: PLR0912
     rows = []
     core_types = ["aic"] * _SYNTHETIC_AIC_CORES + ["aiv"] * _SYNTHETIC_AIV_CORES
-    lanes = [0] * _SYNTHETIC_AIC_CORES + [
-        1 + ordinal % 2 for ordinal in range(_SYNTHETIC_AIV_CORES)
-    ]
+    lanes = [0] * _SYNTHETIC_AIC_CORES + [1 + ordinal % 2 for ordinal in range(_SYNTHETIC_AIV_CORES)]
     for core, (role, lane) in enumerate(zip(core_types, lanes)):
         orchestration_start = 1_000_000 + core * 2_000_000
         if level == 4:
@@ -90,25 +87,42 @@ def _shared_capture(level=1):  # noqa: PLR0912
         for task in range(SHARED_V5_PHASE1_TASK_COUNT):
             kind = task % 5
             task_func = -1 if kind == 0 else kind - 1
-            attempted = kind == 0 or (
-                (role == "aic" and kind in (1, 3))
-                or (role == "aiv" and kind in (2, 4))
+            attempted = _claim_attempted(
+                core,
+                role,
+                task,
+                _SYNTHETIC_AIC_CORES,
+                participation_interval,
             )
-            root_contender = (
-                (kind == 0 and core < 8)
-                or (kind in (1, 3) and core < min(6, _SYNTHETIC_AIC_CORES))
-                or (
-                    kind in (2, 4)
-                    and _SYNTHETIC_AIC_CORES <= core < _SYNTHETIC_AIC_CORES + min(8, _SYNTHETIC_AIV_CORES)
+            if kind == 0:
+                candidate_cores = range(_SYNTHETIC_CORE_COUNT)
+                groups = 8
+            elif kind in (1, 3):
+                candidate_cores = range(_SYNTHETIC_AIC_CORES)
+                groups = 6
+            else:
+                candidate_cores = range(_SYNTHETIC_AIC_CORES, _SYNTHETIC_CORE_COUNT)
+                groups = 8
+            participants = [
+                candidate
+                for candidate in candidate_cores
+                if _claim_attempted(
+                    candidate,
+                    core_types[candidate],
+                    task,
+                    _SYNTHETIC_AIC_CORES,
+                    participation_interval,
                 )
+            ]
+            assert participants
+            candidate_rank = core if kind in (0, 1, 3) else core - _SYNTHETIC_AIC_CORES
+            root_contender = attempted and core == min(
+                candidate
+                for candidate in participants
+                if (candidate if kind in (0, 1, 3) else candidate - _SYNTHETIC_AIC_CORES) % groups
+                == candidate_rank % groups
             )
-            winner_core = {
-                0: 0,
-                1: 0,
-                2: _SYNTHETIC_AIC_CORES,
-                3: 0,
-                4: _SYNTHETIC_AIC_CORES,
-            }[kind]
+            winner_core = participants[0]
             winner = core == winner_core
             func = task_func if winner else -1
             submit_start = orchestration_start + 10 + task * 400
@@ -334,6 +348,7 @@ def _shared_capture(level=1):  # noqa: PLR0912
             "trace_schema_version": 5,
             "raw_trace_version": 5,
             "tensormap_mode": "shared",
+            "claim_participation_interval": participation_interval,
             "records_per_core": 28416,
             "record_size_bytes": 16,
             "atomic_site_names": list(SHARED_V5_ATOMIC_SITE_NAMES),
@@ -380,10 +395,7 @@ def test_shared_v5_level1_converts_and_closes_exclusive_model(shared_level1_raw,
     data = read_perf_data(shared_level1_raw)
     assert data["trace_schema_version"] == 5
     assert data["tensormap_mode"] == "shared"
-    assert (
-        len(data["fdwic_events"])
-        > 2 * _SYNTHETIC_CORE_COUNT * SHARED_V5_PHASE1_TASK_COUNT
-    )
+    assert len(data["fdwic_events"]) > 2 * _SYNTHETIC_CORE_COUNT * SHARED_V5_PHASE1_TASK_COUNT
 
     report = analyze_data(data, shared_level1_raw)
     assert report["validation"]["status"] == "PASS"
@@ -399,6 +411,7 @@ def test_shared_v5_level1_converts_and_closes_exclusive_model(shared_level1_raw,
         clock_freq_hz=data["clock_freq_hz"],
         fdwic_num_cores=data["num_cores"],
         fdwic_core_types=data["core_types"],
+        fdwic_claim_participation_interval=data["claim_participation_interval"],
     )
     names = {event.get("name") for event in json.loads(merged.read_text(encoding="utf-8"))["traceEvents"]}
     assert "efdrain#0" in names
@@ -418,17 +431,79 @@ def test_shared_v5_claim_attempted_matches_full_alloc_tournament_contract(shared
     assert len(alloc_attempted) == 3_072
     assert {row[0] for row in alloc_attempted} == set(range(_SYNTHETIC_CORE_COUNT))
 
-    production_attempts = 0
-    for task in range(SHARED_V5_PHASE1_TASK_COUNT):
-        production_attempts += sum(
-            _claim_attempted("aic", block, task) for block in range(32)
+    production_attempts = sum(
+        _claim_attempted(
+            core,
+            "aic" if core < 32 else "aiv",
+            task,
+            32,
+            1,
         )
-        production_attempts += sum(
-            _claim_attempted("aiv", block, task)
-            for block in range(32)
-            for _lane in range(2)
-        )
+        for task in range(SHARED_V5_PHASE1_TASK_COUNT)
+        for core in range(96)
+    )
     assert production_attempts == 73_728
+
+
+@pytest.mark.parametrize(
+    ("participation_interval", "expected_local_cas", "expected_root_cas"),
+    ((1, 73_728, 9_216), (2, 36_864, 4_608), (4, 18_432, 3_072), (8, 9_216, 2_304)),
+)
+def test_shared_v5_production_claim_interval_counts(participation_interval, expected_local_cas, expected_root_cas):
+    local_cas = sum(
+        _claim_attempted(
+            core,
+            "aic" if core < 32 else "aiv",
+            task,
+            32,
+            participation_interval,
+        )
+        for task in range(SHARED_V5_PHASE1_TASK_COUNT)
+        for core in range(96)
+    )
+    root_cas = sum(
+        len(_claim_tournament_active_groups(task, 32, participation_interval))
+        for task in range(SHARED_V5_PHASE1_TASK_COUNT)
+    )
+    assert local_cas == expected_local_cas
+    assert root_cas == expected_root_cas
+
+
+def test_shared_v5_rejects_interval_with_uncovered_role_local_residue():
+    core_types = ["aic"] * 4 + ["aiv"] * 8
+    with pytest.raises(ValueError, match="uncovered role-local residue"):
+        validate_and_partition_v5([], len(core_types), core_types, 1, 8)
+
+
+def test_shared_v5_selective_claim_marks_skipped_eligible_workers(tmp_path):
+    raw_path = tmp_path / "l2_swimlane_records.json"
+    raw_path.write_text(
+        json.dumps(_shared_capture(participation_interval=4)),
+        encoding="utf-8",
+    )
+    data = read_perf_data(raw_path)
+    assert data["claim_participation_interval"] == 4
+
+    merged = tmp_path / "merged_swimlane.json"
+    generate_chrome_trace_json(
+        data["tasks"],
+        merged,
+        fdwic_events=data["fdwic_events"],
+        trace_schema_version=5,
+        clock_freq_hz=data["clock_freq_hz"],
+        fdwic_num_cores=data["num_cores"],
+        fdwic_core_types=data["core_types"],
+        fdwic_claim_participation_interval=data["claim_participation_interval"],
+    )
+    claim_events = [
+        event
+        for event in json.loads(merged.read_text(encoding="utf-8"))["traceEvents"]
+        if event.get("name", "").startswith("claim.")
+    ]
+    participating = [event for event in claim_events if event["name"].startswith(("claim.won#", "claim.lost#"))]
+    skipped = [event for event in claim_events if event["name"].startswith("claim.participation_skipped#")]
+    assert len(participating) == 2_304
+    assert skipped
 
 
 def test_shared_v5_rejects_atomic_name_table_drift(shared_level1_raw):
@@ -478,11 +553,7 @@ def test_shared_v5_requires_winner_bypass_wait_detail(shared_level1_raw):
     raw["fdwic_events"] = [
         row
         for row in raw["fdwic_events"]
-        if not (
-            row[0] == 0
-            and row[3] == 1
-            and row[5] == "SharedRegisterWaitInsertTurnBypassLoad"
-        )
+        if not (row[0] == 0 and row[3] == 1 and row[5] == "SharedRegisterWaitInsertTurnBypassLoad")
     ]
     _write_mutated_capture(shared_level1_raw, raw)
 
@@ -495,11 +566,7 @@ def test_shared_v5_requires_winner_bypass_wait_detail(shared_level1_raw):
 
 def test_shared_v5_requires_one_kernel_for_every_nonalloc_task(shared_level1_raw):
     raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
-    raw["fdwic_events"] = [
-        row
-        for row in raw["fdwic_events"]
-        if not (row[3] == 1 and row[5] == "Kernel")
-    ]
+    raw["fdwic_events"] = [row for row in raw["fdwic_events"] if not (row[3] == 1 and row[5] == "Kernel")]
     _write_mutated_capture(shared_level1_raw, raw)
 
     with pytest.raises(ValueError, match=r"task 1 requires exactly one Kernel row, got 0"):
@@ -510,19 +577,11 @@ def test_shared_v5_requires_one_kernel_for_every_nonalloc_task(shared_level1_raw
 def test_shared_v5_rejects_extra_or_duplicate_kernel(shared_level1_raw, mutation):
     raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
     if mutation == "duplicate":
-        kernel = next(
-            row
-            for row in raw["fdwic_events"]
-            if row[3] == 1 and row[5] == "Kernel"
-        )
+        kernel = next(row for row in raw["fdwic_events"] if row[3] == 1 and row[5] == "Kernel")
         raw["fdwic_events"].append(list(kernel))
         message = r"task 1 requires exactly one Kernel row, got 2"
     else:
-        tail = next(
-            row
-            for row in raw["fdwic_events"]
-            if row[3] == 0 and row[5] == "AllocComplete"
-        )
+        tail = next(row for row in raw["fdwic_events"] if row[3] == 0 and row[5] == "AllocComplete")
         _append_row(
             raw["fdwic_events"],
             tail[0],
@@ -542,11 +601,7 @@ def test_shared_v5_rejects_extra_or_duplicate_kernel(shared_level1_raw, mutation
 
 def test_shared_v5_rejects_kernel_on_nonwinner_core(shared_level1_raw):
     raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
-    kernel = next(
-        row
-        for row in raw["fdwic_events"]
-        if row[3] == 1 and row[5] == "Kernel"
-    )
+    kernel = next(row for row in raw["fdwic_events"] if row[3] == 1 and row[5] == "Kernel")
     assert kernel[0] == 0
     kernel[0] = 1
     kernel[1] = 1
@@ -559,11 +614,7 @@ def test_shared_v5_rejects_kernel_on_nonwinner_core(shared_level1_raw):
 
 def test_shared_v5_rejects_kernel_function_drift(shared_level1_raw):
     raw = json.loads(shared_level1_raw.read_text(encoding="utf-8"))
-    kernel = next(
-        row
-        for row in raw["fdwic_events"]
-        if row[3] == 1 and row[5] == "Kernel"
-    )
+    kernel = next(row for row in raw["fdwic_events"] if row[3] == 1 and row[5] == "Kernel")
     kernel[4] = 1
     _write_mutated_capture(shared_level1_raw, raw)
 
@@ -575,9 +626,7 @@ def test_shared_v5_level4_validates_insert_turn_bypass_wait_atomic_handoff_and_d
     data = read_perf_data(shared_level4_raw)
     report = analyze_data(data, shared_level4_raw)
     bypass_waits = [
-        event
-        for event in data["fdwic_events"]
-        if event["phase"] == "SharedRegisterWaitInsertTurnBypassLoad"
+        event for event in data["fdwic_events"] if event["phase"] == "SharedRegisterWaitInsertTurnBypassLoad"
     ]
 
     assert report["validation"]["status"] == "PASS"
@@ -593,9 +642,7 @@ def test_shared_v5_level4_validates_insert_turn_bypass_wait_atomic_handoff_and_d
 def test_shared_v5_level4_rejects_missing_tournament_local(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     raw["fdwic_events"] = [
-        row
-        for row in raw["fdwic_events"]
-        if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 40)
+        row for row in raw["fdwic_events"] if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 40)
     ]
     _write_mutated_capture(shared_level4_raw, raw)
 
@@ -606,9 +653,7 @@ def test_shared_v5_level4_rejects_missing_tournament_local(shared_level4_raw):
 def test_shared_v5_level4_rejects_tournament_local_for_nonattempted_core(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     claim = next(
-        row
-        for row in raw["fdwic_events"]
-        if row[0] == _SYNTHETIC_AIC_CORES and row[3] == 1 and row[5] == "Claim"
+        row for row in raw["fdwic_events"] if row[0] == _SYNTHETIC_AIC_CORES and row[3] == 1 and row[5] == "Claim"
     )
     assert not claim[8] & (1 << 1)
     _append_row(
@@ -632,9 +677,7 @@ def test_shared_v5_level4_rejects_tournament_local_for_nonattempted_core(shared_
 def test_shared_v5_level4_rejects_missing_tournament_root_group(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     raw["fdwic_events"] = [
-        row
-        for row in raw["fdwic_events"]
-        if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 41)
+        row for row in raw["fdwic_events"] if not (row[0] == 0 and row[3] == 1 and row[5] == "Atomic" and row[9] == 41)
     ]
     _write_mutated_capture(shared_level4_raw, raw)
 
@@ -644,14 +687,18 @@ def test_shared_v5_level4_rejects_missing_tournament_root_group(shared_level4_ra
 
 def test_shared_v5_level4_rejects_duplicate_tournament_root_group(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
-    claim = next(
-        row
-        for row in raw["fdwic_events"]
-        if row[0] == 0 and row[3] == 1 and row[5] == "Claim"
-    )
+    claim = next(row for row in raw["fdwic_events"] if row[0] == 0 and row[3] == 1 and row[5] == "Claim")
     _append_row(
-        raw["fdwic_events"], claim[0], claim[2], claim[3], -1,
-        "Atomic", claim[6] + 5, claim[7] - 2, 4 | (1 << 4), 41,
+        raw["fdwic_events"],
+        claim[0],
+        claim[2],
+        claim[3],
+        -1,
+        "Atomic",
+        claim[6] + 5,
+        claim[7] - 2,
+        4 | (1 << 4),
+        41,
     )
     _write_mutated_capture(shared_level4_raw, raw)
 
@@ -662,9 +709,7 @@ def test_shared_v5_level4_rejects_duplicate_tournament_root_group(shared_level4_
 def test_shared_v5_level4_rejects_missing_winner_dcci(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
     raw["fdwic_events"] = [
-        row
-        for row in raw["fdwic_events"]
-        if not (row[0] == 0 and row[3] == 0 and row[5] == "Dcci" and row[9] == 3)
+        row for row in raw["fdwic_events"] if not (row[0] == 0 and row[3] == 0 and row[5] == "Dcci" and row[9] == 3)
     ]
     _write_mutated_capture(shared_level4_raw, raw)
 
@@ -688,11 +733,7 @@ def test_shared_v5_level4_rejects_wrong_winner_dcci_lines(shared_level4_raw):
 
 def test_shared_v5_level4_rejects_loser_business_dcci(shared_level4_raw):
     raw = json.loads(shared_level4_raw.read_text(encoding="utf-8"))
-    submit = next(
-        row
-        for row in raw["fdwic_events"]
-        if row[0] == 1 and row[3] == 1 and row[5] == "Submit"
-    )
+    submit = next(row for row in raw["fdwic_events"] if row[0] == 1 and row[3] == 1 and row[5] == "Submit")
     assert not submit[8] & 1
     _append_row(
         raw["fdwic_events"],

@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD060 -->
+
 # 当前候选方案总结：两级 Per-Task CAS Tournament + `deps_prepared` 顺序提交链
 
 > **状态：** 已在 standalone shared PA 落地并保留
@@ -642,3 +644,71 @@ Tournament、候选人口、节点布局或 `deps_prepared` 时仍应作为回�
 
 per-task 节点的 ABA、generation 与长窗口复用仍是明确非目标；若未来允许
 task-id 回绕或节点跨调度复用，必须先扩展协议并重新完成本节全部门槛。
+
+---
+
+## 18. Selective Participation 实现与真实 PA 扫描（2026-08-03）
+
+当前分支在原两级 tournament 前增加了受限编译期预筛：
+
+```text
+task_id % I == role_local_worker_id % I, I ∈ {1, 2, 4, 8}
+```
+
+- `I=1` 是默认值，`if constexpr` 会删除预筛分支与取模，保持原 Claim 热路径；
+- Alloc 使用 `0..95`，AIC 使用 `0..31`，AIV 使用 `0..63` 的角色内编号；
+- 被筛掉者仍是 `eligible`，但 `participating=false`，不发 local/root CAS，也不等待；
+- 固定 `96/32/64` 人口均覆盖全部允许的余数类，编译期断言拒绝不支持的间隔；
+- scene-test 入口为
+  `--fdwic-shared-claim-participation-interval {1,2,4,8}`，且只允许与
+  `--fdwic-tensormap shared` 同时使用；四个 interval 使用独立编译缓存键。
+
+### 18.1 固定拓扑 CAS 数
+
+对完整 B256（1280 task），本地合同测试和真实 level-4 记录使用同一口径：
+
+| interval | local CAS | root CAS | 总 CAS | 相对 I=1 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 73,728 | 9,216 | 82,944 | 100.00% |
+| 2 | 36,864 | 4,608 | 41,472 | 50.00% |
+| 4 | 18,432 | 3,072 | 21,504 | 25.92% |
+| 8 | 9,216 | 2,304 | 11,520 | 13.89% |
+
+`I=4` 的真实 PA level-4 记录闭合为：122,880 条 Claim、18,432 个
+`attempted/local CAS`、3,072 个 root CAS、1,280 个 winner，且 dropped record
+为 0。合并视图进一步区分出 55,296 个合法但被预筛跳过的 Claim，以及 49,152
+个因角色不匹配而不合法的 Claim。
+
+### 18.2 无泳道 perf-clock
+
+同一 device 0、同一 Case1、同一 PTO ISA `ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8`，
+四个 interval 各跑 4 个独立进程样本；正式样本采用交错顺序。环境没有
+`task-submit`/频率锁，因此本表只作当前单卡方向判断，不冒充锁频基准。
+
+| interval | 4 次 global Submit span（us） | 中位数（us） | 相对 I=1 中位数 |
+| ---: | --- | ---: | ---: |
+| 1 | 1472.48 / 1470.08 / 1481.59 / 1508.55 | 1477.035 | 基线 |
+| 2 | 1471.34 / 1448.76 / 1463.78 / 1466.70 | 1465.240 | -11.795 us（-0.80%） |
+| 4 | 1461.79 / 1453.64 / 1460.92 / 1451.97 | **1457.280** | **-19.755 us（-1.34%）** |
+| 8 | 1566.82 / 1495.44 / 1548.07 / 1522.83 | 1535.450 | +58.415 us（+3.96%） |
+
+当前数据说明 CAS 数量并非越少越好：`I=4` 在本轮中最好，`I=8` 虽只保留
+13.89% 的 Claim CAS，却出现明显且更不稳定的回退。合理解释是过度收窄参与人口
+削弱了 arrival-based owner 选择并改变尾部竞争形态，但本轮没有单独证明这一归因。
+因此代码仍保持 `I=1` 为默认值；若后续决定把优化转为默认策略，`I=4` 是当前应优先
+扩大样本验证的候选，而不是直接选择 CAS 最少的 `I=8`。
+
+### 18.3 收益上限与后续试验
+
+总 CAS 数不是端到端串行时间。当前预筛与 local group 都对同一
+`candidate_rank` 取模；对 Alloc/AIV 的 8 组拓扑，`I=2/4/8` 主要关闭
+整组，剩余 local 热点仍分别维持 12/8 个 contender。因而 Alloc 的简化
+关键宽度不变，AIV 只小幅下降，明显收窄主要发生在 AIC；同时
+Materialize、Register、严格 metadata 链、Kernel 和 FinalDrain 均未删除。
+
+已进一步实测“压密参与者序号并按 local/root 串行尾部重分组”的候选。
+它把 I=8 中位数从 1535.450 us 拉回 1497.447 us，但 I=2/I=4 相对本节
+第一版只变化 -0.787/+0.620 us，最佳 I=4 没有获得超出波动的新收益；I=8
+也仍比同轮 I=1 慢 19.594 us。该二次映射已撤回。完整拓扑推导、16 轮原始
+路径、验证和撤回裁决见
+[`perf_opt_record.md` 第 16 节](../perf_opt_record.md#16-2026-08-03-selective-participation收益上限与二次分组试验)。

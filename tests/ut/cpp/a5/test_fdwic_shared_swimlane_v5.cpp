@@ -5,7 +5,7 @@
  * Please refer to the License for details. You may not use this file except in compliance with the License.
  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the LICENSE file.
+ * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
 
@@ -181,8 +181,7 @@ bool shared_trace_task_root_contender(uint32_t core, uint32_t task_id) {
     if (!shared_trace_task_attempted(core, task_id)) return false;
     if (kind == 0) return core < kFdwicSharedAllocClaimTournamentGroups;
     if (kind == 1 || kind == 3) return core < kFdwicSharedAicClaimTournamentGroups;
-    return core >= kFdwicSharedAicWorkers &&
-           core < kFdwicSharedAicWorkers + kFdwicSharedAivClaimTournamentGroups;
+    return core >= kFdwicSharedAicWorkers && core < kFdwicSharedAicWorkers + kFdwicSharedAivClaimTournamentGroups;
 }
 
 enum class SharedTraceFault {
@@ -212,9 +211,7 @@ bool write_shared_generic_span(
     return fdwic_swimlane_detail_write_record(self, task_id, func_id, phase, begin, end, /*flags=*/0, aux);
 }
 
-bool write_shared_business_dcci(
-    DistCore *self, uint32_t task_id, uint64_t submit_begin, SharedTraceFault fault
-) {
+bool write_shared_business_dcci(DistCore *self, uint32_t task_id, uint64_t submit_begin, SharedTraceFault fault) {
     uint64_t offset = 25U;
     const auto write = [&](FdwicDcciSite site, uint32_t lines) {
         const uint64_t begin = submit_begin + offset++;
@@ -227,10 +224,7 @@ bool write_shared_business_dcci(
         return write(FdwicDcciSite::SharedOutputDescriptorFlush, 6);
     case 1:
         if (fault == SharedTraceFault::MissingDcci) return true;
-        return write(
-            FdwicDcciSite::SharedOutputDescriptorFlush,
-            fault == SharedTraceFault::WrongDcciLines ? 3U : 2U
-        );
+        return write(FdwicDcciSite::SharedOutputDescriptorFlush, fault == SharedTraceFault::WrongDcciLines ? 3U : 2U);
     case 2:
         return write(FdwicDcciSite::SharedOutputDescriptorFlush, 6) &&
                write(FdwicDcciSite::SharedWinnerBuildDescriptorInvalidate, 2);
@@ -294,7 +288,7 @@ bool populate_shared_trace_core(Runtime *runtime, uint32_t core, SharedTraceFaul
         const uint64_t claim_begin = submit_begin + 5U;
         const uint64_t claim_end = submit_begin + 10U;
         const uint64_t submit_end = submit_begin + 90U;
-        if (!fdwic_swimlane_record_shared_claim(self, task_id, claim_begin, claim_end, winner) ||
+        if (!fdwic_swimlane_record_shared_claim(self, task_id, claim_begin, claim_end, winner, attempted) ||
             !fdwic_swimlane_record_shared_submit(self, task_id, submit_begin, submit_end)) {
             return false;
         }
@@ -341,8 +335,8 @@ bool populate_shared_trace_core(Runtime *runtime, uint32_t core, SharedTraceFaul
                 self, task_id, func_id, FdwicSwimlanePhase::Register, submit_begin + 35U, submit_begin + 65U
             ) ||
             !write_shared_generic_span(
-                self, task_id, func_id, FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad,
-                submit_begin + 35U, submit_begin + 40U, task_id == 0 ? 0U : 1U
+                self, task_id, func_id, FdwicSwimlanePhase::SharedRegisterWaitInsertTurnBypassLoad, submit_begin + 35U,
+                submit_begin + 40U, task_id == 0 ? 0U : 1U
             )) {
             return false;
         }
@@ -352,12 +346,11 @@ bool populate_shared_trace_core(Runtime *runtime, uint32_t core, SharedTraceFaul
             )) {
             return false;
         }
-        if (detailed &&
-            !fdwic_swimlane_record_captured_atomic(
-                static_cast<int32_t>(task_id), FdwicAtomicSite::SharedInsertTurnHandoff, FdwicAtomicOp::CompareExchange,
-                submit_begin + 55U, submit_begin + 60U,
-                /*result_used=*/true, /*return_ready=*/false
-            )) {
+        if (detailed && !fdwic_swimlane_record_captured_atomic(
+                            static_cast<int32_t>(task_id), FdwicAtomicSite::SharedInsertTurnHandoff,
+                            FdwicAtomicOp::CompareExchange, submit_begin + 55U, submit_begin + 60U,
+                            /*result_used=*/true, /*return_ready=*/false
+                        )) {
             return false;
         }
         if (task_id % 5U == 0) {
@@ -440,10 +433,16 @@ TEST_F(FdwicSharedSwimlaneV5Test, SubmitClaimUseFixedFullWidthAreaAndGenericRows
 
     EXPECT_EQ(g_fdwic_swimlane_record_count, 0U);
     EXPECT_EQ(g_fdwic_swimlane_shared_submit_count, 18U);
-    EXPECT_EQ(endpoints()[17].claim_begin, 100U);
+    EXPECT_EQ(endpoints()[17].claim_begin, 100U | kFdwicSharedClaimAttemptedBit);
     EXPECT_EQ(endpoints()[17].claim_end_and_winner, 120U | kFdwicSharedClaimWinnerBit);
-    EXPECT_EQ(endpoints()[17].submit_begin, 90U);
-    EXPECT_EQ(endpoints()[17].submit_end, 200U);
+    EXPECT_EQ(
+        endpoints()[17].submit_begin,
+        90U | fdwic_shared_claim_participation_interval_begin_bit(kFdwicSharedClaimParticipationInterval)
+    );
+    EXPECT_EQ(
+        endpoints()[17].submit_end,
+        200U | fdwic_shared_claim_participation_interval_end_bit(kFdwicSharedClaimParticipationInterval)
+    );
 
     fdwic_swimlane_detail_record(&self_, 17, 2, FdwicSwimlanePhase::Materialize, 121, 140, 0, 3);
     ASSERT_EQ(g_fdwic_swimlane_record_count, 1U);
@@ -457,6 +456,18 @@ TEST_F(FdwicSharedSwimlaneV5Test, SubmitClaimUseFixedFullWidthAreaAndGenericRows
         static_cast<uint32_t>(FdwicSwimlanePhase::Materialize)
     );
     EXPECT_EQ((generic()[0].packed >> kFdwicCompactTraceAuxShift) & kFdwicCompactTraceAuxMask, 3U);
+}
+
+TEST_F(FdwicSharedSwimlaneV5Test, ParticipationIntervalEndpointBitsRoundTrip) {
+    for (uint32_t interval : {1U, 2U, 4U, 8U}) {
+        EXPECT_EQ(
+            fdwic_shared_claim_participation_interval_from_bits(
+                fdwic_shared_claim_participation_interval_begin_bit(interval),
+                fdwic_shared_claim_participation_interval_end_bit(interval)
+            ),
+            interval
+        );
+    }
 }
 
 TEST_F(FdwicSharedSwimlaneV5Test, ProductionSharedBeginLeavesEfDrainOutOfGenericRows) {
@@ -480,15 +491,11 @@ TEST_F(FdwicSharedSwimlaneV5Test, ProductionSharedBeginLeavesEfDrainOutOfGeneric
     EXPECT_EQ(ticket.task_id, 0);
     EXPECT_EQ(g_fdwic_swimlane_shared_submit_count, 1U);
     for (uint32_t index = 0; index < g_fdwic_swimlane_record_count; ++index) {
-        const uint32_t phase =
-            (generic()[index].packed >> kFdwicCompactTracePhaseShift) &
-            kFdwicCompactTracePhaseMask;
-        EXPECT_NE(
-            phase, static_cast<uint32_t>(FdwicSwimlanePhase::EfDrain)
-        ) << "generic_index=" << index;
+        const uint32_t phase = (generic()[index].packed >> kFdwicCompactTracePhaseShift) & kFdwicCompactTracePhaseMask;
+        EXPECT_NE(phase, static_cast<uint32_t>(FdwicSwimlanePhase::EfDrain)) << "generic_index=" << index;
     }
     EXPECT_NE(endpoints()[0].claim_begin, 0U);
-    EXPECT_NE(endpoints()[0].claim_end_and_winner & ~kFdwicSharedClaimWinnerBit, 0U);
+    EXPECT_NE(endpoints()[0].claim_end_and_winner & ~kFdwicSharedEndpointMetadataBit, 0U);
     EXPECT_NE(endpoints()[0].submit_begin, 0U);
     EXPECT_GE(endpoints()[0].submit_end, endpoints()[0].submit_begin);
 }
