@@ -5865,3 +5865,227 @@ Register、严格 metadata 链、Kernel 和 FinalDrain。若继续追求端到�
 而不是把“CAS 总数更少”继续当成充分条件。任何按角色设置不同 interval、
 超时后二次开放候选类或回看旧 task 的方案都会引入新的调度语义和状态，
 必须另立合同与测试，不能作为第 18 章的小改动直接进入生产路径。
+
+## 17. 2026-08-03：interval=8 下有效 RingSlot 深度 2→1
+
+### 17.1 测试对象与口径澄清
+
+本轮只测试用户指定的一档：在 Selective Participation `interval=8` 不变的
+前提下，把 shared PA 正常提交路径的**有效 RingSlot 深度从当前 2 改为 1**。
+
+这里不能把源码中的 `kPrivateSlots=4` 直接理解为当前 shared PA 同时可用的
+4 个 won slot：
+
+- `DistCore::slots` 和 `BlockWon::slots` 的物理数组长度确实都是 4；
+- 当前 shared PA 正常 RingSlot 容量是
+  `kPrivateSlots - kWonReserve = 4 - 2 = 2`；
+- Case1 shared 单泳道路径不使用 `BlockWon`，因此本轮与性能相关的现状是
+  **有效深度 2**，不是 4。
+
+为避免把结构布局变化混入性能结果，实验分支保留物理数组长度 4、
+`DistCore` ABI 和 reserve slot 不变，只在 shared AICore 路径把正常 slot 的
+分配范围、drain 范围和 capacity 阈值统一从 2 收到 1。该修改仅存在于同一
+commit 上创建的临时 detached worktree，正式分支没有保留候选源码。
+
+### 17.2 构建与正确性校验
+
+两档复用同一套 host/AICPU runtime，只替换分别构建的 AICore override；
+测试环境、Case1 B256、device 0、PTO ISA、`perf-clock`、`--skip-golden` 和
+`interval=8` 均一致，且每个正式样本使用独立 pytest 进程。构建身份如下：
+
+| 档位 | 有效深度 | AICore object SHA256 |
+| --- | ---: | --- |
+| 当前基线 | 2 | `779c59cdf5ad5b21c26a4b3eb3a34c3b901aa7939f5542e32b00b751fb8eb359` |
+| 单 slot 候选 | 1 | `bb86ce0ef15b1099bbef00564af3e9f9e06ca64094bedef3f71d4bd1c1e822d3` |
+
+源码基线为 `2dd2381fd0e7`，PTO ISA 为
+`ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8`。候选的 production CPU
+`test_fdwic_shared_pa_submit_interval8` 通过，覆盖 96 worker 并发、完整 B256
+和 interval=8 合同；这只能证明协议和基本终止性，不能代替真实 PA 的异步
+完成时序。
+
+正式统计前还执行了预热和故障恢复检查：深度 2 为 1514.240 us，候选一次
+启动失败后复位，随后深度 2 为 1525.480 us、深度 1 为 3083.790 us；这些
+诊断样本全部排除在下表之外。
+
+### 17.3 真实 A5 交错结果
+
+正式顺序使用 `2/1/1/2/1/2/2/1`，避免把单向温漂固定归到某一档：
+
+| 顺序 | 有效深度 | Submit span（us） | 结果与产物 |
+| ---: | ---: | ---: | --- |
+| 1 | 2 | 1512.650 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103452/` |
+| 2 | 1 | — | 超时，错误码 `507018`；`outputs/TestPagedAttentionUnroll_Case1_20260803_103536/` |
+| 3 | 1 | 3336.730 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103635/` |
+| 4 | 2 | 1554.260 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103720/` |
+| 5 | 1 | 3164.580 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103804/` |
+| 6 | 2 | 1570.240 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103848/` |
+| 7 | 2 | 1512.910 | `outputs/TestPagedAttentionUnroll_Case1_20260803_103933/` |
+| 8 | 1 | 2856.170 | `outputs/TestPagedAttentionUnroll_Case1_20260803_104017/` |
+
+汇总如下：
+
+| 有效深度 | 正常完成 | 最小值（us） | 中位数（us） | 均值（us） | 最大值（us） |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 4/4 | 1512.650 | **1533.585** | 1537.515 | 1570.240 |
+| 1 | 3/4 | 2856.170 | **3164.580**¹ | 3119.160¹ | 3336.730 |
+
+¹ 深度 1 的统计只包含 3 个成功样本；另有 1 次超时，因此不存在可与基线
+等价的“四个有效样本中位数”。即使只比较成功样本，中位数也增加
+1630.995 us（`+106.352%`），为当前深度 2 的 `2.0635×`；忽略超时只会
+低估可靠性回退。
+
+逐角色数据也不是单一角色偶发拖尾：4 个深度 2 样本的最慢 AIC/AIV 大致
+落在 1.48～1.57 ms，3 个成功的深度 1 样本则都进入约 2.85～3.33 ms。
+AIC 和 AIV 同时明显变慢，不能把回退归因于某一个异常 core 类型。
+
+### 17.4 原因分析与裁决
+
+以下是结合代码路径和结果作出的机制推断，而不是超时现场泳道图的直接
+归因：有效深度为 1 时，只要唯一 slot 上的 task 依赖尚未 ready，
+`dist_submit_wait_slot_capacity` 就会阻塞该 core；它不能继续 replay 后续
+Submit、领取可独立推进的 task，形成明显的队头阻塞。深度 2 至少允许一个
+等待中的 slot 与另一个可推进 task 并存，保留了一部分执行/等待重叠和
+arrival-based owner 调度余量。
+
+`interval=8` 已经把 Alloc/AIC/AIV 的候选数缩到 12/4/8，再把每 core 的
+正常 RingSlot 深度减半，会进一步限制系统在到达时序有偏差时寻找可推进
+工作的能力。这与成功样本约 2 倍耗时以及正式样本 1/4 超时方向一致。
+由于失败运行没有生成完整可用的泳道记录，本轮不声称已经定位到某个唯一
+task 或某一段 fanin 循环。
+
+裁决明确：**拒绝有效深度 1，生产代码继续保持当前有效深度 2**。候选源码
+不进入正式分支；本轮只保留测试数据和分析记录。
+
+## 18. 2026-08-03：interval=2 下有效 RingSlot 深度 1/2/4
+
+### 18.1 单变量与测试边界
+
+本轮按用户最终确认固定 Selective Participation `interval=2`，比较 shared
+PA 正常单泳道 RingSlot 的有效深度 1、2、4。这里的 1/2/4 是用户口语中的
+“winslot”，不等于 `BlockWon::WonSlot`：`DistCore::slots[4]` 与
+`BlockWon::slots[4]` 是两套独立数组，当前 shared 正常路径的有效深度为
+`4-2=2`。Case1 不创建 BlockWon deposit，因此实验保持物理数组、结构 ABI
+和 BlockWon 合同不变，只同步改变 shared 正常路径的 alloc、drain 和
+capacity 边界。
+
+三档都基于 `2dd2381fd0e70248371c8b386d66324df59d623f`，使用 A5 device 0、
+B256、96 worker、shared TensorMap、同一 PTO ISA
+`ddafa8da9c760ecd13fe9fe2833d6ee55fb20bd8`。深度 1/4 位于独立实验
+worktree，正式分支仍为深度 2。三档 production CPU 门禁均通过：除完整
+96-worker B256、唯一 winner 和 tournament/CAS 外，还分别锁定 capacity=1、
+capacity=2 生命周期，以及深度 4 的 slot 3 确实执行并 drain。
+
+### 18.2 前两轮无泳道 `perf-clock`
+
+预热排除后，正式轮次交错为 `1/2/4`、`2/4/1`：
+
+| 有效深度 | 两次 Submit span（us） | 两样本均值（us） | 相对深度 2 |
+| ---: | --- | ---: | ---: |
+| 1 | 2139.260 / 2464.790 | **2302.025** | `+851.295 us（+58.68%）` |
+| 2 | 1451.870 / 1449.590 | **1450.730** | 基线 |
+| 4 | 1465.640 / 1461.300 | **1463.470** | `+12.740 us（+0.88%）` |
+
+按用户指令，正式结论只使用这两轮。停止指令到达前已经完成的第三组
+`4/1/2 = 1494.550/2578.810/1465.640 us` 仅作透明留痕，不进入任何统计，
+也没有继续增加性能轮次。
+
+深度 1 的回退在两轮都很大，足以再次拒绝单槽。深度 4 在两轮中分别比
+深度 2 慢 13.770 和 11.710 us；由于本机没有频率锁且只有两个正式样本，
+不能把 `0.88%` 称为统计显著回退，但可以明确说没有观察到扩容收益。
+
+### 18.3 三份真实 PA level-4 泳道
+
+三档随后各生成一份独立 level-4 泳道；全部
+`validation=PASS`、`dropped_records=0`。泳道 ELF 带完整 atomic/DCCI
+观察开销，绝对时间不与上一节 `perf-clock` 互减：
+
+| 深度 | Submit（us） | worker 完成（us） | atomic calls | batched poll | fanin poll | replay-done poll |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 2212.323 | 2313.029 | 127637 | 47110 | 35762 | 10692 |
+| 2 | 1623.344 | 1702.825 | 89235 | 4097 | 788 | 2677 |
+| 4 | 1631.201 | 1706.918 | 90569 | 5109 | 689 | 3804 |
+
+深度 1 的唯一槽未 ready 时，本核无法继续保留另一个可推进 task，队头阻塞
+把 `fanin_flag_load` 从 788 次放大到 35762 次，也把
+`replay_done_poll` 从 2677 次放大到 10692 次。这些数字来自连续 poll
+合并后的精确 call count，不是逐次记录膨胀。深度 4 的形态与深度 2 接近，
+但没有形成更短的 Submit；额外容量在 Case1 中没有兑现为并行收益。
+
+归档与完整口径见：
+
+```text
+tests/atomic_probe/pa_scheduler/test_record/2026-8-3/本次结果说明.md
+```
+
+### 18.4 interval=2 泳道解码修复
+
+首次生成深度 1 图时发现 host exporter 的 compact clock anchor 未清除
+`submit_begin` 第 63 位的 interval 元数据，导致 generic atomic 时间整体被
+错误加上 `2^63`，进而触发假的 Claim containment 失败。修复只在周期展开前
+清除 `kFdwicSharedEndpointMetadataBit`，没有放宽任何 schema 闭合规则。
+
+C++ host exporter 现在分别以 interval=1、2 编译同一套完整测试；两套各
+14 项全部通过，local/root/DCCI 故障注入仍被拒绝。真实 A5 的深度 1/2/4
+三份图随后全部正常导出。该修复是观察工具正确性修复，不改变无泳道
+`perf-clock` 业务路径和前述性能裁决。
+
+### 18.5 最终裁决
+
+**保持 shared 正常 RingSlot 有效深度 2。** 深度 1 明显破坏等待与执行重叠；
+深度 4 在两轮无泳道和一份完整泳道中均未证明收益。深度 1/4 候选源码不
+进入正式分支，只保留数据、分析和 interval=2 泳道导出修复。
+
+### 18.6 interval=1 基线图与 interval=2 的收益去向
+
+为回答“CAS 减少为什么没有形成明显端到端提升”，又在相同有效深度 2 下
+补采一份 interval=1 的真实 A5 level-4 泳道：
+
+```text
+outputs/TestPagedAttentionUnroll_Case1_20260803_140900/
+```
+
+该图 `validation=PASS`、`dropped_records=0`，Submit 为 1680.947 us；
+interval=2 对照图为 1623.344 us。必须先澄清：interval=1 是全候选旧基线，
+并非少 CAS 版本；interval=2 才把 tournament CAS 从
+`73728 local + 9216 root = 82944` 减为
+`36864 local + 4608 root = 41472`。
+
+CAS 总数减半没有使关键竞争宽度减半。预筛和 local group 都对同一个
+candidate rank 取模，所以 Alloc/AIC/AIV 的 local 最大 fan-in 仍为
+12/6/8；只有 root fan-in 从 8/6/8 降为 4/3/4。level-4 单次 local CAS
+中位数两档均为 292 ns，p95 只从 501 降到 462 ns；root p95 才从
+708 降到 479 ns。大量被删 CAS 是跨核、跨组、跨 task 的并行服务量，
+不是端到端串行和。
+
+更直接的抵消发生在严格 metadata insert 链：
+
+| 累计 core-time / 次数 | interval=1 | interval=2 | 变化 |
+| --- | ---: | ---: | ---: |
+| Claim | 41406.666 us | 24612.735 us | -16793.931 us |
+| Register | 9305.675 us | 16949.696 us | +7644.021 us |
+| `wait_insert_turn` | 8635.788 us | 16268.540 us | +7632.752 us |
+| insert-turn `ld_dev` | 70118 | 141057 | +70939 |
+
+Claim 变快后，winner 更早到达 Register，但 task N 仍必须等待
+`task[N-1].deps_prepared` 发布；该串行链没有随 CAS 数量缩短，于是省下的
+一部分时间转移成前驱等待。完整 worker 累计 core-time 最终只减少
+4600.778 us，而不是 Claim 的 16793.931 us。
+
+上述等待增量只用于定位：interval=1 多出的约 4 万条 level-4 CAS 记录本身
+也会延后 winner 到达并减少表观 Register 等待，不能把 `ld_dev` 增量原样
+外推到无泳道生产路径。严格前驱链的位置和“Claim 提前后暴露等待”的机制
+由源码与泳道共同支持，幅度仍以无泳道结果裁决。
+
+泳道里的 57.603 us 墙钟差还包含观察放大：interval=1 多 41472 次 CAS，
+level-4 也因此多约 4 万条直接记录。权威的既有四轮交错无泳道结果仍是
+1477.035 → 1465.240 us，只改善 11.795 us（0.80%）。所以最终解释为：
+**local 关键 fan-in 未变、删除项高度并行、收益又暴露并转移到严格 Register
+前驱链，CAS 总量减半只能兑现很小的端到端收益。**
+
+可查看的 baseline merged 泳道已放入：
+
+```text
+tests/atomic_probe/pa_scheduler/test_record/2026-8-3/
+  shared_b256_interval1_winslot2_1681us_merged_swimlane.json
+```
