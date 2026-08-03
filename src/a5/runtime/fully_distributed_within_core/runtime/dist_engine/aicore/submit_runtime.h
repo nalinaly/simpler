@@ -9,7 +9,26 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "dist_engine/common/private_claim_participation.h"
+
 namespace {
+
+#if !PTO_FDWIC_SHARED_MAP && PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL != 1
+PTO_DEVICE_FUNC inline bool dist_private_claim_participates(int32_t task_id, uint32_t candidate_rank) {
+    return task_id >= 0 && fdwic_private_claim_participates(
+                               static_cast<uint32_t>(task_id), candidate_rank,
+                               static_cast<uint32_t>(kCursorShards), kFdwicPrivateClaimParticipationInterval
+                           );
+}
+
+PTO_DEVICE_FUNC inline int32_t dist_private_aiv_candidate_rank(__gm__ DistCore *self) {
+    if (self == nullptr || self->block_id < 0 ||
+        (self->lane != LANE_AIV0 && self->lane != LANE_AIV1)) {
+        return -1;
+    }
+    return 2 * self->block_id + (self->lane == LANE_AIV1 ? 1 : 0);
+}
+#endif
 
 PTO_DEVICE_FUNC int32_t anchor_lane_for_mask(const ActiveMask &M) {
     if (lane_active(M, LANE_AIC)) return LANE_AIC;
@@ -51,6 +70,13 @@ PTO_DEVICE_FUNC bool dist_submit_claim_kernel(const MixedKernels &mixed, DistSub
     }
     if (lane_active(M, LANE_AIC)) {
         if (ctx.self->role != CoreType::AIC) return false;
+#if !PTO_FDWIC_SHARED_MAP && PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL != 1
+        const int32_t candidate_rank = ctx.self->block_id;
+        if (candidate_rank < 0 ||
+            !dist_private_claim_participates(ctx.task_id, static_cast<uint32_t>(candidate_rank))) {
+            return false;
+        }
+#endif
         ctx.claim_attempted = true;
         ctx.won = claim(g_dist.cube_cursor[ctx.task_id % kCursorShards].v, ctx.task_id);
         if (!ctx.won) return false;
@@ -59,6 +85,13 @@ PTO_DEVICE_FUNC bool dist_submit_claim_kernel(const MixedKernels &mixed, DistSub
     }
     if (lane_active(M, LANE_AIV0) || lane_active(M, LANE_AIV1)) {
         if (ctx.self->role != CoreType::AIV) return false;
+#if !PTO_FDWIC_SHARED_MAP && PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL != 1
+        const int32_t candidate_rank = dist_private_aiv_candidate_rank(ctx.self);
+        if (candidate_rank < 0 ||
+            !dist_private_claim_participates(ctx.task_id, static_cast<uint32_t>(candidate_rank))) {
+            return false;
+        }
+#endif
         ctx.claim_attempted = true;
 #if PTO_FDWIC_SHARED_MAP
         ctx.won = claim(
@@ -81,6 +114,13 @@ PTO_DEVICE_FUNC bool dist_submit_claim_kernel(const MixedKernels &mixed, DistSub
 PTO_DEVICE_FUNC bool dist_submit_claim_alloc(DistSubmitCtx &ctx) {
     ctx.kernel_id = INVALID_KERNEL_ID;
     if (ctx.self == nullptr || ctx.task_id < 0 || ctx.task_id >= kFlagCap) return false;
+#if !PTO_FDWIC_SHARED_MAP && PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL != 1
+    const int32_t candidate_rank = ctx.self->core_idx;
+    if (candidate_rank < 0 ||
+        !dist_private_claim_participates(ctx.task_id, static_cast<uint32_t>(candidate_rank))) {
+        return false;
+    }
+#endif
     ctx.claim_attempted = true;
     ctx.won = claim(g_dist.alloc_cursor[ctx.task_id % kCursorShards].v, ctx.task_id);
     return ctx.won;

@@ -45,6 +45,8 @@ from simpler_setup.scene_test import (
     _convert_case_swimlane,
     _fdwic_build_identity_cache,
     _fdwic_compile_definitions,
+    _fdwic_private_claim_participation_interval,
+    _fdwic_private_won_slot_count,
     _fdwic_profile,
     _fdwic_tensormap_compile_definitions,
     _fdwic_tensormap_mode,
@@ -103,6 +105,8 @@ def test_fdwic_profile_partitions_compile_cache(monkeypatch):
     base = ("Case", "a5", "fully_distributed_within_core")
 
     monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", raising=False)
     monkeypatch.delenv("PTO_FDWIC_PROFILE", raising=False)
     assert _fdwic_profile() == "none"
     assert _profiled_cache_key(base) == (*base, "private", "none")
@@ -171,13 +175,67 @@ def test_fdwic_profile_partitions_compile_cache(monkeypatch):
     assert _profiled_cache_key(base) == (*base, "shared", "submit-pmu-loser-replay")
 
 
+def test_private_claim_participation_partitions_nondefault_compile_cache(monkeypatch):
+    base = ("Case", "a5", "fully_distributed_within_core")
+    monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.setenv("PTO_FDWIC_PROFILE", "perf-clock")
+
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", raising=False)
+    assert _fdwic_private_claim_participation_interval() == 1
+    assert _profiled_cache_key(base) == (*base, "private", "perf-clock")
+
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", "4")
+    assert _fdwic_private_claim_participation_interval() == 4
+    assert _profiled_cache_key(base) == (*base, 4, "private", "perf-clock")
+
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", "8")
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", "2")
+    assert _fdwic_private_won_slot_count() == 2
+    assert _profiled_cache_key(base) == (*base, "won-slots-2", 8, "private", "perf-clock")
+
+
+@pytest.mark.parametrize("value", ("0", "3", "16", "bad"))
+def test_private_claim_participation_rejects_invalid_environment(monkeypatch, value):
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", value)
+    with pytest.raises(ValueError, match="expected one of 1, 2, 4, or 8"):
+        _fdwic_private_claim_participation_interval()
+
+
+@pytest.mark.parametrize("value", ("0", "3", "8", "bad"))
+def test_private_won_slot_count_rejects_invalid_environment(monkeypatch, value):
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", value)
+    with pytest.raises(ValueError, match="expected one of 1, 2, or 4"):
+        _fdwic_private_won_slot_count()
+
+
 def test_fdwic_tensormap_mode_and_compile_definition_contract(monkeypatch):
     monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", raising=False)
     assert _fdwic_tensormap_mode() == "private"
     assert _fdwic_tensormap_compile_definitions("a5", "fully_distributed_within_core") == [
         "PTO_FDWIC_SHARED_MAP=0",
         "PTO_FDWIC_TENSORMAP_RING_CAP=128",
     ]
+
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", "4")
+    assert _fdwic_tensormap_compile_definitions("a5", "fully_distributed_within_core") == [
+        "PTO_FDWIC_SHARED_MAP=0",
+        "PTO_FDWIC_TENSORMAP_RING_CAP=128",
+        "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL=4",
+    ]
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL")
+
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", "8")
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", "1")
+    assert _fdwic_tensormap_compile_definitions("a5", "fully_distributed_within_core") == [
+        "PTO_FDWIC_SHARED_MAP=0",
+        "PTO_FDWIC_TENSORMAP_RING_CAP=128",
+        "PTO_FDWIC_PRIVATE_WON_SLOT_COUNT=1",
+        "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL=8",
+    ]
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL")
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT")
 
     monkeypatch.setenv("PTO_FDWIC_TENSORMAP_MODE", "shared")
     assert _fdwic_tensormap_mode() == "shared"
@@ -1117,6 +1175,8 @@ class _FakePytestConfig:
     def __init__(self, **options):
         self.options = {
             "--fdwic-tensormap": "private",
+            "--fdwic-private-claim-participation-interval": 1,
+            "--fdwic-private-won-slot-count": 4,
             "--fdwic-profile": "submit-pmu-none",
             "--platform": "a5",
             "--runtime": "fully_distributed_within_core",
@@ -1165,6 +1225,55 @@ def test_shared_tensormap_mode_publishes_environment(monkeypatch):
     assert _fdwic_tensormap_mode() == "shared"
 
 
+@pytest.mark.parametrize("interval", (2, 4, 8))
+def test_private_claim_participation_publishes_environment(monkeypatch, interval):
+    monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", raising=False)
+
+    _configure_fdwic_tensormap(
+        _FakePytestConfig(**{"--fdwic-private-claim-participation-interval": interval})
+    )
+
+    assert _fdwic_tensormap_mode() == "private"
+    assert _fdwic_private_claim_participation_interval() == interval
+
+
+@pytest.mark.parametrize("count", (1, 2))
+def test_private_won_slot_count_publishes_environment(monkeypatch, count):
+    monkeypatch.delenv("PTO_FDWIC_TENSORMAP_MODE", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", raising=False)
+    monkeypatch.delenv("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", raising=False)
+
+    _configure_fdwic_tensormap(
+        _FakePytestConfig(
+            **{
+                "--fdwic-private-claim-participation-interval": 8,
+                "--fdwic-private-won-slot-count": count,
+            }
+        )
+    )
+
+    assert _fdwic_private_claim_participation_interval() == 8
+    assert _fdwic_private_won_slot_count() == count
+
+
+def test_private_won_slot_count_rejects_non_i8():
+    with pytest.raises(pytest.UsageError, match="requires Selective I=8"):
+        _configure_fdwic_tensormap(_FakePytestConfig(**{"--fdwic-private-won-slot-count": 2}))
+
+
+def test_shared_tensormap_rejects_private_claim_participation():
+    with pytest.raises(pytest.UsageError, match="only valid with --fdwic-tensormap private"):
+        _configure_fdwic_tensormap(
+            _FakePytestConfig(
+                **{
+                    "--fdwic-tensormap": "shared",
+                    "--fdwic-private-claim-participation-interval": 4,
+                }
+            )
+        )
+
+
 @pytest.mark.parametrize(
     ("options", "message"),
     [
@@ -1205,6 +1314,26 @@ def test_standalone_shared_tensormap_rejects_mixed_runtime_or_l3_classes():
         )
     with pytest.raises(ValueError, match=r"FdwicL2::Case2"):
         _validate_fdwic_tensormap_test_classes("shared", {fdwic_l2: [{"name": "Case2"}]})
+
+
+def test_private_claim_selective_accepts_only_declared_pa_case(monkeypatch):
+    private_pa = type(
+        "PrivatePa",
+        (),
+        {
+            "_st_level": 2,
+            "_st_runtime": "fully_distributed_within_core",
+            "FDWIC_PRIVATE_CLAIM_SELECTIVE_SUPPORTED_CASES": frozenset({"Case1"}),
+        },
+    )
+    other_l2 = type("OtherL2", (), {"_st_level": 2, "_st_runtime": "host_build_graph"})
+    monkeypatch.setenv("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", "4")
+
+    _validate_fdwic_tensormap_test_classes("private", {private_pa: [{"name": "Case1"}]})
+    with pytest.raises(ValueError, match=r"OtherL2"):
+        _validate_fdwic_tensormap_test_classes("private", {other_l2: [{"name": "Case1"}]})
+    with pytest.raises(ValueError, match=r"PrivatePa::Case2"):
+        _validate_fdwic_tensormap_test_classes("private", {private_pa: [{"name": "Case2"}]})
 
 
 def test_shared_tensormap_uses_mode_local_pa_block_dim(monkeypatch):

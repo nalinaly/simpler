@@ -309,7 +309,7 @@ PTO_DEVICE_FUNC bool drain_block_won(__gm__ DistCore *self) {
     __gm__ BlockWon &bw = g_dist.blocks[self->block_id];
     if (fdwic_trace_atomic_load(-1, FdwicAtomicSite::WonAnyLoad, bw.any_pub) == 0) return false;
     bool drained = false;
-    for (int32_t i = 0; i < kPrivateSlots; i++) {
+    for (int32_t i = 0; i < kWonSlotCount; i++) {
         __gm__ WonSlot &w = bw.slots[i];
         if (fdwic_trace_atomic_load(-1, FdwicAtomicSite::WonStateLoad, w.state.v) != kWonStatePublished) continue;
 #if defined(__CCE_AICORE__)
@@ -351,7 +351,7 @@ PTO_DEVICE_FUNC bool has_pending_won(__gm__ DistCore *self) {
     if (self == nullptr || self->lane == LANE_AIC || self->lane == LANE_NONE) return false;
     __gm__ BlockWon &bw = g_dist.blocks[self->block_id];
     if (fdwic_trace_atomic_load(-1, FdwicAtomicSite::WonAnyLoad, bw.any_pub) == 0) return false;
-    for (int32_t i = 0; i < kPrivateSlots; i++) {
+    for (int32_t i = 0; i < kWonSlotCount; i++) {
         __gm__ WonSlot &w = bw.slots[i];
         if (fdwic_trace_atomic_load(-1, FdwicAtomicSite::WonStateLoad, w.state.v) != kWonStatePublished) continue;
 #if defined(__CCE_AICORE__)

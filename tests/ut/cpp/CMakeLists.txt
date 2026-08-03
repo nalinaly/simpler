@@ -446,6 +446,40 @@ target_include_directories(test_fdwic_swimlane_poll_batch BEFORE PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime
 )
 
+# Private PA keeps its four monotonic FetchMax cursor shards. Selective Claim
+# participation must therefore use one stable candidate residue for every task
+# sharing a cursor; this header-only test locks I=1/2/4/8 populations and the
+# Case1 Claim-attempt model without emulating the atomic itself.
+add_a5_test(test_fdwic_private_claim_participation a5/test_fdwic_private_claim_participation.cpp)
+target_compile_definitions(test_fdwic_private_claim_participation PRIVATE __CPU_SIM=1)
+target_include_directories(test_fdwic_private_claim_participation BEFORE PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/runtime
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/common
+    ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime
+)
+set_tests_properties(test_fdwic_private_claim_participation PROPERTIES LABELS "no_hardware")
+
+# The I=8 WonSlot-capacity experiment compiles only one/two active WonSlots,
+# but must retain the four-slot BlockWon layout owned by the baseline AICPU.
+# Build both non-default variants so a future layout edit fails before A5 use.
+foreach(won_slot_count IN ITEMS 1 2)
+    set(won_slot_test "test_fdwic_private_won_slot_count_${won_slot_count}")
+    add_a5_test(${won_slot_test} a5/test_fdwic_private_won_slot_count.cpp)
+    target_compile_definitions(${won_slot_test} PRIVATE
+        __CPU_SIM=1
+        PTO_FDWIC_PRIVATE_WON_SLOT_COUNT=${won_slot_count}
+        PTO_FDWIC_TEST_EXPECTED_WON_SLOT_COUNT=${won_slot_count}
+    )
+    target_include_directories(${won_slot_test} BEFORE PRIVATE
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/platform/sim/aicore
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/runtime
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/fully_distributed_within_core/common
+        ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime
+    )
+    set_tests_properties(${won_slot_test} PROPERTIES LABELS "no_hardware")
+endforeach()
+
 # Shared schema-v5 uses a different physical record type from the logical
 # 32-byte JSON row. Compile the production writer APIs in that exact mode and
 # lock fixed Submit/Claim routing, compact packing, delayed atomic recording,

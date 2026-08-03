@@ -52,6 +52,10 @@ _FDWIC_TENSORMAP_MODE_ENV = "PTO_FDWIC_TENSORMAP_MODE"
 _FDWIC_TENSORMAP_PRIVATE = "private"
 _FDWIC_TENSORMAP_SHARED = "shared"
 _FDWIC_TENSORMAP_MODES = frozenset({_FDWIC_TENSORMAP_PRIVATE, _FDWIC_TENSORMAP_SHARED})
+_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV = "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL"
+_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVALS = frozenset({1, 2, 4, 8})
+_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV = "PTO_FDWIC_PRIVATE_WON_SLOT_COUNT"
+_FDWIC_PRIVATE_WON_SLOT_COUNTS = frozenset({1, 2, 4})
 _FDWIC_PROFILE_ENV = "PTO_FDWIC_PROFILE"
 _FDWIC_PROFILE_NONE = "none"
 _FDWIC_PROFILE_PERF_CLOCK = "perf-clock"
@@ -105,10 +109,62 @@ def _fdwic_tensormap_mode() -> str:
     return mode
 
 
+def _fdwic_private_claim_participation_interval() -> int:
+    raw_interval = os.environ.get(_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV, "1") or "1"
+    try:
+        interval = int(raw_interval)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsupported {_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV}={raw_interval!r}; "
+            "expected one of 1, 2, 4, or 8"
+        ) from exc
+    if interval not in _FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVALS:
+        raise ValueError(
+            f"Unsupported {_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV}={raw_interval!r}; "
+            "expected one of 1, 2, 4, or 8"
+        )
+    return interval
+
+
+def _fdwic_private_won_slot_count() -> int:
+    raw_count = os.environ.get(_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV, "4") or "4"
+    try:
+        count = int(raw_count)
+    except ValueError as exc:
+        raise ValueError(
+            f"Unsupported {_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV}={raw_count!r}; "
+            "expected one of 1, 2, or 4"
+        ) from exc
+    if count not in _FDWIC_PRIVATE_WON_SLOT_COUNTS:
+        raise ValueError(
+            f"Unsupported {_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV}={raw_count!r}; "
+            "expected one of 1, 2, or 4"
+        )
+    return count
+
+
 def _validate_fdwic_tensormap_test_classes(mode: str, selected_by_cls) -> None:
-    """Reject every shared selection outside the explicitly supported PA cases."""
-    if mode != _FDWIC_TENSORMAP_SHARED:
+    """Reject mode-specific experiments outside their explicitly supported PA cases."""
+    private_interval = _fdwic_private_claim_participation_interval()
+    private_won_slots = _fdwic_private_won_slot_count()
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_won_slots != 4 and private_interval != 8:
+        raise ValueError("private WonSlot count 1/2 is only supported by the Selective I=8 experiment")
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_interval == 1 and private_won_slots == 4:
         return
+    if mode == _FDWIC_TENSORMAP_PRIVATE:
+        supported_cases_attr = "FDWIC_PRIVATE_CLAIM_SELECTIVE_SUPPORTED_CASES"
+        scope_label = f"--fdwic-private-claim-participation-interval {private_interval}"
+        if private_won_slots != 4:
+            scope_label += f" --fdwic-private-won-slot-count {private_won_slots}"
+    elif mode == _FDWIC_TENSORMAP_SHARED:
+        if private_interval != 1 or private_won_slots != 4:
+            raise ValueError(
+                "private Claim/WonSlot experiments are only valid with --fdwic-tensormap private"
+            )
+        supported_cases_attr = "FDWIC_SHARED_SUPPORTED_CASES"
+        scope_label = "--fdwic-tensormap shared"
+    else:
+        raise ValueError(f"Unsupported FDWIC TensorMap mode {mode!r}")
     incompatible = sorted(
         cls.__name__
         for cls in selected_by_cls
@@ -116,19 +172,19 @@ def _validate_fdwic_tensormap_test_classes(mode: str, selected_by_cls) -> None:
     )
     if incompatible:
         raise ValueError(
-            "--fdwic-tensormap shared only accepts level-2 "
+            f"{scope_label} only accepts level-2 "
             "fully_distributed_within_core tests; incompatible class(es): " + ", ".join(incompatible)
         )
     unsupported = sorted(
         f"{cls.__name__}::{case['name']}"
         for cls, cases in selected_by_cls.items()
         for case in cases
-        if case["name"] not in getattr(cls, "FDWIC_SHARED_SUPPORTED_CASES", ())
+        if case["name"] not in getattr(cls, supported_cases_attr, ())
     )
     if unsupported:
         raise ValueError(
-            "--fdwic-tensormap shared phase 1 only supports explicitly declared "
-            "single-group PA cases; unsupported selection(s): " + ", ".join(unsupported)
+            f"{scope_label} only supports explicitly declared single-group PA cases; "
+            "unsupported selection(s): " + ", ".join(unsupported)
         )
 
 
@@ -143,10 +199,23 @@ def _fdwic_tensormap_compile_definitions(platform: str, runtime: str) -> list[st
         )
     if not is_fdwic:
         return None
-    return [
+    definitions = [
         f"PTO_FDWIC_SHARED_MAP={1 if mode == _FDWIC_TENSORMAP_SHARED else 0}",
         fdwic_tensormap_ring_cap_definition(),
     ]
+    private_interval = _fdwic_private_claim_participation_interval()
+    private_won_slots = _fdwic_private_won_slot_count()
+    if mode == _FDWIC_TENSORMAP_SHARED and (private_interval != 1 or private_won_slots != 4):
+        raise ValueError(
+            "private Claim/WonSlot experiments are only valid with private TensorMap mode"
+        )
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_won_slots != 4:
+        if private_interval != 8:
+            raise ValueError("private WonSlot count 1/2 is only supported with Selective I=8")
+        definitions.append(f"PTO_FDWIC_PRIVATE_WON_SLOT_COUNT={private_won_slots}")
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_interval != 1:
+        definitions.append(f"PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL={private_interval}")
+    return definitions
 
 
 def _fdwic_profile() -> str:
@@ -245,7 +314,20 @@ def _fdwic_compile_definitions(profile: str) -> list[str] | None:
 
 def _profiled_cache_key(cache_key) -> tuple[Any, ...]:
     base = cache_key if isinstance(cache_key, tuple) else (cache_key,)
-    return (*base, _fdwic_tensormap_mode(), _fdwic_profile())
+    mode = _fdwic_tensormap_mode()
+    private_interval = _fdwic_private_claim_participation_interval()
+    private_won_slots = _fdwic_private_won_slot_count()
+    if mode == _FDWIC_TENSORMAP_SHARED and (private_interval != 1 or private_won_slots != 4):
+        raise ValueError(
+            "private Claim/WonSlot experiments are only valid with private TensorMap mode"
+        )
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_won_slots != 4:
+        if private_interval != 8:
+            raise ValueError("private WonSlot count 1/2 is only supported with Selective I=8")
+        return (*base, f"won-slots-{private_won_slots}", private_interval, mode, _fdwic_profile())
+    if mode == _FDWIC_TENSORMAP_PRIVATE and private_interval != 1:
+        return (*base, private_interval, mode, _fdwic_profile())
+    return (*base, mode, _fdwic_profile())
 
 
 def clear_compile_cache() -> None:
@@ -580,7 +662,14 @@ def maybe_build_aicore_override(
     # Arg layout. Each isolated evidence profile independently removes the dist
     # swimlane/atomic path without changing orchestration/incore ABI.
     tensormap_mode = _fdwic_tensormap_mode()
-    compile_definitions = list(_fdwic_compile_definitions(profile) or ())
+    compile_definitions = []
+    private_interval = _fdwic_private_claim_participation_interval()
+    private_won_slots = _fdwic_private_won_slot_count()
+    if tensormap_mode == _FDWIC_TENSORMAP_PRIVATE and private_won_slots != 4:
+        compile_definitions.append(f"PTO_FDWIC_PRIVATE_WON_SLOT_COUNT={private_won_slots}")
+    if tensormap_mode == _FDWIC_TENSORMAP_PRIVATE and private_interval != 1:
+        compile_definitions.append(f"PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL={private_interval}")
+    compile_definitions.extend(_fdwic_compile_definitions(profile) or ())
     if tensormap_mode == _FDWIC_TENSORMAP_SHARED:
         # Shared phase 1 admits only the explicitly declared PA callable.
         # Its CCEC image uses one AIC-owned unity source that emits both role
@@ -2431,6 +2520,20 @@ class SceneTestCase:
             "a5/a5sim fully_distributed_within_core runtime.",
         )
         parser.add_argument(
+            "--fdwic-private-claim-participation-interval",
+            type=int,
+            choices=sorted(_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVALS),
+            default=1,
+            help="Run the private PA Claim experiment with one of every I role-local Scalar candidates.",
+        )
+        parser.add_argument(
+            "--fdwic-private-won-slot-count",
+            type=int,
+            choices=sorted(_FDWIC_PRIVATE_WON_SLOT_COUNTS),
+            default=4,
+            help="Select 1, 2, or the default 4 active physical WonSlots for private Selective I=8.",
+        )
+        parser.add_argument(
             "-d",
             "--device",
             type=str,
@@ -2565,11 +2668,34 @@ class SceneTestCase:
         args = parser.parse_args()
         configure_logging(args.log_level)
         if args.fdwic_tensormap == "shared":
+            if (
+                args.fdwic_private_claim_participation_interval != 1
+                or args.fdwic_private_won_slot_count != 4
+            ):
+                parser.error(
+                    "private Claim/WonSlot experiments are only valid with --fdwic-tensormap private"
+                )
             if args.platform not in {"a5", "a5sim"}:
                 parser.error("--fdwic-tensormap shared requires -p a5 or a5sim")
             os.environ[_FDWIC_TENSORMAP_MODE_ENV] = _FDWIC_TENSORMAP_SHARED
+            os.environ.pop(_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV, None)
+            os.environ.pop(_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV, None)
         else:
             os.environ.pop(_FDWIC_TENSORMAP_MODE_ENV, None)
+            if args.fdwic_private_won_slot_count != 4:
+                if args.fdwic_private_claim_participation_interval != 8:
+                    parser.error("--fdwic-private-won-slot-count 1/2 requires Selective I=8")
+                os.environ[_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV] = str(args.fdwic_private_won_slot_count)
+            else:
+                os.environ.pop(_FDWIC_PRIVATE_WON_SLOT_COUNT_ENV, None)
+            if args.fdwic_private_claim_participation_interval == 1:
+                os.environ.pop(_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV, None)
+            else:
+                if args.platform not in {"a5", "a5sim"}:
+                    parser.error("private Claim Selective requires -p a5 or a5sim")
+                os.environ[_FDWIC_PRIVATE_CLAIM_PARTICIPATION_ENV] = str(
+                    args.fdwic_private_claim_participation_interval
+                )
 
         # Match the per-test kernel/orchestration compile to the runtime's
         # sanitizer, and require the runtime preloaded — same as conftest, since
@@ -2777,6 +2903,13 @@ def _dispatch_test_phases_standalone(module_name, selected_by_cls, args):  # noq
     common = ["-p", args.platform, "--manual", args.manual, "--log-level", args.log_level]
     if args.fdwic_tensormap != "private":
         common += ["--fdwic-tensormap", args.fdwic_tensormap]
+    if args.fdwic_private_claim_participation_interval != 1:
+        common += [
+            "--fdwic-private-claim-participation-interval",
+            str(args.fdwic_private_claim_participation_interval),
+        ]
+    if args.fdwic_private_won_slot_count != 4:
+        common += ["--fdwic-private-won-slot-count", str(args.fdwic_private_won_slot_count)]
     if args.sanitizer != "none":
         common += ["--sanitizer", args.sanitizer]
     if args.rounds != 1:

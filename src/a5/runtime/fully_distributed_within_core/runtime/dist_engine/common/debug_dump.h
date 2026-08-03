@@ -62,7 +62,7 @@ void dist_dump_state(int) {
         }
     }
     for (int32_t b = 0; b < g_dist.num_blocks; b++) {
-        for (int32_t i = 0; i < kPrivateSlots; i++) {
+        for (int32_t i = 0; i < kWonSlotCount; i++) {
             WonSlot &w = g_dist.blocks[b].slots[i];
             int64_t st = atomic_load(w.state.v, __ATOMIC_RELAXED);
             if (st == kWonStateFree) continue;

@@ -156,7 +156,7 @@ int32_t dist_engine_register(PTO2Runtime *rt, const L2TaskArgs *orch_args, int n
         if (2 * b < naiv) g_dist.layout[aiv_ids[2 * b]] = CoreLayout{b, LANE_AIV0};
         if (2 * b + 1 < naiv) g_dist.layout[aiv_ids[2 * b + 1]] = CoreLayout{b, LANE_AIV1};
         atomic_exchange(g_dist.blocks[b].any_pub, int32_t{0}, __ATOMIC_RELAXED);
-        for (int32_t s = 0; s < kPrivateSlots; s++) {
+        for (int32_t s = 0; s < kWonSlotCount; s++) {
             atomic_exchange(g_dist.blocks[b].slots[s].state.v, int64_t{0}, __ATOMIC_RELAXED);
         }
     }

@@ -761,6 +761,54 @@ def _publish_fake_provenance(
     return output_path, provenance_path, identity
 
 
+def test_private_claim_participation_closes_submit_pmu_compile_definitions() -> None:
+    profile = CLAIM_CAPTURE_MODE
+    cache_key = ("Case1", "a5", "fully_distributed_within_core", "4", "private", profile)
+
+    interval = report_module._private_claim_participation_interval_from_cache_key(cache_key, "private")
+    definitions = report_module._expected_compile_definitions(profile, "private", interval)
+
+    assert interval == 4
+    assert definitions == (
+        "PTO_FDWIC_SHARED_MAP=0",
+        f"PTO_FDWIC_TENSORMAP_RING_CAP={FDWIC_TENSORMAP_RING_CAP}",
+        "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL=4",
+        "PTO_FDWIC_SUBMIT_PMU=1",
+        f"PTO_FDWIC_SUBMIT_PMU_PHASE_ID={report_module.PHASE_CONFIG_BY_MODE[profile]['id']}",
+        "PTO_FDWIC_TRACE_ENABLED=0",
+    )
+
+
+@pytest.mark.parametrize("won_slots", (1, 2))
+def test_private_won_slot_count_closes_submit_pmu_compile_definitions(won_slots: int) -> None:
+    profile = CLAIM_CAPTURE_MODE
+    cache_key = (
+        "Case1",
+        "a5",
+        "fully_distributed_within_core",
+        f"won-slots-{won_slots}",
+        "8",
+        "private",
+        profile,
+    )
+
+    interval = report_module._private_claim_participation_interval_from_cache_key(cache_key, "private")
+    count = report_module._private_won_slot_count_from_cache_key(cache_key, "private")
+    definitions = report_module._expected_compile_definitions(profile, "private", interval, count)
+
+    assert interval == 8
+    assert count == won_slots
+    assert definitions == (
+        "PTO_FDWIC_SHARED_MAP=0",
+        f"PTO_FDWIC_TENSORMAP_RING_CAP={FDWIC_TENSORMAP_RING_CAP}",
+        f"PTO_FDWIC_PRIVATE_WON_SLOT_COUNT={won_slots}",
+        "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL=8",
+        "PTO_FDWIC_SUBMIT_PMU=1",
+        f"PTO_FDWIC_SUBMIT_PMU_PHASE_ID={report_module.PHASE_CONFIG_BY_MODE[profile]['id']}",
+        "PTO_FDWIC_TRACE_ENABLED=0",
+    )
+
+
 def test_inspect_build_artifact_uses_real_readelf_and_hashes_literal_text(tmp_path: Path) -> None:
     literal_text = b"\x90\x66\x90\xc3\x00\xff"
     artifact = tmp_path / "minimal.o"

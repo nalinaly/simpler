@@ -15,6 +15,7 @@
 #include <cstdint>
 
 #include "dist_engine/common/target.h"
+#include "dist_engine/common/private_won_slot_count.h"
 #include "dist_engine/common/swimlane_types.h"
 
 #include "dist_engine/dist_engine.h"
@@ -267,12 +268,27 @@ static_assert(offsetof(WonSlot, lane) % 64 == 0, "WonSlot lanes must be cachelin
 static_assert(sizeof(WonSlot) % 64 == 0, "WonSlot must not share cachelines");
 
 struct BlockWon {
-    WonSlot slots[kPrivateSlots];
-    uint8_t any_pub_pad[64 - ((sizeof(WonSlot) * kPrivateSlots) % 64)];
+    WonSlot slots[kWonSlotCount];
+#if PTO_FDWIC_PRIVATE_WON_SLOT_COUNT < 4
+    // Preserve the default four-slot BlockWon ABI.  AICPU owns and publishes
+    // DistGlobal; an AICore-only experiment must not move any_pub, cores, or
+    // any later shared address merely because fewer WonSlots are active.
+    uint8_t inactive_slots_abi_reserve[
+        sizeof(WonSlot) * (kWonSlotStorageCapacity - kWonSlotCount)
+    ];
+#endif
+    uint8_t any_pub_pad[
+        64 - ((sizeof(WonSlot) * kWonSlotStorageCapacity) % 64)
+    ];
     volatile int32_t any_pub;
     uint8_t any_pub_tail_pad[64 - sizeof(int32_t)];
 };
 static_assert(offsetof(BlockWon, slots) % 64 == 0, "BlockWon slots must be cacheline-aligned");
+static_assert(
+    offsetof(BlockWon, any_pub) ==
+        sizeof(WonSlot) * kWonSlotStorageCapacity + 64,
+    "BlockWon active-slot experiment must preserve the any_pub ABI"
+);
 static_assert(offsetof(BlockWon, any_pub) % 64 == 0, "BlockWon any_pub must be cacheline-aligned");
 static_assert(sizeof(BlockWon) % 64 == 0, "BlockWon must not share cachelines");
 

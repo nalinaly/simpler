@@ -83,7 +83,7 @@ PTO_DEVICE_FUNC void populate_won_slot_from_submit(
 
 PTO_DEVICE_FUNC int32_t alloc_won_slot(int32_t block, int32_t task_id) {
     __gm__ BlockWon &bw = g_dist.blocks[block];
-    for (int32_t i = 0; i < kPrivateSlots; i++) {
+    for (int32_t i = 0; i < kWonSlotCount; i++) {
         if (fdwic_trace_atomic_fetch_max<int64_t>(
                 task_id, FdwicAtomicSite::WonSlotClaimMax, bw.slots[i].state.v, kWonStateClaimed,
                 /*result_used=*/true

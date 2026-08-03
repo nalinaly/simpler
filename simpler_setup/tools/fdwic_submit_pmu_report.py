@@ -195,14 +195,63 @@ FIXED_ROLE_DYNAMIC_PHASE_CAPTURE_MODES = frozenset(
 KERNEL_EXCLUDING_PHASE_CAPTURE_MODES = frozenset(PHASE_CONFIG_BY_MODE)
 
 
-def _expected_compile_definitions(profile: str, tensormap_mode: str = "private") -> tuple[str, ...]:
+def _private_claim_participation_interval_from_cache_key(
+    cache_key: Sequence[str], tensormap_mode: str
+) -> int:
+    if tensormap_mode != "private" or len(cache_key) < 3:
+        return 1
+    # The default I=1 deliberately retains the historical cache-key ABI.
+    # Non-default private images insert I immediately before mode/profile.
+    candidate = cache_key[-3]
+    return int(candidate) if candidate in {"2", "4", "8"} else 1
+
+
+def _private_won_slot_count_from_cache_key(cache_key: Sequence[str], tensormap_mode: str) -> int:
+    if tensormap_mode != "private" or len(cache_key) < 4:
+        return 4
+    # Non-default WonSlot experiments insert a descriptive token immediately
+    # before the existing Selective-I token, preserving I at cache_key[-3].
+    candidate = cache_key[-4]
+    if candidate == "won-slots-1":
+        return 1
+    if candidate == "won-slots-2":
+        return 2
+    return 4
+
+
+def _expected_compile_definitions(
+    profile: str,
+    tensormap_mode: str = "private",
+    private_claim_participation_interval: int = 1,
+    private_won_slot_count: int = 4,
+) -> tuple[str, ...]:
     if tensormap_mode not in {"private", "shared"}:
         _fail(f"unsupported FDWIC TensorMap mode {tensormap_mode!r}")
+    if private_claim_participation_interval not in {1, 2, 4, 8}:
+        _fail(
+            "unsupported private Claim participation interval "
+            f"{private_claim_participation_interval!r}"
+        )
+    if tensormap_mode == "shared" and private_claim_participation_interval != 1:
+        _fail("private Claim participation is incompatible with shared TensorMap mode")
+    if private_won_slot_count not in {1, 2, 4}:
+        _fail(f"unsupported private WonSlot count {private_won_slot_count!r}")
+    if tensormap_mode == "shared" and private_won_slot_count != 4:
+        _fail("private WonSlot count is incompatible with shared TensorMap mode")
+    if private_won_slot_count != 4 and private_claim_participation_interval != 8:
+        _fail("private WonSlot count 1/2 requires Selective I=8")
     definitions = [
         f"PTO_FDWIC_SHARED_MAP={1 if tensormap_mode == 'shared' else 0}",
         fdwic_tensormap_ring_cap_definition(),
-        "PTO_FDWIC_SUBMIT_PMU=1",
     ]
+    if private_won_slot_count != 4:
+        definitions.append(f"PTO_FDWIC_PRIVATE_WON_SLOT_COUNT={private_won_slot_count}")
+    if private_claim_participation_interval != 1:
+        definitions.append(
+            "PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL="
+            f"{private_claim_participation_interval}"
+        )
+    definitions.append("PTO_FDWIC_SUBMIT_PMU=1")
     if profile != NONE_CAPTURE_MODE:
         definitions.append(f"PTO_FDWIC_SUBMIT_PMU_PHASE_ID={PHASE_CONFIG_BY_MODE[profile]['id']}")
     definitions.append("PTO_FDWIC_TRACE_ENABLED=0")
@@ -432,8 +481,10 @@ def capture_build_identity(
     tensormap_mode = cache_key[-2]
     if tensormap_mode not in {"private", "shared"}:
         _fail("profiled cache key must carry private/shared immediately before the selected profile")
+    private_interval = _private_claim_participation_interval_from_cache_key(cache_key, tensormap_mode)
+    private_won_slots = _private_won_slot_count_from_cache_key(cache_key, tensormap_mode)
     definitions = tuple(compile_definitions)
-    if definitions != _expected_compile_definitions(profile, tensormap_mode):
+    if definitions != _expected_compile_definitions(profile, tensormap_mode, private_interval, private_won_slots):
         _fail("Submit-PMU provenance compile definitions do not match the selected profile")
     kernel = Path(aicore_kernel).resolve()
     build_dir = Path(aicore_build_dir).resolve()
@@ -1678,7 +1729,13 @@ def _validate_provenance_data(data: dict[str, Any], capture: SubmitPmuCapture) -
     definitions = build["compile_definitions"]
     if not isinstance(definitions, list) or not definitions or not all(isinstance(value, str) for value in definitions):
         _fail("provenance.build.compile_definitions must be a non-empty string array")
-    if tuple(definitions) != _expected_compile_definitions(build["profile"], build["tensormap_mode"]):
+    private_interval = _private_claim_participation_interval_from_cache_key(
+        cache_key, build["tensormap_mode"]
+    )
+    private_won_slots = _private_won_slot_count_from_cache_key(cache_key, build["tensormap_mode"])
+    if tuple(definitions) != _expected_compile_definitions(
+        build["profile"], build["tensormap_mode"], private_interval, private_won_slots
+    ):
         _fail("provenance.build compile definitions do not match the selected profile")
     if hashlib.sha256(repr(definitions).encode("utf-8")).hexdigest() != definitions_sha256:
         _fail("provenance.build compile definitions do not match definitions_sha256")

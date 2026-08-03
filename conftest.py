@@ -158,6 +158,22 @@ def pytest_addoption(parser):
         "fully_distributed_within_core runtime. The default is private.",
     )
     parser.addoption(
+        "--fdwic-private-claim-participation-interval",
+        action="store",
+        type=int,
+        choices=[1, 2, 4, 8],
+        default=1,
+        help="Run private PA Claim with one of every I role-local Scalar candidates.",
+    )
+    parser.addoption(
+        "--fdwic-private-won-slot-count",
+        action="store",
+        type=int,
+        choices=[1, 2, 4],
+        default=4,
+        help="Select 1, 2, or the default 4 active physical WonSlots for private Selective I=8.",
+    )
+    parser.addoption(
         "--fdwic-profile",
         action="store",
         choices=[
@@ -543,11 +559,46 @@ def _configure_fdwic_profile(config):
 def _configure_fdwic_tensormap(config):
     """Validate and publish the explicit FDWIC TensorMap artifact family."""
     mode = config.getoption("--fdwic-tensormap", default="private")
+    private_interval = config.getoption("--fdwic-private-claim-participation-interval", default=1)
+    private_won_slots = config.getoption("--fdwic-private-won-slot-count", default=4)
+    if private_interval not in {1, 2, 4, 8}:
+        raise pytest.UsageError(
+            "unsupported --fdwic-private-claim-participation-interval "
+            f"{private_interval!r}; expected one of 1, 2, 4, or 8"
+        )
+    if private_won_slots not in {1, 2, 4}:
+        raise pytest.UsageError(
+            "unsupported --fdwic-private-won-slot-count "
+            f"{private_won_slots!r}; expected one of 1, 2, or 4"
+        )
+    if private_won_slots != 4 and private_interval != 8:
+        raise pytest.UsageError("--fdwic-private-won-slot-count 1/2 requires Selective I=8")
     if mode == "private":
         os.environ.pop("PTO_FDWIC_TENSORMAP_MODE", None)
+        if private_won_slots == 4:
+            os.environ.pop("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", None)
+        else:
+            os.environ["PTO_FDWIC_PRIVATE_WON_SLOT_COUNT"] = str(private_won_slots)
+        if private_interval == 1 and private_won_slots == 4:
+            os.environ.pop("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", None)
+            return
+        platform = config.getoption("--platform", default=None)
+        runtime = config.getoption("--runtime", default=None)
+        level = config.getoption("--level", default=None)
+        if platform not in {"a5", "a5sim"}:
+            raise pytest.UsageError("private Claim Selective requires --platform a5 or a5sim")
+        if runtime not in {None, "fully_distributed_within_core"}:
+            raise pytest.UsageError("private Claim Selective only supports runtime fully_distributed_within_core")
+        if level not in {None, 2}:
+            raise pytest.UsageError("private Claim Selective only supports SceneTest level 2")
+        os.environ["PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL"] = str(private_interval)
         return
     if mode != "shared":
         raise pytest.UsageError(f"unsupported --fdwic-tensormap {mode!r}")
+    if private_interval != 1 or private_won_slots != 4:
+        raise pytest.UsageError(
+            "private Claim/WonSlot experiments are only valid with --fdwic-tensormap private"
+        )
 
     platform = config.getoption("--platform", default=None)
     runtime = config.getoption("--runtime", default=None)
@@ -559,6 +610,8 @@ def _configure_fdwic_tensormap(config):
     if level not in {None, 2}:
         raise pytest.UsageError(f"--fdwic-tensormap {mode} only supports SceneTest level 2")
     os.environ["PTO_FDWIC_TENSORMAP_MODE"] = mode
+    os.environ.pop("PTO_FDWIC_PRIVATE_CLAIM_PARTICIPATION_INTERVAL", None)
+    os.environ.pop("PTO_FDWIC_PRIVATE_WON_SLOT_COUNT", None)
 
 
 def pytest_configure(config):

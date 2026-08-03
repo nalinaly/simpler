@@ -25,6 +25,10 @@ class TestPagedAttentionUnroll(SceneTestCase):
     # Scene-test entry points reject every other class/case before compilation
     # or device execution instead of falling back to private TensorMap logic.
     FDWIC_SHARED_SUPPORTED_CASES = frozenset({"Case1"})
+    # The private Selective-Claim experiment is intentionally scoped to the
+    # same single-group PA case until its generic mixed-kernel semantics are
+    # validated independently.
+    FDWIC_PRIVATE_CLAIM_SELECTIVE_SUPPORTED_CASES = frozenset({"Case1"})
 
     CALLABLE = {
         "orchestration": {
