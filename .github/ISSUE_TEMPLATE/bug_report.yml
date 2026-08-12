@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a general bug in PTO Runtime
+description: Report a general bug in simpler
 title: "[Bug] "
 labels: ["bug"]
 body:
@@ -29,7 +29,6 @@ body:
       description: Which runtime variant is affected?
       options:
         - tensormap_and_ringbuffer
-        - aicpu_build_graph
         - host_build_graph
         - All / Unknown
     validations:

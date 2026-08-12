@@ -1,51 +1,132 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * PTO Runtime2 - Ring Buffer Implementation
  *
- * Implements HeapRing, TaskRing, and DepListPool ring buffers
- * for zero-overhead memory management.
+ * Implements DepListPool ring buffer for zero-overhead dependency management.
+ * TaskAllocator methods are defined inline in pto_ring_buffer.h.
  *
- * Based on: docs/runtime_buffer_manager_methods.md
+ * Based on: docs/RUNTIME_LOGIC.md
  */
 
 #include "pto_ring_buffer.h"
 #include <inttypes.h>
 #include <string.h>
-#include <stdlib.h>  // for exit()
 #include "common/unified_log.h"
-#include "pto_scheduler.h"
+#include "scheduler/pto_scheduler.h"
 
-// =============================================================================
-// Heap Ring Buffer Implementation
-// =============================================================================
-
-void pto2_heap_ring_init(PTO2HeapRing* ring, void* base, uint64_t size,
-                          std::atomic<uint64_t>* tail_ptr,
-                          std::atomic<uint64_t>* top_ptr) {
-    ring->base = base;
-    ring->size = size;
-    ring->top_ptr = top_ptr;
-    ring->tail_ptr = tail_ptr;
+static void latch_pool_error(std::atomic<int32_t> *error_code_ptr, int32_t error_code) {
+    if (error_code_ptr == nullptr) {
+        return;
+    }
+    int32_t expected = PTO2_ERROR_NONE;
+    error_code_ptr->compare_exchange_strong(expected, error_code, std::memory_order_acq_rel);
 }
 
 // =============================================================================
-// Task Ring Buffer Implementation
+// Fanin Spill Pool Implementation
 // =============================================================================
+void PTO2FaninPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
+    if (sm_last_task_alive <= reclaim_task_cursor) return;
 
-void pto2_task_ring_init(PTO2TaskRing* ring, PTO2TaskDescriptor* descriptors,
-                          int32_t window_size, std::atomic<int32_t>* last_alive_ptr,
-                          std::atomic<int32_t>* current_index_ptr) {
-    ring->descriptors = descriptors;
-    ring->window_size = window_size;
-    ring->current_index_ptr = current_index_ptr;
-    ring->last_alive_ptr = last_alive_ptr;
+    int32_t scan_end = sm_last_task_alive;
+    for (int32_t task_id = reclaim_task_cursor; task_id < scan_end; ++task_id) {
+        PTO2TaskPayload &payload = ring.get_payload_by_task_id(task_id);
+        if (payload.fanin_spill_pool != this) {
+            continue;
+        }
+
+        int32_t inline_count = std::min(payload.fanin_actual_count, PTO2_FANIN_INLINE_CAP);
+        int32_t spill_edge_count = payload.fanin_actual_count - inline_count;
+        if (spill_edge_count > 0) {
+            advance_tail(payload.fanin_spill_start + spill_edge_count);
+        }
+    }
+    reclaim_task_cursor = scan_end;
+}
+
+bool PTO2FaninPool::ensure_space(PTO2SharedMemoryRingHeader &ring, int32_t needed) {
+    if (available() >= needed) return true;
+
+    int spin_count = 0;
+    int32_t prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
+    uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
+    bool block_timing = false;  // false until the first no-reclaim-progress spin
+    while (available() < needed) {
+        reclaim(ring, prev_last_alive);
+        if (available() >= needed) return true;
+
+        spin_count++;
+
+        int32_t cur_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
+        if (cur_last_alive > prev_last_alive) {
+            spin_count = 0;
+            prev_last_alive = cur_last_alive;
+            block_timing = false;
+        } else if ((spin_count & 1023) == 0) {
+            // A fatal latched elsewhere breaks this otherwise-unbounded spin; the
+            // caller maps the failed ensure_space to orch_mark_fatal. Cold path.
+            if (error_code_ptr != nullptr && error_code_ptr->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
+                return false;
+            }
+            // Absolute-time backstop, matching the task allocator: stable across
+            // chips/contention, unlike a fixed spin count. get_sys_cnt_aicpu()
+            // is a cheap cntvct_el0 read; the 1024-spin gate keeps fatal-flag
+            // polling and timeout bookkeeping out of every reclaim spin.
+            uint64_t now = get_sys_cnt_aicpu();
+            if (!block_timing) {
+                block_cycle0 = now;
+                block_timing = true;
+            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+                int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
+                LOG_ERROR("========================================");
+                LOG_ERROR("FATAL: Fanin Spill Pool Deadlock Detected!");
+                LOG_ERROR("========================================");
+                LOG_ERROR("Fanin spill pool cannot reclaim space after ~500 ms (no progress).");
+                LOG_ERROR(
+                    "  - Pool used:     %d / %d (%.1f%%)", used(), capacity,
+                    (capacity > 0) ? (100.0 * used() / capacity) : 0.0
+                );
+                LOG_ERROR("  - Pool top:      %d (linear)", top);
+                LOG_ERROR("  - Pool tail:     %d (linear)", tail);
+                LOG_ERROR("  - High water:    %d", high_water);
+                LOG_ERROR("  - Needed:        %d entries", needed);
+                LOG_ERROR("  - last_task_alive: %d (stuck here)", cur_last_alive);
+                LOG_ERROR("  - current_task:    %d", current);
+                LOG_ERROR("  - In-flight tasks: %d", current - cur_last_alive);
+                LOG_ERROR("Diagnosis:");
+                LOG_ERROR("  last_task_alive is not advancing, so fanin spill pool tail");
+                LOG_ERROR("  cannot reclaim. Check TaskRing diagnostics for root cause.");
+                LOG_ERROR("Solution:");
+                LOG_ERROR(
+                    "  Increase fanin spill pool capacity (current: %d, recommended: %d)", capacity, high_water * 2
+                );
+                LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in pto_runtime2_types.h");
+                LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+                LOG_ERROR("========================================");
+                latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
+                return false;
+            }
+        }
+        SPIN_WAIT_HINT();
+    }
+    return true;
 }
 
 // =============================================================================
 // Dependency List Pool Implementation
 // =============================================================================
-void PTO2DepListPool::reclaim(PTO2SchedulerState& sched, uint8_t ring_id, int32_t sm_last_task_alive) {
+void PTO2DepListPool::reclaim(PTO2SharedMemoryRingHeader &ring, int32_t sm_last_task_alive) {
     if (sm_last_task_alive >= last_reclaimed + PTO2_DEP_POOL_CLEANUP_INTERVAL && sm_last_task_alive > 0) {
-        int32_t mark = sched.ring_sched_states[ring_id].get_slot_state_by_task_id(sm_last_task_alive - 1).dep_pool_mark;
+        int32_t mark = ring.get_slot_state_by_task_id(sm_last_task_alive - 1).dep_pool_mark;
         if (mark > 0) {
             advance_tail(mark);
         }
@@ -53,52 +134,98 @@ void PTO2DepListPool::reclaim(PTO2SchedulerState& sched, uint8_t ring_id, int32_
     }
 }
 
-void PTO2DepListPool::ensure_space(
-    PTO2SchedulerState& sched, PTO2RingFlowControl& fc, uint8_t ring_id, int32_t needed) {
-    if (available() >= needed) return;
+void PTO2DepListPool::report_deadlock(
+    PTO2SharedMemoryRingHeader &ring, int32_t needed, int32_t last_alive, bool scope_gated
+) {
+    int32_t current = ring.fc.current_task_index.load(std::memory_order_acquire);
+    LOG_ERROR("========================================");
+    LOG_ERROR("FATAL: Dependency Pool Deadlock Detected!");
+    LOG_ERROR("========================================");
+    if (scope_gated) {
+        LOG_ERROR("Head task %d is the oldest task owned by an open scope on this ring ->", last_alive);
+        LOG_ERROR("no open scope can end while the orchestrator is blocked here.");
+        LOG_ERROR("Provable head-of-line deadlock.");
+    } else {
+        LOG_ERROR("DepListPool cannot reclaim space after ~500 ms (no progress).");
+    }
+    LOG_ERROR(
+        "  - Pool used:     %d / %d (%.1f%%)", used(), capacity, (capacity > 0) ? (100.0 * used() / capacity) : 0.0
+    );
+    LOG_ERROR("  - Pool top:      %d (linear)", top);
+    LOG_ERROR("  - Pool tail:     %d (linear)", tail);
+    LOG_ERROR("  - High water:    %d", high_water);
+    LOG_ERROR("  - Needed:        %d entries", needed);
+    LOG_ERROR("  - last_task_alive: %d (stuck here)", last_alive);
+    LOG_ERROR("  - current_task:    %d", current);
+    LOG_ERROR("  - In-flight tasks: %d", current - last_alive);
+    // Head-task dump: what the shared reclaim watermark is actually waiting on.
+    if (ring.slot_states != nullptr) {
+        PTO2TaskSlotState &h = ring.get_slot_state_by_task_id(last_alive);
+        uint32_t fc = h.fanout_count;
+        uint32_t rc = h.fanout_refcount.load(std::memory_order_acquire);
+        LOG_ERROR(
+            "  Head task %d: state=%d, consumers=%u/%u, scope_released=%d", last_alive,
+            static_cast<int>(h.task_state.load(std::memory_order_acquire)), rc & ~PTO2_FANOUT_SCOPE_BIT,
+            fc & ~PTO2_FANOUT_SCOPE_BIT, (rc & PTO2_FANOUT_SCOPE_BIT) ? 1 : 0
+        );
+    }
+    LOG_ERROR("Solution:");
+    LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d)", capacity, high_water * 2);
+    LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in pto_runtime2_types.h");
+    LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
+    LOG_ERROR("========================================");
+}
+
+bool PTO2DepListPool::ensure_space(
+    PTO2SharedMemoryRingHeader &ring, int32_t needed, PTO2TaskSlotState *oldest_open_task
+) {
+    if (available() >= needed) return true;
 
     int spin_count = 0;
-    int32_t prev_last_alive = fc.last_task_alive.load(std::memory_order_acquire);
+    int32_t prev_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
+    uint64_t block_cycle0 = 0;  // wall-clock anchor for the deadlock backstop
+    bool block_timing = false;  // false until the first no-reclaim-progress spin
     while (available() < needed) {
-        reclaim(sched, ring_id, prev_last_alive);
-        if (available() >= needed) return;
+        reclaim(ring, prev_last_alive);
+        if (available() >= needed) return true;
 
         spin_count++;
 
-        // Progress detection: reset spin counter if last_task_alive advances
-        int32_t cur_last_alive = fc.last_task_alive.load(std::memory_order_acquire);
+        int32_t cur_last_alive = ring.fc.last_task_alive.load(std::memory_order_acquire);
         if (cur_last_alive > prev_last_alive) {
             spin_count = 0;
             prev_last_alive = cur_last_alive;
-        }
-
-        if (spin_count >= PTO2_DEP_POOL_SPIN_LIMIT) {
-            int32_t current = fc.current_task_index.load(std::memory_order_acquire);
-            LOG_ERROR("========================================");
-            LOG_ERROR("FATAL: Dependency Pool Deadlock Detected! (ring %d)", ring_id);
-            LOG_ERROR("========================================");
-            LOG_ERROR("DepListPool cannot reclaim space after %d spins (no progress).", spin_count);
-            LOG_ERROR("  - Pool used:     %d / %d (%.1f%%)",
-                used(),
-                capacity,
-                (capacity > 0) ? (100.0 * used() / capacity) : 0.0);
-            LOG_ERROR("  - Pool top:      %d (linear)", top);
-            LOG_ERROR("  - Pool tail:     %d (linear)", tail);
-            LOG_ERROR("  - High water:    %d", high_water);
-            LOG_ERROR("  - Needed:        %d entries", needed);
-            LOG_ERROR("  - last_task_alive: %d (stuck here)", cur_last_alive);
-            LOG_ERROR("  - current_task:    %d", current);
-            LOG_ERROR("  - In-flight tasks: %d", current - cur_last_alive);
-            LOG_ERROR("Diagnosis:");
-            LOG_ERROR("  last_task_alive is not advancing, so dep pool tail");
-            LOG_ERROR("  cannot reclaim. Check TaskRing diagnostics for root cause.");
-            LOG_ERROR("Solution:");
-            LOG_ERROR("  Increase dep pool capacity (current: %d, recommended: %d)", capacity, high_water * 2);
-            LOG_ERROR("  Compile-time: PTO2_DEP_LIST_POOL_SIZE in pto_runtime2_types.h");
-            LOG_ERROR("  Runtime env:  PTO2_RING_DEP_POOL=%d", high_water * 2);
-            LOG_ERROR("========================================");
-            exit(1);
+            block_timing = false;
+        } else if ((spin_count & 1023) == 0) {
+            // A fatal latched elsewhere breaks this otherwise-unbounded spin; the
+            // caller maps the failed ensure_space to orch_mark_fatal. Cold path.
+            if (error_code_ptr != nullptr && error_code_ptr->load(std::memory_order_acquire) != PTO2_ERROR_NONE) {
+                return false;
+            }
+            // (1) Structural, immediate: no open scope can end while this
+            // orchestrator is blocked here, so its oldest task on this ring
+            // cannot become CONSUMED.
+            bool head_is_oldest_open_task = oldest_open_task != nullptr && ring.slot_states != nullptr &&
+                                            oldest_open_task == &ring.get_slot_state_by_task_id(cur_last_alive);
+            if (head_is_oldest_open_task) {
+                report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/true);
+                latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
+                return false;
+            }
+            // (2) Wall-clock backstop for the residual case the head test cannot
+            // prove. Absolute time (get_sys_cnt_aicpu is an MMIO read), sampled
+            // once per 1024 spins.
+            uint64_t now = get_sys_cnt_aicpu();
+            if (!block_timing) {
+                block_cycle0 = now;
+                block_timing = true;
+            } else if (now - block_cycle0 >= PTO2_ALLOC_DEADLOCK_TIMEOUT_CYCLES) {
+                report_deadlock(ring, needed, cur_last_alive, /*scope_gated=*/false);
+                latch_pool_error(error_code_ptr, PTO2_ERROR_DEP_POOL_OVERFLOW);
+                return false;
+            }
         }
         SPIN_WAIT_HINT();
     }
+    return true;
 }

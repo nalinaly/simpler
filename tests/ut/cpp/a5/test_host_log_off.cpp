@@ -1,0 +1,311 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// HostLogger filtering: one Python-compatible threshold.
+// Drives the singleton via a direct setter, captures stderr, and asserts on
+// the buffered output.
+
+#include <cstdio>
+#include <cstdlib>
+#include <algorithm>
+#include <cerrno>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <gtest/gtest.h>
+
+#include "host_log.h"
+
+using simpler::log::LogLevel;
+
+namespace {
+
+struct CapturedStdio {
+    std::string out;
+    std::string err;
+};
+
+struct CannLogLevelCall {
+    int count;
+    int module_id;
+    int level;
+    int enable_event;
+};
+
+CannLogLevelCall g_cann_log_level_call{};
+
+int capture_cann_log_level(int module_id, int level, int enable_event) {
+    g_cann_log_level_call.count++;
+    g_cann_log_level_call.module_id = module_id;
+    g_cann_log_level_call.level = level;
+    g_cann_log_level_call.enable_event = enable_event;
+    return 0;
+}
+
+CapturedStdio run_with_config(LogLevel level, void (*fn)()) {
+    fflush(stdout);
+    fflush(stderr);
+    FILE *out_tmp = tmpfile();
+    FILE *err_tmp = tmpfile();
+    int saved_out = dup(fileno(stdout));
+    int saved_err = dup(fileno(stderr));
+    dup2(fileno(out_tmp), fileno(stdout));
+    dup2(fileno(err_tmp), fileno(stderr));
+
+    HostLogger::get_instance().set_level(level);
+
+    fn();
+
+    fflush(stdout);
+    fflush(stderr);
+    dup2(saved_out, fileno(stdout));
+    dup2(saved_err, fileno(stderr));
+    close(saved_out);
+    close(saved_err);
+
+    auto slurp = [](FILE *f) {
+        std::string s;
+        rewind(f);
+        char buf[512];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            s.append(buf, n);
+        }
+        fclose(f);
+        return s;
+    };
+    return {slurp(out_tmp), slurp(err_tmp)};
+}
+
+}  // namespace
+
+TEST(HostLogTest, NulLevelMutesAllSeverities) {
+    auto captured = run_with_config(LogLevel::NUL, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "err-msg");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-msg");
+        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "dbg-msg");
+    });
+    EXPECT_EQ(captured.out, "");
+    EXPECT_EQ(captured.err, "");
+}
+
+TEST(HostLogTest, ErrorLevelEmitsErrorOnly) {
+    auto captured = run_with_config(LogLevel::ERROR, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "err-msg");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
+    });
+    EXPECT_EQ(captured.out, "");
+    EXPECT_NE(captured.err.find("err-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("warn-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("timing-msg"), std::string::npos);
+}
+
+TEST(HostLogTest, TimingLevelKeepsTimingAndHigher) {
+    auto captured = run_with_config(LogLevel::TIMING, [] {
+        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "debug-msg");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-msg");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-msg");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-msg");
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "error-msg");
+    });
+    EXPECT_EQ(captured.out, "");
+    EXPECT_EQ(captured.err.find("debug-msg"), std::string::npos);
+    EXPECT_EQ(captured.err.find("info-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("timing-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("warn-msg"), std::string::npos);
+    EXPECT_NE(captured.err.find("error-msg"), std::string::npos);
+}
+
+TEST(HostLogTest, CannLevelMappingSuppressesInfoAtDefault) {
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::DEBUG), 0);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::INFO), 1);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::TIMING), 2);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::WARN), 2);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::ERROR), 3);
+    EXPECT_EQ(simpler::log::to_cann_log_level(LogLevel::NUL), 4);
+}
+
+TEST(HostLogTest, CannConfigurationUsesGlobalModuleAndRespectsExternalOverride) {
+    const char *old_env = std::getenv("ASCEND_GLOBAL_LOG_LEVEL");
+    const bool had_old_env = old_env != nullptr;
+    const std::string old_value = had_old_env ? old_env : "";
+
+    unsetenv("ASCEND_GLOBAL_LOG_LEVEL");
+    HostLogger::get_instance().set_level(LogLevel::TIMING);
+    g_cann_log_level_call = {};
+    HostLogger::get_instance().configure_cann_log_level(capture_cann_log_level);
+    EXPECT_EQ(g_cann_log_level_call.count, 1);
+    EXPECT_EQ(g_cann_log_level_call.module_id, -1);
+    EXPECT_EQ(g_cann_log_level_call.level, 2);
+    EXPECT_EQ(g_cann_log_level_call.enable_event, 0);
+
+    setenv("ASCEND_GLOBAL_LOG_LEVEL", "1", 1);
+    g_cann_log_level_call = {};
+    HostLogger::get_instance().configure_cann_log_level(capture_cann_log_level);
+    EXPECT_EQ(g_cann_log_level_call.count, 0);
+
+    if (had_old_env) {
+        setenv("ASCEND_GLOBAL_LOG_LEVEL", old_value.c_str(), 1);
+    } else {
+        unsetenv("ASCEND_GLOBAL_LOG_LEVEL");
+    }
+}
+
+TEST(HostLogTest, EmitPrefixHasTimestampAndTid) {
+    auto captured = run_with_config(LogLevel::INFO, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "marker");
+    });
+    // Expected shape: "[YYYY-MM-DD HH:MM:SS.uuuuuu][T0x...][ERROR] fn: marker\n"
+    ASSERT_FALSE(captured.err.empty());
+    EXPECT_EQ(captured.err[0], '[');
+    // Year must be 4 ASCII digits.
+    for (int i = 1; i <= 4; ++i) {
+        EXPECT_GE(captured.err[i], '0');
+        EXPECT_LE(captured.err[i], '9');
+    }
+    EXPECT_EQ(captured.err[5], '-');
+    // Thread-id segment "[T0x" must appear before the level tag.
+    auto tid_pos = captured.err.find("][T0x");
+    auto level_pos = captured.err.find("][ERROR]");
+    ASSERT_NE(tid_pos, std::string::npos);
+    ASSERT_NE(level_pos, std::string::npos);
+    EXPECT_LT(tid_pos, level_pos);
+    // Body still present.
+    EXPECT_NE(captured.err.find("marker"), std::string::npos);
+}
+
+TEST(HostLogTest, AllOutputGoesToStderr) {
+    auto captured = run_with_config(LogLevel::DEBUG, [] {
+        HostLogger::get_instance().log(LogLevel::ERROR, "fn", "error-output-marker");
+        HostLogger::get_instance().log(LogLevel::WARN, "fn", "warn-output-marker");
+        HostLogger::get_instance().log(LogLevel::TIMING, "fn", "timing-output-marker");
+        HostLogger::get_instance().log(LogLevel::INFO, "fn", "info-output-marker");
+        HostLogger::get_instance().log(LogLevel::DEBUG, "fn", "debug-output-marker");
+    });
+    EXPECT_EQ(captured.out, "");
+    EXPECT_NE(captured.err.find("error-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("warn-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("timing-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("info-output-marker"), std::string::npos);
+    EXPECT_NE(captured.err.find("debug-output-marker"), std::string::npos);
+}
+
+TEST(HostLogTest, ForkedProcessesEmitWholePipeRecords) {
+    int log_pipe[2];
+    int start_pipe[2];
+    ASSERT_EQ(pipe(log_pipe), 0);
+    ASSERT_EQ(pipe(start_pipe), 0);
+
+    const long pipe_buf = fpathconf(log_pipe[1], _PC_PIPE_BUF);
+    ASSERT_GT(pipe_buf, 256);
+    const size_t payload_size = static_cast<size_t>(std::min<long>(pipe_buf - 256, 2048));
+    constexpr int child_count = 16;
+    constexpr int records_per_child = 128;
+
+    std::vector<pid_t> children;
+    for (int child = 0; child < child_count; ++child) {
+        const pid_t pid = fork();
+        ASSERT_GE(pid, 0);
+        if (pid == 0) {
+            close(log_pipe[0]);
+            close(start_pipe[1]);
+            char start;
+            if (read(start_pipe[0], &start, 1) != 1 || dup2(log_pipe[1], STDERR_FILENO) < 0) {
+                _exit(2);
+            }
+            close(start_pipe[0]);
+            close(log_pipe[1]);
+
+            HostLogger::get_instance().set_level(LogLevel::DEBUG);
+            const std::string payload(payload_size, static_cast<char>('a' + child));
+            for (int seq = 0; seq < records_per_child; ++seq) {
+                HostLogger::get_instance().log(
+                    LogLevel::ERROR, "fork_writer", "child=%d seq=%d payload=%s", child, seq, payload.c_str()
+                );
+            }
+            _exit(0);
+        }
+        children.push_back(pid);
+    }
+
+    close(log_pipe[1]);
+    close(start_pipe[0]);
+    std::string captured;
+    std::thread reader([&] {
+        char buffer[8192];
+        while (true) {
+            const ssize_t count = read(log_pipe[0], buffer, sizeof(buffer));
+            if (count > 0) {
+                captured.append(buffer, static_cast<size_t>(count));
+            } else if (count < 0 && errno == EINTR) {
+                continue;
+            } else {
+                break;
+            }
+        }
+        close(log_pipe[0]);
+    });
+
+    const std::string starts(child_count, 'x');
+    EXPECT_EQ(write(start_pipe[1], starts.data(), starts.size()), static_cast<ssize_t>(starts.size()));
+    close(start_pipe[1]);
+
+    for (pid_t child : children) {
+        int status = 0;
+        const pid_t waited = waitpid(child, &status, 0);
+        EXPECT_EQ(waited, child);
+        if (waited == child) {
+            EXPECT_TRUE(WIFEXITED(status));
+            if (WIFEXITED(status)) {
+                EXPECT_EQ(WEXITSTATUS(status), 0);
+            }
+        }
+    }
+    reader.join();
+
+    std::vector<std::vector<bool>> seen(child_count, std::vector<bool>(records_per_child, false));
+    std::istringstream lines(captured);
+    std::string line;
+    int line_count = 0;
+    constexpr char payload_marker[] = " payload=";
+    while (std::getline(lines, line)) {
+        const size_t record_pos = line.find("child=");
+        const size_t payload_pos = line.find(payload_marker);
+        ASSERT_NE(record_pos, std::string::npos);
+        ASSERT_NE(payload_pos, std::string::npos);
+        ASSERT_EQ(line.find("child=", record_pos + 1), std::string::npos);
+
+        int child = -1;
+        int seq = -1;
+        ASSERT_EQ(sscanf(line.c_str() + record_pos, "child=%d seq=%d", &child, &seq), 2);
+        ASSERT_GE(child, 0);
+        ASSERT_LT(child, child_count);
+        ASSERT_GE(seq, 0);
+        ASSERT_LT(seq, records_per_child);
+        ASSERT_FALSE(seen[child][seq]);
+        seen[child][seq] = true;
+
+        const std::string payload = line.substr(payload_pos + sizeof(payload_marker) - 1);
+        ASSERT_EQ(payload.size(), payload_size);
+        EXPECT_TRUE(std::all_of(payload.begin(), payload.end(), [child](char value) {
+            return value == static_cast<char>('a' + child);
+        }));
+        ++line_count;
+    }
+    EXPECT_EQ(line_count, child_count * records_per_child);
+}

@@ -1,0 +1,52 @@
+# Project Layout Quick Reference
+
+How this repo organizes Python packages, the build system, and example / test directories. For the *architecture* the code implements (hardware tiers, software three-program model), see [ascend.md](ascend.md).
+
+## Python Package Layout
+
+| Package | Source | What's in wheel | Use for |
+| ------- | ------ | --------------- | ------- |
+| `simpler` | `python/simpler/` | `task_interface`, `worker`, `env_manager` only | Runtime user API: `Worker` plus the task/callable types |
+| `simpler_setup` | `simpler_setup/` | All files + `_assets/{src,build/lib}` | **Also user-facing**, not internal-only: `KernelCompiler`, `SceneTestCase` / `scene_test`, `TensorArg`, `Scalar`, `TaskArgsBuilder`, `ensure_pto_isa_root`, `make_chip_tensor_arg`, plus the `simpler_setup.tools` CLIs. A kernel cannot be compiled without it |
+| `_task_interface` | `python/bindings/` | nanobind `.so` at wheel root | Internal nanobind module |
+
+`simpler` exposes `Worker` and the `task_interface` submodule lazily (PEP 562
+`__getattr__`), so `from simpler import Worker` works while `import simpler`
+still costs nothing and does not require the `_task_interface` extension.
+`simpler.task_interface.ChipTensor` is the GM-address-bearing device descriptor
+a `ChipWorker` consumes; `simpler_setup.TensorArg` is the address-free
+scene-test arg spec `NamedTuple`. They are separate types in separate
+namespaces.
+
+The 4 files `kernel_compiler.py`, `runtime_compiler.py`, `toolchain.py`, `elf_parser.py` exist in **both** `python/simpler/` and `simpler_setup/` during transition. The `simpler_setup/` copies are authoritative; the `python/simpler/` copies are excluded from wheel via `pyproject.toml::wheel.exclude`. New code must `import` from `simpler_setup.*`, not `simpler.*`, for these four.
+
+## Build System Lookup
+
+| What | Where |
+| ---- | ----- |
+| Runtime selection | `@scene_test(runtime="...")` on the SceneTestCase class |
+| Per-case knobs (aicpu_thread_num, runtime_env) | `CASES[*]["config"]` on the SceneTestCase class |
+| Per-runtime build config | `src/{arch}/runtime/{runtime}/build_config.py` |
+| Runtime build orchestration | `simpler_setup/runtime_builder.py` → `simpler_setup/runtime_compiler.py` → cmake |
+| Pre-build all runtimes | `simpler_setup/build_runtimes.py` (invoked by `pip install .`) |
+| Platform/runtime discovery | `simpler_setup/platform_info.py` |
+| Kernel compilation | `simpler_setup/kernel_compiler.py` (one `.cpp` per `func_id`) |
+| Python bindings | `python/bindings/` (nanobind extension for ChipWorker, task types) |
+| Path resolution (wheel vs source tree) | `simpler_setup/environment.py::PROJECT_ROOT` |
+| Pre-built binary lookup | `build/lib/{arch}/{variant}/{runtime}/` (source tree) or `simpler_setup/_assets/build/lib/...` (wheel) |
+| Persistent cmake cache | `build/cache/{arch}/{variant}/{runtime}/` |
+
+## Example / Test Layout
+
+```text
+my_example/
+  test_my_example.py     # @scene_test class (CALLABLE + CASES + generate_args + compute_golden)
+  kernels/
+    aic/                 # AICore kernel sources (optional)
+    aiv/                 # AIV kernel sources (optional)
+    orchestration/       # Orchestration C++ source
+```
+
+Run via pytest: `pytest examples tests/st --platform <platform>`, or standalone: `python <example_or_test>/test_*.py -p <platform>`.
+
+Tests load pre-built runtime binaries from `build/lib/`. After changing runtime/platform C++, re-run `pip install --no-build-isolation -e .` to rebuild them (incremental via the cmake cache; there is no rebuild-on-import — `editable.rebuild = false`) before re-running. See [docs/developer-guide.md](../../docs/developer-guide.md#when-to-rebuild) for the full rebuild decision table.

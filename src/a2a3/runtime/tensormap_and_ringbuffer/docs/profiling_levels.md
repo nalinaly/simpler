@@ -1,137 +1,173 @@
-# PTO Runtime2 Profiling Levels
+# Profiling Levels
 
-This document describes the profiling macro hierarchy and logging control in the PTO Runtime2 system.
+This document describes the profiling macro hierarchy and logging control in the simpler runtime.
 
 ## Overview
 
-PTO Runtime2 uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_profiling` runtime flag controls data collection (performance buffers, shared memory writes) but does NOT control log output.
+The runtime uses a hierarchical profiling system with compile-time macros to control profiling code compilation and log output. The `enable_chip_swimlane` runtime flag (integer perf_level 0–4) controls data collection granularity (performance buffers, shared memory writes) but does NOT control log output.
 
 ## Profiling Macro Hierarchy
 
-```
-PTO2_PROFILING (base level, default=1)
-├── PTO2_ORCH_PROFILING (orchestrator, default=0, requires PTO2_PROFILING=1)
-|   └──PTO2_TENSORMAP_PROFILING (tensormap, default=0, requires PTO2_ORCH_PROFILING=1)
-├── PTO2_SCHED_PROFILING (scheduler, default=0, requires PTO2_PROFILING=1)
-└── --enable-profiling (Dump profiling merged swimlane json file for visualization, requires PTO2_PROFILING=1)
+Defaults and dependency validation are centralized in
+`src/common/task_interface/profiling_config.h`. Runtime headers include that
+file before using the macros, so both a2a3 and a5 share the same default
+values and compile-time checks.
+
+```text
+SIMPLER_DFX (base level, default=1)
+├── SIMPLER_ORCH_PROFILING (orchestrator, default=0, requires SIMPLER_DFX=1)
+|   └──SIMPLER_TENSORMAP_PROFILING (tensormap, default=0, requires SIMPLER_ORCH_PROFILING=1)
+├── SIMPLER_SCHED_PROFILING (scheduler, default=0, requires SIMPLER_DFX=1)
+└── --enable-chip-swimlane [PERF_LEVEL] (chip swimlane data collection, 0-4, bare=4, requires SIMPLER_DFX=1)
 
 ```
 
 ### Compile-Time Validation
 
-Each sub-level macro requires `PTO2_PROFILING=1`:
+Each sub-level macro requires `SIMPLER_DFX=1`:
 
 ```cpp
-#if PTO2_ORCH_PROFILING && !PTO2_PROFILING
-#error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
+#if SIMPLER_ORCH_PROFILING && !SIMPLER_DFX
+#error "SIMPLER_ORCH_PROFILING requires SIMPLER_DFX=1"
 #endif
 
-#if PTO2_SCHED_PROFILING && !PTO2_PROFILING
-#error "PTO2_SCHED_PROFILING requires PTO2_PROFILING=1"
+#if SIMPLER_SCHED_PROFILING && !SIMPLER_DFX
+#error "SIMPLER_SCHED_PROFILING requires SIMPLER_DFX=1"
 #endif
 
-#if PTO2_TENSORMAP_PROFILING && !PTO2_ORCH_PROFILING
-#error "PTO2_TENSORMAP_PROFILING requires PTO2_ORCH_PROFILING=1"
+#if SIMPLER_TENSORMAP_PROFILING && !SIMPLER_ORCH_PROFILING
+#error "SIMPLER_TENSORMAP_PROFILING requires SIMPLER_ORCH_PROFILING=1"
 #endif
 ```
 
 ## Profiling Levels
 
-### Level 0: No Profiling (PTO2_PROFILING=0)
+### Level 0: No Profiling (SIMPLER_DFX=0)
 
 **What's compiled:**
+
 - Debug/diagnostic logs (always present)
-- Progress tracking
-- Stall detection
-- Deadlock/livelock detection
+- Progress tracking (`PTO2 progress: completed=...`)
+- Stall detection and dump (triggered after the `SCHEDULER_TIMEOUT_MS` wall-clock no-progress budget)
+- Deadlock/livelock detection (`diagnose_stuck_state`, called on stall)
 
 **What's NOT compiled:**
-- All profiling counters
-- All profiling logs
-- Performance data collection
 
-**Log output:** 11 DEV_ALWAYS logs (debug/diagnostic only)
+- All `CYCLE_COUNT_*` timing counters (`sched_*_cycle`, orchestrator cost counters)
+- Scheduler/Orchestrator profiling summary logs guarded by `#if SIMPLER_DFX`
+- Performance data collection paths (`enable_chip_swimlane` runtime flag becomes ineffective because profiling code is not compiled)
+
+**Log output (normal run, no stall):**
+
+- No `sched_start/sched_end/sched_cost` timestamps
+- No `orch_start/orch_end/orch_cost` timestamps
+- No `Scheduler summary: total_time=...`
+- No `PTO2 total submitted tasks` log
+- `PTO2 progress: completed=... total=...` may appear (thread 0 only, at task completion milestones)
 
 ---
 
-### Level 1: Basic Profiling (PTO2_PROFILING=1)
+### Level 1: Basic Profiling (SIMPLER_DFX=1)
 
 **What's compiled:**
-- All profiling counters (cycles, task counts, loop counts)
-- Basic profiling summaries
-- Scheduler summary output
-- Orchestration completion time
+
+- Base timing counters for the scheduler loop (`sched_complete/dispatch/idle`)
+- Host-side phase windows: each sched/orch thread publishes its
+  start/end window via `aicpu_phase_set_window`, which the host reduces
+  into the `Orch` / `Sched` `[STRACE]` markers
 
 **What's NOT compiled:**
+
+- Per-thread scheduler/orchestrator device-log lines (moved to Level 2 / Level 3)
 - Detailed phase breakdowns
 - TensorMap statistics
 
-**Log output:** 13 DEV_ALWAYS logs
-- 11 debug/diagnostic logs (always present)
-- 2 basic profiling summaries:
-  - Orchestration completion time
-  - Total submitted tasks
+**Log output (additional lines vs Level 0, per normal run):**
 
-**Scheduler output:**
-```
-Thread X: Scheduler summary: total_time=XXXus, loops=XXX, tasks_scheduled=XXX
-```
+- None on the device side. The per-thread `orch_start/orch_end/orch_cost`,
+  `sched_start/sched_end/sched_cost`, and `Scheduler summary` lines are NOT
+  emitted at this level — `orch_*` is gated by `SIMPLER_ORCH_PROFILING` (Level 3),
+  `sched_*` and `Scheduler summary` by `SIMPLER_SCHED_PROFILING` (Level 2).
+  Level 1 only feeds the host-side `Orch` / `Sched` `[STRACE]` timeline.
 
-**Note:** Scheduler summary always prints when `PTO2_PROFILING=1`, regardless of `enable_profiling` flag.
+**LOG_INFO count (normal run):**
+
+- `0` (device-side profiling logs). The timeline is delivered host-side via the
+  phase windows, not through per-thread device logs.
+
+**Note:**
+
+- The host-side `[STRACE]` phase windows are controlled by compile-time macro
+  `SIMPLER_DFX`, not by `enable_chip_swimlane`.
+- `enable_chip_swimlane` only controls shared-memory data collection / swimlane export.
 
 ---
 
-### Level 2: Scheduler Detailed Profiling (PTO2_SCHED_PROFILING=1)
+### Level 2: Scheduler Detailed Profiling (SIMPLER_SCHED_PROFILING=1)
 
-**Requires:** `PTO2_PROFILING=1`
+**Requires:** `SIMPLER_DFX=1`
 
 **What's compiled:**
+
 - All Level 1 features
 - Detailed scheduler phase counters
-- Phase-specific statistics (complete, scan, dispatch, idle)
+- Phase-specific statistics (complete, dispatch, idle)
 - Hit rate tracking (complete poll, ready queue pop)
 
-**Log output:** 18 DEV_ALWAYS logs (11 debug + 2 basic + 7 scheduler detailed - 2 replaced)
-- Replaces scheduler summary with detailed breakdown
+**Log output (per scheduler thread, normal run):** the `sched_start/sched_end/
+sched_cost` line, the full phase breakdown, and the `Scheduler summary` line
+(all gated by `SIMPLER_SCHED_PROFILING`). The `Scheduler summary` line first
+appears at this level — it is not emitted at Level 1.
 
 **Scheduler output:**
-```
+
+```text
+Thread X: sched_start=XXX sched_end=XXX sched_cost=XXXus
 Thread X: === Scheduler Phase Breakdown: total=XXXus, XXX tasks ===
-Thread X:   complete       : XXXus (XX.X%)  [fanout: edges=XXX, max_degree=X, avg=X.X]  [fanin: edges=XXX, max_degree=X, avg=X.X]
+Thread X:   complete       : XXXus (XX.X%)
 Thread X:     poll         : XXXus (XX.X%)  hit=XXX, miss=XXX, hit_rate=XX.X%
 Thread X:     otc_lock     : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:     otc_fanout   : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:     otc_fanin    : XXXus (XX.X%)  atomics=XXX
 Thread X:     otc_self     : XXXus (XX.X%)  atomics=XXX
 Thread X:     perf         : XXXus (XX.X%)
-Thread X:   dispatch       : XXXus (XX.X%)  [pop: hit=XXX, miss=XXX, hit_rate=XX.X%]
+Thread X:   dispatch       : XXXus (XX.X%)
 Thread X:     poll         : XXXus (XX.X%)
 Thread X:     pop          : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:     setup        : XXXus (XX.X%)
-Thread X:   scan           : XXXus (XX.X%)
 Thread X:   idle           : XXXus (XX.X%)
 Thread X:   avg/complete   : XXXus
 Thread X: Scheduler summary: total_time=XXXus, loops=XXX, tasks_scheduled=XXX
 ```
 
+Per-thread fanout / fanin edge counts and ready-queue pop hit / miss
+stats live in `aicpu_scheduler_phases[]` (in `chip_swimlane_records.json`
+captured at chip_swimlane_level >= 3) and `deps.json`; consume them via
+`simpler_setup/tools/sched_overhead_analysis.py`.
+
 ---
 
-### Level 3: Orchestrator Detailed Profiling (PTO2_ORCH_PROFILING=1)
+### Level 3: Orchestrator Detailed Profiling (SIMPLER_ORCH_PROFILING=1)
 
-**Requires:** `PTO2_PROFILING=1`
+**Requires:** `SIMPLER_DFX=1`
 
 **What's compiled:**
+
 - All Level 1 features
 - Detailed orchestrator phase counters
 - Per-phase cycle tracking
 - Atomic operation counters
 - Wait time tracking
 
-**Log output:** 30 DEV_ALWAYS logs (11 debug + 2 basic + 1 scheduler summary + 17 orchestrator detailed - 1 replaced)
-- Replaces basic orchestration completion with detailed breakdown
+**Log output (per orchestrator thread, normal run):** the orchestrator phase
+breakdown, followed by the `orch_start/orch_end/orch_cost` line and the
+`PTO2 total submitted tasks` line — all gated by `SIMPLER_ORCH_PROFILING`. This
+level adds orchestrator-side logs only; the scheduler side is unchanged from
+Level 1 (add `SIMPLER_SCHED_PROFILING` / Level 2 for scheduler detail).
 
 **Orchestrator output:**
-```
+
+```text
 Thread X: === Orchestrator Profiling: XXX tasks, total=XXXus ===
 Thread X:   sync_tensormap : XXXus (XX.X%)
 Thread X:   task_ring_alloc: XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
@@ -143,26 +179,32 @@ Thread X:   fanin+ready    : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:   finalize+SM    : XXXus (XX.X%)  work=XXXus wait=XXXus  atomics=XXX
 Thread X:   scope_end      : XXXus  atomics=XXX
 Thread X:   avg/task       : XXXus
+Thread X: orch_start=XXX orch_end=XXX orch_cost=XXXus
+PTO2 total submitted tasks = XXX, already executed XXX tasks
 ```
 
-**Note:** Orchestrator logs always print when `PTO2_ORCH_PROFILING=1`, regardless of `enable_profiling` flag.
+**Note:** Orchestrator logs always print when `SIMPLER_ORCH_PROFILING=1`, regardless of `enable_chip_swimlane` flag.
 
 ---
 
-### Level 4: TensorMap Profiling (PTO2_TENSORMAP_PROFILING=1)
+### Level 4: TensorMap Profiling (SIMPLER_TENSORMAP_PROFILING=1)
 
-**Requires:** `PTO2_PROFILING=1` AND `PTO2_ORCH_PROFILING=1`
+**Requires:** `SIMPLER_DFX=1` AND `SIMPLER_ORCH_PROFILING=1`
 
 **What's compiled:**
+
 - All Level 3 features
 - TensorMap lookup statistics
 - Hash chain walk tracking
 - Overlap check counters
 
-**Log output:** 34 DEV_ALWAYS logs (30 from Level 3 + 4 tensormap)
+**Log output (per orchestrator thread, normal run):** all Level 3 orchestrator
+output plus the 4-line TensorMap lookup stats block below (gated by
+`SIMPLER_TENSORMAP_PROFILING`, nested inside `SIMPLER_ORCH_PROFILING`).
 
 **TensorMap output:**
-```
+
+```text
 Thread X: === TensorMap Lookup Stats ===
 Thread X:   lookups        : XXX, inserts: XXX
 Thread X:   chain walked   : total=XXX, avg=X.X, max=X
@@ -171,85 +213,180 @@ Thread X:   overlap checks : XXX, hits=XXX (XX.X%)
 
 ---
 
-## Runtime Flag: enable_profiling
+## Runtime Flag: enable_chip_swimlane (perf_level)
 
-The `runtime->enable_profiling` flag controls **data collection**, NOT log output.
+`--enable-chip-swimlane` accepts an integer perf_level (0–4). Transport
+mirrors the PMU pattern — two independent channels (one binary, one int):
 
-### When enable_profiling=true:
-- Performance buffers are allocated and written
-- Per-task timing data is collected
-- Phase profiling data is recorded
-- Orchestrator summary is written to shared memory
+- **Binary on/off** — `KernelArgs::enable_profiling_flag` bit1
+  (`SIMPLER_DFX_FLAG_CHIP_SWIMLANE`). Set by the host whenever level > 0; read
+  by AICore (which only needs on/off to decide whether to write timing) and
+  by AICPU kernel entry via `set_chip_swimlane_enabled(bool)`.
+- **Granular level (0–4)** — `ChipSwimlaneDataHeader::chip_swimlane_level`
+  (shared memory). Host writes it in `ChipSwimlaneCollector::initialize`; AICPU
+  promotes it from the header in `chip_swimlane_aicpu_init` and exposes it via
+  `get_chip_swimlane_level()` (typed `ChipSwimlaneLevel`) for
+  `>= AICPU_TIMING / SCHED_PHASES / ORCH_PHASES` gates.
 
-### When enable_profiling=false:
+On sim, the binary on/off travels via the dlsym'd `set_chip_swimlane_enabled`
+entry point; the granular level still goes through the shared-memory
+header just like on onboard.
+
+| Level | Collects |
+| ----- | -------- |
+| 0 | Nothing (disabled) |
+| 1 | AICore timing only (start/end/task_token_raw) — AICPU `complete_task` is bypassed |
+| 2 | + AICPU dispatch_time, finish_time |
+| 3 | + Scheduler phases (`SCHED_*`) |
+| 4 | + Orchestrator phases (full) |
+
+At level 1 the AICore record carries the full PTO2 `task_token_raw`
+(`(ring_id << 32) | local_id`), read straight from
+`LocalContext.async_ctx.task_token.raw` inside the AICore helper —
+already in cache from the dispatch payload, so no extra GM load.
+Identity fields the AICPU side used to write at level 1 (`func_id`,
+`core_type`) are derived host-side:
+
+- `func_id` ← `deps.json`'s per-task `kernel_ids[]`, joined by
+  `task_id` at post-process by `swimlane_converter.py`. Same model
+  `fanout` already uses.
+- `core_type` ← per-core static table published by the host into the
+  collector (`ChipSwimlaneCollector::set_core_types`).
+
+AICore buffer rotation no longer piggy-backs on `complete_task`. AICPU
+counts dispatches per core in the dispatch path (scheduler_dispatch in
+tensormap_and_ringbuffer; aicpu_executor in host_build_graph) and rotates
+the AICore buffer when the count is about to cross a
+`PLATFORM_AICORE_BUFFER_SIZE` boundary — strictly before
+`write_reg(DATA_MAIN_BASE)` for the first task of the new batch. The
+hook is `chip_swimlane_aicpu_on_aicore_dispatch`. No AICore-side signal is
+needed: AICPU has full dispatch visibility on its own. Race safety comes
+from the completion-before-dispatch invariant (AICore per core is
+single-threaded and AICPU does not dispatch task K+1 until K FIN'd), which
+guarantees AICore has FIN'd — and `dcci`'d out — every record in the old
+buffer by rotation time. This decoupling is what lets level 1 skip
+`complete_task` without losing rotations.
+
+Fanout edges are no longer carried on the device hot path — `swimlane_converter.py`
+joins them from the sibling `deps.json` (produced by dep_gen) at post-process time.
+
+Bare `--enable-chip-swimlane` = level 4 (backward compatible).
+
+### Level gating in AICPU code
+
+Use the strongly-typed `ChipSwimlaneLevel` enum so each gate names the
+content it depends on instead of relying on magic numbers:
+
+```cpp
+// Any level > 0: AICPU task record buffer init / flush.
+// Cheap binary check, available immediately after kernel entry.
+if (is_chip_swimlane_enabled()) { ... }
+
+// AICPU dispatch/finish timestamps.
+// Granular checks below require chip_swimlane_aicpu_init to have already run
+// (so the level has been promoted from the shared-memory header).
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::AICPU_TIMING) { ... }
+
+// Scheduler main-loop phase records (SCHED_*)
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::SCHED_PHASES) { ... }
+
+// Orchestrator phase records
+if (get_chip_swimlane_level() >= ChipSwimlaneLevel::ORCH_PHASES) { ... }
+```
+
+`ChipSwimlaneLevel` is defined in `common/chip_swimlane_profiling.h` with
+underlying type `uint32_t` (matches the `ChipSwimlaneDataHeader::chip_swimlane_level`
+shared-memory field and mirrors `PmuEventType : uint32_t`):
+
+| Enumerator | Underlying value |
+| ---------- | ---------------- |
+| `DISABLED` | 0 |
+| `AICORE_TIMING` | 1 |
+| `AICPU_TIMING` | 2 |
+| `SCHED_PHASES` | 3 |
+| `ORCH_PHASES` | 4 |
+
+### When enable_chip_swimlane=0
+
 - No performance data collection
 - No shared memory writes
 - Logs still print (controlled by macros only)
-
-### Usage:
-```cpp
-// Initialize runtime with profiling enabled
-runtime->enable_profiling = true;
-```
 
 ---
 
 ## Common Profiling Configurations
 
 ### Development (minimal overhead)
+
 ```bash
 # No profiling overhead
-PTO2_PROFILING=0
+SIMPLER_DFX=0
 ```
 
 ### Basic Performance Monitoring
+
 ```bash
 # Minimal overhead, summary logs only
-PTO2_PROFILING=1
-PTO2_ORCH_PROFILING=0
-PTO2_SCHED_PROFILING=0
+SIMPLER_DFX=1
+SIMPLER_ORCH_PROFILING=0
+SIMPLER_SCHED_PROFILING=0
 ```
 
 ### Scheduler Performance Analysis
+
 ```bash
 # Detailed scheduler breakdown
-PTO2_PROFILING=1
-PTO2_ORCH_PROFILING=0
-PTO2_SCHED_PROFILING=1
+SIMPLER_DFX=1
+SIMPLER_ORCH_PROFILING=0
+SIMPLER_SCHED_PROFILING=1
 ```
 
 ### Orchestrator Performance Analysis
+
 ```bash
 # Detailed orchestrator breakdown
-PTO2_PROFILING=1
-PTO2_ORCH_PROFILING=1
-PTO2_SCHED_PROFILING=0
+SIMPLER_DFX=1
+SIMPLER_ORCH_PROFILING=1
+SIMPLER_SCHED_PROFILING=0
 ```
 
 ### Full Profiling (maximum overhead)
+
 ```bash
 # All profiling features enabled
-PTO2_PROFILING=1
-PTO2_ORCH_PROFILING=1
-PTO2_SCHED_PROFILING=1
-PTO2_TENSORMAP_PROFILING=1
+SIMPLER_DFX=1
+SIMPLER_ORCH_PROFILING=1
+SIMPLER_SCHED_PROFILING=1
+SIMPLER_TENSORMAP_PROFILING=1
 ```
 
 ---
 
 ## Setting Profiling Macros
 
-### At compile time:
+### At compile time
+
+Pass compile definitions through the build command or CI `CXXFLAGS`.
+This overrides the defaults in `profiling_config.h` without changing source.
+
 ```bash
-# In CMakeLists.txt or build command
-add_definitions(-DPTO2_PROFILING=1)
-add_definitions(-DPTO2_ORCH_PROFILING=1)
+# Example: disable all profiling code
+CXXFLAGS="-DSIMPLER_DFX=0" pip install --no-build-isolation -e .
+
+# Example: enable orchestrator and tensormap profiling
+CXXFLAGS="-DSIMPLER_ORCH_PROFILING=1 -DSIMPLER_TENSORMAP_PROFILING=1" \
+    pip install --no-build-isolation -e .
 ```
 
-### In source code (before including headers):
+### In source code (before including headers)
+
+Source-level overrides are only for local experiments. They must appear before
+any header includes `profiling_config.h`; do not add duplicated fallback
+definitions to runtime headers.
+
 ```cpp
-#define PTO2_PROFILING 1
-#define PTO2_ORCH_PROFILING 1
+#define SIMPLER_DFX 1
+#define SIMPLER_ORCH_PROFILING 1
 #include "pto_runtime2_types.h"
 ```
 
@@ -257,13 +394,15 @@ add_definitions(-DPTO2_ORCH_PROFILING=1)
 
 ## Log Output Summary
 
-| Level | Macro Settings | DEV_ALWAYS Count | Description |
-|-------|---------------|------------------|-------------|
-| 0 | `PTO2_PROFILING=0` | 11 | Debug/diagnostic only |
-| 1 | `PTO2_PROFILING=1` | 13 | Basic summaries |
-| 2 | `+PTO2_SCHED_PROFILING=1` | 18 | Scheduler detailed |
-| 3 | `+PTO2_ORCH_PROFILING=1` | 30 | Orchestrator detailed |
-| 4 | `+PTO2_TENSORMAP_PROFILING=1` | 34 | TensorMap stats |
+> Example: `paged_attention` on Ascend hardware, 2 sched threads + 2 orch threads, normal run (no stall/timeout).
+
+| Level | Macro Settings | LOG_INFO Count | Description |
+| ----- | -------------- | -------------- | ----------- |
+| 0 | `SIMPLER_DFX=0` | 0 | No timing output |
+| 1 | `SIMPLER_DFX=1` | 0 | Host-side `Orch`/`Sched` `[STRACE]` windows only; no device logs |
+| 2 | `+SIMPLER_SCHED_PROFILING=1` | per sched thread | `sched_start` + phase breakdown + `Scheduler summary` |
+| 3 | `+SIMPLER_ORCH_PROFILING=1` | per orch thread | Orchestrator phase breakdown + `orch_start` + `PTO2 total` |
+| 4 | `+SIMPLER_TENSORMAP_PROFILING=1` | per orch thread | + TensorMap lookup stats (4 lines) |
 
 ---
 
@@ -272,11 +411,11 @@ add_definitions(-DPTO2_ORCH_PROFILING=1)
 ### Key Principles
 
 1. **Macros control compilation and logging**
-   - `#if PTO2_PROFILING` controls whether profiling code is compiled
+   - `#if SIMPLER_DFX` controls whether profiling code is compiled
    - Logs print when macro is enabled, regardless of runtime flag
 
 2. **Runtime flag controls data collection**
-   - `enable_profiling` controls performance buffer allocation
+   - `enable_chip_swimlane` controls performance buffer allocation
    - Controls shared memory writes for host-side export
    - Does NOT control log output
 
@@ -287,28 +426,31 @@ add_definitions(-DPTO2_ORCH_PROFILING=1)
 
 ### Code Locations
 
-- Macro definitions: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_runtime2_types.h`
-- Scheduler profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp` (lines 770-835)
-- Orchestrator profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp` (lines 1035-1105)
+- Macro defaults and validation: `src/common/task_interface/profiling_config.h`
+- Scheduler profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/scheduler/scheduler_dispatch.cpp` and `scheduler_cold_path.cpp`
+- Orchestrator profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/aicpu/aicpu_executor.cpp`
 - TensorMap profiling: `src/a2a3/runtime/tensormap_and_ringbuffer/runtime/pto_tensormap.h`
 
 ---
 
 ## Performance Impact
 
-### Compilation overhead:
+### Compilation overhead
+
 - Level 0: No overhead
 - Level 1: Minimal (counter increments, basic arithmetic)
 - Level 2-4: Low to moderate (additional counters, cycle measurements)
 
-### Runtime overhead:
+### Runtime overhead
+
 - Logging: Negligible (device logs are asynchronous)
-- Data collection (`enable_profiling=true`): Low to moderate
+- Data collection (`enable_chip_swimlane>0`): Low to moderate
   - Performance buffer writes
   - Shared memory updates
   - Per-task timing measurements
 
-### Recommendation:
+### Recommendation
+
 - Use Level 0 for production
 - Use Level 1-2 for performance monitoring
 - Use Level 3-4 for detailed performance analysis only

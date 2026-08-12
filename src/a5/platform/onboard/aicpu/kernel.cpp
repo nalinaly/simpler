@@ -1,66 +1,83 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 #include <cstdio>
+
+#include <driver/ascend_hal_base.h>
 
 #include "common/unified_log.h"
 #include "common/kernel_args.h"
+#include "common/platform_config.h"
+#include "aicpu/aicpu_device_config.h"
+#include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_log.h"
+#include "aicpu/device_phase_aicpu.h"
+#include "aicpu/device_time.h"
+#include "aicpu/chip_swimlane_collector_aicpu.h"
 #include "aicpu/platform_regs.h"
+#include "aicpu/platform_aicpu_affinity.h"
+#include "aicpu/pmu_collector_aicpu.h"
+#include "aicpu/scope_stats_collector_aicpu.h"
+#include "aicpu/args_dump_aicpu.h"
+#include "runtime.h"
 
-// Forward declaration (no need for full runtime.h)
-class Runtime;
+// Device timing capture: KernelArgs.device_wall_data_base addresses a fixed
+// header followed by per-thread phase records and an optional task-timing tail.
+// Every surviving simpler_aicpu_exec thread writes its own phase slot with
+// plain stores. The final thread publishes whether the tail was used, allowing
+// the host to skip that D2H when no task was tagged.
 
-// Forward declaration of aicpu_execute (implemented in aicpu_executor.cpp)
+// Forward declaration of aicpu_execute (implemented in aicpu_executor.cpp).
+// simpler_aicpu_register_callable is NOT declared/forwarded here: it is
+// exported directly by the TMARB runtime (host_build_graph does not export it).
 extern "C" int aicpu_execute(Runtime *arg);
 
-extern "C" __attribute__((visibility("default"))) int StaticTileFwkBackendKernelServer(void *arg) {
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
-        return -1;
-    }
-
-    return 0;
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_query_topology(void *arg) {
+    if (arg == nullptr) return -1;
+    auto *query_args = reinterpret_cast<AicpuTopologyQueryArgs *>(arg);
+    if (query_args->result_addr == 0) return -1;
+    auto *result = reinterpret_cast<AicpuTopologyQueryResult *>(query_args->result_addr);
+    int64_t value = 0;
+    result->occupy_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_OCCUPY, &value);
+    result->occupy = static_cast<uint64_t>(value);
+    value = 0;
+    result->pf_occupy_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_PF_OCCUPY, &value);
+    result->pf_occupy = static_cast<uint64_t>(value);
+    value = 0;
+    result->os_sched_rc = halGetDeviceInfo(0, MODULE_TYPE_AICPU, INFO_TYPE_OS_SCHED, &value);
+    result->os_sched = static_cast<uint64_t>(value);
+    return result->occupy_rc == 0 ? 0 : -1;
 }
 
 /**
- * AICPU kernel initialization entry point
+ * AICPU kernel main execution entry point.
  *
- * This function is called once during kernel initialization by the CANN
- * runtime. It initializes logging and validates kernel arguments.
+ * Called per-thread by the main aicpu_scheduler. Host registers this SO via
+ * `rtsBinaryLoadFromFile` (JSON load, cpuKernelMode=0) and resolves this
+ * symbol via `rtsFuncGetByName`; each per-task launch goes through
+ * `rtsLaunchCpuKernel` on the cached `rtFuncHandle`. The bootstrap dispatcher
+ * only writes this SO to the preinstall path — it does not dlsym this symbol
+ * itself.
  *
- * Note: Function name is hardcoded in libaicpu_extend_kernels.so
- *
- * @param arg Pointer to KernelArgs structure
- * @return 0 on success, -1 on error
- */
-extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServerInit(void *arg) {
-    init_log_switch();
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
-        return -1;
-    }
-
-    LOG_INFO("%s", "Runtime Executor Init: Initializing AICPU kernel");
-    return 0;
-}
-
-/**
- * AICPU kernel main execution entry point
- *
- * This is the main entry point for the AICPU runtime executor kernel.
- * It extracts the Runtime from KernelArgs and delegates to AicpuExecute.
- *
- * Note: Function name is hardcoded in libaicpu_extend_kernels.so
- *
- * @param arg Pointer to KernelArgs structure containing runtime_args
+ * @param arg Pointer to the front-less KernelArgs payload (runtime_args @ 0)
  * @return 0 on success, non-zero on error
  */
-extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelServer(void *arg) {
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *arg) {
+    // Log severity was snapshot once by simpler_aicpu_init at worker init; the
+    // resident SO keeps it across launches, so exec does not re-snapshot.
     if (arg == nullptr) {
         LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
         return -1;
     }
 
-    // Extract Runtime from KernelArgs
-    auto k_args = (KernelArgs *)arg;
+    KernelArgs *k_args = reinterpret_cast<KernelArgs *>(arg);
     Runtime *runtime = k_args->runtime_args;
 
     if (runtime == nullptr) {
@@ -68,16 +85,96 @@ extern "C" __attribute__((visibility("default"))) int DynTileFwkBackendKernelSer
         return -1;
     }
 
-    // Store platform regs before calling aicpu_execute
+    // Per-device invariants (log config, orch device id) were latched once by
+    // simpler_aicpu_init at worker init. Profiling enable bits live on
+    // KernelArgs::enable_profiling_flag now (no longer mirrored into
+    // Handshake), so decode the umbrella bitmask once and hand it to the
+    // existing platform-state setters.
     set_platform_regs(k_args->regs);
+    set_platform_dump_base(k_args->dump_data_base);
+    set_dump_args_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_DUMP_ARGS));
+    set_platform_chip_swimlane_base(k_args->chip_swimlane_data_base);
+    set_platform_chip_swimlane_aicore_rotation_table(k_args->chip_swimlane_aicore_rotation_table);
+    set_chip_swimlane_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_CHIP_SWIMLANE));
+    set_platform_pmu_base(k_args->pmu_data_base);
+    set_pmu_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_PMU));
+    set_platform_dep_gen_base(k_args->dep_gen_data_base);
+    set_dep_gen_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_DEP_GEN));
+    set_scope_stats_enabled(SIMPLER_GET_DFX_FLAG(k_args->enable_profiling_flag, SIMPLER_DFX_FLAG_SCOPE_STATS));
+    set_platform_scope_stats_base(k_args->scope_stats_data_base);
 
-    LOG_INFO("%s", "DynTileFwkBackendKernelServer: Calling aicpu_execute with Runtime");
+    // Filter-style affinity gate (a5). Host probed the topology, computed
+    // ALLOWED_CPUS, and wrote it into runtime->aicpu_allowed_cpus[]. The
+    // gate barriers exactly runtime->aicpu_launch_count threads (= the
+    // count CANN was told to launch, which equals popcount(OCCUPY) — see
+    // src/a5/platform/onboard/host/device_runner.cpp), keeps those whose
+    // sched_getcpu() ∈ allowed_cpus, and exposes the deterministic
+    // exec_idx via platform_aicpu_affinity_thread_idx() — the executor
+    // reads it to assign sched/orch role.
+    //
+    // If the host probe didn't populate the gate inputs (allowed_count or
+    // launch_count is 0) the gate would unconditionally drop every thread
+    // and we'd silently return success without ever calling aicpu_execute.
+    // That's a host-side bug; fail loud so it surfaces instead of
+    // producing nothing at runtime.
+    if (runtime->get_aicpu_allowed_cpu_count() <= 0 || runtime->get_aicpu_launch_count() <= 0) {
+        LOG_ERROR(
+            "AICPU affinity inputs missing: allowed_cpu_count=%d launch_count=%d (host probe must run before exec)",
+            runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+        );
+        return -1;
+    }
+    if (!platform_aicpu_affinity_gate_filter(
+            runtime->get_aicpu_allowed_cpus(), runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+        )) {
+        return 0;
+    }
+
+    // Publish the phase-buffer base so the finer preamble/so_load/graph_build/
+    // post_orch + orch/sched phases stamped inside aicpu_execute / the scheduler
+    // resolve their per-thread slot via platform_aicpu_affinity_thread_idx()
+    // (no C++ thread_local — see docs/dynamic-linking.md). Idempotent across the
+    // concurrent exec threads (same base). Run-wall is stamped here.
+    set_platform_phase_base(k_args->device_wall_data_base);
+    AicpuPhaseScope run_wall(AicpuPhase::RunWall);
+
     int rc = aicpu_execute(runtime);
     if (rc != 0) {
-        LOG_ERROR("DynTileFwkBackendKernelServer: aicpu_execute failed with rc=%d", rc);
+        LOG_ERROR("simpler_aicpu_exec: aicpu_execute failed with rc=%d", rc);
         return rc;
     }
-    LOG_INFO("%s", "DynTileFwkBackendKernelServer: aicpu_execute completed successfully");
 
+    // Run-wall end is stamped by run_wall's destructor (covers the early return
+    // above too); host reduces max(end) - min(start) → ns.
     return rc;
+}
+
+/**
+ * AICPU per-device init entry point.
+ *
+ * Launched at worker init (before any register_callable / exec), this latches
+ * the per-device invariants into the resident AICPU SO globals. It is launched
+ * again only when first-use provisioning adds an async-DMA workspace. Because
+ * the inner SO stays dlopen'd across launches, the latest values survive every
+ * subsequent per-task launch.
+ *
+ * @param arg Pointer to an InitArgs payload
+ * @return 0 on success, non-zero on error
+ */
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *arg) {
+    init_log_switch();
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "Invalid init kernel arguments: null pointer");
+        return -1;
+    }
+
+    InitArgs *init_args = reinterpret_cast<InitArgs *>(arg);
+    set_log_level(static_cast<int>(init_args->log_level));
+    set_orch_device_id(static_cast<int>(init_args->device_id));
+    set_scheduler_timeout_ms(static_cast<int>(init_args->scheduler_timeout_ms));
+    for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
+        set_dma_workspace_addr(k, init_args->dma_workspace_addr[k]);
+    }
+
+    return 0;
 }
