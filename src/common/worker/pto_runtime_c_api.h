@@ -19,7 +19,9 @@
  * export all of these; runtimes without a real backend ship not-supported
  * stubs rather than omitting symbols):
  *   - lifecycle:    create_device_context, destroy_device_context,
- *                   simpler_init, finalize_device
+ *                   simpler_init, simpler_l1_supported, simpler_l1_init,
+ *                   simpler_l1_prepare_callable, simpler_l1_launch,
+ *                   finalize_device
  *   - sizing:       get_runtime_size, get_runtime_alignment
  *   - device-mem:   device_malloc_ctx, device_free_ctx,
  *                   committed_device_memory_ctx,
@@ -76,6 +78,11 @@ typedef void *DeviceContextHandle;
 
 enum {
     PTO_RUNTIME_ERR_UNSUPPORTED = -2,
+    PTO_RUNTIME_ERR_INVALID_ARGUMENT = -3,
+    PTO_RUNTIME_ERR_INVALID_STATE = -4,
+    PTO_RUNTIME_ERR_DEVICE_MISMATCH = -5,
+    PTO_RUNTIME_ERR_RUNTIME_FAILURE = -6,
+    PTO_RUNTIME_ERR_NOT_READY = -7,
 };
 
 /** Return values from simpler_poll_run(). */
@@ -249,10 +256,59 @@ int simpler_init(
     const CallConfig *prewarm_config
 );
 
+/* ===========================================================================
+ * Borrowed-device L1 single-operator lifecycle
+ *
+ * These symbols are exported by every host-runtime variant. Device-
+ * orchestration tensormap_and_ringbuffer onboard runtimes report support;
+ * simulator and host_build_graph variants return unsupported without changing
+ * state. The L1 and historical L2/L3 initialization paths are mutually
+ * exclusive for a DeviceContextHandle.
+ * =========================================================================== */
+
+/** Return nonzero when this runtime/context can use the L1 ABI. */
+int simpler_l1_supported(DeviceContextHandle ctx);
+
+/**
+ * Initialize a borrowed-device L1 context.
+ *
+ * The requested device must already be current on the calling thread. This
+ * call does not take ACL/device-reset ownership and does not synchronize a
+ * stream or device. It creates only context-owned persistent handles used by
+ * asynchronous preparation and launch. `config` is context-static and launch
+ * never mutates it.
+ */
+int simpler_l1_init(
+    DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
+    const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
+    const CallConfig *config
+);
+
+/**
+ * Prepare one callable outside ACLGraph capture on a borrowed caller stream.
+ * The stream is never owned or destroyed by PyPTO. Preparation may allocate
+ * persistent state but must not internally synchronize.
+ */
+int simpler_l1_prepare_callable(
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+);
+
+/**
+ * Enqueue one ordinary asynchronous L1 operator invocation.
+ *
+ * `args` points to a ChipStorageTaskArgs object. Tensor addresses in that POD
+ * are already device addresses owned by the caller. The launch path must not
+ * allocate/free device memory, stage tensor contents, synchronize, query
+ * capture state, or attach private streams to a graph/model.
+ */
+int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream);
+
 /**
  * Release all device resources held by the context.
  * Must be called before destroy_device_context() / dlclose(). Returns an error
- * without teardown while a prepared native run remains unfinalized.
+ * without teardown while a prepared native run remains unfinalized. L2/L3
+ * retains its owned reset/finalize behavior; L1 only releases resources owned
+ * by the borrowed context and never resets/finalizes the caller's device.
  */
 int finalize_device(DeviceContextHandle ctx);
 

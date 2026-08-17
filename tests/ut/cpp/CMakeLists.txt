@@ -236,6 +236,7 @@ function(add_hierarchical_test name src)
         ${GTEST_MAIN_LIB}
         ${GTEST_LIB}
         pthread
+        ${CMAKE_DL_LIBS}
     )
     # worker_manager.cpp uses shm_open/shm_unlink; librt on glibc < 2.34, libSystem on macOS.
     if(UNIX AND NOT APPLE)
@@ -407,6 +408,23 @@ target_include_directories(test_run_stream_slots PRIVATE
 target_link_libraries(test_run_stream_slots PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
 add_test(NAME test_run_stream_slots COMMAND test_run_stream_slots)
 set_tests_properties(test_run_stream_slots PROPERTIES LABELS "no_hardware")
+
+# Borrowed-device L1 mode and resource lifecycle. The production state object
+# accepts a tiny injected operation table whose type does not contain CANN
+# handles or any sync/reset/capture operation, so fault ordering and the
+# no-owned-device-teardown contract remain testable on no-hardware CI.
+add_executable(test_l1_execution_state
+    common/test_l1_execution_state.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host/l1_execution_state.cpp
+)
+target_include_directories(test_l1_execution_state PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_l1_execution_state PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_l1_execution_state COMMAND test_l1_execution_state)
+set_tests_properties(test_l1_execution_state PROPERTIES LABELS "no_hardware")
 
 # Native launch readiness is a sticky blocking handoff: notification may race
 # either side of wait(), and the waiting host thread must sleep until signaled.

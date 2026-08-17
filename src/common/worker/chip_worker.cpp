@@ -155,6 +155,11 @@ void ChipWorker::init(
         get_runtime_size_fn_ = load_symbol<GetRuntimeSizeFn>(handle, "get_runtime_size");
         get_runtime_alignment_fn_ = load_symbol<GetRuntimeAlignmentFn>(handle, "get_runtime_alignment");
         simpler_init_fn_ = load_symbol<SimplerInitFn>(handle, "simpler_init");
+        simpler_l1_supported_fn_ = load_symbol<SimplerL1SupportedFn>(handle, "simpler_l1_supported");
+        simpler_l1_init_fn_ = load_symbol<SimplerL1InitFn>(handle, "simpler_l1_init");
+        simpler_l1_prepare_callable_fn_ =
+            load_symbol<SimplerL1PrepareCallableFn>(handle, "simpler_l1_prepare_callable");
+        simpler_l1_launch_fn_ = load_symbol<SimplerL1LaunchFn>(handle, "simpler_l1_launch");
         register_callable_fn_ = load_symbol<SimplerRegisterCallableFn>(handle, "simpler_register_callable");
         run_fn_ = load_symbol<SimplerRunFn>(handle, "simpler_run");
         prepare_run_fn_ = load_symbol<SimplerPrepareRunFn>(handle, "simpler_prepare_run");
@@ -292,6 +297,10 @@ void ChipWorker::init(
         get_runtime_size_fn_ = nullptr;
         get_runtime_alignment_fn_ = nullptr;
         simpler_init_fn_ = nullptr;
+        simpler_l1_supported_fn_ = nullptr;
+        simpler_l1_init_fn_ = nullptr;
+        simpler_l1_prepare_callable_fn_ = nullptr;
+        simpler_l1_launch_fn_ = nullptr;
         register_callable_fn_ = nullptr;
         run_fn_ = nullptr;
         prepare_run_fn_ = nullptr;
@@ -346,6 +355,10 @@ void ChipWorker::init(
         get_runtime_size_fn_ = nullptr;
         get_runtime_alignment_fn_ = nullptr;
         simpler_init_fn_ = nullptr;
+        simpler_l1_supported_fn_ = nullptr;
+        simpler_l1_init_fn_ = nullptr;
+        simpler_l1_prepare_callable_fn_ = nullptr;
+        simpler_l1_launch_fn_ = nullptr;
         register_callable_fn_ = nullptr;
         run_fn_ = nullptr;
         prepare_run_fn_ = nullptr;
@@ -431,6 +444,11 @@ void ChipWorker::finalize() {
     copy_from_device_ctx_fn_ = nullptr;
     get_runtime_size_fn_ = nullptr;
     get_runtime_alignment_fn_ = nullptr;
+    simpler_init_fn_ = nullptr;
+    simpler_l1_supported_fn_ = nullptr;
+    simpler_l1_init_fn_ = nullptr;
+    simpler_l1_prepare_callable_fn_ = nullptr;
+    simpler_l1_launch_fn_ = nullptr;
     register_callable_fn_ = nullptr;
     run_fn_ = nullptr;
     prepare_run_fn_ = nullptr;

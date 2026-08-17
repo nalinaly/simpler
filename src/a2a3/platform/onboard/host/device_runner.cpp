@@ -138,7 +138,16 @@ int kernel_args_init_ffts_base_addr(KernelArgsHelper &helper) {
 // DeviceRunner Implementation
 // =============================================================================
 
-DeviceRunner::~DeviceRunner() { finalize(); }
+DeviceRunner::~DeviceRunner() {
+    if (requires_explicit_l1_close()) {
+        LOG_ERROR(
+            "DeviceRunner destroyed with an unclosed borrowed L1 context; preserving graph-referenced resources "
+            "and refusing owned-device reset"
+        );
+        return;
+    }
+    finalize();
+}
 
 // `setup_static_arena`, `create_thread`, `attach_current_thread`,
 // `configure_aicore_op_timeout`, and `ensure_device_initialized` live on

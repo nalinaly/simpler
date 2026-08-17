@@ -32,6 +32,7 @@
 #include "task_args.h"
 #include "native_run_state.h"
 
+#include <acl/acl.h>
 #include <dlfcn.h>
 #include <pthread.h>
 
@@ -68,6 +69,7 @@ extern "C" {
 int register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out);
 int validate_runtime_impl(Runtime *runtime, const HostApi *api, int execution_rc);
 __attribute__((weak)) int concurrent_native_prepare_supported_impl(void) { return 0; }
+__attribute__((weak)) int l1_runtime_supported_impl(void) { return 0; }
 
 /* ===========================================================================
  * Per-thread DeviceRunnerBase binding (set by simpler_register_callable / simpler_run)
@@ -78,6 +80,56 @@ static pthread_once_t g_runner_key_once = PTHREAD_ONCE_INIT;
 static void create_runner_key() { pthread_key_create(&g_runner_key, nullptr); }
 
 static DeviceRunnerBase *current_runner() { return static_cast<DeviceRunnerBase *>(pthread_getspecific(g_runner_key)); }
+
+/* ===========================================================================
+ * Borrowed L1 lifecycle operations
+ * =========================================================================== */
+
+static int l1_get_current_device(void *, int *device_id) {
+    if (device_id == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    int32_t current = -1;
+    const aclError rc = aclrtGetDevice(&current);
+    if (rc != ACL_SUCCESS) return static_cast<int>(rc);
+    *device_id = static_cast<int>(current);
+    return 0;
+}
+
+static int l1_create_hidden_stream(void *, void **stream) {
+    if (stream == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    aclrtStream created = nullptr;
+    const aclError rc = aclrtCreateStream(&created);
+    if (rc == ACL_SUCCESS) {
+        *stream = created;
+    }
+    return static_cast<int>(rc);
+}
+
+static int l1_destroy_hidden_stream(void *, void *stream) {
+    return static_cast<int>(aclrtDestroyStream(reinterpret_cast<aclrtStream>(stream)));
+}
+
+static int l1_create_event(void *, void **event) {
+    if (event == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    aclrtEvent created = nullptr;
+    const aclError rc = aclrtCreateEvent(&created);
+    if (rc == ACL_SUCCESS) {
+        *event = created;
+    }
+    return static_cast<int>(rc);
+}
+
+static int l1_destroy_event(void *, void *event) {
+    return static_cast<int>(aclrtDestroyEvent(reinterpret_cast<aclrtEvent>(event)));
+}
+
+static const L1RuntimeOps kL1RuntimeOps = {
+    .context = nullptr,
+    .get_current_device = l1_get_current_device,
+    .create_hidden_stream = l1_create_hidden_stream,
+    .destroy_hidden_stream = l1_destroy_hidden_stream,
+    .create_event = l1_create_event,
+    .destroy_event = l1_destroy_event,
+};
 
 /* ===========================================================================
  * Internal device-memory functions (wired into a HostApi and passed to the
@@ -260,6 +312,13 @@ static const HostApi g_host_api = {
 
 void destroy_device_context(DeviceContextHandle ctx) {
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (runner != nullptr && runner->requires_explicit_l1_close()) {
+        LOG_ERROR(
+            "destroy_device_context: refusing to destroy an L1 context before explicit finalize_device; "
+            "captured graphs may still reference its persistent resources"
+        );
+        return;
+    }
     if (runner != nullptr && runner->native_runs_outstanding()) {
         LOG_ERROR("destroy_device_context: refusing to destroy a context with an unfinalized native run");
         return;
@@ -309,11 +368,22 @@ int finalize_device(DeviceContextHandle ctx) {
     if (ctx == NULL) return -1;
     try {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+        const DeviceExecutionMode mode = runner->execution_mode();
+        if (mode == DeviceExecutionMode::Closed || mode == DeviceExecutionMode::Uninitialized) {
+            return 0;
+        }
+        if (mode == DeviceExecutionMode::L1Borrowed) {
+            return runner->finalize_l1_borrowed();
+        }
         if (runner->native_runs_outstanding()) {
             LOG_ERROR("finalize_device: native run must be finalized first");
             return -1;
         }
-        return runner->finalize();
+        int rc = runner->finalize();
+        if (runner->device_id() == -1) {
+            runner->complete_l2_finalize();
+        }
+        return rc;
     } catch (...) {
         return -1;
     }
@@ -327,6 +397,11 @@ int simpler_init(
     if (ctx == NULL) return -1;
 
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    int rc = runner->claim_l2_execution_mode();
+    if (rc != 0) {
+        LOG_ERROR("simpler_init: device context already selected another execution mode");
+        return rc;
+    }
     // HostApi callbacks, including the prewarm path below, recover their
     // DeviceRunner from this thread-local binding.
     pthread_once(&g_runner_key_once, create_runner_key);
@@ -347,7 +422,6 @@ int simpler_init(
     // configured — CANN keeps that.
     HostLogger::get_instance().configure_cann_log_level(dlog_setlevel);
 
-    int rc;
     try {
         rc = runner->attach_current_thread(device_id);
     } catch (...) {
@@ -407,6 +481,91 @@ int simpler_init(
     return 0;
 }
 
+int simpler_l1_supported(DeviceContextHandle ctx) {
+    if (ctx == nullptr || l1_runtime_supported_impl() == 0) {
+        return 0;
+    }
+    const DeviceExecutionMode mode = static_cast<DeviceRunnerBase *>(ctx)->execution_mode();
+    return mode == DeviceExecutionMode::Uninitialized || mode == DeviceExecutionMode::L1Borrowed ? 1 : 0;
+}
+
+int simpler_l1_init(
+    DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
+    const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
+    const CallConfig *config
+) {
+    if (l1_runtime_supported_impl() == 0) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    if (ctx == nullptr || device_id < 0 || aicpu_binary == nullptr || aicpu_size == 0 || aicore_binary == nullptr ||
+        aicore_size == 0 || dispatcher_binary == nullptr || dispatcher_size == 0 || config == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (runner->execution_mode() != DeviceExecutionMode::Uninitialized) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    // Reject a borrowed-device mismatch before copying potentially large
+    // executor binaries or creating any runtime resource. initialize() repeats
+    // the check transactionally immediately before stream/event creation.
+    int current_device_id = -1;
+    const int device_rc = l1_get_current_device(nullptr, &current_device_id);
+    if (device_rc != 0) {
+        LOG_ERROR("simpler_l1_init: aclrtGetDevice failed: %d", device_rc);
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+    if (current_device_id != device_id) {
+        return PTO_RUNTIME_ERR_DEVICE_MISMATCH;
+    }
+
+    try {
+        std::vector<uint8_t> aicpu_vec(aicpu_binary, aicpu_binary + aicpu_size);
+        std::vector<uint8_t> aicore_vec(aicore_binary, aicore_binary + aicore_size);
+        std::vector<uint8_t> dispatcher_vec(dispatcher_binary, dispatcher_binary + dispatcher_size);
+        return runner->initialize_l1_borrowed(
+            device_id, std::move(aicpu_vec), std::move(aicore_vec), std::move(dispatcher_vec), kL1RuntimeOps
+        );
+    } catch (...) {
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+}
+
+int simpler_l1_prepare_callable(
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+) {
+    (void)callable_id;
+    if (l1_runtime_supported_impl() == 0) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    if (ctx == nullptr || callable == nullptr || caller_stream == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (!runner->accepts_l1_calls()) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    // No L1 callable state is graph-visible until asynchronous registration
+    // publishes it. The L2 register path is not a fallback: its AICPU helpers
+    // synchronize an internal stream and violate the borrowed L1 contract.
+    return PTO_RUNTIME_ERR_NOT_READY;
+}
+
+int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
+    (void)callable_id;
+    if (l1_runtime_supported_impl() == 0) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    if (ctx == nullptr || args == nullptr || caller_stream == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (!runner->accepts_l1_calls()) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    return PTO_RUNTIME_ERR_NOT_READY;
+}
+
 /* ===========================================================================
  * Per-callable_id preparation
  * =========================================================================== */
@@ -414,6 +573,10 @@ int simpler_init(
 int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, const void *callable) {
     if (ctx == NULL || callable == NULL) return -1;
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (!runner->accepts_l2_calls()) {
+        LOG_ERROR("simpler_register_callable: device context is not in L2/L3 owned mode");
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
     if (runner->native_runs_outstanding()) {
         LOG_ERROR("simpler_register_callable: native run must be finalized before mutating the callable registry");
         return -1;
@@ -646,6 +809,10 @@ int simpler_prepare_run(
         return -1;
     }
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    if (!runner->accepts_l2_calls()) {
+        LOG_ERROR("simpler_prepare_run: device context is not in L2/L3 owned mode");
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
     if (!runner->has_callable(callable_id)) {
         LOG_ERROR("simpler_prepare_run: callable_id=%d not registered", callable_id);
         return -1;
@@ -1002,6 +1169,9 @@ int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
     if (ctx == NULL) return -1;
     try {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+        if (!runner->accepts_l2_calls()) {
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
         if (runner->native_runs_outstanding()) {
             LOG_ERROR(
                 "simpler_unregister_callable: native run must be finalized before mutating the callable registry"
@@ -1053,7 +1223,11 @@ size_t committed_device_memory_ctx(DeviceContextHandle ctx) {
 int simpler_provision_dma_workspace(DeviceContextHandle ctx, uint32_t required_mask) {
     if (ctx == NULL) return -1;
     try {
-        return static_cast<DeviceRunnerBase *>(ctx)->provision_dma_workspace(required_mask);
+        DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+        if (!runner->accepts_l2_calls()) {
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        return runner->provision_dma_workspace(required_mask);
     } catch (...) {
         return -1;
     }

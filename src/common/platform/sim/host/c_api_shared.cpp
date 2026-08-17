@@ -377,6 +377,46 @@ int simpler_init(
     return 0;
 }
 
+int simpler_l1_supported(DeviceContextHandle ctx) {
+    (void)ctx;
+    return 0;
+}
+
+int simpler_l1_init(
+    DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
+    const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
+    const CallConfig *config
+) {
+    (void)ctx;
+    (void)device_id;
+    (void)aicpu_binary;
+    (void)aicpu_size;
+    (void)aicore_binary;
+    (void)aicore_size;
+    (void)dispatcher_binary;
+    (void)dispatcher_size;
+    (void)config;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+int simpler_l1_prepare_callable(
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+) {
+    (void)ctx;
+    (void)callable_id;
+    (void)callable;
+    (void)caller_stream;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
+    (void)ctx;
+    (void)callable_id;
+    (void)args;
+    (void)caller_stream;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 /* ===========================================================================
  * Per-callable_id preparation
  * =========================================================================== */

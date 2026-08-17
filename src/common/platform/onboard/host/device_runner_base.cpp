@@ -176,6 +176,63 @@ DeviceRunnerBase::DeviceRunnerBase() {
     }
 }
 
+int DeviceRunnerBase::claim_l2_execution_mode() { return execution_mode_state_.claim_l2_owned(); }
+
+int DeviceRunnerBase::initialize_l1_borrowed(
+    int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
+    std::vector<uint8_t> dispatcher_so_binary, const L1RuntimeOps &ops
+) {
+    int rc = execution_mode_state_.claim_l1_borrowed();
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = l1_execution_state_.initialize(device_id, ops);
+    if (rc != 0) {
+        if (l1_execution_state_.phase() == L1ContextPhase::New) {
+            (void)execution_mode_state_.abort_l1_initialization();
+        } else {
+            // A failed rollback can retain a stream/event handle. Keep the
+            // context in borrowed mode so only explicit L1 close may retry the
+            // teardown; the arch destructor must never reset the device.
+            device_id_ = device_id;
+        }
+        return rc;
+    }
+
+    aicpu_so_binary_ = std::move(aicpu_so_binary);
+    aicore_kernel_binary_ = std::move(aicore_kernel_binary);
+    dispatcher_so_binary_ = std::move(dispatcher_so_binary);
+    device_id_ = device_id;
+    return 0;
+}
+
+int DeviceRunnerBase::finalize_l1_borrowed() {
+    if (execution_mode() == DeviceExecutionMode::Closed) {
+        return 0;
+    }
+    if (!accepts_l1_calls()) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    const int rc = l1_execution_state_.close();
+    if (l1_execution_state_.phase() != L1ContextPhase::Closed) {
+        return rc;
+    }
+
+    // L1ExecutionState reaches Closed only after every graph-visible runtime
+    // handle it owns has been released. Executor bytes are host-only until
+    // asynchronous preparation registers their device handles.
+    aicpu_so_binary_.clear();
+    aicore_kernel_binary_.clear();
+    dispatcher_so_binary_.clear();
+    device_id_ = -1;
+    (void)execution_mode_state_.mark_closed();
+    return rc;
+}
+
+void DeviceRunnerBase::complete_l2_finalize() { (void)execution_mode_state_.mark_closed(); }
+
 int DeviceRunnerBase::select_pipeline_slot(uint32_t slot_id) {
     if (slot_id >= PTO_PIPELINE_MAX_DEPTH) {
         LOG_ERROR("pipeline slot %u is outside [0, %u)", slot_id, PTO_PIPELINE_MAX_DEPTH);

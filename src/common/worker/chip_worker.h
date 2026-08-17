@@ -246,6 +246,10 @@ private:
     using SimplerInitFn = int (*)(
         void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *
     );
+    using SimplerL1SupportedFn = int (*)(void *);
+    using SimplerL1InitFn = SimplerInitFn;
+    using SimplerL1PrepareCallableFn = int (*)(void *, int32_t, const void *, void *);
+    using SimplerL1LaunchFn = int (*)(void *, int32_t, const void *, void *);
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
     using SimplerPrepareRunFn = int (*)(void *, void *, int32_t, const void *, const CallConfig *);
@@ -304,6 +308,10 @@ private:
     GetRuntimeAlignmentFn get_runtime_alignment_fn_ = nullptr;
     GetCommittedDeviceMemoryFn device_committed_memory_fn_ = nullptr;
     SimplerInitFn simpler_init_fn_ = nullptr;
+    SimplerL1SupportedFn simpler_l1_supported_fn_ = nullptr;
+    SimplerL1InitFn simpler_l1_init_fn_ = nullptr;
+    SimplerL1PrepareCallableFn simpler_l1_prepare_callable_fn_ = nullptr;
+    SimplerL1LaunchFn simpler_l1_launch_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
     SimplerPrepareRunFn prepare_run_fn_ = nullptr;

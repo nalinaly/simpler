@@ -66,6 +66,7 @@
 #include "host/runtime_timeout_config.h"
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
+#include "l1_execution_state.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
 
@@ -281,6 +282,32 @@ public:
         aicpu_so_binary_ = std::move(aicpu_so_binary);
         aicore_kernel_binary_ = std::move(aicore_kernel_binary);
     }
+
+    /** Claim this context for the historical owned-device L2/L3 path. */
+    int claim_l2_execution_mode();
+
+    /**
+     * Initialize the borrowed L1 lifecycle without attaching/resetting the
+     * device. The caller must already have `device_id` current. Executor bytes
+     * are retained for later asynchronous prepare; no binary bootstrap occurs
+     * here because the existing bootstrap contains an internal stream sync.
+     */
+    int initialize_l1_borrowed(
+        int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
+        std::vector<uint8_t> dispatcher_so_binary, const L1RuntimeOps &ops
+    );
+
+    /** Release only resources owned by the borrowed L1 context. */
+    int finalize_l1_borrowed();
+
+    /** Mark the owned L2/L3 lifecycle terminal after its existing finalize. */
+    void complete_l2_finalize();
+
+    DeviceExecutionMode execution_mode() const { return execution_mode_state_.mode(); }
+    bool accepts_l2_calls() const { return execution_mode_state_.accepts_l2_calls(); }
+    bool accepts_l1_calls() const { return execution_mode_state_.accepts_l1_calls(); }
+    bool requires_explicit_l1_close() const { return execution_mode_state_.requires_explicit_l1_close(); }
+    L1ContextPhase l1_phase() const { return l1_execution_state_.phase(); }
 
     /**
      * Take ownership of the dispatcher SO bytes. Called by simpler_init
@@ -955,6 +982,12 @@ protected:
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
+    // A context chooses exactly one ownership model. The L1 object owns only
+    // borrowed-mode resources and deliberately does not clean itself up from
+    // its destructor; destroy_device_context refuses an unclosed L1 context.
+    DeviceExecutionModeState execution_mode_state_;
+    L1ExecutionState l1_execution_state_;
+
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.
     int device_id_{-1};
