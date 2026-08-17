@@ -480,6 +480,20 @@ target_link_libraries(test_hbg_launch_blob PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB
 add_test(NAME test_hbg_launch_blob COMMAND test_hbg_launch_blob)
 set_tests_properties(test_hbg_launch_blob PROPERTIES LABELS "no_hardware")
 
+# Prepare-time HBG execution-slot trust root. The POD records every frozen
+# device window, generation, binary epoch and package-capacity ceiling without
+# allocating or touching CANN, so host and future AICPU consumers share one
+# byte-exact validator.
+add_executable(test_hbg_execution_slot types/test_hbg_execution_slot.cpp)
+target_include_directories(test_hbg_execution_slot PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_link_libraries(test_hbg_execution_slot PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_execution_slot COMMAND test_hbg_execution_slot)
+set_tests_properties(test_hbg_execution_slot PROPERTIES LABELS "no_hardware")
+
 # Contract test for upload_chip_callable_buffer caller-buffer immutability.
 # Pulls both task_interface (callable.h) and src/common (utils/fnv1a_64.h),
 # so it can't use add_task_interface_test as-is.

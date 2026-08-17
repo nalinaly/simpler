@@ -16,7 +16,7 @@
 #include <limits>
 #include <type_traits>
 
-#include "hbg_launch_blob.h"
+#include "hbg_execution_slot.h"
 
 namespace simpler::hbg {
 
@@ -37,6 +37,7 @@ static_assert(std::is_trivially_copyable_v<HbgRestoreCommit>, "HBG restore commi
 enum class HbgRestoreStatus : uint32_t {
     Ok = 0,
     InvalidArguments,
+    SlotRejected,
     BlobRejected,
     AddressOverflow,
     CopyFailed,
@@ -45,6 +46,7 @@ enum class HbgRestoreStatus : uint32_t {
 
 struct HbgRestoreResult {
     HbgRestoreStatus status{HbgRestoreStatus::InvalidArguments};
+    HbgExecutionSlotStatus slot_status{HbgExecutionSlotStatus::NullArgument};
     HbgLaunchBlobStatus blob_status{HbgLaunchBlobStatus::NullArgument};
     uint32_t region_index{std::numeric_limits<uint32_t>::max()};
     int callback_error{0};
@@ -73,7 +75,7 @@ struct HbgRestoreOps {
  * teardown.
  */
 inline HbgRestoreResult restore_hbg_launch_blob(
-    const void *blob, size_t blob_size, const HbgExecutionBinding &expected_binding,
+    const void *blob, size_t blob_size, const HbgExecutionSlotRegistration &slot_registration,
     const HbgInvocationIdentity &expected_identity, const HbgRestoreOps &ops, HbgRestoreCommit *out_commit
 ) noexcept {
     HbgRestoreResult result;
@@ -82,8 +84,19 @@ inline HbgRestoreResult restore_hbg_launch_blob(
         return result;
     }
 
+    result.slot_status = validate_hbg_execution_slot_registration(&slot_registration);
+    if (result.slot_status != HbgExecutionSlotStatus::Ok) {
+        result.status = HbgRestoreStatus::SlotRejected;
+        return result;
+    }
+    result.slot_status = validate_hbg_launch_blob_size_for_slot(slot_registration, blob_size);
+    if (result.slot_status != HbgExecutionSlotStatus::Ok) {
+        result.status = HbgRestoreStatus::SlotRejected;
+        return result;
+    }
+
     result.blob_status = validate_hbg_launch_blob(
-        blob, blob_size, HbgLaunchBlobAddressMode::DevicePatched, &expected_binding, &expected_identity
+        blob, blob_size, HbgLaunchBlobAddressMode::DevicePatched, &slot_registration.binding, &expected_identity
     );
     if (result.blob_status != HbgLaunchBlobStatus::Ok) {
         result.status = HbgRestoreStatus::BlobRejected;
@@ -123,10 +136,11 @@ inline HbgRestoreResult restore_hbg_launch_blob(
     }
 
     const HbgRestoreCommit candidate{
-        header->binding.slot_generation, header->plan_generation, header->plan_hash, header->identity
+        slot_registration.binding.slot_generation, header->plan_generation, header->plan_hash, header->identity
     };
     *out_commit = candidate;
     result.status = HbgRestoreStatus::Ok;
+    result.slot_status = HbgExecutionSlotStatus::Ok;
     result.blob_status = HbgLaunchBlobStatus::Ok;
     result.region_index = std::numeric_limits<uint32_t>::max();
     result.callback_error = 0;

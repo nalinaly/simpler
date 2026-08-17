@@ -9,6 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +30,8 @@ using simpler::hbg::hbg_launch_regions;
 using simpler::hbg::HBG_REGION_IMMUTABLE_SOURCE;
 using simpler::hbg::HBG_REGION_REQUIRED;
 using simpler::hbg::HbgExecutionBinding;
+using simpler::hbg::HbgExecutionSlotRegistration;
+using simpler::hbg::HbgExecutionSlotStatus;
 using simpler::hbg::HbgHostRegionInput;
 using simpler::hbg::HbgInvocationIdentity;
 using simpler::hbg::HbgLaunchBlobAddressMode;
@@ -41,6 +44,7 @@ using simpler::hbg::HbgRestoreOps;
 using simpler::hbg::HbgRestoreStatus;
 using simpler::hbg::make_hbg_launch_placeholder;
 using simpler::hbg::restore_hbg_launch_blob;
+using simpler::hbg::seal_hbg_execution_slot_registration;
 using simpler::hbg::validate_hbg_launch_blob;
 using simpler::host_args::HostArgsLaunchStatus;
 using simpler::host_args::HostArgsPlaceholder;
@@ -56,6 +60,8 @@ struct Sources {
 struct RestoreHarness {
     std::array<uint8_t, 16> working_sm{};
     std::array<uint8_t, 24> working_arena{};
+    std::array<uint8_t, 32> outer_runtime{};
+    std::array<uint8_t, 16> device_kernel_args{};
     int copy_calls{0};
     int publish_calls{0};
     int fail_copy_at{-1};
@@ -85,6 +91,22 @@ HbgExecutionBinding make_restore_binding(const RestoreHarness &harness) {
     binding.runtime_offset = 8;
     binding.slot_generation = 17;
     return binding;
+}
+
+HbgExecutionSlotRegistration make_restore_registration(
+    const RestoreHarness &harness, const HbgExecutionBinding &binding, size_t max_launch_blob_size
+) {
+    HbgExecutionSlotRegistration registration;
+    registration.device_id = 1;
+    registration.max_launch_blob_size = max_launch_blob_size;
+    registration.binding = binding;
+    registration.outer_runtime_base = reinterpret_cast<uint64_t>(harness.outer_runtime.data());
+    registration.outer_runtime_size = harness.outer_runtime.size();
+    registration.device_kernel_args_base = reinterpret_cast<uint64_t>(harness.device_kernel_args.data());
+    registration.device_kernel_args_size = harness.device_kernel_args.size();
+    registration.binary_generation = 23;
+    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::Ok);
+    return registration;
 }
 
 HbgExecutionBinding make_binding(const Sources &sources, bool with_heap = false) {
@@ -512,12 +534,13 @@ TEST(HbgLaunchBlob, RestoresThePristineWorkingImageOnEveryReplay) {
     const HbgExecutionBinding binding = make_restore_binding(harness);
     const HbgInvocationIdentity identity = make_identity();
     std::vector<uint8_t> blob = make_restore_blob(sources, binding, identity, 31);
+    const HbgExecutionSlotRegistration registration = make_restore_registration(harness, binding, blob.size());
     HbgRestoreCommit commit{};
     const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
 
     harness.working_sm.fill(0xee);
     harness.working_arena.fill(0xdd);
-    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit);
     ASSERT_EQ(result.status, HbgRestoreStatus::Ok);
     EXPECT_EQ(harness.working_sm, sources.sm);
     EXPECT_EQ(harness.working_arena, sources.arena);
@@ -527,7 +550,7 @@ TEST(HbgLaunchBlob, RestoresThePristineWorkingImageOnEveryReplay) {
 
     harness.working_sm.fill(0x11);
     harness.working_arena.fill(0x22);
-    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit);
     ASSERT_EQ(result.status, HbgRestoreStatus::Ok);
     EXPECT_EQ(harness.working_sm, sources.sm);
     EXPECT_EQ(harness.working_arena, sources.arena);
@@ -549,18 +572,20 @@ TEST(HbgLaunchBlob, AlternatingCapturedPackagesRestoreTheirOwnSnapshotIntoOneSlo
     ++identity_b.argument_snapshot_hash;
     std::vector<uint8_t> blob_a = make_restore_blob(sources_a, binding, identity_a, 41);
     std::vector<uint8_t> blob_b = make_restore_blob(sources_b, binding, identity_b, 42);
+    const HbgExecutionSlotRegistration registration =
+        make_restore_registration(harness, binding, std::max(blob_a.size(), blob_b.size()));
     const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
     HbgRestoreCommit commit{};
 
     ASSERT_EQ(
-        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), binding, identity_a, ops, &commit).status,
+        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), registration, identity_a, ops, &commit).status,
         HbgRestoreStatus::Ok
     );
     EXPECT_EQ(harness.working_sm, sources_a.sm);
     EXPECT_EQ(commit.plan_generation, 41u);
 
     ASSERT_EQ(
-        restore_hbg_launch_blob(blob_b.data(), blob_b.size(), binding, identity_b, ops, &commit).status,
+        restore_hbg_launch_blob(blob_b.data(), blob_b.size(), registration, identity_b, ops, &commit).status,
         HbgRestoreStatus::Ok
     );
     EXPECT_EQ(harness.working_sm, sources_b.sm);
@@ -568,7 +593,7 @@ TEST(HbgLaunchBlob, AlternatingCapturedPackagesRestoreTheirOwnSnapshotIntoOneSlo
     EXPECT_EQ(commit.plan_generation, 42u);
 
     ASSERT_EQ(
-        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), binding, identity_a, ops, &commit).status,
+        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), registration, identity_a, ops, &commit).status,
         HbgRestoreStatus::Ok
     );
     EXPECT_EQ(harness.working_sm, sources_a.sm);
@@ -584,13 +609,23 @@ TEST(HbgLaunchBlob, FailedRestoreNeverPublishesAReadyCommit) {
     const HbgExecutionBinding binding = make_restore_binding(harness);
     const HbgInvocationIdentity identity = make_identity();
     std::vector<uint8_t> blob = make_restore_blob(sources, binding, identity, 51);
+    const HbgExecutionSlotRegistration registration = make_restore_registration(harness, binding, blob.size());
     const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
     HbgRestoreCommit commit{91, 92, 93, identity};
     const HbgRestoreCommit sentinel = commit;
 
-    HbgExecutionBinding stale_binding = binding;
-    ++stale_binding.slot_generation;
-    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), stale_binding, identity, ops, &commit);
+    HbgExecutionSlotRegistration corrupted_registration = registration;
+    ++corrupted_registration.binary_generation;
+    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), corrupted_registration, identity, ops, &commit);
+    EXPECT_EQ(result.status, HbgRestoreStatus::SlotRejected);
+    EXPECT_EQ(result.slot_status, HbgExecutionSlotStatus::HashMismatch);
+    EXPECT_EQ(harness.copy_calls, 0);
+    EXPECT_EQ(std::memcmp(&commit, &sentinel, sizeof(commit)), 0);
+
+    HbgExecutionSlotRegistration stale_registration = registration;
+    ++stale_registration.binding.slot_generation;
+    ASSERT_EQ(seal_hbg_execution_slot_registration(&stale_registration, 1), HbgExecutionSlotStatus::Ok);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), stale_registration, identity, ops, &commit);
     EXPECT_EQ(result.status, HbgRestoreStatus::BlobRejected);
     EXPECT_EQ(result.blob_status, HbgLaunchBlobStatus::InvalidGeneration);
     EXPECT_EQ(harness.copy_calls, 0);
@@ -599,7 +634,7 @@ TEST(HbgLaunchBlob, FailedRestoreNeverPublishesAReadyCommit) {
     harness.working_sm.fill(0xee);
     harness.working_arena.fill(0xdd);
     harness.fail_copy_at = 1;
-    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit);
     EXPECT_EQ(result.status, HbgRestoreStatus::CopyFailed);
     EXPECT_EQ(result.region_index, 1u);
     EXPECT_EQ(result.callback_error, -91);
@@ -609,7 +644,7 @@ TEST(HbgLaunchBlob, FailedRestoreNeverPublishesAReadyCommit) {
 
     harness.fail_copy_at = -1;
     harness.fail_publish_at = harness.publish_calls;
-    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit);
     EXPECT_EQ(result.status, HbgRestoreStatus::PublishFailed);
     EXPECT_EQ(result.region_index, 0u);
     EXPECT_EQ(result.callback_error, -92);
