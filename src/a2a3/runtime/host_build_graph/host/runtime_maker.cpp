@@ -1096,6 +1096,12 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         LOG_ERROR("build_l1_hbg_graph_plan_impl: failed to snapshot task-owned invocation state");
         return -1;
     }
+    if (!simpler::hbg::hbg_prebuilt_invocation_matches(
+            &rt->prebuilt_invocation, identity->function_binding_hash, host_total_tasks
+        )) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: function binding identity does not match the task-owned table");
+        return -1;
+    }
     rt->prebuilt_layout = layout;
 
     simpler::hbg::HbgInvocationIdentity plan_identity = *identity;

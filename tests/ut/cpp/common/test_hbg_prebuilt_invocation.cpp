@@ -21,6 +21,8 @@
 namespace {
 
 using FunctionTable = std::array<uint64_t, PTO2_PREBUILT_FUNC_ID_COUNT>;
+using simpler::hbg::hbg_function_binding_hash;
+using simpler::hbg::hbg_prebuilt_invocation_matches;
 
 TEST(HbgPrebuiltInvocationTest, InvalidInputDoesNotMutateExistingSnapshot) {
     PTO2Runtime runtime{};
@@ -46,6 +48,12 @@ TEST(HbgPrebuiltInvocationTest, SnapshotOwnsFullCallableLocalFunctionTableAndTas
 
     ASSERT_TRUE(runtime_set_prebuilt_invocation_state(&runtime, first.data(), first.size(), 37));
     ASSERT_TRUE(runtime_has_valid_prebuilt_invocation_state(&runtime));
+    const uint64_t expected_hash = hbg_function_binding_hash(first.data(), first.size());
+    ASSERT_NE(expected_hash, 0u);
+    EXPECT_EQ(runtime.prebuilt_invocation.function_binding_hash, expected_hash);
+    EXPECT_TRUE(hbg_prebuilt_invocation_matches(&runtime.prebuilt_invocation, expected_hash, 37));
+    EXPECT_FALSE(hbg_prebuilt_invocation_matches(&runtime.prebuilt_invocation, expected_hash, 38));
+    EXPECT_FALSE(hbg_prebuilt_invocation_matches(&runtime.prebuilt_invocation, expected_hash ^ 1U, 37));
     EXPECT_EQ(runtime.prebuilt_invocation.host_total_tasks, 37);
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[0], 0x10000000ULL);
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[17], 0x17000000ULL);
@@ -71,6 +79,9 @@ TEST(HbgPrebuiltInvocationTest, NewGenerationReplacesTheEntireFunctionTable) {
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[0], 0x22220000ULL);
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[19], 0);
     EXPECT_EQ(runtime.prebuilt_invocation.host_total_tasks, 9);
+    EXPECT_EQ(
+        runtime.prebuilt_invocation.function_binding_hash, hbg_function_binding_hash(second.data(), second.size())
+    );
     EXPECT_TRUE(runtime_has_valid_prebuilt_invocation_state(&runtime));
 }
 
@@ -89,6 +100,31 @@ TEST(HbgPrebuiltInvocationTest, ValidationRejectsCorruptMetadata) {
 
     runtime.prebuilt_invocation.host_total_tasks = -1;
     EXPECT_FALSE(runtime_has_valid_prebuilt_invocation_state(&runtime));
+}
+
+TEST(HbgPrebuiltInvocationTest, ValidationRejectsFunctionTableCorruption) {
+    PTO2Runtime runtime{};
+    FunctionTable functions{};
+    functions[0] = 0x10000000ULL;
+    ASSERT_TRUE(runtime_set_prebuilt_invocation_state(&runtime, functions.data(), functions.size(), 1));
+    const uint64_t snapshot_hash = runtime.prebuilt_invocation.function_binding_hash;
+
+    runtime.prebuilt_invocation.func_id_to_addr[0] ^= 0x1000;
+    EXPECT_FALSE(runtime_has_valid_prebuilt_invocation_state(&runtime));
+    EXPECT_EQ(runtime.prebuilt_invocation.function_binding_hash, snapshot_hash);
+}
+
+TEST(HbgPrebuiltInvocationTest, HashCoversTheWholeFixedSizeTable) {
+    FunctionTable first{};
+    FunctionTable second{};
+    second.back() = 0x12345000ULL;
+
+    EXPECT_EQ(hbg_function_binding_hash(nullptr, first.size()), 0u);
+    EXPECT_EQ(hbg_function_binding_hash(first.data(), first.size() - 1), 0u);
+    EXPECT_NE(hbg_function_binding_hash(first.data(), first.size()), 0u);
+    EXPECT_NE(
+        hbg_function_binding_hash(first.data(), first.size()), hbg_function_binding_hash(second.data(), second.size())
+    );
 }
 
 }  // namespace
