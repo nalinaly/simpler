@@ -189,6 +189,7 @@ HostApi make_host_api(bool with_temporary_buffer = true) {
         with_temporary_buffer ? fake_get_retained_temp_buffer : nullptr,
         with_temporary_buffer ? fake_set_retained_temp_buffer : nullptr,
         fake_setup_static_arena,
+        nullptr,
         fake_acquire_pooled_gm_heap,
         fake_acquire_pooled_gm_sm,
         fake_acquire_pooled_runtime_arena,

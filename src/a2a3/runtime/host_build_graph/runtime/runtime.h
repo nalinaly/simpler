@@ -193,12 +193,21 @@ private:
     void *slot_states_ptr_;                  // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
 
-    // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
-    // Runtime to device; AICPU reads them in the boot path to skip
-    // runtime_create_from_sm and reuse the pooled, prebuilt arena buffer
-    // (already populated by runtime_init_data_from_layout + wire on host).
+    // Scheduler runtime-arena location. Set by the host before the outer
+    // Runtime reaches the device; AICPU attaches the arena and recovers its
+    // inner runtime at the recorded offset.
     void *prebuilt_arena_base_;
     size_t prebuilt_runtime_offset_;
+
+    // Exact capacities frozen by HBG L1 prepare. The L2 path leaves them zero.
+    // They are host-established metadata for constructing
+    // a complete execution-slot registration; task-owned graph bytes cannot
+    // update them.
+    uint64_t l1_gm_heap_capacity_;
+    uint64_t l1_shared_memory_capacity_;
+    uint64_t l1_runtime_arena_capacity_;
+    uint32_t l1_static_execution_slot_frozen_;
+    uint32_t l1_static_execution_slot_reserved_;
 
     // Orchestration metadata set by the platform host (DeviceRunner) when
     // registering a callable. host_build_graph runs the orchestrator on the
@@ -255,15 +264,15 @@ public:
     void set_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
 
-    // Prebuilt-arena fast path (trb only). Set by host's
-    // bind_callable_to_runtime_impl; consumed by AICPU at boot to attach a
-    // DeviceArena to `prebuilt_arena_base_` and pick up the PTO2Runtime at
-    // `prebuilt_arena_base_ + prebuilt_runtime_offset_`. Both stay zero on
-    // first construction (Runtime() ctor zeros them) so a non-prebuilt boot
-    // path can still detect "no prebuilt image set" via nullptr.
+    // Runtime-arena binding consumed by AICPU at boot.
     void set_prebuilt_arena(void *arena_base, size_t runtime_off);
     void *get_prebuilt_arena_base() const;
     size_t get_prebuilt_runtime_offset() const;
+    void set_l1_static_execution_slot_capacities(uint64_t gm_heap, uint64_t shared_memory, uint64_t runtime_arena);
+    bool has_l1_static_execution_slot() const;
+    uint64_t get_l1_gm_heap_capacity() const;
+    uint64_t get_l1_shared_memory_capacity() const;
+    uint64_t get_l1_runtime_arena_capacity() const;
 
     // Orchestration metadata written by the platform host (DeviceRunner) at
     // callable registration. Shared ABI with tensormap_and_ringbuffer; the

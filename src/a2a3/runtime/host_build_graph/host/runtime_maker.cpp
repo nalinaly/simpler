@@ -58,6 +58,7 @@
 #include "../runtime/runtime.h"
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
+#include "../../../../common/task_interface/hbg_static_execution_slot.h"
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
@@ -768,9 +769,8 @@ extern "C" int bind_callable_to_runtime_impl(
     }
     int64_t t_args_end = _now_ms();
 
-    // Lay out the per-Worker static device arena. GM heap, PTO2 shared memory,
-    // and the prebuilt runtime arena all live in a single backing allocation;
-    // setup_static_arena reserves the three regions and commits in one shot.
+    // Lay out the per-Worker static device arena. GM heap, shared memory and
+    // the runtime arena use three independently committed pooled regions.
     // Owned by DeviceRunner across runs — do NOT record in tensor_pairs_; the
     // free is deferred to DeviceRunner::finalize(). The runtime-arena size is
     // determined by replaying the reserve sequence on a host-side arena.
@@ -904,6 +904,58 @@ extern "C" int bind_callable_to_runtime_impl(
     LOG_INFO("TIMING: prebuilt_runtime_arena = %" PRId64 "ms", t_prebuilt_end - t_prebuilt_start);
     LOG_INFO("TIMING: total_init_runtime_impl = %" PRId64 "ms", t_total_end - t_total_start);
 
+    return 0;
+}
+
+extern "C" int prepare_l1_runtime_impl(
+    Runtime *runtime, const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap,
+    [[maybe_unused]] const uint64_t *ring_dep_pool
+) {
+    if (runtime == nullptr || api == nullptr) {
+        LOG_ERROR("prepare_l1_runtime_impl: runtime and HostApi must be non-null");
+        return -1;
+    }
+
+    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
+    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
+    if (!resolve_ring_config(ring_task_window, ring_heap, task_window_sizes, heap_sizes)) {
+        return -1;
+    }
+
+    uint64_t total_heap_size = 0;
+    for (int ring = 0; ring < PTO2_MAX_RING_DEPTH; ++ring) {
+        if (heap_sizes[ring] > std::numeric_limits<uint64_t>::max() - total_heap_size) {
+            LOG_ERROR("Total ring heap size overflows uint64_t");
+            return -1;
+        }
+        total_heap_size += heap_sizes[ring];
+    }
+
+    DeviceArena sizing_arena;
+    const PTO2RuntimeArenaLayout arena_layout = runtime_reserve_layout(sizing_arena, task_window_sizes, heap_sizes);
+    simpler::hbg::HbgStaticExecutionSlotLayout slot_layout{};
+    slot_layout.gm_heap_capacity = total_heap_size;
+    slot_layout.shared_memory_capacity = PTO2SharedMemoryHandle::calculate_size_per_ring(task_window_sizes);
+    slot_layout.runtime_arena_capacity = arena_layout.arena_size;
+    slot_layout.runtime_offset = arena_layout.off_runtime;
+
+    simpler::hbg::HbgPreparedStaticExecutionSlot slot{};
+    const auto status = simpler::hbg::prepare_hbg_static_execution_slot(api, slot_layout, &slot);
+    if (status != simpler::hbg::HbgStaticExecutionSlotStatus::Ok) {
+        LOG_ERROR("Failed to prepare frozen HBG L1 execution slot: status=%u", static_cast<unsigned>(status));
+        return -1;
+    }
+
+    runtime->set_gm_heap(reinterpret_cast<void *>(slot.binding.gm_heap_base));
+    runtime->set_gm_sm_ptr(reinterpret_cast<void *>(slot.binding.shared_memory_base));
+    runtime->set_prebuilt_arena(
+        reinterpret_cast<void *>(slot.binding.runtime_arena_base), static_cast<size_t>(slot.binding.runtime_offset)
+    );
+    runtime->set_l1_static_execution_slot_capacities(
+        slot.binding.gm_heap_capacity, slot.binding.shared_memory_capacity, slot.binding.runtime_arena_capacity
+    );
+    runtime->set_orch_args(ChipStorageTaskArgs{});
+    runtime->host_total_tasks = 0;
     return 0;
 }
 

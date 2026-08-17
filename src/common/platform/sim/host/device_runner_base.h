@@ -119,6 +119,10 @@ public:
     // --- Shared methods --------------------------------------------------
 
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
+    int freeze_static_arena(
+        const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    );
 
     void *acquire_pooled_gm_heap();
     void *acquire_pooled_gm_sm();
@@ -276,14 +280,14 @@ protected:
     std::array<void *, PTO_PIPELINE_MAX_DEPTH> retained_temp_addrs_{};
     std::array<size_t, PTO_PIPELINE_MAX_DEPTH> retained_temp_sizes_{};
 
-    // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2
-    // shared memory / trb prebuilt runtime arena) for one pipeline slot. They
+    // Each arena bank backs the three pooled regions (GM heap, shared memory
+    // and runtime arena) for one pipeline slot. They
     // are separate allocations because the combined size can exceed the device
     // allocator's largest contiguous block. Released explicitly in finalize()
     // before mem_alloc_.finalize().
     //
-    // A bank's runtime pool stays unreserved when setup_static_arena was
-    // invoked with runtime_arena_size == 0 (hbg path).
+    // A bank's runtime pool stays unreserved when setup_static_arena receives
+    // runtime_arena_size == 0.
     static void *arena_alloc_trampoline(void *ctx, size_t size) {
         return static_cast<MemoryAllocator *>(ctx)->alloc(size);
     }
@@ -307,6 +311,7 @@ protected:
         size_t cached_gm_heap_size{0};
         size_t cached_gm_sm_size{0};
         size_t cached_runtime_arena_size{0};
+        bool static_arena_frozen{false};
     };
     std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
     ArenaBank &arena_bank() { return *arena_banks_[arena_bank_]; }

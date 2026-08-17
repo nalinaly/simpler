@@ -736,6 +736,7 @@ int DeviceRunner::finalize() {
         bank->cached_gm_heap_size = 0;
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
+        bank->static_arena_frozen = false;
     }
     pipeline_slot_ = 0;
     arena_bank_ = 0;

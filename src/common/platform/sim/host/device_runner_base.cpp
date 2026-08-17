@@ -150,6 +150,12 @@ uint64_t SimDeviceRunnerBase::retained_temp_addr(uint32_t slot_id) const {
 
 int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) {
     ArenaBank &bank = arena_bank();
+    if (bank.static_arena_frozen) {
+        return gm_heap_size == bank.cached_gm_heap_size && gm_sm_size == bank.cached_gm_sm_size &&
+                       runtime_arena_size == bank.cached_runtime_arena_size ?
+                   0 :
+                   -1;
+    }
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
@@ -197,6 +203,7 @@ int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_si
         bank.cached_gm_heap_size = 0;
         bank.cached_gm_sm_size = 0;
         bank.cached_runtime_arena_size = 0;
+        bank.static_arena_frozen = false;
         prebuilt_runtime_arena_cache_valid_ = false;
         prebuilt_runtime_arena_cache_key_.clear();
         prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
@@ -213,6 +220,23 @@ int SimDeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_si
         prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
         prebuilt_runtime_arena_cache_image_.clear();
     }
+    return 0;
+}
+
+int SimDeviceRunnerBase::freeze_static_arena(
+    const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+    const void *runtime_arena_base, size_t runtime_arena_size
+) {
+    ArenaBank &bank = arena_bank();
+    const bool exact_layout = gm_heap_base != nullptr && gm_sm_base != nullptr && runtime_arena_base != nullptr &&
+                              bank.gm_heap.is_committed() && bank.gm_sm.is_committed() &&
+                              bank.runtime_pool.is_committed() && bank.gm_heap.base() == gm_heap_base &&
+                              bank.gm_sm.base() == gm_sm_base && bank.runtime_pool.base() == runtime_arena_base &&
+                              bank.cached_gm_heap_size == gm_heap_size && bank.cached_gm_sm_size == gm_sm_size &&
+                              bank.cached_runtime_arena_size == runtime_arena_size && gm_heap_size != 0 &&
+                              gm_sm_size != 0 && runtime_arena_size != 0;
+    if (!exact_layout) return -1;
+    bank.static_arena_frozen = true;
     return 0;
 }
 

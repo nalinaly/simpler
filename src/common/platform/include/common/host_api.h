@@ -61,22 +61,30 @@ struct HostApi {
     // returns {nullptr, 0} when nothing is retained yet.
     void (*get_retained_temp_buffer)(void **addr, size_t *size);
     void (*set_retained_temp_buffer)(void *addr, size_t size);
-    // Commit the three pooled regions (PTO2 GM heap, PTO2 shared memory, trb
-    // prebuilt runtime arena) of the arena bank the current run's lease
-    // selected, as three independent device allocations. `runtime_arena_size == 0` skips the third region (hbg
-    // path: hbg has no prebuilt runtime arena). Idempotent on identical
-    // sizes; returns 0 on success, -1 on allocation failure.
+    // Commit the three pooled regions (GM heap, shared memory and runtime
+    // arena) of the arena bank selected by the current run or L1 context.
+    // A zero runtime_arena_size leaves the third region uncommitted. The
+    // operation is idempotent on identical sizes and may grow an unfrozen
+    // bank; it returns 0 on success and -1 on failure.
     int (*setup_static_arena)(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
+    // Freeze one fully committed arena bank at the exact bases and capacities
+    // observed by its caller. Once frozen, setup_static_arena accepts only the
+    // identical triple and can never release, grow or replace any region.
+    // HBG L1 uses this as the platform-owned trust boundary before publishing
+    // a destination binding to task-owned graph packages.
+    int (*freeze_static_arena)(
+        const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    );
     // Return the per-Worker pooled pointer for the PTO2 GM heap / shared
     // memory / prebuilt runtime arena. setup_static_arena must have already
     // committed the relevant region; the returned pointer is owned by the
     // DeviceRunner and freed in `DeviceRunner::finalize()` — do NOT pass it
     // to device_free or record it as an owned tensor lease.
     //
-    // acquire_pooled_runtime_arena is trb-only — the runtime-arena region is
-    // only committed when setup_static_arena was invoked with
-    // runtime_arena_size > 0. Calling it on the hbg path
-    // (setup_static_arena(...,0)) returns nullptr (not undefined).
+    // The runtime-arena accessor returns nullptr when setup_static_arena was
+    // invoked with runtime_arena_size == 0. TRB and HBG L1 both use a nonzero
+    // runtime arena; historical HBG L2 callers may also commit one.
     void *(*acquire_pooled_gm_heap)();
     void *(*acquire_pooled_gm_sm)();
     void *(*acquire_pooled_runtime_arena)();

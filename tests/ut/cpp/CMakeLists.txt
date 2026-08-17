@@ -354,6 +354,8 @@ function(add_task_interface_test name src)
     add_executable(${name} ${src})
     target_include_directories(${name} PRIVATE
         ${GTEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../../../src/common
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
     )
     target_link_libraries(${name} PRIVATE
@@ -493,6 +495,11 @@ target_include_directories(test_hbg_execution_slot PRIVATE
 target_link_libraries(test_hbg_execution_slot PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
 add_test(NAME test_hbg_execution_slot COMMAND test_hbg_execution_slot)
 set_tests_properties(test_hbg_execution_slot PROPERTIES LABELS "no_hardware")
+
+# HBG L1 static working-slot allocation and capacity freeze. The production
+# helper is host-only and uses an injected HostApi, so exact base/capacity
+# publication and failure ordering stay testable without CANN or a device.
+add_task_interface_test(test_hbg_static_execution_slot types/test_hbg_static_execution_slot.cpp)
 
 # Contract test for upload_chip_callable_buffer caller-buffer immutability.
 # Pulls both task_interface (callable.h) and src/common (utils/fnv1a_64.h),

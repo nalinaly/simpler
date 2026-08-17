@@ -190,13 +190,12 @@ public:
     virtual void unregister_device_memory_from_host(void *dev_ptr) { (void)dev_ptr; }
 
     /**
-     * Commit the three per-Worker pooled regions (PTO2 GM heap, PTO2
-     * shared memory, trb prebuilt runtime arena) as three independent
-     * device allocations. Must be called before any `acquire_pooled_*`.
+     * Commit the three per-Worker pooled regions (GM heap, shared memory and
+     * runtime arena) as three independent device allocations. Must be called
+     * before any `acquire_pooled_*`.
      * Idempotent on identical (or smaller) sizes; an equal-or-smaller
-     * follow-up request leaves the arena untouched. `runtime_arena_size`
-     * is 0 for the hbg path (no prebuilt runtime arena) — the
-     * corresponding arena stays uncommitted.
+     * follow-up request leaves the arena untouched. A zero
+     * `runtime_arena_size` leaves the corresponding arena uncommitted.
      *
      * On failure to commit a later region, earlier committed regions are
      * rolled back (a5's prior semantics). This is the safer default: a
@@ -210,13 +209,16 @@ public:
      */
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
+    /** Freeze the selected arena bank at one exact, already-committed layout. */
+    int freeze_static_arena(
+        const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    );
+
     /**
      * Return the pooled GM heap / PTO2 SM / runtime arena base pointer of the
-     * selected arena bank. `setup_static_arena` (arch subclass) must have
-     * already committed the relevant region on that bank; otherwise returns
-     * nullptr. The runtime arena accessor is trb-only — hbg's
-     * `setup_static_arena(...,0)` leaves the runtime pool uncommitted and this
-     * returns nullptr.
+     * selected arena bank. `setup_static_arena` must have already committed
+     * the relevant region on that bank; otherwise returns nullptr.
      */
     void *acquire_pooled_gm_heap();
     void *acquire_pooled_gm_sm();
@@ -1123,6 +1125,7 @@ protected:
         size_t cached_gm_heap_size{0};
         size_t cached_gm_sm_size{0};
         size_t cached_runtime_arena_size{0};
+        bool static_arena_frozen{false};
     };
     // Held by pointer because DeviceArena is non-copyable and non-movable, so
     // the array cannot be brace-initialised without naming every bank.

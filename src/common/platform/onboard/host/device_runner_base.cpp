@@ -733,6 +733,7 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
         bank->cached_gm_heap_size = 0;
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
+        bank->static_arena_frozen = false;
     }
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_key_.clear();
@@ -886,8 +887,6 @@ void *DeviceRunnerBase::acquire_pooled_gm_sm() {
 }
 
 void *DeviceRunnerBase::acquire_pooled_runtime_arena() {
-    // hbg calls setup_static_arena(...,0) and leaves the runtime pool
-    // uncommitted — fail loudly if a caller asks for it anyway.
     DeviceArena &arena = arena_bank().runtime_pool;
     if (!arena.is_committed()) return nullptr;
     return arena.base();
@@ -951,13 +950,25 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
     // region, redo just that region — already-committed peers stay alive
     // so their callers don't have to re-acquire.
     ArenaBank &bank = arena_bank();
+    if (bank.static_arena_frozen) {
+        const bool exact_layout = gm_heap_size == bank.cached_gm_heap_size && gm_sm_size == bank.cached_gm_sm_size &&
+                                  runtime_arena_size == bank.cached_runtime_arena_size;
+        if (!exact_layout) {
+            LOG_ERROR(
+                "Static arena bank %u is frozen at {%zu, %zu, %zu}; rejecting {%zu, %zu, %zu}", selected_arena_bank(),
+                bank.cached_gm_heap_size, bank.cached_gm_sm_size, bank.cached_runtime_arena_size, gm_heap_size,
+                gm_sm_size, runtime_arena_size
+            );
+            return -1;
+        }
+        return 0;
+    }
 
     bool arena_changed = false;
     auto commit_region = [&arena_changed](DeviceArena &arena, size_t &cached_size, size_t requested_size) -> int {
         if (requested_size == 0) {
-            // hbg's runtime_arena path: caller passed 0 and never reserved
-            // a region. Leave the arena uncommitted; acquire_pooled_* will
-            // return nullptr.
+            // A zero-sized region stays uncommitted; acquire_pooled_* returns
+            // nullptr for it.
             if (arena.is_committed() && cached_size != 0) {
                 arena.release();
                 cached_size = 0;
@@ -999,6 +1010,7 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
         bank.cached_gm_heap_size = 0;
         bank.cached_gm_sm_size = 0;
         bank.cached_runtime_arena_size = 0;
+        bank.static_arena_frozen = false;
         if (selected_arena_bank() == 0) {
             prebuilt_runtime_arena_cache_valid_ = false;
             prebuilt_runtime_arena_cache_key_.clear();
@@ -1017,6 +1029,28 @@ int DeviceRunnerBase::setup_static_arena(size_t gm_heap_size, size_t gm_sm_size,
         prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
         prebuilt_runtime_arena_cache_image_.clear();
     }
+    return 0;
+}
+
+int DeviceRunnerBase::freeze_static_arena(
+    const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+    const void *runtime_arena_base, size_t runtime_arena_size
+) {
+    ArenaBank &bank = arena_bank();
+    const bool exact_layout = gm_heap_base != nullptr && gm_sm_base != nullptr && runtime_arena_base != nullptr &&
+                              bank.gm_heap.is_committed() && bank.gm_sm.is_committed() &&
+                              bank.runtime_pool.is_committed() && bank.gm_heap.base() == gm_heap_base &&
+                              bank.gm_sm.base() == gm_sm_base && bank.runtime_pool.base() == runtime_arena_base &&
+                              bank.cached_gm_heap_size == gm_heap_size && bank.cached_gm_sm_size == gm_sm_size &&
+                              bank.cached_runtime_arena_size == runtime_arena_size && gm_heap_size != 0 &&
+                              gm_sm_size != 0 && runtime_arena_size != 0;
+    if (!exact_layout) {
+        LOG_ERROR(
+            "Static arena freeze rejected a base or capacity that is not owned by bank %u", selected_arena_bank()
+        );
+        return -1;
+    }
+    bank.static_arena_frozen = true;
     return 0;
 }
 
@@ -1805,8 +1839,8 @@ int DeviceRunnerBase::finalize_common() {
     aicpu_seen_callable_ids_.clear();
     aicpu_dlopen_total_ = 0;
 
-    // Release the three per-Worker pooled arenas (GM heap, PTO2 SM, optional
-    // trb prebuilt runtime arena — each its own device_malloc). Must precede
+    // Release the three per-Worker pooled arenas (GM heap, shared memory and
+    // optional runtime arena — each its own device_malloc). Must precede
     // mem_alloc_.finalize() so the arenas free through the still-live
     // allocator, not after it.
     for (auto &bank : arena_banks_) {
@@ -1847,6 +1881,7 @@ int DeviceRunnerBase::finalize_common() {
         bank->cached_gm_heap_size = 0;
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
+        bank->static_arena_frozen = false;
     }
     return rc;
 }

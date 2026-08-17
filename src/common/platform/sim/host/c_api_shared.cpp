@@ -164,6 +164,19 @@ static int setup_static_arena_wrapper(size_t gm_heap_size, size_t gm_sm_size, si
     }
 }
 
+static int freeze_static_arena_wrapper(
+    const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+    const void *runtime_arena_base, size_t runtime_arena_size
+) {
+    try {
+        return current_runner()->freeze_static_arena(
+            gm_heap_base, gm_heap_size, gm_sm_base, gm_sm_size, runtime_arena_base, runtime_arena_size
+        );
+    } catch (...) {
+        return -1;
+    }
+}
+
 static void *acquire_pooled_gm_heap_wrapper() {
     try {
         return current_runner()->acquire_pooled_gm_heap();
@@ -236,6 +249,7 @@ static const HostApi g_host_api = {
     .get_retained_temp_buffer = get_retained_temp_buffer,
     .set_retained_temp_buffer = set_retained_temp_buffer,
     .setup_static_arena = setup_static_arena_wrapper,
+    .freeze_static_arena = freeze_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,
     .acquire_pooled_runtime_arena = acquire_pooled_runtime_arena_wrapper,
