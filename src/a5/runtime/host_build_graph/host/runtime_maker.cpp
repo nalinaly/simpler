@@ -1266,13 +1266,23 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
     return rc;
 }
 
-// host_build_graph resolves orchestration on the host, so it exports no AICPU
-// entries beyond the base {simpler_aicpu_exec, simpler_aicpu_init} — in
-// particular it does not export simpler_aicpu_register_callable. Reporting an
-// empty extra-symbol set keeps the common AICPU loader from looking for it.
+// host_build_graph resolves orchestration on the host, so the legacy L2 loader
+// has no entries beyond {simpler_aicpu_exec, simpler_aicpu_init}. In
+// particular it does not export simpler_aicpu_register_callable.
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
     if (count != nullptr) {
         *count = 0;
     }
     return nullptr;
+}
+
+// HBG L1 uses a registration ABI independent from TMARB's fixed callable
+// registration. Capability remains disabled until the run/restore path is
+// complete, but the symbol set is already exact and build-checked.
+extern "C" const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
+    static const char *const kExtra[] = {"simpler_aicpu_l1_hbg_register_execution_slot"};
+    if (count != nullptr) {
+        *count = sizeof(kExtra) / sizeof(kExtra[0]);
+    }
+    return kExtra;
 }

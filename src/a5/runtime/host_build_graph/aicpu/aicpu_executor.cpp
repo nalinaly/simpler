@@ -20,8 +20,10 @@
 #include <sys/mman.h>
 #endif
 
+#include "aicpu/aicpu_device_config.h"
 #include "aicpu/device_time.h"
 #include "callable_protocol.h"
+#include "hbg_execution_slot_registry.h"
 #include "pto2_dispatch_payload.h"
 #include "runtime.h"
 #include "spin_hint.h"
@@ -124,6 +126,7 @@ struct AicpuExecutor {
 };
 
 static AicpuExecutor g_aicpu_executor;
+static simpler::hbg::HbgExecutionSlotRegistry g_hbg_execution_slot_registry;
 
 // ===== AicpuExecutor Method Implementations =====
 
@@ -414,6 +417,27 @@ void AicpuExecutor::deinit(Runtime *runtime) {
 }
 
 // ===== Public Entry Point =====
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_register_execution_slot(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_register_execution_slot: null argument");
+        return -1;
+    }
+
+    // CANN owns a byte snapshot of HostArgs but does not promise the C++
+    // alignment of that task-argument address. Copy before typed access.
+    simpler::hbg::HbgExecutionSlotRegistration registration{};
+    std::memcpy(&registration, arg, sizeof(registration));
+    const auto status = simpler::hbg::publish_hbg_execution_slot_registration(
+        &g_hbg_execution_slot_registry, &registration, get_orch_device_id()
+    );
+    if (status != simpler::hbg::HbgExecutionSlotRegistryStatus::Published &&
+        status != simpler::hbg::HbgExecutionSlotRegistryStatus::AlreadyRegistered) {
+        LOG_ERROR("simpler_aicpu_l1_hbg_register_execution_slot: rejected status=%u", static_cast<unsigned>(status));
+        return -1;
+    }
+    return 0;
+}
 
 extern "C" int32_t aicpu_prewarm_callable(Runtime *runtime) {
     // host_build_graph host-orch: the orchestration .so is dlopen'd on the HOST

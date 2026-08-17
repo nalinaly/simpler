@@ -496,6 +496,19 @@ target_link_libraries(test_hbg_execution_slot PRIVATE ${GTEST_MAIN_LIB} ${GTEST_
 add_test(NAME test_hbg_execution_slot COMMAND test_hbg_execution_slot)
 set_tests_properties(test_hbg_execution_slot PROPERTIES LABELS "no_hardware")
 
+# Device-resident immutable HBG slot registration state machine.  This pure
+# C++ test pins publication ordering, idempotence and conflict rejection
+# without requiring an AICPU process or CANN.
+add_executable(test_hbg_execution_slot_registry types/test_hbg_execution_slot_registry.cpp)
+target_include_directories(test_hbg_execution_slot_registry PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_link_libraries(test_hbg_execution_slot_registry PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_execution_slot_registry COMMAND test_hbg_execution_slot_registry)
+set_tests_properties(test_hbg_execution_slot_registry PROPERTIES LABELS "no_hardware")
+
 # HBG L1 static working-slot allocation and capacity freeze. The production
 # helper is host-only and uses an injected HostApi, so exact base/capacity
 # publication and failure ordering stay testable without CANN or a device.

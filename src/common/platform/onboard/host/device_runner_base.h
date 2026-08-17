@@ -1058,9 +1058,15 @@ protected:
     // is retained until successful explicit close. A future independent HBG
     // AICPU registration entry will receive these exact bytes.
     std::unique_ptr<const simpler::hbg::HbgExecutionSlotRegistration> l1_hbg_execution_slot_registration_;
+    // Set after the immutable registration task has been accepted onto the
+    // caller stream. The task may already belong to an ACLGraph, so teardown
+    // conservatively treats it as device-owned until the AICPU binary unload
+    // succeeds; launch return is not a device-consumption signal.
+    bool l1_hbg_execution_slot_registration_enqueued_{false};
 
     int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
     int prepare_l1_hbg_execution_slot_registration();
+    int enqueue_l1_hbg_execution_slot_registration(rtStream_t caller_stream);
 
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.

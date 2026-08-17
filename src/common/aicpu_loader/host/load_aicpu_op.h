@@ -229,6 +229,7 @@ constexpr const char *RunName = "simpler_aicpu_exec";   // multi-threaded exec
 constexpr const char *InitName = "simpler_aicpu_init";  // per-device one-shot invariants
 constexpr const char *RegisterCallableName = "simpler_aicpu_register_callable";
 constexpr const char *L1RegisterCallableName = "simpler_aicpu_l1_register_callable";
+constexpr const char *L1HbgRegisterExecutionSlotName = "simpler_aicpu_l1_hbg_register_execution_slot";
 constexpr const char *L1RunName = "simpler_aicpu_l1_exec";
 }  // namespace KernelNames
 

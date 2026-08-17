@@ -502,6 +502,9 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         l1_aicpu_init_enqueued_ = true;
     }
 
+    rc = enqueue_l1_hbg_execution_slot_registration(caller_stream);
+    if (rc != 0) return poison(rc);
+
     L1RegisterCallableArgs register_args{};
     register_args.struct_size = sizeof(register_args);
     register_args.callable_id = callable_id;
@@ -599,6 +602,31 @@ int DeviceRunnerBase::prepare_l1_hbg_execution_slot_registration() {
     );
     if (owner == nullptr) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
     l1_hbg_execution_slot_registration_ = std::move(owner);
+    return 0;
+}
+
+int DeviceRunnerBase::enqueue_l1_hbg_execution_slot_registration(rtStream_t caller_stream) {
+    if (l1_hbg_execution_slot_registration_ == nullptr || l1_hbg_execution_slot_registration_enqueued_) return 0;
+    if (caller_stream == nullptr || !l1_aicpu_init_enqueued_) return PTO_RUNTIME_ERR_NOT_READY;
+
+    const auto status =
+        simpler::hbg::validate_hbg_execution_slot_registration(l1_hbg_execution_slot_registration_.get(), device_id_);
+    if (status != simpler::hbg::HbgExecutionSlotStatus::Ok) {
+        LOG_ERROR(
+            "Refusing to enqueue invalid HBG execution-slot registration: status=%u", static_cast<unsigned>(status)
+        );
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    // Never hand the immutable canonical owner to an API whose signature is
+    // writable. This launch has no placeholders, but a fresh byte copy keeps
+    // future runtime patching behavior from mutating the trust root.
+    simpler::hbg::HbgExecutionSlotRegistration launch_args = *l1_hbg_execution_slot_registration_;
+    const int rc = load_aicpu_op_.LaunchWithHostArgs(
+        caller_stream, &launch_args, sizeof(launch_args), 1, host::KernelNames::L1HbgRegisterExecutionSlotName
+    );
+    if (rc != 0) return rc;
+    l1_hbg_execution_slot_registration_enqueued_ = true;
     return 0;
 }
 
@@ -792,7 +820,17 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     // close. Teardown deliberately has no implicit stream/device synchronize.
     rc = load_aicpu_op_.Finalize();
     capture(rc);
-    if (rc == 0) l1_aicpu_binary_loaded_ = false;
+    if (rc == 0) {
+        l1_aicpu_binary_loaded_ = false;
+        l1_hbg_execution_slot_registration_enqueued_ = false;
+    } else if (l1_hbg_execution_slot_registration_enqueued_) {
+        // The resident HBG registry contains addresses into the allocations
+        // below. If its owning DSO could not be unloaded, retain every
+        // referenced resource and the immutable host trust root for an
+        // explicit close retry. The context is already Closing, so no further
+        // prepare or launch can race this retained state.
+        return first_error;
+    }
 
     capture(l1_kernel_args_.finalize_device_kernel_args());
     capture(l1_kernel_args_.finalize_runtime_args());
@@ -860,6 +898,7 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     l1_serial_tail_recorded_ = false;
     l1_last_caller_stream_ = nullptr;
     l1_hbg_execution_slot_registration_.reset();
+    l1_hbg_execution_slot_registration_enqueued_ = false;
     l1_context_generation_ = 0;
     block_dim_ = 0;
     worker_count_ = 0;
