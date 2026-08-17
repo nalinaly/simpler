@@ -43,6 +43,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -59,10 +60,12 @@
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
 #include "../../../../common/task_interface/hbg_static_execution_slot.h"
+#include "../../../../common/worker/hbg_l1_host_build.h"
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "host/raii_scope_guard.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
@@ -956,6 +959,141 @@ extern "C" int prepare_l1_runtime_impl(
     );
     runtime->set_orch_args(ChipStorageTaskArgs{});
     runtime->host_total_tasks = 0;
+    return 0;
+}
+
+/**
+ * Build one immutable HBG L1 graph plan against the already-frozen working
+ * slot. External tensor storage is borrowed: this path performs no allocation,
+ * H2D/D2H copy or stream synchronization. A platform host mapping is exposed
+ * read-only while orchestration runs; set_tensor_data and unavailable device
+ * value reads fail closed.
+ */
+extern "C" int build_l1_hbg_graph_plan_impl(
+    Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
+    const simpler::hbg::HbgExecutionBinding *binding, const simpler::hbg::HbgInvocationIdentity *identity,
+    uint64_t plan_generation, const uint64_t *ring_task_window, const uint64_t *ring_heap,
+    [[maybe_unused]] const uint64_t *ring_dep_pool, std::unique_ptr<const simpler::hbg::HbgGraphPlan> *out
+) {
+    if (runtime == nullptr || api == nullptr || orch_args == nullptr || host_orch_func_ptr == nullptr ||
+        binding == nullptr || identity == nullptr || out == nullptr || plan_generation == 0) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: invalid argument");
+        return -1;
+    }
+    if (!runtime->has_l1_static_execution_slot() || binding->slot_generation == 0 ||
+        binding->gm_heap_base != reinterpret_cast<uint64_t>(runtime->get_gm_heap_ptr()) ||
+        binding->shared_memory_base != reinterpret_cast<uint64_t>(runtime->get_gm_sm_ptr()) ||
+        binding->runtime_arena_base != reinterpret_cast<uint64_t>(runtime->get_prebuilt_arena_base()) ||
+        binding->gm_heap_capacity != runtime->get_l1_gm_heap_capacity() ||
+        binding->shared_memory_capacity != runtime->get_l1_shared_memory_capacity() ||
+        binding->runtime_arena_capacity != runtime->get_l1_runtime_arena_capacity() ||
+        binding->runtime_offset != runtime->get_prebuilt_runtime_offset()) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: binding does not name the frozen runtime slot");
+        return -1;
+    }
+    if (identity->tensor_count != static_cast<uint32_t>(orch_args->tensor_count()) ||
+        identity->scalar_count != static_cast<uint32_t>(orch_args->scalar_count()) || identity->host_total_tasks != 0 ||
+        !simpler::hbg::hbg_valid_invocation_identity(*identity)) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: invocation identity count mismatch");
+        return -1;
+    }
+    if ((api->register_device_memory_to_host == nullptr) != (api->unregister_device_memory_from_host == nullptr)) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: host-map register/unregister capability is incomplete");
+        return -1;
+    }
+
+    uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
+    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
+    if (!resolve_ring_config(ring_task_window, ring_heap, task_window_sizes, heap_sizes)) {
+        return -1;
+    }
+    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(task_window_sizes);
+    DeviceArena host_arena;
+    const PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, task_window_sizes, heap_sizes);
+    if (sm_size != binding->shared_memory_capacity || layout.arena_size != binding->runtime_arena_capacity ||
+        layout.off_runtime != binding->runtime_offset || host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: host layout no longer matches the frozen slot");
+        return -1;
+    }
+
+    std::vector<void *> mapped_tensors;
+    auto mapping_guard = RAIIScopeGuard([&]() {
+        host_tensor_access_reset(nullptr);
+        if (api->unregister_device_memory_from_host != nullptr) {
+            for (void *address : mapped_tensors) {
+                api->unregister_device_memory_from_host(address);
+            }
+        }
+    });
+    host_tensor_access_reset_read_only();
+    if (api->register_device_memory_to_host != nullptr) {
+        try {
+            mapped_tensors.reserve(static_cast<size_t>(orch_args->tensor_count()));
+        } catch (...) {
+            return -1;
+        }
+        for (int index = 0; index < orch_args->tensor_count(); ++index) {
+            const Tensor &tensor = orch_args->tensor(index);
+            if (tensor.is_child_memory() || tensor.buffer.addr == 0) continue;
+            const uint64_t bytes = tensor.nbytes();
+            if (bytes == 0 || bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) continue;
+            void *device_address = reinterpret_cast<void *>(tensor.buffer.addr);
+            void *host_view = api->register_device_memory_to_host(device_address, static_cast<size_t>(bytes));
+            if (host_view == nullptr) continue;
+            try {
+                mapped_tensors.push_back(device_address);
+            } catch (...) {
+                api->unregister_device_memory_from_host(device_address);
+                return -1;
+            }
+            if (!host_tensor_access_add(tensor.buffer.addr, bytes, host_view)) {
+                return -1;
+            }
+        }
+    }
+
+    PTO2Runtime *rt = runtime_init_data_from_layout(
+        host_arena, layout, PTO2_MODE_EXECUTE, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
+        reinterpret_cast<void *>(binding->gm_heap_base), heap_sizes
+    );
+    if (rt == nullptr) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: runtime_init_data_from_layout failed");
+        return -1;
+    }
+    runtime_wire_arena_pointers(host_arena, layout, rt);
+
+    std::vector<uint8_t> host_sm_image;
+    L2TaskArgs orch_l2;
+    orch_l2.create_from_chip_args(*orch_args);
+    const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    auto runtime_bind_guard = RAIIScopeGuard([entry_points]() {
+        framework_bind_runtime(nullptr);
+        if (entry_points->bind != nullptr) entry_points->bind(nullptr);
+    });
+    const int32_t host_total_tasks = build_host_orchestration_image(
+        runtime, rt, host_arena, layout, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
+        reinterpret_cast<void *>(binding->runtime_arena_base), reinterpret_cast<void *>(binding->gm_heap_base),
+        heap_sizes, task_window_sizes, host_orch_func_ptr, orch_l2, &host_sm_image
+    );
+    if (host_total_tasks < 0) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: host orchestration failed");
+        return -1;
+    }
+    rt->prebuilt_layout = layout;
+
+    simpler::hbg::HbgInvocationIdentity plan_identity = *identity;
+    plan_identity.host_total_tasks = host_total_tasks;
+    const uint32_t region_flags = simpler::hbg::HBG_REGION_REQUIRED | simpler::hbg::HBG_REGION_IMMUTABLE_SOURCE;
+    const std::vector<simpler::hbg::HbgHostRegionInput> inputs{
+        {simpler::hbg::HbgLaunchRegionKind::SharedMemoryImage, region_flags, host_sm_image.data(), host_sm_image.size(),
+         0},
+        {simpler::hbg::HbgLaunchRegionKind::RuntimeArenaImage, region_flags, host_arena.base(), layout.arena_size, 0},
+    };
+    const auto status = simpler::hbg::build_hbg_graph_plan(*binding, plan_identity, plan_generation, inputs, out);
+    if (status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: graph plan build failed: status=%u", static_cast<unsigned>(status));
+        return -1;
+    }
     return 0;
 }
 

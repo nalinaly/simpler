@@ -51,6 +51,7 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
+#include "hbg_l1_host_build.h"
 #include "l1_aicpu_args.h"
 #include "l1_callable_validation.h"
 #include "l1_launch_sequence.h"
@@ -81,6 +82,16 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
 extern "C" __attribute__((weak)) int prepare_l1_runtime_impl(
     Runtime * /*runtime*/, const HostApi * /*api*/, const uint64_t * /*ring_task_window*/,
     const uint64_t * /*ring_heap*/, const uint64_t * /*ring_dep_pool*/
+) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+extern "C" __attribute__((weak)) int build_l1_hbg_graph_plan_impl(
+    Runtime * /*runtime*/, const HostApi * /*api*/, const ChipStorageTaskArgs * /*orch_args*/,
+    void * /*host_orch_func_ptr*/, const simpler::hbg::HbgExecutionBinding * /*binding*/,
+    const simpler::hbg::HbgInvocationIdentity * /*identity*/, uint64_t /*plan_generation*/,
+    const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/, const uint64_t * /*ring_dep_pool*/,
+    std::unique_ptr<const simpler::hbg::HbgGraphPlan> * /*out*/
 ) {
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }

@@ -37,6 +37,7 @@ struct HostTensorRegion {
 std::vector<HostTensorRegion> g_regions;
 
 int (*g_copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size) = nullptr;
+bool g_writes_allowed = true;
 
 // The region serving the whole of [dev_addr, dev_addr + bytes), or nullptr.
 // `*offset` is the span's distance from that region's base.
@@ -68,6 +69,9 @@ bool host_tensor_read(uint64_t dev_addr, void *dst, uint64_t bytes) {
 }
 
 bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes) {
+    if (!g_writes_allowed) {
+        return false;
+    }
     uint64_t offset = 0;
     const HostTensorRegion *region = find_region(dev_addr, bytes, &offset);
     if (region == nullptr) {
@@ -87,6 +91,13 @@ bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes) {
 void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size)) {
     g_regions.clear();
     g_copy_to_device = copy_to_device;
+    g_writes_allowed = true;
+}
+
+void host_tensor_access_reset_read_only() {
+    g_regions.clear();
+    g_copy_to_device = nullptr;
+    g_writes_allowed = false;
 }
 
 bool host_tensor_access_add(uint64_t dev_base, uint64_t size, void *host_view) {

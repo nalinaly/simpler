@@ -24,7 +24,7 @@ namespace simpler::hbg {
 
 inline constexpr uint32_t HBG_LAUNCH_BLOB_MAGIC = 0x31474248U;  // "HBG1" in little-endian memory.
 inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MAJOR = 1;
-inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MINOR = 0;
+inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MINOR = 1;
 inline constexpr uint32_t HBG_LAUNCH_BLOB_MAX_REGIONS = 1024;
 inline constexpr size_t HBG_LAUNCH_BLOB_ALIGNMENT = 8;
 
@@ -79,6 +79,12 @@ struct alignas(8) HbgInvocationIdentity {
     uint64_t function_binding_hash{0};
     uint32_t tensor_count{0};
     uint32_t scalar_count{0};
+    // The scheduler consumes this value on every invocation. Keeping it in
+    // the task-owned graph snapshot prevents a later host build from
+    // overwriting one context-wide Runtime::host_total_tasks before an older
+    // eager task or captured node executes.
+    int32_t host_total_tasks{0};
+    uint32_t reserved{0};
 };
 
 /** One immutable source span and its offset within a mutable execution slot. */
@@ -123,9 +129,9 @@ struct alignas(8) HbgLaunchBlobHeader {
 };
 
 static_assert(sizeof(HbgExecutionBinding) == 64, "HBG binding ABI changed");
-static_assert(sizeof(HbgInvocationIdentity) == 32, "HBG invocation identity ABI changed");
+static_assert(sizeof(HbgInvocationIdentity) == 40, "HBG invocation identity ABI changed");
 static_assert(sizeof(HbgLaunchRegion) == 40, "HBG region ABI changed");
-static_assert(sizeof(HbgLaunchBlobHeader) == 152, "HBG launch header ABI changed");
+static_assert(sizeof(HbgLaunchBlobHeader) == 160, "HBG launch header ABI changed");
 static_assert(offsetof(HbgLaunchBlobHeader, inline_payload_addr) == 40, "HBG placeholder offset changed");
 static_assert(offsetof(HbgLaunchBlobHeader, binding) == 56, "HBG execution binding offset changed");
 static_assert(offsetof(HbgLaunchBlobHeader, identity) == 120, "HBG invocation identity offset changed");
@@ -195,13 +201,15 @@ hbg_invocation_identity_matches(const HbgInvocationIdentity &actual, const HbgIn
     return actual.callable_hash == expected.callable_hash &&
            actual.argument_snapshot_hash == expected.argument_snapshot_hash &&
            actual.function_binding_hash == expected.function_binding_hash &&
-           actual.tensor_count == expected.tensor_count && actual.scalar_count == expected.scalar_count;
+           actual.tensor_count == expected.tensor_count && actual.scalar_count == expected.scalar_count &&
+           actual.host_total_tasks == expected.host_total_tasks && actual.reserved == expected.reserved;
 }
 
 inline bool hbg_valid_invocation_identity(const HbgInvocationIdentity &identity) noexcept {
     return identity.callable_hash != 0 && identity.function_binding_hash != 0 &&
            identity.tensor_count <= static_cast<uint32_t>(CHIP_MAX_TENSOR_ARGS) &&
-           identity.scalar_count <= static_cast<uint32_t>(CHIP_MAX_SCALAR_ARGS);
+           identity.scalar_count <= static_cast<uint32_t>(CHIP_MAX_SCALAR_ARGS) && identity.host_total_tasks >= 0 &&
+           identity.reserved == 0;
 }
 
 inline uint64_t hbg_destination_base(const HbgExecutionBinding &binding, HbgLaunchRegionKind kind) noexcept {

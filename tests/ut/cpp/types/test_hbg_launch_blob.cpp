@@ -14,16 +14,19 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "hbg_launch_blob.h"
 #include "hbg_launch_blob_builder.h"
+#include "hbg_graph_plan.h"
 #include "hbg_restore.h"
 
 namespace {
 
+using simpler::hbg::build_hbg_graph_plan;
 using simpler::hbg::build_hbg_launch_blob;
 using simpler::hbg::hbg_inline_payload;
 using simpler::hbg::hbg_launch_regions;
@@ -32,6 +35,7 @@ using simpler::hbg::HBG_REGION_REQUIRED;
 using simpler::hbg::HbgExecutionBinding;
 using simpler::hbg::HbgExecutionSlotRegistration;
 using simpler::hbg::HbgExecutionSlotStatus;
+using simpler::hbg::HbgGraphPlan;
 using simpler::hbg::HbgHostRegionInput;
 using simpler::hbg::HbgInvocationIdentity;
 using simpler::hbg::HbgLaunchBlobAddressMode;
@@ -131,6 +135,7 @@ HbgInvocationIdentity make_identity() {
     identity.function_binding_hash = 0x9999aaaabbbbccccULL;
     identity.tensor_count = 2;
     identity.scalar_count = 1;
+    identity.host_total_tasks = 3;
     return identity;
 }
 
@@ -194,6 +199,67 @@ TEST(HbgLaunchBlob, SerializesAnIndependentCanonicalSnapshot) {
     const uint8_t snapshotted_first_byte = payload[regions[0].source_offset];
     sources.sm[0] ^= 0xff;
     EXPECT_EQ(payload[regions[0].source_offset], snapshotted_first_byte);
+}
+
+TEST(HbgGraphPlan, OwnsCanonicalBytesAndProducesFreshWritableTaskSnapshots) {
+    Sources sources;
+    sources.sm.fill(0x31);
+    sources.arena.fill(0x72);
+    const HbgExecutionBinding binding = make_binding(sources);
+    const HbgInvocationIdentity identity = make_identity();
+    std::unique_ptr<const HbgGraphPlan> plan;
+
+    ASSERT_EQ(build_hbg_graph_plan(binding, identity, 19, make_inputs(sources), &plan), HbgLaunchBlobStatus::Ok);
+    ASSERT_NE(plan, nullptr);
+    EXPECT_EQ(plan->binding().slot_generation, binding.slot_generation);
+    EXPECT_EQ(plan->identity().host_total_tasks, identity.host_total_tasks);
+    EXPECT_EQ(plan->plan_generation(), 19u);
+    EXPECT_NE(plan->plan_hash(), 0u);
+
+    sources.sm.fill(0xee);
+    sources.arena.fill(0xdd);
+    std::vector<uint8_t> first;
+    std::vector<uint8_t> second;
+    ASSERT_EQ(plan->serialize(&first), HbgLaunchBlobStatus::Ok);
+    ASSERT_EQ(plan->serialize(&second), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(first, second);
+
+    const auto *header = reinterpret_cast<const HbgLaunchBlobHeader *>(first.data());
+    const HbgLaunchRegion *regions = hbg_launch_regions(header);
+    const uint8_t *payload = hbg_inline_payload(header);
+    EXPECT_EQ(header->plan_hash, plan->plan_hash());
+    EXPECT_EQ(payload[regions[0].source_offset], 0x31);
+    EXPECT_EQ(payload[regions[1].source_offset], 0x72);
+
+    HostArgsPlaceholder placeholder{};
+    ASSERT_EQ(make_hbg_launch_placeholder(first.data(), first.size(), &placeholder), HbgLaunchBlobStatus::Ok);
+    const uint64_t patched = reinterpret_cast<uint64_t>(first.data()) + placeholder.data_offset;
+    std::memcpy(first.data() + placeholder.addr_offset, &patched, sizeof(patched));
+    EXPECT_NE(first, second);
+
+    std::vector<uint8_t> third;
+    ASSERT_EQ(plan->serialize(&third), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(third, second);
+}
+
+TEST(HbgGraphPlan, FailedBuildDoesNotReplaceAnExistingOwner) {
+    Sources sources;
+    std::unique_ptr<const HbgGraphPlan> plan;
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), make_identity(), 23, make_inputs(sources), &plan),
+        HbgLaunchBlobStatus::Ok
+    );
+    const HbgGraphPlan *const original = plan.get();
+    const uint64_t original_hash = plan->plan_hash();
+
+    std::vector<HbgHostRegionInput> invalid = make_inputs(sources);
+    invalid[0].data = nullptr;
+    EXPECT_EQ(
+        build_hbg_graph_plan(make_binding(sources), make_identity(), 24, invalid, &plan),
+        HbgLaunchBlobStatus::InvalidRegion
+    );
+    EXPECT_EQ(plan.get(), original);
+    EXPECT_EQ(plan->plan_hash(), original_hash);
 }
 
 TEST(HbgLaunchBlob, DistinguishesHostAndRuntimePatchedPointerStates) {
@@ -349,6 +415,22 @@ TEST(HbgLaunchBlob, RejectsTruncationHeaderAndGenerationCorruption) {
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
         HbgLaunchBlobStatus::InvalidIdentity
     );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->identity.host_total_tasks = -1;
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidIdentity
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->identity.reserved = 1;
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidIdentity
+    );
 }
 
 TEST(HbgLaunchBlob, RejectsPartialOrOverlappingRestoreImagesBeforeHashing) {
@@ -401,6 +483,14 @@ TEST(HbgLaunchBlob, HashExcludesPlaceholderButCoversIdentityDescriptorsAndPayloa
     blob = make_blob();
     header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
     ++header->identity.argument_snapshot_hash;
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::HashMismatch
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    ++header->identity.host_total_tasks;
     EXPECT_EQ(
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
         HbgLaunchBlobStatus::HashMismatch

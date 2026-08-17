@@ -31,7 +31,7 @@ struct alignas(8) HbgRestoreCommit {
     HbgInvocationIdentity identity{};
 };
 
-static_assert(sizeof(HbgRestoreCommit) == 56, "HBG restore commit ABI changed");
+static_assert(sizeof(HbgRestoreCommit) == 64, "HBG restore commit ABI changed");
 static_assert(std::is_trivially_copyable_v<HbgRestoreCommit>, "HBG restore commit must be byte-copyable");
 
 enum class HbgRestoreStatus : uint32_t {

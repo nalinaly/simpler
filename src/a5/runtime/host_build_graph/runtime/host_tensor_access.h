@@ -80,6 +80,14 @@ bool host_tensor_write(uint64_t dev_addr, const void *src, uint64_t bytes);
 void host_tensor_access_reset(int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size));
 
 /**
+ * Open a registration window that permits host-orchestration reads but rejects
+ * every set_tensor_data write before mutating either a mapped device buffer or
+ * a mirror. HBG L1 uses this mode because external tensors belong to the
+ * caller and no caller-stream-ordered write-back protocol exists yet.
+ */
+void host_tensor_access_reset_read_only();
+
+/**
  * Register `[dev_base, dev_base + size)` as reachable from the host at
  * `host_view`.
  *
