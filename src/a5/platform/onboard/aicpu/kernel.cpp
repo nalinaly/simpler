@@ -9,9 +9,11 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 #include <cstdio>
+#include <cstring>
 
 #include "common/unified_log.h"
 #include "common/kernel_args.h"
+#include "l1_aicpu_args.h"
 #include "common/platform_config.h"
 #include "aicpu/aicpu_device_config.h"
 #include "aicpu/dep_gen_collector_aicpu.h"
@@ -40,6 +42,8 @@
 // simpler_aicpu_register_callable is NOT declared/forwarded here: it is
 // exported directly by the TMARB runtime (host_build_graph does not export it).
 extern "C" int aicpu_execute(Runtime *arg);
+extern "C" __attribute__((weak)) int
+aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id);
 
 /**
  * AICPU kernel main execution entry point.
@@ -54,15 +58,9 @@ extern "C" int aicpu_execute(Runtime *arg);
  * @param arg Pointer to the front-less KernelArgs payload (runtime_args @ 0)
  * @return 0 on success, non-zero on error
  */
-extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *arg) {
+static int ExecuteAicpuKernel(const KernelArgs *k_args, const L1AicpuInvocationArgs *l1_invocation) {
     // Log severity was snapshot once by simpler_aicpu_init at worker init; the
     // resident SO keeps it across launches, so exec does not re-snapshot.
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
-        return -1;
-    }
-
-    KernelArgs *k_args = reinterpret_cast<KernelArgs *>(arg);
     Runtime *runtime = k_args->runtime_args;
 
     if (runtime == nullptr) {
@@ -123,15 +121,49 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     set_platform_phase_base(k_args->device_wall_data_base);
     AicpuPhaseScope run_wall(AicpuPhase::RunWall);
 
-    int rc = aicpu_execute(runtime);
+    int rc = l1_invocation == nullptr ?
+                 aicpu_execute(runtime) :
+                 aicpu_execute_l1(runtime, &l1_invocation->orch_args, l1_invocation->callable_id);
     if (rc != 0) {
-        LOG_ERROR("simpler_aicpu_exec: aicpu_execute failed with rc=%d", rc);
+        LOG_ERROR("AICPU executor failed with rc=%d", rc);
         return rc;
     }
 
     // Run-wall end is stamped by run_wall's destructor (covers the early return
     // above too); host reduces max(end) - min(start) → ns.
     return rc;
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
+        return -1;
+    }
+    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr);
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "Invalid L1 invocation arguments: null pointer");
+        return -1;
+    }
+    // aclrtLaunchKernelWithHostArgs only guarantees a runtime-owned byte
+    // image; the task-argument pool is not required to preserve alignas(64).
+    // Copy to an aligned local object before any typed access.
+    L1AicpuInvocationArgs invocation{};
+    std::memcpy(&invocation, arg, sizeof(invocation));
+    if (!IsValidL1AicpuInvocation(invocation)) {
+        LOG_ERROR(
+            "Invalid L1 invocation ABI: version=%u size=%u reserved=%u", invocation.abi_version, invocation.struct_size,
+            invocation.reserved
+        );
+        return -1;
+    }
+    if (aicpu_execute_l1 == nullptr) {
+        LOG_ERROR("%s", "L1 AICPU execution is unavailable in this runtime");
+        return -1;
+    }
+    return ExecuteAicpuKernel(&invocation.kernel_args, &invocation);
 }
 
 /**

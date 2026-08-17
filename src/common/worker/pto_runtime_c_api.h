@@ -287,10 +287,12 @@ int simpler_l1_init(
 /**
  * Prepare one callable outside ACLGraph capture on a borrowed caller stream.
  * The stream is never owned or destroyed by PyPTO. Preparation may allocate
- * persistent state but must not internally synchronize.
+ * persistent state but must not internally synchronize. `callable_size` is
+ * the exact byte length of the canonical ChipCallable image; the runtime
+ * validates every flexible-array offset before hashing or uploading it.
  */
 int simpler_l1_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
 );
 
 /**

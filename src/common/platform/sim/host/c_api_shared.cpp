@@ -400,11 +400,12 @@ int simpler_l1_init(
 }
 
 int simpler_l1_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
 ) {
     (void)ctx;
     (void)callable_id;
     (void)callable;
+    (void)callable_size;
     (void)caller_stream;
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }

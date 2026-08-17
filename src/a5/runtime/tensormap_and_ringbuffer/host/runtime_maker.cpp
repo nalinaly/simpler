@@ -396,6 +396,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
     }
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
+    out->scalar_count = callable->scalar_count();
 
     LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
@@ -708,10 +709,8 @@ static bool build_runtime_image(
     return true;
 }
 
-static int bind_cached_runtime_image(
-    Runtime *runtime, const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe,
-    const ChipStorageTaskArgs &device_args
-) {
+static int
+bind_cached_runtime_context(Runtime *runtime, const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe) {
     if (api->lookup_prebuilt_runtime_arena_cache == nullptr) {
         return 1;
     }
@@ -730,12 +729,22 @@ static int bind_cached_runtime_image(
         return 1;
     }
 
-    runtime->set_orch_args(device_args);
     (void)cached_image;
     (void)cached_image_size;
     runtime->set_gm_sm_ptr(sm_ptr);
     runtime->set_prebuilt_arena(runtime_arena_dev, runtime_off);
     return 0;
+}
+
+static int bind_cached_runtime_image(
+    Runtime *runtime, const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe,
+    const ChipStorageTaskArgs &device_args
+) {
+    int rc = bind_cached_runtime_context(runtime, api, probe);
+    if (rc == 0) {
+        runtime->set_orch_args(device_args);
+    }
+    return rc;
 }
 
 static void store_prebuilt_runtime_image(
@@ -914,6 +923,40 @@ extern "C" int bind_callable_to_runtime_impl(
     return 0;
 }
 
+extern "C" int prepare_l1_runtime_impl(
+    Runtime *runtime, const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap,
+    const uint64_t *ring_dep_pool
+) {
+    if (runtime == nullptr || api == nullptr) {
+        LOG_ERROR("prepare_l1_runtime_impl: runtime and HostApi must be non-null");
+        return -1;
+    }
+
+    ArenaSizingConfig sizing;
+    if (!resolve_arena_sizing(ring_task_window, ring_heap, ring_dep_pool, &sizing)) {
+        return -1;
+    }
+    apply_orch_sched_env_flags(runtime);
+
+    PrebuiltRuntimeArenaCacheProbe cache_probe = make_prebuilt_runtime_arena_cache_probe(sizing);
+    int cache_rc = bind_cached_runtime_context(runtime, api, cache_probe);
+    if (cache_rc < 0) {
+        return -1;
+    }
+    if (cache_rc != 0) {
+        StaticArenaPtrs ptrs;
+        PTO2RuntimeArenaLayout layout;
+        if (!build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout)) {
+            return -1;
+        }
+        runtime->set_gm_sm_ptr(ptrs.gm_sm);
+        runtime->set_prebuilt_arena(ptrs.runtime_arena_dev, layout.offsets.off_runtime);
+    }
+
+    runtime->set_orch_args(ChipStorageTaskArgs{});
+    return 0;
+}
+
 /**
  * Eagerly populate the prebuilt runtime-arena cache for a run config, so the
  * first bind_callable_to_runtime_impl with the same sizing hits the cache and
@@ -1055,12 +1098,21 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 
 // Extra AICPU entry symbols this runtime exports beyond the base
 // {simpler_aicpu_exec, simpler_aicpu_init}. TMARB resolves orchestration on the
-// device, so it exports simpler_aicpu_register_callable; the common AICPU loader
-// queries this so it carries no runtime-specific symbol knowledge.
+// device and exposes the L1 invocation entry in addition to callable
+// registration; the common AICPU loader queries this list so it carries no
+// runtime-specific symbol knowledge.
 extern "C" int l1_runtime_supported_impl(void) { return 1; }
 
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
     static const char *const kExtra[] = {"simpler_aicpu_register_callable"};
+    if (count != nullptr) {
+        *count = sizeof(kExtra) / sizeof(kExtra[0]);
+    }
+    return kExtra;
+}
+
+extern "C" const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
+    static const char *const kExtra[] = {"simpler_aicpu_l1_register_callable", "simpler_aicpu_l1_exec"};
     if (count != nullptr) {
         *count = sizeof(kExtra) / sizeof(kExtra[0]);
     }

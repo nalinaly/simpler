@@ -35,6 +35,7 @@
 
 // Include HAL constants from CANN (header only, library loaded dynamically)
 #include "ascend_hal.h"
+#include "aicore_handshake_protocol.h"
 #include "aicpu_topology_probe.h"
 #include "callable.h"
 #include "callable_protocol.h"
@@ -240,6 +241,57 @@ void DeviceRunner::adopt_native_run_thread_state(void *snapshot) noexcept {
 
 void DeviceRunner::destroy_native_run_thread_state(void *snapshot) noexcept {
     dep_gen_host_graph_destroy_capture(snapshot);
+}
+
+int DeviceRunner::prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) {
+    int rc = prepare_launch_shape(runtime, config);
+    if (rc != 0) return rc;
+
+    rc = init_aicore_register_addresses(
+        &kernel_args.args.regs, static_cast<uint64_t>(device_id_), mem_alloc_, AicoreRegKind::Ctrl
+    );
+    if (rc != 0) {
+        LOG_ERROR("L1 init_aicore_register_addresses(Ctrl) failed: %d", rc);
+        return rc;
+    }
+
+    std::vector<pto::a2a3::AicpuLogicalCpu> user_cpus;
+    std::vector<int32_t> allowed;
+    if (!pto::a2a3::probe_aicpu_topology(static_cast<uint32_t>(device_id_), user_cpus)) {
+        LOG_ERROR("L1 A2/A3 AICPU topology probe failed");
+        return -1;
+    }
+    const int resolved_aicpu = resolve_aicpu_thread_num(
+        config.aicpu_thread_num, static_cast<int>(user_cpus.size()), PLATFORM_DEFAULT_AICPU_THREAD_NUM
+    );
+    if (resolved_aicpu < 0 || !pto::a2a3::compute_allowed_cpus(user_cpus, resolved_aicpu, allowed)) {
+        LOG_ERROR(
+            "L1 A2/A3 AICPU topology has %zu user cpus and cannot fit %d active threads", user_cpus.size(),
+            resolved_aicpu
+        );
+        return -1;
+    }
+    if (allowed.size() > runtime.aicpu_allowed_cpus_capacity()) {
+        LOG_ERROR("L1 A2/A3 allowed cpu count %zu exceeds runtime capacity", allowed.size());
+        return -1;
+    }
+    int32_t *allowed_cpus = runtime.get_aicpu_allowed_cpus();
+    for (size_t i = 0; i < allowed.size(); ++i)
+        allowed_cpus[i] = allowed[i];
+    runtime.set_aicpu_allowed_cpu_count(static_cast<int32_t>(allowed.size()));
+    runtime.set_aicpu_thread_num(resolved_aicpu);
+    runtime.set_aicpu_launch_count(
+        std::min<int32_t>(static_cast<int32_t>(user_cpus.size()), PLATFORM_MAX_AICPU_THREADS_JUST_FOR_LAUNCH)
+    );
+
+    rc = kernel_args_init_ffts_base_addr(kernel_args);
+    if (rc != 0) {
+        LOG_ERROR("L1 init_ffts_base_addr failed: %d", rc);
+        return rc;
+    }
+    kernel_args.args.enable_profiling_flag = SIMPLER_DFX_FLAG_NONE;
+    activate_launch_shape(runtime);
+    return 0;
 }
 
 int DeviceRunner::provision_native_run_resources(uint32_t pipeline_slot) {
@@ -588,11 +640,13 @@ int DeviceRunner::launch_run(Runtime &runtime, int num_aicore, int launch_aicpu_
     // workers region persists across runs in the pooled arena. Clearing each
     // worker's aicore_done before the AICore kernel launches keeps the AICPU's
     // handshake sweep from reading a prior run's report — which would open a
-    // window on that run's physical_core_id. Only aicore_done needs clearing; the
-    // AICore overwrites physical_core_id/core_type in the same report.
+    // window on that run's physical_core_id. aicpu_ready is the error-only
+    // pre-window CANCEL channel and must also start at WAIT; the AICore
+    // overwrites physical_core_id/core_type in the same report.
     {
         Handshake *workers = runtime.get_workers();
         for (int i = 0; i < num_aicore; i++) {
+            workers[i].aicpu_ready = AICORE_PRE_WINDOW_WAIT;
             workers[i].aicore_done = 0;
         }
     }

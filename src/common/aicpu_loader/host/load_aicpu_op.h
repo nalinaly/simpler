@@ -12,7 +12,7 @@
  * @file load_aicpu_op.h
  * @brief Host-side AICPU operation loader.
  *
- * Three-phase architecture:
+ * L2/L3 owned-device architecture:
  *
  *   1. BootstrapDispatcher (per-DeviceRunner, idempotent across instances in
  *      the same process via a content-fingerprint cache): bundles dispatcher
@@ -40,10 +40,19 @@
  * See common/aicpu_loader/device/aicpu_dispatcher.h for the bootstrap protocol
  * details (extended DeviceArgs with inner_so_bin/inner_so_len,
  * fingerprint-named preinstall files).
+ *
+ * L1 borrowed-device architecture:
+ *
+ *   1. InitFromData loads the AICPU runtime SO directly from its host byte
+ *      image with cpuKernelMode=2 and registers every entry with
+ *      aclrtRegisterCpuFunc. No dispatcher task, device-side file, JSON, or
+ *      stream synchronization participates in this path.
+ *
+ *   2. LaunchWithHostArgs enqueues a runtime-owned argument snapshot on the
+ *      caller-provided stream through aclrtLaunchKernelWithHostArgs.
  */
 
-#ifndef COMMON_HOST_LOAD_AICPU_OP_H_
-#define COMMON_HOST_LOAD_AICPU_OP_H_
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -119,8 +128,25 @@ public:
      */
     int Init(const std::vector<std::string> &extra_symbols);
 
-    /** @brief Release binary handle + function handles + temporary JSON. */
-    void Finalize();
+    /**
+     * @brief Load the runtime SO from host bytes and register its AICPU entries.
+     *
+     * @param inner_so_data  Runtime SO bytes (caller-owned, must outlive call)
+     * @param inner_so_len   Runtime SO size
+     * @param extra_symbols  Runtime-specific entries beyond {RunName, InitName}
+     * @return 0 on success, error code on failure
+     */
+    int InitFromData(const void *inner_so_data, size_t inner_so_len, const std::vector<std::string> &extra_symbols);
+
+    /**
+     * @brief Release binary handle, function handles, and temporary JSON.
+     *
+     * A data-loaded borrowed-device binary remains owned when unload fails so
+     * explicit L1 close can retry. A file-loaded owned-device binary clears
+     * its host handle even when RTS reports an unload failure because the L2
+     * teardown immediately destroys that RTS context.
+     */
+    int Finalize();
 
     /**
      * @brief Launch a runtime SO entry point via rtsLaunchCpuKernel.
@@ -135,8 +161,29 @@ public:
      */
     int LaunchBuiltInOp(rtStream_t stream, void *args, size_t args_size, int aicpu_num, const std::string &func_name);
 
+    /**
+     * @brief Launch a registered AICPU entry with a runtime-owned host-args snapshot.
+     *
+     * @param stream       Caller-owned stream
+     * @param host_args    Host argument image copied by the runtime during enqueue
+     * @param args_size    Size of the host argument image
+     * @param aicpu_num    Number of AICPU blocks
+     * @param func_name    Lookup key in func_handles_ (KernelNames::*)
+     * @return 0 on success, error code on failure
+     */
+    int LaunchWithHostArgs(
+        rtStream_t stream, const void *host_args, size_t args_size, int aicpu_num, const char *func_name
+    );
+
 private:
+    enum class BinaryLoadMode : uint8_t {
+        None,
+        RtsFile,
+        AclData,
+    };
+
     void *binary_handle_ = nullptr;
+    BinaryLoadMode binary_load_mode_ = BinaryLoadMode::None;
     std::unordered_map<std::string, rtFuncHandle> func_handles_;
     std::string json_file_path_;
     uint64_t inner_fp_ = 0;
@@ -147,6 +194,7 @@ private:
     std::vector<std::string> kernel_symbols_;
 
     bool GenerateAicpuOpJson(const std::string &json_path, const std::string &kernel_so);
+    void SetKernelSymbols(const std::vector<std::string> &extra_symbols);
     int AicpuKernelLaunch(rtFuncHandle func_handle, rtStream_t stream, void *args, size_t args_size, int aicpu_num);
 };
 
@@ -156,8 +204,8 @@ namespace KernelNames {
 constexpr const char *RunName = "simpler_aicpu_exec";   // multi-threaded exec
 constexpr const char *InitName = "simpler_aicpu_init";  // per-device one-shot invariants
 constexpr const char *RegisterCallableName = "simpler_aicpu_register_callable";
+constexpr const char *L1RegisterCallableName = "simpler_aicpu_l1_register_callable";
+constexpr const char *L1RunName = "simpler_aicpu_l1_exec";
 }  // namespace KernelNames
 
 }  // namespace host
-
-#endif  // COMMON_HOST_LOAD_AICPU_OP_H_

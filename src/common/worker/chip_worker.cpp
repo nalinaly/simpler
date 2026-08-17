@@ -16,6 +16,7 @@
 #include <dlfcn.h>
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -80,6 +81,105 @@ std::vector<uint8_t> read_binary_file(const std::string &path) {
 
 }  // namespace
 
+struct ChipWorker::L1DispatchState {
+    L1DispatchState(DeviceContextHandle device_context, SimplerL1PrepareCallableFn prepare, SimplerL1LaunchFn launch) :
+        device_context(device_context),
+        prepare(prepare),
+        launch(launch) {}
+
+    std::mutex mutex;
+    DeviceContextHandle device_context{nullptr};
+    SimplerL1PrepareCallableFn prepare{nullptr};
+    SimplerL1LaunchFn launch{nullptr};
+    bool closed{false};
+};
+
+struct ChipWorker::L1QueuedCall {
+    enum class Kind : uint8_t {
+        Prepare = 0,
+        Launch,
+    };
+
+    L1QueuedCall(
+        std::shared_ptr<L1DispatchState> dispatch_state, int32_t callable_id, const void *callable, size_t callable_size
+    ) :
+        dispatch_state_(std::move(dispatch_state)),
+        kind_(Kind::Prepare),
+        callable_id_(callable_id),
+        callable_(static_cast<const uint8_t *>(callable), static_cast<const uint8_t *>(callable) + callable_size) {
+        initialize_abi();
+    }
+
+    L1QueuedCall(
+        std::shared_ptr<L1DispatchState> dispatch_state, int32_t callable_id, const ChipStorageTaskArgs &args
+    ) :
+        dispatch_state_(std::move(dispatch_state)),
+        kind_(Kind::Launch),
+        callable_id_(callable_id),
+        args_(args) {
+        initialize_abi();
+    }
+
+    static void retain(void *opaque) noexcept {
+        if (opaque != nullptr) {
+            static_cast<L1QueuedCall *>(opaque)->ref_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    static void release(void *opaque) noexcept {
+        if (opaque == nullptr) return;
+        auto *self = static_cast<L1QueuedCall *>(opaque);
+        if (self->ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            delete self;
+        }
+    }
+
+    static int invoke(void *opaque, uint64_t caller_stream) noexcept {
+        if (opaque == nullptr || caller_stream == 0) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        auto *self = static_cast<L1QueuedCall *>(opaque);
+        try {
+            std::lock_guard<std::mutex> lock(self->dispatch_state_->mutex);
+            L1DispatchState &state = *self->dispatch_state_;
+            if (state.closed || state.device_context == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+            if (self->kind_ == Kind::Prepare) {
+                if (state.prepare == nullptr || self->callable_.empty()) return PTO_RUNTIME_ERR_INVALID_STATE;
+                return state.prepare(
+                    state.device_context, self->callable_id_, self->callable_.data(), self->callable_.size(),
+                    reinterpret_cast<void *>(caller_stream)
+                );
+            }
+            if (state.launch == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+            return state.launch(
+                state.device_context, self->callable_id_, &self->args_, reinterpret_cast<void *>(caller_stream)
+            );
+        } catch (...) {
+            return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        }
+    }
+
+    SimplerL1QueueCall *abi() { return &abi_; }
+
+private:
+    void initialize_abi() {
+        abi_ = {
+            SIMPLER_L1_QUEUE_CALL_ABI_VERSION,
+            static_cast<uint32_t>(sizeof(SimplerL1QueueCall)),
+            this,
+            &L1QueuedCall::retain,
+            &L1QueuedCall::release,
+            &L1QueuedCall::invoke,
+        };
+    }
+
+    std::atomic<uint32_t> ref_count_{1};
+    SimplerL1QueueCall abi_{};
+    std::shared_ptr<L1DispatchState> dispatch_state_;
+    Kind kind_;
+    int32_t callable_id_;
+    std::vector<uint8_t> callable_;
+    ChipStorageTaskArgs args_{};
+};
+
 ChipWorker::RuntimeStorage::RuntimeStorage(size_t size, size_t alignment) {
     void *storage = nullptr;
     if (posix_memalign(&storage, alignment, size) != 0) {
@@ -104,11 +204,37 @@ ChipWorker::RuntimeStorage &ChipWorker::RuntimeStorage::operator=(RuntimeStorage
     return *this;
 }
 
-ChipWorker::~ChipWorker() { finalize(); }
+ChipWorker::~ChipWorker() {
+    if (initialized_ && l1_mode_ && !finalized_) {
+        std::fprintf(
+            stderr, "WARNING: borrowed L1 ChipWorker destroyed without explicit finalize(); "
+                    "pinned runtime resources are intentionally leaked to avoid invalidating a live ACLGraph.\n"
+        );
+        return;
+    }
+    finalize();
+}
 
 void ChipWorker::init(
     const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
     const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config, uint32_t dma_workspace_mask
+) {
+    init_impl(
+        host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id, prewarm_config, dma_workspace_mask, false
+    );
+}
+
+void ChipWorker::init_l1(
+    const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
+    const std::string &dispatcher_path, int device_id, const CallConfig &config
+) {
+    init_impl(host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id, &config, 0, true);
+}
+
+void ChipWorker::init_impl(
+    const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
+    const std::string &dispatcher_path, int device_id, const CallConfig *config, uint32_t dma_workspace_mask,
+    bool borrowed_l1
 ) {
     if (finalized_) {
         throw std::runtime_error("ChipWorker already finalized; cannot reinitialize");
@@ -275,12 +401,16 @@ void ChipWorker::init(
             dispatcher_bytes = read_binary_file(dispatcher_path);
         }
         const uint8_t *dispatcher_ptr = dispatcher_bytes.empty() ? nullptr : dispatcher_bytes.data();
-        // `prewarm_config` (fork-constant, COW-delivered) rides simpler_init: the
+        // `config` (fork-constant, COW-delivered) rides simpler_init: the
         // platform builds + caches the prebuilt runtime-arena for its ring sizing
         // right after the device comes up. Null => no prewarm.
-        init_rc = simpler_init_fn_(
+        if (borrowed_l1 && (config == nullptr || simpler_l1_supported_fn_(device_ctx_) == 0)) {
+            throw std::runtime_error("selected host runtime does not support borrowed L1 execution");
+        }
+        SimplerInitFn selected_init = borrowed_l1 ? simpler_l1_init_fn_ : simpler_init_fn_;
+        init_rc = selected_init(
             device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(), aicore_bytes.size(),
-            dispatcher_ptr, dispatcher_bytes.size(), prewarm_config
+            dispatcher_ptr, dispatcher_bytes.size(), config
         );
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
@@ -336,6 +466,23 @@ void ChipWorker::init(
         throw;
     }
     if (init_rc != 0) {
+        int rollback_rc = 0;
+        if (borrowed_l1 && device_ctx_ != nullptr && finalize_device_fn_ != nullptr) {
+            rollback_rc = finalize_device_fn_(device_ctx_);
+        }
+        if (borrowed_l1 && rollback_rc != 0) {
+            // Native L1 initialization may have retained a stream/event after
+            // a failed rollback. Keep the context and DSO loaded so the caller
+            // can explicitly retry finalize(); unloading here would leave a
+            // live C++ object whose code/vtable no longer exists.
+            device_id_ = device_id;
+            initialized_ = true;
+            l1_mode_ = true;
+            throw std::runtime_error(
+                "simpler_l1_init failed with code " + std::to_string(init_rc) + "; cleanup failed with code " +
+                std::to_string(rollback_rc) + " and explicit finalize() is required"
+            );
+        }
         // Symmetric teardown: drop the device context, clear all dlsym'd
         // function pointers, dlclose, and discard cached binaries so the
         // ChipWorker is back to its zero-initialized state. Mirror finalize()
@@ -401,6 +548,17 @@ void ChipWorker::init(
     // of a runtime this worker is not bound to.
     pipeline_contract_ = resolved_contract;
     initialized_ = true;
+    l1_mode_ = borrowed_l1;
+    if (borrowed_l1) {
+        try {
+            auto dispatch_state =
+                std::make_shared<L1DispatchState>(device_ctx_, simpler_l1_prepare_callable_fn_, simpler_l1_launch_fn_);
+            std::atomic_store_explicit(&l1_dispatch_state_, std::move(dispatch_state), std::memory_order_release);
+        } catch (...) {
+            finalize();
+            throw;
+        }
+    }
 
     // Provision async-DMA workspaces (SDMA) once, now that the device is up. The
     // addresses are latched into the resident KernelArgs so every run carries
@@ -419,13 +577,30 @@ void ChipWorker::init(
 }
 
 void ChipWorker::finalize() {
+    std::shared_ptr<L1DispatchState> dispatch_state =
+        std::atomic_load_explicit(&l1_dispatch_state_, std::memory_order_acquire);
+    std::unique_lock<std::mutex> dispatch_lock;
+    if (dispatch_state != nullptr) {
+        dispatch_lock = std::unique_lock<std::mutex>(dispatch_state->mutex);
+        dispatch_state->closed = true;
+    }
     cleanup_native_runs_noexcept();
     // Defensive: if the user never called comm_destroy, reclaim all owned
     // communicator handles and streams before tearing down the device context.
     clear_comm_sessions();
 
     if (device_ctx_ != nullptr && finalize_device_fn_ != nullptr && initialized_) {
-        finalize_device_fn_(device_ctx_);
+        const int finalize_rc = finalize_device_fn_(device_ctx_);
+        if (l1_mode_ && finalize_rc != 0) {
+            // Keep device_ctx_, lib_handle_, and every function pointer valid.
+            // The native L1 state deliberately retains any handle whose
+            // destruction failed, so a later explicit close can retry.
+            if (dispatch_lock.owns_lock()) dispatch_lock.unlock();
+            throw std::runtime_error(
+                "borrowed L1 finalize failed with code " + std::to_string(finalize_rc) +
+                "; runtime remains loaded for an explicit retry"
+            );
+        }
     }
     if (device_ctx_ != nullptr && destroy_device_context_fn_ != nullptr) {
         destroy_device_context_fn_(device_ctx_);
@@ -485,8 +660,85 @@ void ChipWorker::finalize() {
     pipeline_generations_.reset();
     pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     initialized_ = false;
+    l1_mode_ = false;
     device_id_ = -1;
     finalized_ = true;
+    std::atomic_store_explicit(&l1_dispatch_state_, std::shared_ptr<L1DispatchState>{}, std::memory_order_release);
+    if (dispatch_lock.owns_lock()) dispatch_lock.unlock();
+}
+
+void ChipWorker::prepare_l1_callable(
+    int32_t callable_id, const void *callable, size_t callable_size, uint64_t caller_stream
+) {
+    if (callable == nullptr || callable_size == 0 || caller_stream == 0) {
+        throw std::runtime_error("prepare_l1_callable requires a non-empty callable and non-null caller stream");
+    }
+    std::shared_ptr<L1DispatchState> dispatch_state =
+        std::atomic_load_explicit(&l1_dispatch_state_, std::memory_order_acquire);
+    if (dispatch_state == nullptr) {
+        throw std::runtime_error("prepare_l1_callable requires an initialized L1 ChipWorker");
+    }
+    std::lock_guard<std::mutex> lock(dispatch_state->mutex);
+    if (dispatch_state->closed || dispatch_state->device_context == nullptr || dispatch_state->prepare == nullptr) {
+        throw std::runtime_error("prepare_l1_callable requires an open L1 ChipWorker");
+    }
+    const int rc = dispatch_state->prepare(
+        dispatch_state->device_context, callable_id, callable, callable_size, reinterpret_cast<void *>(caller_stream)
+    );
+    if (rc != 0) {
+        throw std::runtime_error("prepare_l1_callable failed with code " + std::to_string(rc));
+    }
+}
+
+void ChipWorker::launch_l1(int32_t callable_id, const ChipStorageTaskArgs *args, uint64_t caller_stream) {
+    if (args == nullptr || caller_stream == 0) {
+        throw std::runtime_error("launch_l1 requires args and a non-null caller stream");
+    }
+    std::shared_ptr<L1DispatchState> dispatch_state =
+        std::atomic_load_explicit(&l1_dispatch_state_, std::memory_order_acquire);
+    if (dispatch_state == nullptr) {
+        throw std::runtime_error("launch_l1 requires an initialized L1 ChipWorker");
+    }
+    std::lock_guard<std::mutex> lock(dispatch_state->mutex);
+    if (dispatch_state->closed || dispatch_state->device_context == nullptr || dispatch_state->launch == nullptr) {
+        throw std::runtime_error("launch_l1 requires an open L1 ChipWorker");
+    }
+    const int rc = dispatch_state->launch(
+        dispatch_state->device_context, callable_id, args, reinterpret_cast<void *>(caller_stream)
+    );
+    if (rc != 0) {
+        throw std::runtime_error("launch_l1 failed with code " + std::to_string(rc));
+    }
+}
+
+SimplerL1QueueCall *
+ChipWorker::make_l1_prepare_queue_call(int32_t callable_id, const void *callable, size_t callable_size) {
+    if (callable == nullptr || callable_size == 0) {
+        throw std::invalid_argument("make_l1_prepare_queue_call requires a non-empty callable snapshot");
+    }
+    std::shared_ptr<L1DispatchState> dispatch_state =
+        std::atomic_load_explicit(&l1_dispatch_state_, std::memory_order_acquire);
+    if (dispatch_state == nullptr) {
+        throw std::runtime_error("make_l1_prepare_queue_call requires an initialized L1 ChipWorker");
+    }
+    std::lock_guard<std::mutex> lock(dispatch_state->mutex);
+    if (dispatch_state->closed || dispatch_state->device_context == nullptr || dispatch_state->prepare == nullptr) {
+        throw std::runtime_error("make_l1_prepare_queue_call requires an open L1 ChipWorker");
+    }
+    return (new L1QueuedCall(std::move(dispatch_state), callable_id, callable, callable_size))->abi();
+}
+
+SimplerL1QueueCall *ChipWorker::make_l1_launch_queue_call(int32_t callable_id, const ChipStorageTaskArgs &args) {
+    std::shared_ptr<L1DispatchState> dispatch_state =
+        std::atomic_load_explicit(&l1_dispatch_state_, std::memory_order_acquire);
+    if (dispatch_state == nullptr) {
+        throw std::runtime_error("make_l1_launch_queue_call requires an initialized L1 ChipWorker");
+    }
+    std::lock_guard<std::mutex> lock(dispatch_state->mutex);
+    if (dispatch_state->closed || dispatch_state->device_context == nullptr || dispatch_state->launch == nullptr) {
+        throw std::runtime_error("make_l1_launch_queue_call requires an open L1 ChipWorker");
+    }
+    return (new L1QueuedCall(std::move(dispatch_state), callable_id, args))->abi();
 }
 
 void ChipWorker::register_callable(int32_t callable_id, const void *callable) {

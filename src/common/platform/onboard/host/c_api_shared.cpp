@@ -26,6 +26,7 @@
 
 #include "callable.h"
 #include "call_config.h"
+#include "chip_callable_layout.h"
 #include "device_runner_base.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
@@ -111,7 +112,10 @@ static int l1_destroy_hidden_stream(void *, void *stream) {
 static int l1_create_event(void *, void **event) {
     if (event == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     aclrtEvent created = nullptr;
-    const aclError rc = aclrtCreateEvent(&created);
+    // L1 events cross caller/hidden streams and must remain captureable.  A
+    // default event is not a cross-stream synchronization event on CANN and
+    // aclrtRecordEvent may reject it while ACLGraph capture is active.
+    const aclError rc = aclrtCreateEventExWithFlag(&created, ACL_EVENT_SYNC);
     if (rc == ACL_SUCCESS) {
         *event = created;
     }
@@ -498,7 +502,7 @@ int simpler_l1_init(
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
     if (ctx == nullptr || device_id < 0 || aicpu_binary == nullptr || aicpu_size == 0 || aicore_binary == nullptr ||
-        aicore_size == 0 || dispatcher_binary == nullptr || dispatcher_size == 0 || config == nullptr) {
+        aicore_size == 0 || config == nullptr || (dispatcher_binary == nullptr && dispatcher_size != 0)) {
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
 
@@ -522,9 +526,12 @@ int simpler_l1_init(
     try {
         std::vector<uint8_t> aicpu_vec(aicpu_binary, aicpu_binary + aicpu_size);
         std::vector<uint8_t> aicore_vec(aicore_binary, aicore_binary + aicore_size);
-        std::vector<uint8_t> dispatcher_vec(dispatcher_binary, dispatcher_binary + dispatcher_size);
+        std::vector<uint8_t> dispatcher_vec;
+        if (dispatcher_size != 0) {
+            dispatcher_vec.assign(dispatcher_binary, dispatcher_binary + dispatcher_size);
+        }
         return runner->initialize_l1_borrowed(
-            device_id, std::move(aicpu_vec), std::move(aicore_vec), std::move(dispatcher_vec), kL1RuntimeOps
+            device_id, std::move(aicpu_vec), std::move(aicore_vec), std::move(dispatcher_vec), *config, kL1RuntimeOps
         );
     } catch (...) {
         return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
@@ -532,27 +539,38 @@ int simpler_l1_init(
 }
 
 int simpler_l1_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
 ) {
-    (void)callable_id;
     if (l1_runtime_supported_impl() == 0) {
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
-    if (ctx == nullptr || callable == nullptr || caller_stream == nullptr) {
+    if (ctx == nullptr || callable == nullptr || callable_size == 0 || caller_stream == nullptr) {
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-    if (!runner->accepts_l1_calls()) {
+    if (!runner->accepts_l1_dispatch()) {
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
-    // No L1 callable state is graph-visible until asynchronous registration
-    // publishes it. The L2 register path is not a fallback: its AICPU helpers
-    // synchronize an internal stream and violate the borrowed L1 contract.
-    return PTO_RUNTIME_ERR_NOT_READY;
+    pthread_once(&g_runner_key_once, create_runner_key);
+    pthread_setspecific(g_runner_key, ctx);
+    auto tsd_guard = RAIIScopeGuard([]() {
+        pthread_setspecific(g_runner_key, nullptr);
+    });
+
+    try {
+        return runner->prepare_l1_callable_from_blob(
+            callable_id, reinterpret_cast<const ChipCallable *>(callable), callable_size,
+            reinterpret_cast<rtStream_t>(caller_stream), &g_host_api
+        );
+    } catch (const std::exception &e) {
+        LOG_ERROR("simpler_l1_prepare_callable failed: %s", e.what());
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    } catch (...) {
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
 }
 
 int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
-    (void)callable_id;
     if (l1_runtime_supported_impl() == 0) {
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
@@ -560,10 +578,12 @@ int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
-    if (!runner->accepts_l1_calls()) {
+    if (!runner->accepts_l1_dispatch()) {
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
-    return PTO_RUNTIME_ERR_NOT_READY;
+    return runner->launch_l1_callable(
+        callable_id, *reinterpret_cast<const ChipStorageTaskArgs *>(args), reinterpret_cast<rtStream_t>(caller_stream)
+    );
 }
 
 /* ===========================================================================
@@ -635,7 +655,8 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
             rc = runner->record_device_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
                 artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(),
-                artifacts.config_name.c_str(), std::move(kernel_addrs), std::move(artifacts.signature)
+                artifacts.config_name.c_str(), std::move(kernel_addrs), std::move(artifacts.signature),
+                artifacts.scalar_count
             );
             if (rc != 0) return rc;
             chip_buffer_guard.dismiss();

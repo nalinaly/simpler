@@ -58,10 +58,11 @@ struct ChildKernelAddr {
 struct CallableArtifacts {
     std::vector<ChildKernelAddr> kernel_addrs;
     // Chip-level entry-tensor directions, copied from ChipCallable::signature_[].
-    // Scalars are also present (ArgDirection::SCALAR) and follow the tensor
-    // entries. Consumed at bind time to decide H2D/D2H per tensor — see
-    // runtime_maker.cpp.
+    // Scalars are deliberately separate because signature_ is indexed 1:1
+    // with the tensor payload. Consumed at bind time to decide H2D/D2H per
+    // tensor — see runtime_maker.cpp.
     std::vector<ArgDirection> signature;
+    int32_t scalar_count{0};
     void *host_dlopen_handle{nullptr};  // hbg only
     void *host_orch_func_ptr{nullptr};  // hbg only
     uint64_t chip_buffer_hash{0};       // FNV-1a hash for the whole ChipCallable buffer

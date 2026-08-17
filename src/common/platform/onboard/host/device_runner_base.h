@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "arg_direction.h"
+#include "call_config.h"
 #include "callable.h"
 #include "common/device_phase.h"
 #include "common/dma_workspace.h"
@@ -70,8 +71,7 @@
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
 
-struct HostApi;     // common/host_api.h — fwd-declared to keep task_interface headers out
-struct CallConfig;  // task_interface/call_config.h — per-run config threaded into run()
+struct HostApi;  // common/host_api.h — fwd-declared to keep task_interface headers out
 class NativeRunLaunchSignal;
 
 /**
@@ -294,8 +294,24 @@ public:
      */
     int initialize_l1_borrowed(
         int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
-        std::vector<uint8_t> dispatcher_so_binary, const L1RuntimeOps &ops
+        std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops
     );
+
+    /**
+     * Atomically validate/upload/register/prepare one L1 callable. The single
+     * L1 operation lock spans the complete transaction, including the phase
+     * check before any device allocation.
+     */
+    int prepare_l1_callable_from_blob(
+        int32_t callable_id, const ChipCallable *callable, size_t callable_size, rtStream_t caller_stream,
+        const HostApi *api
+    );
+
+    /** Prepare already-recorded persistent L1 state (primarily for focused tests). */
+    int prepare_l1_callable(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
+
+    /** Enqueue one complete asynchronous L1 operator on a borrowed stream. */
+    int launch_l1_callable(int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream);
 
     /** Release only resources owned by the borrowed L1 context. */
     int finalize_l1_borrowed();
@@ -306,6 +322,9 @@ public:
     DeviceExecutionMode execution_mode() const { return execution_mode_state_.mode(); }
     bool accepts_l2_calls() const { return execution_mode_state_.accepts_l2_calls(); }
     bool accepts_l1_calls() const { return execution_mode_state_.accepts_l1_calls(); }
+    bool accepts_l1_dispatch() const {
+        return execution_mode_state_.accepts_l1_calls() && l1_execution_state_.accepts_dispatch();
+    }
     bool requires_explicit_l1_close() const { return execution_mode_state_.requires_explicit_l1_close(); }
     L1ContextPhase l1_phase() const { return l1_execution_state_.phase(); }
 
@@ -408,7 +427,7 @@ public:
     int record_device_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
         const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
     );
 
     /**
@@ -442,6 +461,9 @@ public:
      * calls without a matching `simpler_register_callable`.
      */
     bool has_callable(int32_t callable_id) const;
+
+    /** True when an existing callable id names the same pinned binary image. */
+    bool callable_identity_matches(int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash) const;
 
     /**
      * Provision the async-DMA workspaces named in `required_mask` once at Worker
@@ -580,6 +602,10 @@ public:
      */
     virtual int run(Runtime &runtime, const CallConfig &config) = 0;
 
+    /** Populate arch-specific topology/register state for persistent L1 execution. */
+    virtual int
+    prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) = 0;
+
     /**
      * Cleanup all resources. Each arch's `finalize()` wraps
      * `finalize_common()` with arch-specific device-reset behaviour:
@@ -645,6 +671,12 @@ public:
      * device-resident KernelArgs payload pointer.
      */
     int launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args);
+
+    /** Register the AICore executor binary without launching a task. */
+    int ensure_aicore_binary_registered();
+
+    /** Launch only through an already-registered AICore executor handle. */
+    int launch_prepared_aicore_kernel(rtStream_t stream, KernelArgs *k_args);
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.
@@ -943,6 +975,17 @@ protected:
         // common
         std::vector<std::pair<int, uint64_t>> kernel_addrs;
         std::vector<ArgDirection> signature;
+        int32_t scalar_count{0};
+        // L1 v1 binds tensor metadata on the first eager warmup launch. The
+        // fixed POD storage is allocated with CallableState during prepare, so
+        // later capture-time launches only compare/copy bytes and never grow a
+        // host container.
+        // Allocated only while registering a borrowed L1 callable. Keeping the
+        // 33-KiB POD out of the common state avoids charging every L2/L3
+        // callable for graph-only metadata, while prepare-time allocation
+        // keeps the L1 launch path allocation-free.
+        std::unique_ptr<ChipStorageTaskArgs> l1_metadata;
+        bool l1_metadata_bound{false};
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
@@ -987,6 +1030,23 @@ protected:
     // its destructor; destroy_device_context refuses an unclosed L1 context.
     DeviceExecutionModeState execution_mode_state_;
     L1ExecutionState l1_execution_state_;
+    mutable std::mutex l1_operation_mutex_;
+    CallConfig l1_config_{};
+    std::unique_ptr<Runtime> l1_runtime_;
+    KernelArgsHelper l1_kernel_args_;
+    std::unordered_set<int32_t> l1_prepared_callable_ids_;
+    bool l1_aicpu_binary_loaded_{false};
+    bool l1_aicpu_init_enqueued_{false};
+    bool l1_static_state_prepared_{false};
+    // Only the first launch consumes the external prepare chain. Subsequent
+    // capture launches must not import a prepare event recorded outside their
+    // graph. Cross-caller-stream transitions require external quiescence in
+    // L1 v1 because CANN also rejects importing an old SerialTail into capture.
+    bool l1_prepare_tail_consumed_{false};
+    bool l1_serial_tail_recorded_{false};
+    rtStream_t l1_last_caller_stream_{nullptr};
+
+    int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
 
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.

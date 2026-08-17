@@ -563,6 +563,7 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
     }
     *out = CallableArtifacts{};
     out->signature.assign(callable->signature_, callable->signature_ + callable->sig_count());
+    out->scalar_count = callable->scalar_count();
 
     LOG_INFO("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(

@@ -80,6 +80,7 @@ enum class L1ContextPhase : uint8_t {
     ReadyEnqueued,
     Sealed,
     Poisoned,
+    Closing,
     Closed,
 };
 
@@ -114,10 +115,12 @@ public:
     int initialize(int requested_device_id, const L1RuntimeOps &ops);
     int mark_ready_enqueued();
     int seal();
+    int begin_close();
     void poison(int runtime_error);
     int close();
 
     L1ContextPhase phase() const;
+    bool accepts_dispatch() const;
     int device_id() const;
     int last_runtime_error() const;
     bool has_live_resources() const;
@@ -133,6 +136,7 @@ private:
     L1ContextPhase phase_{L1ContextPhase::New};
     int device_id_{-1};
     int last_runtime_error_{0};
+    bool device_claimed_{false};
     L1RuntimeOps ops_{};
     void *hidden_aicore_stream_{nullptr};
     std::array<void *, static_cast<size_t>(L1EventKind::Count)> events_{};

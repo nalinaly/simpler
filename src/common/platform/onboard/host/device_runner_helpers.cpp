@@ -41,8 +41,7 @@ int KernelArgsHelper::init_runtime_args(const Runtime &host_runtime, MemoryAlloc
     int rc = rtMemcpy(args.runtime_args, runtime_size, &host_runtime, runtime_size, RT_MEMCPY_HOST_TO_DEVICE);
     if (rc != 0) {
         LOG_ERROR("rtMemcpy for runtime failed: %d", rc);
-        allocator_->free(args.runtime_args);
-        args.runtime_args = nullptr;
+        if (allocator_->free(args.runtime_args) == 0) args.runtime_args = nullptr;
         return rc;
     }
     return 0;
@@ -51,7 +50,7 @@ int KernelArgsHelper::init_runtime_args(const Runtime &host_runtime, MemoryAlloc
 int KernelArgsHelper::finalize_runtime_args() {
     if (args.runtime_args != nullptr && allocator_ != nullptr) {
         int rc = allocator_->free(args.runtime_args);
-        args.runtime_args = nullptr;
+        if (rc == 0) args.runtime_args = nullptr;
         return rc;
     }
     return 0;
@@ -70,8 +69,7 @@ int KernelArgsHelper::init_device_kernel_args(MemoryAllocator &allocator) {
     int rc = rtMemcpy(device_k_args_, sizeof(KernelArgs), &args, sizeof(KernelArgs), RT_MEMCPY_HOST_TO_DEVICE);
     if (rc != 0) {
         LOG_ERROR("rtMemcpy for KernelArgs failed: %d", rc);
-        allocator_->free(device_k_args_);
-        device_k_args_ = nullptr;
+        if (allocator_->free(device_k_args_) == 0) device_k_args_ = nullptr;
         return rc;
     }
     return 0;
@@ -80,7 +78,7 @@ int KernelArgsHelper::init_device_kernel_args(MemoryAllocator &allocator) {
 int KernelArgsHelper::finalize_device_kernel_args() {
     if (device_k_args_ != nullptr && allocator_ != nullptr) {
         int rc = allocator_->free(device_k_args_);
-        device_k_args_ = nullptr;
+        if (rc == 0) device_k_args_ = nullptr;
         return rc;
     }
     return 0;

@@ -447,6 +447,7 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     }
 
     int32_t rc = g_aicpu_executor.run(runtime);
+    g_aicpu_executor.completion_gate_.wait_for_finalization();
     if (rc != 0) {
         LOG_ERROR("aicpu_execute: Thread execution failed with rc=%d", rc);
     }
@@ -454,7 +455,7 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     int32_t runtime_rc = read_pto2_runtime_status(runtime);
 
     // The finalizer publishes cleanup eligibility only after runtime destruction.
-    if (g_aicpu_executor.completion_gate_.claim_cleanup()) {
+    if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
         LOG_INFO("aicpu_execute: All threads finished, cleaning up");
         g_aicpu_executor.deinit(runtime);
     }

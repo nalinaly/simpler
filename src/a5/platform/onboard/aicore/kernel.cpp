@@ -113,10 +113,10 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
 
     // Publish per-core profiling state into platform-owned slots before the
     // executor runs. AICore reads via get_aicore_*() — never touches Handshake
-    // for profiling. The PMU MMIO base is resolved here from
-    // `regs[physical_core_id]`; both fields are filled by the host before
-    // kernel launch, so the resolved base is valid from Phase 1 onward and
-    // does not depend on any AICPU init ordering.
+    // for profiling. The PMU MMIO base is resolved here from the fixed-size
+    // host-provisioned register table. An out-of-range physical id publishes a
+    // zero PMU base and remains subject to the normal pre-window handshake
+    // verdict.
     set_aicore_profiling_flag(k_args->enable_profiling_flag);
     // Always publish the head slot (nullptr when this launch is disabled or
     // has no rotation table). [[block_local]] storage persists across launches
@@ -146,7 +146,14 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
         }
         __gm__ uint64_t *regs_array = reinterpret_cast<__gm__ uint64_t *>(k_args->regs);
         if (regs_array != nullptr) {
-            set_aicore_pmu_reg_base(regs_array[get_physical_core_id()]);
+            constexpr uint32_t register_address_count =
+                DAV_3510::PLATFORM_MAX_PHYSICAL_CORES * PLATFORM_CORES_PER_BLOCKDIM;
+            const uint32_t physical_core_id = get_physical_core_id();
+            if (physical_core_id < register_address_count) {
+                set_aicore_pmu_reg_base(regs_array[physical_core_id]);
+            } else {
+                set_aicore_pmu_reg_base(0);
+            }
         } else {
             set_aicore_pmu_reg_base(0);
         }

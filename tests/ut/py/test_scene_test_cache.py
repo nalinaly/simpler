@@ -25,7 +25,12 @@ from _task_interface import ArgDirection, ChipCallable  # pyright: ignore[report
 # ``simpler_setup/__init__.py`` re-exports the ``scene_test`` *decorator*,
 # which shadows the submodule attribute when accessed via ``simpler_setup``.
 # Importing the names directly from the submodule avoids that ambiguity.
-from simpler_setup.scene_test import _compile_cache, _pto_isa_compile_cache_token, clear_compile_cache
+from simpler_setup.scene_test import (
+    _compile_cache,
+    _compile_chip_callable_from_spec,
+    _pto_isa_compile_cache_token,
+    clear_compile_cache,
+)
 
 
 def _build_chip_callable(tag: str) -> ChipCallable:
@@ -65,3 +70,45 @@ def test_pto_isa_compile_cache_token_tracks_pin(monkeypatch):
     assert _pto_isa_compile_cache_token() == pin_a
     monkeypatch.setattr("simpler_setup.pto_isa.read_pto_isa_pin", lambda: pin_b)
     assert _pto_isa_compile_cache_token() == pin_b
+
+
+def test_compile_chip_callable_preserves_orchestration_scalar_count(monkeypatch, tmp_path):
+    """Generated ORCHESTRATION scalar arity must reach the native callable ABI."""
+
+    class FakeKernelCompiler:
+        def __init__(self, platform):
+            assert platform == "a2a3_sim"
+
+        def compile_orchestration(self, runtime, source):
+            assert runtime == "tensormap_and_ringbuffer"
+            assert source == "orch source"
+            return b"orch-binary"
+
+        def get_orchestration_include_dirs(self, runtime):
+            assert runtime == "tensormap_and_ringbuffer"
+            return []
+
+        def compile_incore(self, source, *, core_type, pto_isa_root, extra_include_dirs):
+            raise AssertionError("this scalar-only test has no incore children")
+
+    monkeypatch.setattr("simpler_setup.kernel_compiler.KernelCompiler", FakeKernelCompiler)
+    monkeypatch.setattr("simpler_setup.pto_isa.ensure_pto_isa_root", lambda: tmp_path)
+    _compile_cache.clear()
+    callable_obj = _compile_chip_callable_from_spec(
+        {
+            "orchestration": {
+                "source": "orch source",
+                "function_name": "orch_entry",
+                "signature": [ArgDirection.IN],
+                "scalar_count": 2,
+            },
+            "incores": [],
+        },
+        "a2a3_sim",
+        "tensormap_and_ringbuffer",
+        ("scalar-count",),
+    )
+
+    assert callable_obj.sig_count == 1
+    assert callable_obj.scalar_count == 2
+    clear_compile_cache()

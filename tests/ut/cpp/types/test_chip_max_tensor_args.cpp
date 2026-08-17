@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -50,11 +51,41 @@ TEST(ChipMaxTensorArgs, ChipStorageHoldsCapacity) {
 TEST(ChipMaxTensorArgs, ChipCallableAcceptsCapacity) {
     std::vector<ArgDirection> signature(256, ArgDirection::IN);
     auto buffer = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
-        signature.data(), static_cast<int32_t>(signature.size()), "composed", nullptr, 0, nullptr, nullptr, 0, ""
+        signature.data(), static_cast<int32_t>(signature.size()), 0, "composed", nullptr, 0, nullptr, nullptr, 0, ""
     );
 
     const auto &callable = *reinterpret_cast<const ChipCallable *>(buffer.data());
     EXPECT_EQ(callable.sig_count(), 256);
+}
+
+TEST(ChipMaxTensorArgs, ChipCallableCarriesScalarAritySeparatelyFromTensorSignature) {
+    ArgDirection signature[] = {ArgDirection::IN, ArgDirection::OUT};
+    auto buffer = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+        signature, 2, 3, "composed", nullptr, 0, nullptr, nullptr, 0, ""
+    );
+
+    const auto &callable = *reinterpret_cast<const ChipCallable *>(buffer.data());
+    EXPECT_EQ(callable.sig_count(), 2);
+    EXPECT_EQ(callable.scalar_count(), 3);
+}
+
+TEST(ChipMaxTensorArgs, LegacyFactoryAndZeroedTailPaddingDecodeAsZeroScalars) {
+    ArgDirection signature[] = {ArgDirection::IN};
+    // This overload is the pre-L1 source API. Its byte layout and every old
+    // field offset remain unchanged; the historical zero-filled tail padding
+    // now carries scalar_count == 0.
+    auto buffer = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+        signature, 1, "legacy", nullptr, 0, nullptr, nullptr, 0, "legacy_config"
+    );
+
+    const auto &callable = *reinterpret_cast<const ChipCallable *>(buffer.data());
+    EXPECT_EQ(callable.sig_count(), 1);
+    EXPECT_EQ(callable.binary_size(), 0u);
+    EXPECT_STREQ(callable.func_name(), "legacy");
+    EXPECT_STREQ(callable.config_name(), "legacy_config");
+    EXPECT_EQ(callable.child_count(), 0);
+    EXPECT_EQ(callable.scalar_count(), 0);
+    EXPECT_EQ(buffer.size(), offsetof(ChipCallable, storage_));
 }
 
 TEST(ChipMaxTensorArgs, ChipCallableOverflowReportsRequestedAndSupportedCounts) {
@@ -63,7 +94,7 @@ TEST(ChipMaxTensorArgs, ChipCallableOverflowReportsRequestedAndSupportedCounts) 
 
     try {
         (void)make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
-            signature.data(), requested, "overflow", nullptr, 0, nullptr, nullptr, 0, ""
+            signature.data(), requested, 0, "overflow", nullptr, 0, nullptr, nullptr, 0, ""
         );
         FAIL() << "expected signature capacity validation to fail";
     } catch (const std::invalid_argument &error) {

@@ -51,9 +51,14 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
+#include "l1_aicpu_args.h"
+#include "l1_callable_validation.h"
+#include "l1_launch_sequence.h"
+#include "l1_tensor_validation.h"
 #include "native_run_launch_signal.h"
 #include "platform_comm/comm.h"
 #include "pto_runtime_c_api.h"
+#include "prepare_callable_common.h"
 #include "task_args.h"
 #include "utils/elf_build_id.h"
 // `runtime.h` (pulled in via `device_runner_helpers.h` in the base header)
@@ -66,12 +71,35 @@
 // the common AICPU loader carries no runtime-specific symbol knowledge. TMARB
 // returns simpler_aicpu_register_callable; host_build_graph returns none.
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count);
+extern "C" __attribute__((weak)) const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
+    if (count != nullptr) *count = 0;
+    return nullptr;
+}
+extern "C" int
+register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const void *), CallableArtifacts *out);
+
+extern "C" __attribute__((weak)) int prepare_l1_runtime_impl(
+    Runtime * /*runtime*/, const HostApi * /*api*/, const uint64_t * /*ring_task_window*/,
+    const uint64_t * /*ring_heap*/, const uint64_t * /*ring_dep_pool*/
+) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
 
 namespace {
 
 pthread_key_t g_run_selection_key;
 pthread_once_t g_run_selection_once = PTHREAD_ONCE_INIT;
 int g_run_selection_key_error = 0;
+thread_local DeviceRunnerBase *g_l1_prepare_upload_runner = nullptr;
+
+uint64_t upload_l1_callable_transaction(const void *callable) {
+    if (g_l1_prepare_upload_runner == nullptr || callable == nullptr) return 0;
+    try {
+        return g_l1_prepare_upload_runner->upload_chip_callable_buffer(static_cast<const ChipCallable *>(callable));
+    } catch (...) {
+        return 0;
+    }
+}
 
 using NativeRunThreadSelection = DeviceRunnerBase::NativeRunThreadSelection;
 static_assert(
@@ -168,6 +196,52 @@ HostRuntimeTimeoutConfig resolve_onboard_timeout_config() {
     return HostRuntimeTimeoutConfig{cfg.op_execute_timeout_us, cfg.stream_sync_timeout_ms, scheduler_override};
 }
 
+int validate_borrowed_device(int expected_device_id) {
+    int32_t current_device_id = -1;
+    const aclError rc = aclrtGetDevice(&current_device_id);
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("aclrtGetDevice failed in L1 operation: %d", static_cast<int>(rc));
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+    return current_device_id == expected_device_id ? 0 : PTO_RUNTIME_ERR_DEVICE_MISMATCH;
+}
+
+bool valid_l1_tensor_descriptor(const Tensor &tensor, int expected_device_id) {
+    if (!valid_l1_tensor_metadata(tensor)) return false;
+
+    aclrtPtrAttributes attributes{};
+    const aclError rc = aclrtPointerGetAttributes(reinterpret_cast<const void *>(tensor.buffer.addr), &attributes);
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR(
+            "aclrtPointerGetAttributes failed for L1 tensor address 0x%lx: %d", tensor.buffer.addr, static_cast<int>(rc)
+        );
+        return false;
+    }
+    if (attributes.location.type != ACL_MEM_LOCATION_TYPE_DEVICE ||
+        static_cast<int>(attributes.location.id) != expected_device_id) {
+        LOG_ERROR(
+            "L1 tensor address 0x%lx belongs to location type=%d device=%u, expected device=%d", tensor.buffer.addr,
+            static_cast<int>(attributes.location.type), attributes.location.id, expected_device_id
+        );
+        return false;
+    }
+    return true;
+}
+
+bool same_l1_tensor_metadata(const Tensor &lhs, const Tensor &rhs) {
+    if (lhs.buffer.size != rhs.buffer.size ||
+        std::memcmp(&lhs.owner_task_id, &rhs.owner_task_id, sizeof(lhs.owner_task_id)) != 0 ||
+        lhs.start_offset != rhs.start_offset || lhs.version != rhs.version || lhs.ndims != rhs.ndims ||
+        lhs.dtype != rhs.dtype || lhs.manual_dep != rhs.manual_dep || lhs.is_contiguous != rhs.is_contiguous ||
+        lhs.child_memory != rhs.child_memory || lhs.extent_elem_cache != rhs.extent_elem_cache) {
+        return false;
+    }
+    for (uint32_t dim = 0; dim < lhs.ndims; ++dim) {
+        if (lhs.shapes[dim] != rhs.shapes[dim] || lhs.strides[dim] != rhs.strides[dim]) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 DeviceRunnerBase::DeviceRunnerBase() {
@@ -180,8 +254,19 @@ int DeviceRunnerBase::claim_l2_execution_mode() { return execution_mode_state_.c
 
 int DeviceRunnerBase::initialize_l1_borrowed(
     int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
-    std::vector<uint8_t> dispatcher_so_binary, const L1RuntimeOps &ops
+    std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops
 ) {
+    try {
+        config.validate();
+    } catch (const std::exception &e) {
+        LOG_ERROR("Invalid L1 CallConfig: %s", e.what());
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (config.diagnostics_any() || validate_launch_aicpu_num(config.aicpu_thread_num) != 0) {
+        LOG_ERROR("L1 v1 does not support diagnostics or an invalid AICPU thread count");
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
     int rc = execution_mode_state_.claim_l1_borrowed();
     if (rc != 0) {
         return rc;
@@ -203,11 +288,403 @@ int DeviceRunnerBase::initialize_l1_borrowed(
     aicpu_so_binary_ = std::move(aicpu_so_binary);
     aicore_kernel_binary_ = std::move(aicore_kernel_binary);
     dispatcher_so_binary_ = std::move(dispatcher_so_binary);
+    l1_config_ = config;
+    timeout_config_ = resolve_onboard_timeout_config();
     device_id_ = device_id;
     return 0;
 }
 
+int DeviceRunnerBase::prepare_l1_callable_from_blob(
+    int32_t callable_id, const ChipCallable *callable, size_t callable_size, rtStream_t caller_stream,
+    const HostApi *api
+) {
+    std::lock_guard<std::mutex> lock(l1_operation_mutex_);
+    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS || callable == nullptr || callable_size == 0 ||
+        caller_stream == nullptr || api == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const L1ContextPhase phase = l1_execution_state_.phase();
+    if (phase == L1ContextPhase::Sealed && callables_.count(callable_id) == 0) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    int rc = validate_borrowed_device(device_id_);
+    if (rc != 0) return rc;
+    if (!simpler::l1::valid_callable_blob(callable, callable_size)) {
+        LOG_ERROR("L1 callable_id=%d has an invalid or non-canonical %zu-byte image", callable_id, callable_size);
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    const ChipCallableLayout identity = compute_chip_callable_layout(callable);
+    if (has_callable(callable_id)) {
+        if (!callable_identity_matches(callable_id, identity.content_hash, identity.aicore_image_hash)) {
+            LOG_ERROR("L1 callable_id=%d identity conflict", callable_id);
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        return prepare_l1_callable_locked(callable_id, caller_stream, api);
+    }
+
+    CallableArtifacts artifacts;
+    auto chip_buffer_guard = RAIIScopeGuard([this, &artifacts]() {
+        if (artifacts.chip_buffer_hash != 0) {
+            release_chip_callable_buffer(artifacts.chip_buffer_hash);
+        }
+    });
+    DeviceRunnerBase *prior_upload_runner = g_l1_prepare_upload_runner;
+    g_l1_prepare_upload_runner = this;
+    auto upload_runner_guard = RAIIScopeGuard([prior_upload_runner]() {
+        g_l1_prepare_upload_runner = prior_upload_runner;
+    });
+    rc = register_callable_impl(callable, upload_l1_callable_transaction, &artifacts);
+    if (rc != 0) return rc;
+    if (artifacts.host_dlopen_handle != nullptr) {
+        LOG_ERROR("L1 host orchestration runtime is unsupported");
+        dlclose(artifacts.host_dlopen_handle);
+        artifacts.host_dlopen_handle = nullptr;
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+
+    std::vector<std::pair<int, uint64_t>> kernel_addrs;
+    kernel_addrs.reserve(artifacts.kernel_addrs.size());
+    for (const ChildKernelAddr &entry : artifacts.kernel_addrs) {
+        kernel_addrs.emplace_back(entry.func_id, entry.device_addr);
+    }
+    rc = record_device_orch_callable(
+        callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
+        artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
+        std::move(kernel_addrs), std::move(artifacts.signature), artifacts.scalar_count
+    );
+    if (rc != 0) return rc;
+    chip_buffer_guard.dismiss();
+    return prepare_l1_callable_locked(callable_id, caller_stream, api);
+}
+
+int DeviceRunnerBase::prepare_l1_callable(int32_t callable_id, rtStream_t caller_stream, const HostApi *api) {
+    std::lock_guard<std::mutex> lock(l1_operation_mutex_);
+    return prepare_l1_callable_locked(callable_id, caller_stream, api);
+}
+
+int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api) {
+    if (caller_stream == nullptr || api == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const L1ContextPhase phase = l1_execution_state_.phase();
+    int rc = validate_borrowed_device(device_id_);
+    if (rc != 0) return rc;
+
+    const auto callable_it = callables_.find(callable_id);
+    if (callable_it == callables_.end()) {
+        LOG_ERROR("L1 prepare reached without registered callable_id=%d", callable_id);
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    auto poison = [this](int error) {
+        l1_execution_state_.poison(error);
+        return error != 0 ? error : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    };
+
+    if (l1_prepared_callable_ids_.count(callable_id) != 0) {
+        return 0;
+    }
+    if (phase == L1ContextPhase::Sealed) return PTO_RUNTIME_ERR_INVALID_STATE;
+
+    if (callable_it->second.kernel_addrs.size() > L1_MAX_KERNELS_PER_CALLABLE) {
+        LOG_ERROR(
+            "L1 callable_id=%d has %zu kernels, exceeding the L1 registration capacity %u", callable_id,
+            callable_it->second.kernel_addrs.size(), L1_MAX_KERNELS_PER_CALLABLE
+        );
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    bool seen_func_id[L1_MAX_KERNELS_PER_CALLABLE]{};
+    for (const auto &entry : callable_it->second.kernel_addrs) {
+        if (entry.first < 0 || entry.first >= RUNTIME_MAX_FUNC_ID || entry.second == 0) {
+            LOG_ERROR(
+                "L1 callable_id=%d has invalid func binding id=%d addr=0x%lx", callable_id, entry.first, entry.second
+            );
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+        if (seen_func_id[entry.first]) {
+            LOG_ERROR("L1 callable_id=%d contains duplicate func_id=%d", callable_id, entry.first);
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+        seen_func_id[entry.first] = true;
+    }
+    if (!l1_aicpu_binary_loaded_ && aicpu_so_binary_.empty()) {
+        LOG_ERROR("L1 AICPU executor binary is empty");
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    if (!l1_aicpu_binary_loaded_) {
+        std::vector<std::string> extra_symbols;
+        size_t extra_count = 0;
+        const char *const *extra = runtime_l1_extra_aicpu_symbols(&extra_count);
+        for (size_t i = 0; i < extra_count && extra != nullptr; ++i) {
+            if (extra[i] != nullptr) extra_symbols.emplace_back(extra[i]);
+        }
+        rc = load_aicpu_op_.InitFromData(aicpu_so_binary_.data(), aicpu_so_binary_.size(), extra_symbols);
+        if (rc != 0) return poison(rc);
+        l1_aicpu_binary_loaded_ = true;
+    }
+
+    if (!l1_static_state_prepared_) {
+        rtStream_t hidden_stream = reinterpret_cast<rtStream_t>(l1_execution_state_.hidden_aicore_stream());
+        max_block_dim_ = query_max_block_dim(hidden_stream, &max_cube_cores_, &max_vector_cores_);
+        if (max_block_dim_ < 1) {
+            LOG_ERROR("L1 failed to resolve AICore launch width");
+            return poison(PTO_RUNTIME_ERR_RUNTIME_FAILURE);
+        }
+        try {
+            l1_runtime_ = std::make_unique<Runtime>();
+        } catch (...) {
+            return poison(PTO_RUNTIME_ERR_RUNTIME_FAILURE);
+        }
+        rc = prepare_l1_platform_state(*l1_runtime_, l1_kernel_args_, l1_config_);
+        if (rc != 0) return poison(rc);
+        rc = prepare_l1_runtime_impl(
+            l1_runtime_.get(), api, l1_config_.runtime_env.ring_task_window, l1_config_.runtime_env.ring_heap,
+            l1_config_.runtime_env.ring_dep_pool
+        );
+        if (rc != 0) return poison(rc);
+        l1_static_state_prepared_ = true;
+    }
+
+    rc = l1_kernel_args_.init_runtime_args(*l1_runtime_, mem_alloc_);
+    if (rc != 0) return poison(rc);
+    rc = l1_kernel_args_.init_device_kernel_args(mem_alloc_);
+    if (rc != 0) return poison(rc);
+    rc = ensure_aicore_binary_registered();
+    if (rc != 0) return poison(rc);
+
+    if (!l1_prepared_callable_ids_.empty()) {
+        rc = aclrtStreamWaitEvent(
+            reinterpret_cast<aclrtStream>(caller_stream),
+            reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::PrepareTail))
+        );
+        if (rc != ACL_SUCCESS) return poison(static_cast<int>(rc));
+    }
+
+    if (!l1_aicpu_init_enqueued_) {
+        InitArgs init_args{};
+        init_args.device_id = static_cast<uint32_t>(device_id_);
+        init_args.log_level = static_cast<uint32_t>(HostLogger::get_instance().level());
+        init_args.scheduler_timeout_ms = timeout_config_.scheduler_timeout_ms;
+        for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
+            init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
+        }
+        rc = load_aicpu_op_.LaunchWithHostArgs(
+            caller_stream, &init_args, sizeof(init_args), 1, host::KernelNames::InitName
+        );
+        if (rc != 0) return poison(rc);
+        l1_aicpu_init_enqueued_ = true;
+    }
+
+    L1RegisterCallableArgs register_args{};
+    register_args.struct_size = sizeof(register_args);
+    register_args.callable_id = callable_id;
+    register_args.kernel_count = static_cast<uint32_t>(callable_it->second.kernel_addrs.size());
+    register_args.dev_orch_so_addr = callable_it->second.dev_orch_so_addr;
+    register_args.dev_orch_so_size = callable_it->second.dev_orch_so_size;
+    std::snprintf(
+        register_args.device_orch_func_name, sizeof(register_args.device_orch_func_name), "%s",
+        callable_it->second.func_name.c_str()
+    );
+    std::snprintf(
+        register_args.device_orch_config_name, sizeof(register_args.device_orch_config_name), "%s",
+        callable_it->second.config_name.c_str()
+    );
+    for (uint32_t i = 0; i < register_args.kernel_count; ++i) {
+        register_args.kernel_addrs[i].func_id = callable_it->second.kernel_addrs[i].first;
+        register_args.kernel_addrs[i].device_addr = callable_it->second.kernel_addrs[i].second;
+    }
+    rc = load_aicpu_op_.LaunchWithHostArgs(
+        caller_stream, &register_args, sizeof(register_args), 1, host::KernelNames::L1RegisterCallableName
+    );
+    if (rc != 0) return poison(rc);
+
+    rc = aclrtRecordEvent(
+        reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::PrepareTail)),
+        reinterpret_cast<aclrtStream>(caller_stream)
+    );
+    if (rc != ACL_SUCCESS) return poison(static_cast<int>(rc));
+
+    try {
+        l1_prepared_callable_ids_.insert(callable_id);
+    } catch (...) {
+        return poison(PTO_RUNTIME_ERR_RUNTIME_FAILURE);
+    }
+    rc = l1_execution_state_.mark_ready_enqueued();
+    return rc == 0 ? 0 : poison(rc);
+}
+
+int DeviceRunnerBase::launch_l1_callable(
+    int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream
+) {
+    std::lock_guard<std::mutex> lock(l1_operation_mutex_);
+    if (caller_stream == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const L1ContextPhase phase = l1_execution_state_.phase();
+    if ((phase != L1ContextPhase::ReadyEnqueued && phase != L1ContextPhase::Sealed) ||
+        l1_prepared_callable_ids_.count(callable_id) == 0 || l1_runtime_ == nullptr ||
+        l1_kernel_args_.device_k_args_ == nullptr) {
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+    int rc = validate_borrowed_device(device_id_);
+    if (rc != 0) return rc;
+
+    // Host entry is serialized, but device work is asynchronous. A caller
+    // stream switch is safe only after the prior complete-operator tail has
+    // actually finished. Querying is non-blocking and does not inspect capture
+    // state; a not-ready tail fails closed and may be retried after the caller's
+    // explicit external quiescence.
+    if (l1_serial_tail_recorded_ && l1_last_caller_stream_ != caller_stream) {
+        aclrtEventRecordedStatus tail_status = ACL_EVENT_RECORDED_STATUS_NOT_READY;
+        const aclError tail_rc = aclrtQueryEventStatus(
+            reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::SerialTail)), &tail_status
+        );
+        if (tail_rc != ACL_SUCCESS) {
+            LOG_ERROR("aclrtQueryEventStatus failed before L1 caller-stream switch: %d", static_cast<int>(tail_rc));
+            return static_cast<int>(tail_rc);
+        }
+        if (tail_status != ACL_EVENT_RECORDED_STATUS_COMPLETE) {
+            LOG_ERROR(
+                "L1 caller stream changed before the prior invocation quiesced; externally synchronize and retry"
+            );
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+    }
+
+    auto callable_it = callables_.find(callable_id);
+    if (callable_it == callables_.end()) return PTO_RUNTIME_ERR_NOT_READY;
+    const int expected_tensors = static_cast<int>(callable_it->second.signature.size());
+    const int expected_scalars = callable_it->second.scalar_count;
+    if (args.tensor_count() != expected_tensors || args.scalar_count() != expected_scalars) {
+        LOG_ERROR(
+            "L1 callable_id=%d expected %d tensors/%d scalars, got %d/%d", callable_id, expected_tensors,
+            expected_scalars, args.tensor_count(), args.scalar_count()
+        );
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (callable_it->second.l1_metadata_bound && callable_it->second.l1_metadata == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    for (int32_t i = 0; i < args.tensor_count(); ++i) {
+        if (!valid_l1_tensor_descriptor(args.tensor(i), device_id_)) {
+            LOG_ERROR("L1 callable_id=%d has invalid tensor descriptor at index %d", callable_id, i);
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+        if (callable_it->second.l1_metadata_bound &&
+            !same_l1_tensor_metadata(callable_it->second.l1_metadata->tensor(i), args.tensor(i))) {
+            LOG_ERROR("L1 callable_id=%d tensor metadata changed at index %d", callable_id, i);
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+    }
+    if (callable_it->second.l1_metadata_bound) {
+        if (callable_it->second.l1_metadata == nullptr ||
+            callable_it->second.l1_metadata->tensor_count() != args.tensor_count() ||
+            callable_it->second.l1_metadata->scalar_count() != args.scalar_count()) {
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+    } else if (callable_it->second.l1_metadata == nullptr) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    auto poison = [this](int error) {
+        l1_execution_state_.poison(error);
+        return error != 0 ? error : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    };
+    if (l1_kernel_args_.args.runtime_args == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const size_t handshake_bytes = static_cast<size_t>(l1_runtime_->get_worker_count()) * sizeof(Handshake);
+    void *device_handshakes = l1_kernel_args_.args.runtime_args->get_workers();
+    const L1AicpuInvocationArgs invocation = MakeL1AicpuInvocationArgs(l1_kernel_args_.args, callable_id, args);
+    const int aicpu_launch_count = l1_runtime_->get_aicpu_launch_count();
+    if (device_handshakes == nullptr || handshake_bytes == 0 || aicpu_launch_count <= 0) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    struct LaunchContext {
+        DeviceRunnerBase *runner;
+        void *device_handshakes;
+        size_t handshake_bytes;
+        const L1AicpuInvocationArgs *invocation;
+        int aicpu_launch_count;
+    } launch_context{this, device_handshakes, handshake_bytes, &invocation, aicpu_launch_count};
+
+    const L1LaunchSequenceOps launch_ops{
+        .context = &launch_context,
+        .wait_event =
+            [](void *, void *stream, void *event) noexcept {
+                return static_cast<int>(
+                    aclrtStreamWaitEvent(reinterpret_cast<aclrtStream>(stream), reinterpret_cast<aclrtEvent>(event))
+                );
+            },
+        .memset_handshake =
+            [](void *context, void *stream) noexcept {
+                auto *launch = static_cast<LaunchContext *>(context);
+                return static_cast<int>(aclrtMemsetAsync(
+                    launch->device_handshakes, launch->handshake_bytes, 0, launch->handshake_bytes,
+                    reinterpret_cast<aclrtStream>(stream)
+                ));
+            },
+        .record_event =
+            [](void *, void *event, void *stream) noexcept {
+                return static_cast<int>(
+                    aclrtRecordEvent(reinterpret_cast<aclrtEvent>(event), reinterpret_cast<aclrtStream>(stream))
+                );
+            },
+        .launch_aicpu = [](void *context, void *stream) noexcept -> int {
+            auto *launch = static_cast<LaunchContext *>(context);
+            try {
+                return launch->runner->load_aicpu_op_.LaunchWithHostArgs(
+                    reinterpret_cast<rtStream_t>(stream), launch->invocation, sizeof(*launch->invocation),
+                    launch->aicpu_launch_count, host::KernelNames::L1RunName
+                );
+            } catch (...) {
+                return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
+        },
+        .launch_aicore = [](void *context, void *stream) noexcept -> int {
+            auto *launch = static_cast<LaunchContext *>(context);
+            try {
+                return launch->runner->launch_prepared_aicore_kernel(
+                    reinterpret_cast<rtStream_t>(stream), launch->runner->l1_kernel_args_.device_k_args_
+                );
+            } catch (...) {
+                return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
+        },
+    };
+    const L1LaunchSequenceHandles launch_handles{
+        .caller_stream = reinterpret_cast<void *>(caller_stream),
+        .hidden_stream = l1_execution_state_.hidden_aicore_stream(),
+        .prepare_tail_event = l1_execution_state_.event(L1EventKind::PrepareTail),
+        .start_event = l1_execution_state_.event(L1EventKind::Start),
+        .aicore_done_event = l1_execution_state_.event(L1EventKind::AicoreDone),
+        .serial_tail_event = l1_execution_state_.event(L1EventKind::SerialTail),
+        .wait_for_prepare_tail = !l1_prepare_tail_consumed_,
+        // A tail recorded before capture cannot be waited by a capturing
+        // stream even after external synchronize (CANN returns capture
+        // isolation 107024 based on event record state). L1 v1 therefore
+        // relies on caller-stream FIFO and requires external quiescence before
+        // switching streams; concurrent cross-stream invocation is unsupported.
+        .wait_for_serial_tail = false,
+    };
+    if (!callable_it->second.l1_metadata_bound) {
+        *callable_it->second.l1_metadata = args;
+        callable_it->second.l1_metadata_bound = true;
+    }
+    rc = enqueue_l1_launch_sequence(launch_ops, launch_handles);
+    if (rc != 0) return poison(rc);
+
+    l1_prepare_tail_consumed_ = true;
+    l1_serial_tail_recorded_ = true;
+    l1_last_caller_stream_ = caller_stream;
+    rc = l1_execution_state_.seal();
+    return rc == 0 ? 0 : poison(rc);
+}
+
 int DeviceRunnerBase::finalize_l1_borrowed() {
+    std::lock_guard<std::mutex> lock(l1_operation_mutex_);
     if (execution_mode() == DeviceExecutionMode::Closed) {
         return 0;
     }
@@ -215,10 +692,71 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
 
-    const int rc = l1_execution_state_.close();
+    int rc = validate_borrowed_device(device_id_);
+    if (rc != 0) return rc;
+
+    rc = l1_execution_state_.begin_close();
+    if (rc != 0) return rc;
+
+    int first_error = 0;
+    auto capture = [&first_error](int error) {
+        if (error != 0 && first_error == 0) first_error = error;
+    };
+
+    // The caller is responsible for quiescing every eager/graph use before
+    // close. Teardown deliberately has no implicit stream/device synchronize.
+    rc = load_aicpu_op_.Finalize();
+    capture(rc);
+    if (rc == 0) l1_aicpu_binary_loaded_ = false;
+
+    capture(l1_kernel_args_.finalize_device_kernel_args());
+    capture(l1_kernel_args_.finalize_runtime_args());
+    if (l1_kernel_args_.args.regs != 0) {
+        rc = mem_alloc_.free(reinterpret_cast<void *>(l1_kernel_args_.args.regs));
+        capture(rc);
+        if (rc == 0) l1_kernel_args_.args.regs = 0;
+    }
+    for (auto it = chip_callable_buffers_.begin(); it != chip_callable_buffers_.end();) {
+        rc = mem_alloc_.free(reinterpret_cast<void *>(it->second.chip_dev));
+        capture(rc);
+        if (rc == 0) {
+            it = chip_callable_buffers_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto &bank : arena_banks_) {
+        bank->gm_heap.release();
+        bank->gm_sm.release();
+        bank->runtime_pool.release();
+        bank->cached_gm_heap_size = 0;
+        bank->cached_gm_sm_size = 0;
+        bank->cached_runtime_arena_size = 0;
+    }
+    prebuilt_runtime_arena_cache_valid_ = false;
+    prebuilt_runtime_arena_cache_key_.clear();
+    prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
+    prebuilt_runtime_arena_cache_sm_base_ = nullptr;
+    prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
+    prebuilt_runtime_arena_cache_image_.clear();
+    clear_temporary_buffer();
+    capture(mem_alloc_.finalize(/*preserve_failures=*/true));
+
+    if (first_error != 0) {
+        return first_error;
+    }
+
+    rc = l1_execution_state_.close();
     if (l1_execution_state_.phase() != L1ContextPhase::Closed) {
         return rc;
     }
+
+    for (auto &entry : callables_) {
+        if (entry.second.host_dlopen_handle != nullptr) dlclose(entry.second.host_dlopen_handle);
+    }
+    callables_.clear();
+    chip_callable_buffers_.clear();
 
     // L1ExecutionState reaches Closed only after every graph-visible runtime
     // handle it owns has been released. Executor bytes are host-only until
@@ -226,6 +764,20 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     aicpu_so_binary_.clear();
     aicore_kernel_binary_.clear();
     dispatcher_so_binary_.clear();
+    aicore_bin_handle_ = nullptr;
+    l1_runtime_.reset();
+    l1_kernel_args_ = KernelArgsHelper{};
+    l1_prepared_callable_ids_.clear();
+    l1_aicpu_init_enqueued_ = false;
+    l1_static_state_prepared_ = false;
+    l1_prepare_tail_consumed_ = false;
+    l1_serial_tail_recorded_ = false;
+    l1_last_caller_stream_ = nullptr;
+    block_dim_ = 0;
+    worker_count_ = 0;
+    max_block_dim_ = 0;
+    max_cube_cores_ = 0;
+    max_vector_cores_ = 0;
     device_id_ = -1;
     (void)execution_mode_state_.mark_closed();
     return rc;
@@ -737,7 +1289,7 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     if (callable == nullptr) {
         return 0;
     }
-    if (stream_aicpu_ == nullptr) {
+    if (stream_aicpu_ == nullptr && execution_mode() != DeviceExecutionMode::L1Borrowed) {
         LOG_ERROR("Run context not prepared before upload_chip_callable_buffer()");
         return 0;
     }
@@ -910,7 +1462,7 @@ int DeviceRunnerBase::launch_device_register(int32_t callable_id) {
 int DeviceRunnerBase::record_device_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
     const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
-    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
 ) {
     // The AICPU executor reserves `orch_so_table_[MAX_REGISTERED_CALLABLE_IDS]`
     // (declared in src/common/task_interface/callable_protocol.h) and indexes
@@ -934,6 +1486,10 @@ int DeviceRunnerBase::record_device_orch_callable(
         LOG_ERROR("record_device_orch_callable: callable_id=%d already registered", callable_id);
         return -1;
     }
+    if (scalar_count < 0 || scalar_count > CHIP_MAX_SCALAR_ARGS) {
+        LOG_ERROR("record_device_orch_callable: scalar_count=%d is invalid", scalar_count);
+        return -1;
+    }
 
     const uint64_t hash = simpler::common::utils::elf_build_id_64(orch_so_data, orch_so_size);
 
@@ -947,6 +1503,10 @@ int DeviceRunnerBase::record_device_orch_callable(
     state.config_name = (config_name != nullptr) ? config_name : "";
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
+    state.scalar_count = scalar_count;
+    if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
+        state.l1_metadata = std::make_unique<ChipStorageTaskArgs>();
+    }
     callables_.emplace(callable_id, std::move(state));
     LOG_INFO(
         "record_device_orch_callable: cid=%d orch_hash=0x%lx chip_hash=0x%lx %zu bytes", callable_id, hash,
@@ -1010,6 +1570,14 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 }
 
 bool DeviceRunnerBase::has_callable(int32_t callable_id) const { return callables_.count(callable_id) != 0; }
+
+bool DeviceRunnerBase::callable_identity_matches(
+    int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash
+) const {
+    const auto it = callables_.find(callable_id);
+    return it != callables_.end() && it->second.chip_buffer_hash == chip_buffer_hash &&
+           it->second.aicore_image_hash == aicore_image_hash;
+}
 
 int DeviceRunnerBase::provision_dma_workspace(uint32_t required_mask) {
     const uint32_t supported = dma_workspace_supported_mask();
@@ -1283,12 +1851,7 @@ int DeviceRunnerBase::finalize_common() {
     return rc;
 }
 
-int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args) {
-    // Lazy-register the AICore binary on first call; reuse cached handle
-    // thereafter. CANN has no public rtUnregisterAllKernel, so re-registering
-    // every run would pin another device-side copy of the ELF and quickly
-    // exhaust HBM — surfaced in CI as 207001 at rtKernelLaunchWithHandleV2
-    // with a 507899 cascade at rtStreamCreate.
+int DeviceRunnerBase::ensure_aicore_binary_registered() {
     if (aicore_bin_handle_ == nullptr) {
         if (aicore_kernel_binary_.empty()) {
             LOG_ERROR("AICore kernel binary is empty");
@@ -1307,6 +1870,21 @@ int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args
             aicore_bin_handle_ = nullptr;
             return rc;
         }
+    }
+    return 0;
+}
+
+int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args) {
+    int rc = ensure_aicore_binary_registered();
+    if (rc != 0) return rc;
+
+    return launch_prepared_aicore_kernel(stream, k_args);
+}
+
+int DeviceRunnerBase::launch_prepared_aicore_kernel(rtStream_t stream, KernelArgs *k_args) {
+    if (aicore_bin_handle_ == nullptr || stream == nullptr || k_args == nullptr) {
+        LOG_ERROR("AICore launch requires a prepared binary handle, stream, and KernelArgs");
+        return PTO_RUNTIME_ERR_NOT_READY;
     }
 
     struct Args {

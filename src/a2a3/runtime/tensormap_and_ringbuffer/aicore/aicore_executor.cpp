@@ -52,8 +52,8 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * 3. Cache per-core PTO2DispatchPayload pointer from hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
- * AICPU writes &s_payload_per_core[i] to hank->task before setting
- * aicpu_ready=1. AICore caches this pointer and reads function_bin_addr +
+ * AICPU writes &s_payload_per_core[i] to hank->task before opening the
+ * register window. AICore caches this pointer and reads function_bin_addr +
  * args pointer from it on each dispatch. reg_val is a monotonically
  * increasing task ID used only for dispatch signaling and ACK/FIN protocol.
  *
@@ -89,7 +89,18 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // the poll cannot miss it and mistake a later task for the reset value.
     // Window-open is the sync point for everything the AICPU publishes (task
     // pointer, swimlane head): the AICPU writes those before opening the window.
+    uint32_t pre_window_spins = 0;
     while (read_reg(RegId::DATA_MAIN_BASE) == 0) {
+        if (((++pre_window_spins) & AICORE_PRE_WINDOW_CANCEL_POLL_MASK) == 0) {
+            dcci(my_hank, SINGLE_CACHE_LINE);
+            if (my_hank->aicpu_ready == AICORE_PRE_WINDOW_CANCEL) {
+                // The AICPU observed this launch's report but could not safely
+                // resolve a register window for its physical id. Do not touch
+                // any SPR. The hidden-stream kernel completion is the
+                // collective acknowledgement for this error-only cancel.
+                return;
+            }
+        }
         SPIN_WAIT_HINT();
     }
     // Report initial idle status via register (FAST_PATH is now open).
@@ -108,8 +119,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
 
     // Per-core L2SwimlaneActiveHead channel. AICPU completes
     // `l2_swimlane_aicpu_init` (in pre_handshake_init) before any thread writes
-    // `aicpu_ready = 1` in `handshake_partition`, and Phase 1 above has already observed
-    // `aicpu_ready == 1`, so the rotation-table slot is populated and the
+    // the AICPU opens DATA_MAIN_BASE in `handshake_partition`; Phase 2 above
+    // has observed that open, so the rotation-table slot is populated and the
     // first deref is safe here — off the dispatch→start critical path.
     __gm__ L2SwimlaneActiveHead *l2_swimlane_head = l2_swimlane_enabled ? get_l2_swimlane_aicore_head() : nullptr;
     // cached_buf_seq must start != AICPU's initial head.current_buf_seq (0)

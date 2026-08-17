@@ -426,6 +426,19 @@ target_link_libraries(test_l1_execution_state PRIVATE ${GTEST_MAIN_LIB} ${GTEST_
 add_test(NAME test_l1_execution_state COMMAND test_l1_execution_state)
 set_tests_properties(test_l1_execution_state PROPERTIES LABELS "no_hardware")
 
+# Exact borrowed-stream L1 enqueue topology. The production helper is
+# allocation-free and accepts only wait/memset/record/AICPU/AICore callbacks,
+# so the test proves both ordering and first-error prefix behavior without CANN.
+add_executable(test_l1_launch_sequence common/test_l1_launch_sequence.cpp)
+target_include_directories(test_l1_launch_sequence PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_l1_launch_sequence PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_l1_launch_sequence COMMAND test_l1_launch_sequence)
+set_tests_properties(test_l1_launch_sequence PROPERTIES LABELS "no_hardware")
+
 # Native launch readiness is a sticky blocking handoff: notification may race
 # either side of wait(), and the waiting host thread must sleep until signaled.
 add_executable(test_native_run_launch_signal common/test_native_run_launch_signal.cpp)
@@ -443,6 +456,14 @@ set_tests_properties(test_native_run_launch_signal PROPERTIES LABELS "no_hardwar
 add_task_interface_test(test_child_memory types/test_child_memory.cpp)
 add_task_interface_test(test_chip_max_tensor_args types/test_chip_max_tensor_args.cpp)
 add_task_interface_test(test_call_config types/test_call_config.cpp)
+add_task_interface_test(test_aicore_handshake_protocol types/test_aicore_handshake_protocol.cpp)
+set_tests_properties(test_aicore_handshake_protocol PROPERTIES LABELS "no_hardware")
+add_a2a3_test(test_l1_aicpu_args types/test_l1_aicpu_args.cpp)
+set_tests_properties(test_l1_aicpu_args PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_l1_tensor_validation types/test_l1_tensor_validation.cpp)
+set_tests_properties(test_l1_tensor_validation PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_l1_callable_validation types/test_l1_callable_validation.cpp)
+set_tests_properties(test_l1_callable_validation PROPERTIES LABELS "no_hardware")
 
 # Contract test for upload_chip_callable_buffer caller-buffer immutability.
 # Pulls both task_interface (callable.h) and src/common (utils/fnv1a_64.h),

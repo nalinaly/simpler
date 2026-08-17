@@ -11,6 +11,36 @@
 
 #include "l1_execution_state.h"
 
+#include <unordered_set>
+
+namespace {
+
+std::mutex &l1_device_claim_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_set<int> &l1_claimed_devices() {
+    static std::unordered_set<int> devices;
+    return devices;
+}
+
+int claim_l1_device(int device_id) noexcept {
+    std::lock_guard<std::mutex> lock(l1_device_claim_mutex());
+    try {
+        return l1_claimed_devices().insert(device_id).second ? 0 : PTO_RUNTIME_ERR_INVALID_STATE;
+    } catch (...) {
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+}
+
+void release_l1_device(int device_id) noexcept {
+    std::lock_guard<std::mutex> lock(l1_device_claim_mutex());
+    l1_claimed_devices().erase(device_id);
+}
+
+}  // namespace
+
 int DeviceExecutionModeState::claim(DeviceExecutionMode requested) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (mode_ != DeviceExecutionMode::Uninitialized) {
@@ -75,6 +105,15 @@ int L1ExecutionState::initialize(int requested_device_id, const L1RuntimeOps &op
     }
     device_id_ = requested_device_id;
 
+    rc = claim_l1_device(device_id_);
+    if (rc != 0) {
+        phase_ = L1ContextPhase::New;
+        device_id_ = -1;
+        ops_ = {};
+        return rc;
+    }
+    device_claimed_ = true;
+
     rc = ops_.create_hidden_stream(ops_.context, &hidden_aicore_stream_);
     if (rc != 0 || hidden_aicore_stream_ == nullptr) {
         return fail_runtime_call_locked(rc != 0 ? rc : PTO_RUNTIME_ERR_RUNTIME_FAILURE);
@@ -110,13 +149,28 @@ int L1ExecutionState::seal() {
     return 0;
 }
 
+int L1ExecutionState::begin_close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (phase_ == L1ContextPhase::Closing || phase_ == L1ContextPhase::Closed) {
+        return 0;
+    }
+    if (phase_ != L1ContextPhase::Collecting && phase_ != L1ContextPhase::ReadyEnqueued &&
+        phase_ != L1ContextPhase::Sealed && phase_ != L1ContextPhase::Poisoned) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    phase_ = L1ContextPhase::Closing;
+    return 0;
+}
+
 void L1ExecutionState::poison(int runtime_error) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (phase_ == L1ContextPhase::Closed) {
         return;
     }
     last_runtime_error_ = runtime_error;
-    phase_ = L1ContextPhase::Poisoned;
+    if (phase_ != L1ContextPhase::Closing) {
+        phase_ = L1ContextPhase::Poisoned;
+    }
 }
 
 int L1ExecutionState::close() {
@@ -127,7 +181,12 @@ int L1ExecutionState::close() {
     if (phase_ == L1ContextPhase::Initializing) {
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
+    const bool close_intent_latched = phase_ == L1ContextPhase::Closing;
     if (!has_live_resources_locked()) {
+        if (device_claimed_) {
+            release_l1_device(device_id_);
+            device_claimed_ = false;
+        }
         phase_ = L1ContextPhase::Closed;
         device_id_ = -1;
         ops_ = {};
@@ -138,7 +197,7 @@ int L1ExecutionState::close() {
     int rc = ops_.get_current_device(ops_.context, &current_device_id);
     if (rc != 0) {
         last_runtime_error_ = rc;
-        phase_ = L1ContextPhase::Poisoned;
+        phase_ = close_intent_latched ? L1ContextPhase::Closing : L1ContextPhase::Poisoned;
         return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
     }
     if (current_device_id != device_id_) {
@@ -147,8 +206,13 @@ int L1ExecutionState::close() {
 
     rc = cleanup_owned_resources_locked();
     if (has_live_resources_locked()) {
-        phase_ = L1ContextPhase::Poisoned;
+        phase_ = close_intent_latched ? L1ContextPhase::Closing : L1ContextPhase::Poisoned;
         return rc != 0 ? rc : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+
+    if (device_claimed_) {
+        release_l1_device(device_id_);
+        device_claimed_ = false;
     }
 
     phase_ = L1ContextPhase::Closed;
@@ -160,6 +224,12 @@ int L1ExecutionState::close() {
 L1ContextPhase L1ExecutionState::phase() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return phase_;
+}
+
+bool L1ExecutionState::accepts_dispatch() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return phase_ == L1ContextPhase::Collecting || phase_ == L1ContextPhase::ReadyEnqueued ||
+           phase_ == L1ContextPhase::Sealed;
 }
 
 int L1ExecutionState::device_id() const {
@@ -194,6 +264,10 @@ int L1ExecutionState::fail_runtime_call_locked(int runtime_error) {
     if (has_live_resources_locked()) {
         phase_ = L1ContextPhase::Poisoned;
     } else {
+        if (device_claimed_) {
+            release_l1_device(device_id_);
+            device_claimed_ = false;
+        }
         phase_ = L1ContextPhase::New;
         device_id_ = -1;
         ops_ = {};

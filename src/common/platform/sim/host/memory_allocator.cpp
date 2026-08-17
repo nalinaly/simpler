@@ -51,7 +51,7 @@ int MemoryAllocator::free(void *ptr) {
     return 0;
 }
 
-int MemoryAllocator::finalize() {
+int MemoryAllocator::finalize(bool /*preserve_failures*/) {
     std::scoped_lock<std::mutex> lk(mu_);
     for (const auto &kv : ptr_size_map_) {
         std::free(kv.first);

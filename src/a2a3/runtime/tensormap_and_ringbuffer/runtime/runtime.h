@@ -43,6 +43,7 @@
 #include "common/l2_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
+#include "aicore_handshake_protocol.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -69,8 +70,8 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * AICPU and AICore during task execution.
  *
  * Protocol State Machine:
- * 1. Initialization: AICPU sets aicpu_ready=1
- * 2. Acknowledgment: AICore sets aicore_done=core_id+1
+ * 1. Report: AICore publishes physical id/type and sets aicore_done=core_id+1
+ * 2. Success: AICPU opens DATA_MAIN_BASE; invalid-id failure: AICPU publishes CANCEL
  * 3. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
  * 4. Task Execution: AICore reads the cached PTO2DispatchPayload and executes
  * 5. Task Completion: AICore writes FIN to COND; AICPU observes completion
@@ -96,7 +97,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * - physical_core_id: Written by AICore (with aicore_done), read by AICPU
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;  // AICPU ready signal: 0=not ready, 1=ready
+    volatile uint32_t aicpu_ready;  // Pre-window error control: WAIT=0, legacy=1, CANCEL=2
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
     volatile uint64_t task;         // Init: PTO2DispatchPayload* (set before aicpu_ready); runtime: unused
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)

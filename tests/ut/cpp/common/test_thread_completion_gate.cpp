@@ -25,6 +25,7 @@ TEST(ThreadCompletionGateTest, CleanupCannotBeClaimedWhileFinalizerIsRunning) {
     std::condition_variable condition;
     bool finalizer_started = false;
     bool allow_finalizer_to_finish = false;
+    bool waiter_returned = false;
 
     std::thread last_thread([&] {
         gate.arrive_and_finalize_if_last(2, [&] {
@@ -43,7 +44,18 @@ TEST(ThreadCompletionGateTest, CleanupCannotBeClaimedWhileFinalizerIsRunning) {
             return finalizer_started;
         });
     }
-    EXPECT_FALSE(gate.claim_cleanup());
+    std::thread waiter([&] {
+        gate.wait_for_finalization();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            waiter_returned = true;
+        }
+        condition.notify_one();
+    });
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        EXPECT_FALSE(waiter_returned);
+    }
 
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -51,9 +63,11 @@ TEST(ThreadCompletionGateTest, CleanupCannotBeClaimedWhileFinalizerIsRunning) {
     }
     condition.notify_one();
     last_thread.join();
+    waiter.join();
 
-    EXPECT_TRUE(gate.claim_cleanup());
-    EXPECT_FALSE(gate.claim_cleanup());
+    EXPECT_FALSE(gate.depart_and_claim_cleanup_if_last(2));
+    EXPECT_TRUE(gate.depart_and_claim_cleanup_if_last(2));
+    EXPECT_FALSE(gate.depart_and_claim_cleanup_if_last(2));
 }
 
 TEST(ThreadCompletionGateTest, ResetAllowsAnotherRun) {
@@ -63,12 +77,14 @@ TEST(ThreadCompletionGateTest, ResetAllowsAnotherRun) {
     gate.arrive_and_finalize_if_last(1, [&] {
         ++finalized;
     });
-    ASSERT_TRUE(gate.claim_cleanup());
+    gate.wait_for_finalization();
+    ASSERT_TRUE(gate.depart_and_claim_cleanup_if_last(1));
 
     gate.reset();
     gate.arrive_and_finalize_if_last(1, [&] {
         ++finalized;
     });
-    EXPECT_TRUE(gate.claim_cleanup());
+    gate.wait_for_finalization();
+    EXPECT_TRUE(gate.depart_and_claim_cleanup_if_last(1));
     EXPECT_EQ(finalized, 2);
 }

@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 import _task_interface as _ti_module  # pyright: ignore[reportMissingImports]
 from _task_interface import (  # pyright: ignore[reportMissingImports]
+    CHIP_MAX_SCALAR_ARGS,
+    CHIP_MAX_TENSOR_ARGS,
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_FRAME_SIZE,
     MAILBOX_OFF_ERROR_MSG,
@@ -132,6 +134,8 @@ def _assert_bindings_match_source_tree() -> None:
 _assert_bindings_match_source_tree()
 
 __all__ = [
+    "CHIP_MAX_SCALAR_ARGS",
+    "CHIP_MAX_TENSOR_ARGS",
     "DataType",
     "get_element_size",
     "get_dtype_name",
@@ -1104,9 +1108,45 @@ class ChipWorker:
         self._owner_id = uuid.uuid4().hex
         self._registry_lock = threading.Lock()
         self._callable_registry: dict[int, ChipCallable] = {}
+        # L1 has append-only callable ownership: once a callable has been
+        # prepared, its device image may be referenced by an ACLGraph until
+        # the whole borrowed context is explicitly closed.  Keep this
+        # registry separate from the L2 handle/ref-count table so an L2
+        # unregister can never release or recycle L1 state.
+        self._l1_callable_registry: dict[int, ChipCallable] = {}
+        self._execution_mode: str | None = None
         self._identity_registry: dict[bytes, Any] = {}
         self._live_handles: dict[int, bytes] = {}
         self._next_handle_id = 0
+
+    @staticmethod
+    def _bootstrap_runtime_globals(bins: Any, log_level: int | None) -> str:
+        """Preload process-global logging/simulator DSOs for one init path.
+
+        Both owned L2 and borrowed L1 dlopen the same host runtime.  Keeping
+        the RTLD_GLOBAL bootstrap in one helper prevents the two modes from
+        drifting while leaving device/context ownership entirely to their
+        distinct native init entry points.
+        """
+        if log_level is None:
+            from . import _log  # noqa: PLC0415
+
+            log_level = _log.get_current_config()
+
+        if not bins.simpler_log_path:
+            raise ValueError("ChipWorker init: bins.simpler_log_path is required")
+        log_handle = _preload_global(str(bins.simpler_log_path))
+        log_handle.simpler_log_init.argtypes = [ctypes.c_int]
+        log_handle.simpler_log_init.restype = ctypes.c_int
+        rc = log_handle.simpler_log_init(int(log_level))
+        if rc != 0:
+            raise RuntimeError(f"simpler_log_init failed with code {rc}")
+
+        if bins.sim_context_path:
+            _preload_global(str(bins.sim_context_path))
+
+        dispatcher_path = getattr(bins, "dispatcher_path", None)
+        return "" if dispatcher_path is None else str(dispatcher_path)
 
     def init(
         self,
@@ -1149,42 +1189,128 @@ class ChipWorker:
         `_ChipWorker.init(...)` from `_task_interface` instead of going
         through this wrapper.
         """
-        if log_level is None:
-            from . import _log  # noqa: PLC0415
-
-            log_level = _log.get_current_config()
-
-        # 1. libsimpler_log.so — RTLD_GLOBAL singleton, before host_runtime.so.
-        if not bins.simpler_log_path:
-            raise ValueError("ChipWorker.init: bins.simpler_log_path is required")
-        log_handle = _preload_global(str(bins.simpler_log_path))
-        log_handle.simpler_log_init.argtypes = [ctypes.c_int]
-        log_handle.simpler_log_init.restype = ctypes.c_int
-        rc = log_handle.simpler_log_init(int(log_level))
-        if rc != 0:
-            raise RuntimeError(f"simpler_log_init failed with code {rc}")
-
-        # 2. libcpu_sim_context.so — sim platforms only (host_runtime.so's sim
-        #    variant resolves sim_context_set_* / pto_sim_get_* against it).
-        if bins.sim_context_path:
-            _preload_global(str(bins.sim_context_path))
-
-        # 3. host_runtime.so is dlopen'd RTLD_LOCAL inside _impl.init.
-        #    dispatcher_path is passed as an empty string on sim (where bins
-        #    has dispatcher_path=None); the onboard simpler_init reads it
-        #    via LoadAicpuOp::BootstrapDispatcher, sim ignores it.
-        dispatcher_path = getattr(bins, "dispatcher_path", None)
+        # host_runtime.so is dlopen'd RTLD_LOCAL inside _impl.init after the
+        # process-global logging/simulator bootstrap.
+        dispatcher_path = self._bootstrap_runtime_globals(bins, log_level)
         self._impl.init(
             str(bins.host_path),
             str(bins.aicpu_path),
             str(bins.aicore_path),
-            "" if dispatcher_path is None else str(dispatcher_path),
+            dispatcher_path,
             int(device_id),
             prewarm_config,
             bool(enable_sdma),
         )
+        self._execution_mode = "l2"
         for slot_id, callable_obj in list(self._callable_registry.items()):
             self._impl.register_callable(int(slot_id), callable_obj)
+
+    def init_l1(
+        self,
+        device_id: int,
+        bins: Any,
+        config: CallConfig,
+        log_level: int | None = None,
+    ) -> None:
+        """Initialize borrowed-device L1 mode without taking device ownership.
+
+        The caller must already have ``device_id`` current.  This method does
+        not call ``aclInit``, set/reset the device, create an AICPU run stream,
+        or synchronize any stream.  The native L1 context owns only its hidden
+        AICore stream, synchronization events, persistent runtime state and
+        internal workspace.
+
+        Only the onboard ``tensormap_and_ringbuffer`` runtime supports L1.
+        Callables are prepared through the dedicated ``l1_*`` methods below;
+        the L2 ``register_callable`` registry is intentionally not reused.
+        """
+        if not isinstance(config, CallConfig):
+            raise TypeError("ChipWorker.init_l1 config must be a CallConfig")
+        if self._execution_mode is not None or self._impl.initialized:
+            raise RuntimeError("ChipWorker.init_l1 requires a fresh, uninitialized worker")
+        if self._callable_registry:
+            raise RuntimeError("ChipWorker.init_l1 cannot reuse callables registered for L2")
+
+        dispatcher_path = self._bootstrap_runtime_globals(bins, log_level)
+        try:
+            self._impl.init_l1(
+                str(bins.host_path),
+                str(bins.aicpu_path),
+                str(bins.aicore_path),
+                dispatcher_path,
+                int(device_id),
+                config,
+            )
+        except BaseException:
+            # Native init normally rolls back to an uninitialized worker.  If
+            # that rollback itself fails, however, ChipWorker deliberately
+            # keeps the borrowed context/DSO alive and marks itself initialized
+            # so explicit finalize() can be retried.  Preserve the Python mode
+            # marker too; otherwise finalize() would apply legacy L2 failure
+            # cleanup and discard the very owners needed for the retry.
+            if self._impl.initialized:
+                self._execution_mode = "l1"
+            raise
+        self._execution_mode = "l1"
+
+    def _check_l1_ready(self) -> None:
+        if self._execution_mode != "l1" or not self._impl.initialized:
+            raise RuntimeError("ChipWorker is not initialized in borrowed-device L1 mode")
+
+    @staticmethod
+    def _check_l1_callable_id(callable_id: int) -> int:
+        callable_id = int(callable_id)
+        if callable_id < 0 or callable_id >= MAX_REGISTERED_CALLABLE_IDS:
+            raise ValueError(f"L1 callable_id must be in [0, {MAX_REGISTERED_CALLABLE_IDS}), got {callable_id}")
+        return callable_id
+
+    def _remember_l1_callable(self, callable_id: int, callable: ChipCallable) -> int:
+        self._check_l1_ready()
+        callable_id = self._check_l1_callable_id(callable_id)
+        if not isinstance(callable, ChipCallable):
+            raise TypeError("L1 prepare only supports ChipCallable targets")
+        existing = self._l1_callable_registry.get(callable_id)
+        if existing is not None and existing is not callable:
+            raise RuntimeError(f"L1 callable_id {callable_id} is already bound; L1 registrations are append-only")
+        return callable_id
+
+    def l1_prepare_callable(self, callable_id: int, callable: ChipCallable, caller_stream: int) -> None:
+        """Validate and enqueue one L1 callable prepare on ``caller_stream``.
+
+        This is the raw-stream path.  PyTorch callers should normally create a
+        retained queue call with :meth:`l1_make_prepare_queue_call` and submit
+        it through the optional torch_npu adapter so taskQueue ordering is
+        preserved.
+        """
+        callable_id = self._remember_l1_callable(callable_id, callable)
+        self._impl.l1_prepare_callable(callable_id, callable, int(caller_stream))
+        self._l1_callable_registry[callable_id] = callable
+
+    def l1_make_prepare_queue_call(self, callable_id: int, callable: ChipCallable):
+        """Return a retained, Python-free deferred L1 prepare capsule."""
+        callable_id = self._remember_l1_callable(callable_id, callable)
+        queue_call = self._impl.l1_make_prepare_queue_call(callable_id, callable)
+        self._l1_callable_registry[callable_id] = callable
+        return queue_call
+
+    def _check_l1_launch(self, callable_id: int, args: ChipStorageTaskArgs) -> int:
+        self._check_l1_ready()
+        callable_id = self._check_l1_callable_id(callable_id)
+        if callable_id not in self._l1_callable_registry:
+            raise KeyError(f"L1 callable_id {callable_id} has not been prepared")
+        if not isinstance(args, ChipStorageTaskArgs):
+            raise TypeError("L1 launch args must be ChipStorageTaskArgs")
+        return callable_id
+
+    def l1_launch(self, callable_id: int, args: ChipStorageTaskArgs, caller_stream: int) -> None:
+        """Enqueue one L1 invocation on a caller-owned raw ACL stream."""
+        callable_id = self._check_l1_launch(callable_id, args)
+        self._impl.l1_launch(callable_id, args, int(caller_stream))
+
+    def l1_make_launch_queue_call(self, callable_id: int, args: ChipStorageTaskArgs):
+        """Return a retained, Python-free deferred L1 launch capsule."""
+        callable_id = self._check_l1_launch(callable_id, args)
+        return self._impl.l1_make_launch_queue_call(callable_id, args)
 
     def finalize(self):
         """Tear down everything: device resources and runtime library.
@@ -1193,11 +1319,25 @@ class ChipWorker:
         """
         try:
             self._impl.finalize()
-        finally:
+        except Exception:
+            # Borrowed L1 teardown is explicitly retryable.  If native close
+            # retained a failed binary/device allocation, keep every Python
+            # owner and the execution-mode marker live so the caller can
+            # quiesce the device and retry close.  Preserve the legacy L2
+            # wrapper's terminal cleanup behaviour on failure.
+            if self._execution_mode != "l1":
+                with self._registry_lock:
+                    self._callable_registry.clear()
+                    self._identity_registry.clear()
+                    self._live_handles.clear()
+            raise
+        else:
             with self._registry_lock:
                 self._callable_registry.clear()
+                self._l1_callable_registry.clear()
                 self._identity_registry.clear()
                 self._live_handles.clear()
+            self._execution_mode = None
 
     def _allocate_slot_locked(self) -> int:
         for slot_id in range(MAX_REGISTERED_CALLABLE_IDS):

@@ -178,6 +178,23 @@ TEST(L1ExecutionState, DeviceMismatchFailsBeforeCreatingAnyResource) {
     EXPECT_EQ(runtime.calls_, (std::vector<std::string>{"get_current_device"}));
 }
 
+TEST(L1ExecutionState, AllowsOnlyOneLiveContextPerProcessDevice) {
+    FakeL1Runtime first_runtime;
+    FakeL1Runtime second_runtime;
+    L1ExecutionState first;
+    L1ExecutionState second;
+
+    ASSERT_EQ(first.initialize(3, first_runtime.ops()), 0);
+    EXPECT_EQ(second.initialize(3, second_runtime.ops()), PTO_RUNTIME_ERR_INVALID_STATE);
+    EXPECT_EQ(second.phase(), L1ContextPhase::New);
+    EXPECT_TRUE(second_runtime.live_.empty());
+    EXPECT_EQ(second_runtime.calls_, (std::vector<std::string>{"get_current_device"}));
+
+    ASSERT_EQ(first.close(), 0);
+    ASSERT_EQ(second.initialize(3, second_runtime.ops()), 0);
+    EXPECT_EQ(second.close(), 0);
+}
+
 TEST(L1ExecutionState, CreateFailureRollsBackOnlyAlreadyOwnedHandlesInReverseOrder) {
     FakeL1Runtime runtime;
     runtime.fail_create_attempt(4, -77);  // stream + two events succeed; third event fails
@@ -208,8 +225,37 @@ TEST(L1ExecutionState, FailedRollbackPoisonsAndKeepsTheHandleForExplicitCloseRet
     EXPECT_EQ(runtime.live_.size(), 1u);
     EXPECT_EQ(state.last_runtime_error(), -88);
 
+    ASSERT_EQ(state.begin_close(), 0);
+    EXPECT_EQ(state.phase(), L1ContextPhase::Closing);
     ASSERT_EQ(state.close(), 0);
     EXPECT_EQ(state.phase(), L1ContextPhase::Closed);
+    EXPECT_TRUE(runtime.live_.empty());
+}
+
+TEST(L1ExecutionState, CloseIntentRejectsDispatchAndSurvivesRetryableTeardownFailure) {
+    FakeL1Runtime runtime;
+    L1ExecutionState state;
+    ASSERT_EQ(state.initialize(3, runtime.ops()), 0);
+    ASSERT_EQ(state.mark_ready_enqueued(), 0);
+    EXPECT_TRUE(state.accepts_dispatch());
+
+    ASSERT_EQ(state.begin_close(), 0);
+    EXPECT_EQ(state.phase(), L1ContextPhase::Closing);
+    EXPECT_FALSE(state.accepts_dispatch());
+    EXPECT_EQ(state.mark_ready_enqueued(), PTO_RUNTIME_ERR_INVALID_STATE);
+    EXPECT_EQ(state.seal(), PTO_RUNTIME_ERR_INVALID_STATE);
+    EXPECT_EQ(state.begin_close(), 0) << "close retry must preserve the terminal intent";
+
+    runtime.fail_next_destroys(1, -88);
+    EXPECT_EQ(state.close(), PTO_RUNTIME_ERR_RUNTIME_FAILURE);
+    EXPECT_EQ(state.phase(), L1ContextPhase::Closing);
+    EXPECT_FALSE(state.accepts_dispatch());
+    EXPECT_TRUE(state.has_live_resources());
+
+    ASSERT_EQ(state.begin_close(), 0);
+    ASSERT_EQ(state.close(), 0);
+    EXPECT_EQ(state.phase(), L1ContextPhase::Closed);
+    EXPECT_FALSE(state.accepts_dispatch());
     EXPECT_TRUE(runtime.live_.empty());
 }
 

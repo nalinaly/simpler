@@ -56,6 +56,8 @@ def _ensure_torch_map():
         torch.int64: DataType.INT64,
         torch.uint16: DataType.UINT16,
         torch.uint32: DataType.UINT32,
+        torch.uint64: DataType.UINT64,
+        torch.bool: DataType.BOOL,
     }
     # MX low-precision dtypes — A5 only (consumed by the A5-only pto.tquant.mx /
     # tmatmul.mx ops). MX paths use E4M3FN (+ E8M0 scale) and packed E2M1;

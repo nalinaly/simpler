@@ -53,8 +53,8 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  * 3. Cache per-core PTO2DispatchPayload pointer from hank->task
  * 4. Poll DATA_MAIN_BASE register for task dispatch until exit signal
  *
- * AICPU writes &s_payload_per_core[i] to hank->task before setting
- * aicpu_ready=1. AICore caches this pointer and reads function_bin_addr +
+ * AICPU writes &s_payload_per_core[i] to hank->task before opening the
+ * register window. AICore caches this pointer and reads function_bin_addr +
  * args pointer from it on each dispatch. reg_val is a monotonically
  * increasing task ID used only for dispatch signaling and ACK/FIN protocol.
  *
@@ -86,7 +86,17 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // poll cannot miss it and mistake a later task for the reset value.
     // Window-open is the sync point for everything the AICPU publishes (task
     // pointer, swimlane head): the AICPU writes those before opening the window.
+    uint32_t pre_window_spins = 0;
     while (read_reg(RegId::DATA_MAIN_BASE) == 0) {
+        if (((++pre_window_spins) & AICORE_PRE_WINDOW_CANCEL_POLL_MASK) == 0) {
+            dcci(my_hank, SINGLE_CACHE_LINE);
+            if (my_hank->aicpu_ready == AICORE_PRE_WINDOW_CANCEL) {
+                // No valid register window exists for this reported physical
+                // id. Exit without touching an SPR; hidden-stream kernel
+                // completion is the collective acknowledgment.
+                return;
+            }
+        }
         SPIN_WAIT_HINT();
     }
     // Report initial idle status via register (FAST_PATH is now open).

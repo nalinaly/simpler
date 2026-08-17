@@ -108,6 +108,11 @@ struct Callable {
     int32_t child_count_;
     char config_name_[CALLABLE_FUNC_NAME_MAX];
     uint32_t config_name_len_;
+    // Uses four bytes of the historical padding before the 16-byte-aligned
+    // storage_ member. Keeping this field at the end preserves every existing
+    // ChipCallable wire offset and makes old zero-initialized blobs read as
+    // scalar_count == 0.
+    int32_t scalar_count_;
     // Children live in storage_ at CALLABLE_ALIGN-aligned offsets, but the
     // all-uint32 header above can leave offsetof(storage_) at 4-mod-8, which
     // would place an 8-byte-aligned Child (CoreCallable has a uint64) on a
@@ -123,6 +128,7 @@ struct Callable {
         return signature_[i];
     }
     int32_t sig_count() const { return sig_count_; }
+    int32_t scalar_count() const { return scalar_count_; }
     const void *binary_data() const { return storage_; }
     uint32_t binary_size() const { return binary_size_; }
     const char *func_name() const { return func_name_; }
@@ -149,9 +155,9 @@ private:
 
     template <typename C, int MS, int MC>
     friend std::vector<uint8_t> make_callable(
-        const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
-        const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
-        const char *config_name
+        const ArgDirection *sig, int32_t sig_count, int32_t scalar_count, const char *func_name, const void *binary,
+        uint32_t binary_size, const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers,
+        int32_t child_count, const char *config_name
     );
 };
 
@@ -176,6 +182,19 @@ static_assert(
     offsetof(ChipCallable, storage_) % CALLABLE_CHILD_ALIGN == 0,
     "ChipCallable.storage_ must be CALLABLE_CHILD_ALIGN-aligned for SIMT kernel binaries"
 );
+// ChipCallable bytes are shipped through L3/L4 IPC and caches. scalar_count_
+// must consume tail padding rather than moving any historical field.
+static_assert(offsetof(ChipCallable, sig_count_) == 1024, "ChipCallable wire ABI: sig_count offset changed");
+static_assert(offsetof(ChipCallable, binary_size_) == 1028, "ChipCallable wire ABI: binary_size offset changed");
+static_assert(offsetof(ChipCallable, func_name_) == 1032, "ChipCallable wire ABI: func_name offset changed");
+static_assert(offsetof(ChipCallable, func_name_len_) == 1096, "ChipCallable wire ABI: func_name_len offset changed");
+static_assert(offsetof(ChipCallable, child_func_ids_) == 1100, "ChipCallable wire ABI: child ids offset changed");
+static_assert(offsetof(ChipCallable, child_offsets_) == 5196, "ChipCallable wire ABI: child offsets changed");
+static_assert(offsetof(ChipCallable, child_count_) == 9292, "ChipCallable wire ABI: child_count offset changed");
+static_assert(offsetof(ChipCallable, config_name_) == 9296, "ChipCallable wire ABI: config_name offset changed");
+static_assert(offsetof(ChipCallable, config_name_len_) == 9360, "ChipCallable wire ABI: config length offset changed");
+static_assert(offsetof(ChipCallable, scalar_count_) == 9364, "ChipCallable wire ABI: scalar_count padding changed");
+static_assert(offsetof(ChipCallable, storage_) == 9376, "ChipCallable wire ABI: storage offset changed");
 
 // ============================================================================
 // Factory: make_callable for static leaf
@@ -216,8 +235,8 @@ make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, ui
 
 template <typename Child, int MaxSig, int MaxChildren>
 std::vector<uint8_t> make_callable(
-    const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
-    const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
+    const ArgDirection *sig, int32_t sig_count, int32_t scalar_count, const char *func_name, const void *binary,
+    uint32_t binary_size, const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
     // No default arg here: the friend declaration above has none, so a default
     // on this definition is a "redeclaration may not have default arguments"
     // error once ChipCallable is instantiated (the static_assert below does
@@ -229,6 +248,12 @@ std::vector<uint8_t> make_callable(
         throw std::invalid_argument(
             "make_callable: requested tensor count " + std::to_string(sig_count) + " exceeds supported tensor count " +
             std::to_string(MaxSig)
+        );
+    }
+    if (scalar_count < 0 || scalar_count > CHIP_MAX_SCALAR_ARGS) {
+        throw std::invalid_argument(
+            "make_callable: requested scalar count " + std::to_string(scalar_count) +
+            " exceeds supported scalar count " + std::to_string(CHIP_MAX_SCALAR_ARGS)
         );
     }
     if (child_count > MaxChildren) throw std::invalid_argument("make_callable: child_count exceeds MaxChildren");
@@ -250,6 +275,7 @@ std::vector<uint8_t> make_callable(
     for (int32_t i = 0; i < sig_count; ++i)
         obj->signature_[i] = sig[i];
     obj->sig_count_ = sig_count;
+    obj->scalar_count_ = scalar_count;
     obj->binary_size_ = binary_size;
 
     // Store func_name (null-terminated, truncated to CALLABLE_FUNC_NAME_MAX-1)
@@ -286,4 +312,16 @@ std::vector<uint8_t> make_callable(
     obj->child_count_ = child_count;
 
     return buf;
+}
+
+/** Source-compatible parent factory for existing L2/L3 callers. */
+template <typename Child, int MaxSig, int MaxChildren>
+std::vector<uint8_t> make_callable(
+    const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
+    const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
+    const char *config_name
+) {
+    return make_callable<Child, MaxSig, MaxChildren>(
+        sig, sig_count, 0, func_name, binary, binary_size, child_func_ids, child_buffers, child_count, config_name
+    );
 }
