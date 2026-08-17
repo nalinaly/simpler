@@ -19,6 +19,7 @@
 
 #include "hbg_launch_blob.h"
 #include "hbg_launch_blob_builder.h"
+#include "hbg_restore.h"
 
 namespace {
 
@@ -35,7 +36,11 @@ using simpler::hbg::HbgLaunchBlobHeader;
 using simpler::hbg::HbgLaunchBlobStatus;
 using simpler::hbg::HbgLaunchRegion;
 using simpler::hbg::HbgLaunchRegionKind;
+using simpler::hbg::HbgRestoreCommit;
+using simpler::hbg::HbgRestoreOps;
+using simpler::hbg::HbgRestoreStatus;
 using simpler::hbg::make_hbg_launch_placeholder;
+using simpler::hbg::restore_hbg_launch_blob;
 using simpler::hbg::validate_hbg_launch_blob;
 using simpler::host_args::HostArgsLaunchStatus;
 using simpler::host_args::HostArgsPlaceholder;
@@ -47,6 +52,40 @@ struct Sources {
     std::array<uint8_t, 16> sm{};
     std::array<uint8_t, 24> arena{};
 };
+
+struct RestoreHarness {
+    std::array<uint8_t, 16> working_sm{};
+    std::array<uint8_t, 24> working_arena{};
+    int copy_calls{0};
+    int publish_calls{0};
+    int fail_copy_at{-1};
+    int fail_publish_at{-1};
+};
+
+int restore_copy(void *context, HbgLaunchRegionKind, void *destination, const void *source, size_t size) noexcept {
+    auto *harness = static_cast<RestoreHarness *>(context);
+    const int call = harness->copy_calls++;
+    if (call == harness->fail_copy_at) return -91;
+    std::memcpy(destination, source, size);
+    return 0;
+}
+
+int restore_publish(void *context, HbgLaunchRegionKind, const void *, size_t) noexcept {
+    auto *harness = static_cast<RestoreHarness *>(context);
+    const int call = harness->publish_calls++;
+    return call == harness->fail_publish_at ? -92 : 0;
+}
+
+HbgExecutionBinding make_restore_binding(const RestoreHarness &harness) {
+    HbgExecutionBinding binding;
+    binding.shared_memory_base = reinterpret_cast<uint64_t>(harness.working_sm.data());
+    binding.shared_memory_capacity = harness.working_sm.size();
+    binding.runtime_arena_base = reinterpret_cast<uint64_t>(harness.working_arena.data());
+    binding.runtime_arena_capacity = harness.working_arena.size();
+    binding.runtime_offset = 8;
+    binding.slot_generation = 17;
+    return binding;
+}
 
 HbgExecutionBinding make_binding(const Sources &sources, bool with_heap = false) {
     HbgExecutionBinding binding;
@@ -78,6 +117,19 @@ std::vector<HbgHostRegionInput> make_inputs(const Sources &sources) {
         {HbgLaunchRegionKind::SharedMemoryImage, kRegionFlags, sources.sm.data(), sources.sm.size(), 0},
         {HbgLaunchRegionKind::RuntimeArenaImage, kRegionFlags, sources.arena.data(), sources.arena.size(), 0},
     };
+}
+
+std::vector<uint8_t> make_restore_blob(
+    const Sources &sources, const HbgExecutionBinding &binding, const HbgInvocationIdentity &identity,
+    uint64_t plan_generation
+) {
+    std::vector<uint8_t> blob;
+    EXPECT_EQ(
+        build_hbg_launch_blob(binding, identity, plan_generation, make_inputs(sources), &blob), HbgLaunchBlobStatus::Ok
+    );
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->inline_payload_addr = reinterpret_cast<uint64_t>(blob.data()) + header->header_size;
+    return blob;
 }
 
 std::vector<uint8_t> make_blob(Sources *sources = nullptr) {
@@ -448,6 +500,120 @@ TEST(HbgLaunchBlob, FailedBuildPreservesThePreviousCanonicalBlob) {
         HbgLaunchBlobStatus::InvalidRegion
     );
     EXPECT_EQ(blob, before);
+}
+
+TEST(HbgLaunchBlob, RestoresThePristineWorkingImageOnEveryReplay) {
+    Sources sources;
+    for (size_t i = 0; i < sources.sm.size(); ++i)
+        sources.sm[i] = static_cast<uint8_t>(0x20 + i);
+    for (size_t i = 0; i < sources.arena.size(); ++i)
+        sources.arena[i] = static_cast<uint8_t>(0x60 + i);
+    RestoreHarness harness;
+    const HbgExecutionBinding binding = make_restore_binding(harness);
+    const HbgInvocationIdentity identity = make_identity();
+    std::vector<uint8_t> blob = make_restore_blob(sources, binding, identity, 31);
+    HbgRestoreCommit commit{};
+    const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
+
+    harness.working_sm.fill(0xee);
+    harness.working_arena.fill(0xdd);
+    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    ASSERT_EQ(result.status, HbgRestoreStatus::Ok);
+    EXPECT_EQ(harness.working_sm, sources.sm);
+    EXPECT_EQ(harness.working_arena, sources.arena);
+    EXPECT_EQ(commit.slot_generation, binding.slot_generation);
+    EXPECT_EQ(commit.plan_generation, 31u);
+    EXPECT_EQ(commit.identity.argument_snapshot_hash, identity.argument_snapshot_hash);
+
+    harness.working_sm.fill(0x11);
+    harness.working_arena.fill(0x22);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    ASSERT_EQ(result.status, HbgRestoreStatus::Ok);
+    EXPECT_EQ(harness.working_sm, sources.sm);
+    EXPECT_EQ(harness.working_arena, sources.arena);
+    EXPECT_EQ(harness.copy_calls, 4);
+    EXPECT_EQ(harness.publish_calls, 4);
+}
+
+TEST(HbgLaunchBlob, AlternatingCapturedPackagesRestoreTheirOwnSnapshotIntoOneSlot) {
+    Sources sources_a;
+    Sources sources_b;
+    sources_a.sm.fill(0xa1);
+    sources_a.arena.fill(0xa2);
+    sources_b.sm.fill(0xb1);
+    sources_b.arena.fill(0xb2);
+    RestoreHarness harness;
+    const HbgExecutionBinding binding = make_restore_binding(harness);
+    const HbgInvocationIdentity identity_a = make_identity();
+    HbgInvocationIdentity identity_b = identity_a;
+    ++identity_b.argument_snapshot_hash;
+    std::vector<uint8_t> blob_a = make_restore_blob(sources_a, binding, identity_a, 41);
+    std::vector<uint8_t> blob_b = make_restore_blob(sources_b, binding, identity_b, 42);
+    const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
+    HbgRestoreCommit commit{};
+
+    ASSERT_EQ(
+        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), binding, identity_a, ops, &commit).status,
+        HbgRestoreStatus::Ok
+    );
+    EXPECT_EQ(harness.working_sm, sources_a.sm);
+    EXPECT_EQ(commit.plan_generation, 41u);
+
+    ASSERT_EQ(
+        restore_hbg_launch_blob(blob_b.data(), blob_b.size(), binding, identity_b, ops, &commit).status,
+        HbgRestoreStatus::Ok
+    );
+    EXPECT_EQ(harness.working_sm, sources_b.sm);
+    EXPECT_EQ(harness.working_arena, sources_b.arena);
+    EXPECT_EQ(commit.plan_generation, 42u);
+
+    ASSERT_EQ(
+        restore_hbg_launch_blob(blob_a.data(), blob_a.size(), binding, identity_a, ops, &commit).status,
+        HbgRestoreStatus::Ok
+    );
+    EXPECT_EQ(harness.working_sm, sources_a.sm);
+    EXPECT_EQ(harness.working_arena, sources_a.arena);
+    EXPECT_EQ(harness.copy_calls, 6);
+}
+
+TEST(HbgLaunchBlob, FailedRestoreNeverPublishesAReadyCommit) {
+    Sources sources;
+    sources.sm.fill(0xc1);
+    sources.arena.fill(0xc2);
+    RestoreHarness harness;
+    const HbgExecutionBinding binding = make_restore_binding(harness);
+    const HbgInvocationIdentity identity = make_identity();
+    std::vector<uint8_t> blob = make_restore_blob(sources, binding, identity, 51);
+    const HbgRestoreOps ops{&harness, restore_copy, restore_publish};
+    HbgRestoreCommit commit{91, 92, 93, identity};
+    const HbgRestoreCommit sentinel = commit;
+
+    HbgExecutionBinding stale_binding = binding;
+    ++stale_binding.slot_generation;
+    auto result = restore_hbg_launch_blob(blob.data(), blob.size(), stale_binding, identity, ops, &commit);
+    EXPECT_EQ(result.status, HbgRestoreStatus::BlobRejected);
+    EXPECT_EQ(result.blob_status, HbgLaunchBlobStatus::InvalidGeneration);
+    EXPECT_EQ(harness.copy_calls, 0);
+    EXPECT_EQ(std::memcmp(&commit, &sentinel, sizeof(commit)), 0);
+
+    harness.working_sm.fill(0xee);
+    harness.working_arena.fill(0xdd);
+    harness.fail_copy_at = 1;
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    EXPECT_EQ(result.status, HbgRestoreStatus::CopyFailed);
+    EXPECT_EQ(result.region_index, 1u);
+    EXPECT_EQ(result.callback_error, -91);
+    EXPECT_EQ(harness.working_sm, sources.sm);
+    EXPECT_NE(harness.working_arena, sources.arena);
+    EXPECT_EQ(std::memcmp(&commit, &sentinel, sizeof(commit)), 0);
+
+    harness.fail_copy_at = -1;
+    harness.fail_publish_at = harness.publish_calls;
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), binding, identity, ops, &commit);
+    EXPECT_EQ(result.status, HbgRestoreStatus::PublishFailed);
+    EXPECT_EQ(result.region_index, 0u);
+    EXPECT_EQ(result.callback_error, -92);
+    EXPECT_EQ(std::memcmp(&commit, &sentinel, sizeof(commit)), 0);
 }
 
 }  // namespace

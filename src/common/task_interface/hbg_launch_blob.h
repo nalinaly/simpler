@@ -295,7 +295,10 @@ inline HbgLaunchBlobStatus validate_hbg_launch_blob(
         if (header_bytes[offset] != 0) return HbgLaunchBlobStatus::InvalidHeader;
     }
 
-    const uint64_t expected_payload_addr = reinterpret_cast<uint64_t>(blob) + header->header_size;
+    uint64_t expected_payload_addr = 0;
+    if (!hbg_checked_add_u64(reinterpret_cast<uint64_t>(blob), header->header_size, &expected_payload_addr)) {
+        return HbgLaunchBlobStatus::OutOfBounds;
+    }
     if ((address_mode == HbgLaunchBlobAddressMode::HostUnpatched && header->inline_payload_addr != 0) ||
         (address_mode == HbgLaunchBlobAddressMode::DevicePatched &&
          header->inline_payload_addr != expected_payload_addr) ||
