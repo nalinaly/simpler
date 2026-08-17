@@ -530,6 +530,28 @@ target_link_libraries(test_hbg_argument_snapshot PRIVATE ${GTEST_MAIN_LIB} ${GTE
 add_test(NAME test_hbg_argument_snapshot COMMAND test_hbg_argument_snapshot)
 set_tests_properties(test_hbg_argument_snapshot PROPERTIES LABELS "no_hardware")
 
+add_executable(test_hbg_callable_function_binding types/test_hbg_callable_function_binding.cpp)
+target_include_directories(test_hbg_callable_function_binding PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_callable_function_binding PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_callable_function_binding COMMAND test_hbg_callable_function_binding)
+set_tests_properties(test_hbg_callable_function_binding PROPERTIES LABELS "no_hardware")
+
+add_executable(test_hbg_aicpu_invocation types/test_hbg_aicpu_invocation.cpp)
+target_include_directories(test_hbg_aicpu_invocation PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_aicpu_invocation PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_aicpu_invocation COMMAND test_hbg_aicpu_invocation)
+set_tests_properties(test_hbg_aicpu_invocation PROPERTIES LABELS "no_hardware")
+
 # HBG L1 static working-slot allocation and capacity freeze. The production
 # helper is host-only and uses an injected HostApi, so exact base/capacity
 # publication and failure ordering stay testable without CANN or a device.

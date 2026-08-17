@@ -166,7 +166,8 @@ public:
     );
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        void (*destroy_host_orch_func_ptr)(void *), std::vector<std::pair<int, uint64_t>> kernel_addrs,
+        std::vector<ArgDirection> signature
     );
     int unregister_callable(int32_t callable_id);
     bool has_callable(int32_t callable_id) const;
@@ -375,6 +376,7 @@ protected:
         // hbg path
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
+        void (*destroy_host_orch_func_ptr)(void *){nullptr};
     };
     std::unordered_map<int32_t, CallableState> callables_;
     std::unordered_set<int32_t> aicpu_seen_callable_ids_;

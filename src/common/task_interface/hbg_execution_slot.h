@@ -127,8 +127,16 @@ inline bool hbg_minimum_launch_blob_size(const HbgExecutionBinding &binding, uin
         return false;
     }
     header_size &= ~(static_cast<uint64_t>(HBG_LAUNCH_BLOB_ALIGNMENT) - 1);
+    uint64_t aligned_shared_memory = 0;
+    if (!hbg_checked_add_u64(
+            binding.shared_memory_capacity, static_cast<uint64_t>(HBG_LAUNCH_BLOB_ALIGNMENT - 1), &aligned_shared_memory
+        )) {
+        return false;
+    }
+    aligned_shared_memory &= ~(static_cast<uint64_t>(HBG_LAUNCH_BLOB_ALIGNMENT) - 1);
+
     uint64_t size = 0;
-    if (!hbg_checked_add_u64(header_size, binding.shared_memory_capacity, &size) ||
+    if (!hbg_checked_add_u64(header_size, aligned_shared_memory, &size) ||
         !hbg_checked_add_u64(size, binding.runtime_arena_capacity, &size)) {
         return false;
     }

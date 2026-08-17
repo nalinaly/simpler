@@ -13,6 +13,7 @@
 
 #include "common/unified_log.h"
 #include "common/kernel_args.h"
+#include "hbg_aicpu_invocation.h"
 #include "l1_aicpu_args.h"
 #include "common/platform_config.h"
 #include "aicpu/aicpu_device_config.h"
@@ -44,6 +45,8 @@
 extern "C" int aicpu_execute(Runtime *arg);
 extern "C" __attribute__((weak)) int
 aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id);
+extern "C" __attribute__((weak)) int
+aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation);
 
 /**
  * AICPU kernel main execution entry point.
@@ -58,7 +61,10 @@ aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, i
  * @param arg Pointer to the front-less KernelArgs payload (runtime_args @ 0)
  * @return 0 on success, non-zero on error
  */
-static int ExecuteAicpuKernel(const KernelArgs *k_args, const L1AicpuInvocationArgs *l1_invocation) {
+static int ExecuteAicpuKernel(
+    const KernelArgs *k_args, const L1AicpuInvocationArgs *l1_invocation,
+    const simpler::hbg::HbgAicpuInvocationView *hbg_invocation
+) {
     // Log severity was snapshot once by simpler_aicpu_init at worker init; the
     // resident SO keeps it across launches, so exec does not re-snapshot.
     Runtime *runtime = k_args->runtime_args;
@@ -121,9 +127,18 @@ static int ExecuteAicpuKernel(const KernelArgs *k_args, const L1AicpuInvocationA
     set_platform_phase_base(k_args->device_wall_data_base);
     AicpuPhaseScope run_wall(AicpuPhase::RunWall);
 
-    int rc = l1_invocation == nullptr ?
-                 aicpu_execute(runtime) :
-                 aicpu_execute_l1(runtime, &l1_invocation->orch_args, l1_invocation->callable_id);
+    int rc = 0;
+    if (hbg_invocation != nullptr) {
+        if (aicpu_execute_l1_hbg == nullptr) {
+            LOG_ERROR("%s", "HBG L1 AICPU execution is unavailable in this runtime");
+            return -1;
+        }
+        rc = aicpu_execute_l1_hbg(runtime, hbg_invocation);
+    } else if (l1_invocation != nullptr) {
+        rc = aicpu_execute_l1(runtime, &l1_invocation->orch_args, l1_invocation->callable_id);
+    } else {
+        rc = aicpu_execute(runtime);
+    }
     if (rc != 0) {
         LOG_ERROR("AICPU executor failed with rc=%d", rc);
         return rc;
@@ -139,7 +154,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
         LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
         return -1;
     }
-    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr);
+    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr, nullptr);
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void *arg) {
@@ -163,7 +178,17 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void
         LOG_ERROR("%s", "L1 AICPU execution is unavailable in this runtime");
         return -1;
     }
-    return ExecuteAicpuKernel(&invocation.kernel_args, &invocation);
+    return ExecuteAicpuKernel(&invocation.kernel_args, &invocation, nullptr);
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_execute_l1_hbg_platform(
+    const KernelArgs *kernel_args, const simpler::hbg::HbgAicpuInvocationView *invocation
+) {
+    if (kernel_args == nullptr || invocation == nullptr) {
+        LOG_ERROR("%s", "Invalid HBG L1 platform invocation");
+        return -1;
+    }
+    return ExecuteAicpuKernel(kernel_args, nullptr, invocation);
 }
 
 /**

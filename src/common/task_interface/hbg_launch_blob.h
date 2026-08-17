@@ -17,6 +17,7 @@
 #include <type_traits>
 
 #include "arg_direction.h"
+#include "callable_protocol.h"
 #include "host_args_launch.h"
 #include "utils/fnv1a_64.h"
 
@@ -24,7 +25,7 @@ namespace simpler::hbg {
 
 inline constexpr uint32_t HBG_LAUNCH_BLOB_MAGIC = 0x31474248U;  // "HBG1" in little-endian memory.
 inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MAJOR = 1;
-inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MINOR = 1;
+inline constexpr uint16_t HBG_LAUNCH_BLOB_ABI_MINOR = 2;
 inline constexpr uint32_t HBG_LAUNCH_BLOB_MAX_REGIONS = 1024;
 inline constexpr size_t HBG_LAUNCH_BLOB_ALIGNMENT = 8;
 
@@ -84,7 +85,10 @@ struct alignas(8) HbgInvocationIdentity {
     // overwriting one context-wide Runtime::host_total_tasks before an older
     // eager task or captured node executes.
     int32_t host_total_tasks{0};
-    uint32_t reserved{0};
+    // Context-global callable identity. Function ids inside the graph remain
+    // callable-local, so two programs may both bind func_id 0 without sharing
+    // one mutable context-wide dispatch table.
+    int32_t callable_id{-1};
 };
 
 /** One immutable source span and its offset within a mutable execution slot. */
@@ -202,14 +206,14 @@ hbg_invocation_identity_matches(const HbgInvocationIdentity &actual, const HbgIn
            actual.argument_snapshot_hash == expected.argument_snapshot_hash &&
            actual.function_binding_hash == expected.function_binding_hash &&
            actual.tensor_count == expected.tensor_count && actual.scalar_count == expected.scalar_count &&
-           actual.host_total_tasks == expected.host_total_tasks && actual.reserved == expected.reserved;
+           actual.host_total_tasks == expected.host_total_tasks && actual.callable_id == expected.callable_id;
 }
 
 inline bool hbg_valid_invocation_identity(const HbgInvocationIdentity &identity) noexcept {
-    return identity.callable_hash != 0 && identity.function_binding_hash != 0 &&
+    return identity.callable_hash != 0 && identity.argument_snapshot_hash != 0 && identity.function_binding_hash != 0 &&
            identity.tensor_count <= static_cast<uint32_t>(CHIP_MAX_TENSOR_ARGS) &&
            identity.scalar_count <= static_cast<uint32_t>(CHIP_MAX_SCALAR_ARGS) && identity.host_total_tasks >= 0 &&
-           identity.reserved == 0;
+           identity.callable_id >= 0 && identity.callable_id < MAX_REGISTERED_CALLABLE_IDS;
 }
 
 inline uint64_t hbg_destination_base(const HbgExecutionBinding &binding, HbgLaunchRegionKind kind) noexcept {

@@ -21,9 +21,14 @@
 #endif
 
 #include "aicpu/aicpu_device_config.h"
+#include "aicpu/cache_maintenance.h"
 #include "aicpu/device_time.h"
 #include "callable_protocol.h"
+#include "common/kernel_args.h"
+#include "hbg_aicpu_invocation.h"
+#include "hbg_callable_registry.h"
 #include "hbg_execution_slot_registry.h"
+#include "hbg_restore.h"
 #include "pto2_dispatch_payload.h"
 #include "runtime.h"
 #include "spin_hint.h"
@@ -61,6 +66,9 @@
 // From orchestration/common.cpp linked into this DSO — updates g_current_runtime
 // here (cleared on teardown before runtime_destroy).
 extern "C" void framework_bind_runtime(PTO2Runtime *rt);
+extern "C" __attribute__((weak)) int simpler_aicpu_execute_l1_hbg_platform(
+    const KernelArgs *kernel_args, const simpler::hbg::HbgAicpuInvocationView *invocation
+);
 
 static int32_t read_pto2_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
@@ -110,6 +118,7 @@ struct AicpuExecutor {
 
     simpler::ThreadCompletionGate completion_gate_;
     std::atomic<bool> runtime_init_ready_{false};
+    std::atomic<int32_t> hbg_restore_error_{0};
 
     // Per-Worker arena backing the PTO2Runtime + sm_handle + orch/sched/mailbox
     // sub-regions (created in runtime_create_from_sm, released in runtime_destroy).
@@ -121,12 +130,26 @@ struct AicpuExecutor {
 
     // ===== Methods =====
     int32_t init(Runtime *runtime);
-    int32_t run(Runtime *runtime);
+    int32_t run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation = nullptr);
     void deinit(Runtime *runtime);
 };
 
 static AicpuExecutor g_aicpu_executor;
 static simpler::hbg::HbgExecutionSlotRegistry g_hbg_execution_slot_registry;
+static simpler::hbg::HbgCallableRegistry g_hbg_callable_registry;
+
+static int hbg_restore_copy(
+    void *, simpler::hbg::HbgLaunchRegionKind, void *destination, const void *source, size_t size
+) noexcept {
+    std::memcpy(destination, source, size);
+    return 0;
+}
+
+static int
+hbg_restore_publish(void *, simpler::hbg::HbgLaunchRegionKind, const void *destination, size_t size) noexcept {
+    cache_flush_range(destination, size);
+    return 0;
+}
 
 // ===== AicpuExecutor Method Implementations =====
 
@@ -217,7 +240,7 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 /**
  * Shutdown AICore - Send exit signal via registers to all AICore kernels
  */
-int32_t AicpuExecutor::run(Runtime *runtime) {
+int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation) {
     int32_t affinity_exec_idx = platform_aicpu_affinity_thread_idx();
     int32_t thread_idx = (affinity_exec_idx >= 0) ? affinity_exec_idx : (thread_idx_++);
     if (thread_idx < 0 || thread_idx >= aicpu_thread_num_ || thread_idx >= MAX_AICPU_THREADS) {
@@ -240,8 +263,11 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     // cores like every other thread — host_build_graph has no device-side
     // orchestrator, so there is no orch/sched split.
     if (thread_idx == aicpu_thread_num_ - 1) {
-        void *prebuilt_arena = runtime->get_prebuilt_arena_base();
-        size_t off_runtime = runtime->get_prebuilt_runtime_offset();
+        const bool is_hbg_l1 = hbg_invocation != nullptr;
+        void *prebuilt_arena = is_hbg_l1 ? reinterpret_cast<void *>(hbg_invocation->slot.binding.runtime_arena_base) :
+                                           runtime->get_prebuilt_arena_base();
+        size_t off_runtime =
+            is_hbg_l1 ? hbg_invocation->slot.binding.runtime_offset : runtime->get_prebuilt_runtime_offset();
 
         // A boot failure falls through to the common teardown at the end of
         // run() — it must NOT return early. This thread owns a core slice
@@ -260,6 +286,27 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             run_rc = -1;
         }
 
+        if (boot_ok && is_hbg_l1) {
+            cache_invalidate_range(hbg_invocation->blob, static_cast<size_t>(hbg_invocation->blob_size));
+            simpler::hbg::HbgRestoreCommit commit{};
+            const simpler::hbg::HbgRestoreOps restore_ops{nullptr, hbg_restore_copy, hbg_restore_publish};
+            const auto restore = simpler::hbg::restore_hbg_launch_blob(
+                hbg_invocation->blob, static_cast<size_t>(hbg_invocation->blob_size), hbg_invocation->slot,
+                hbg_invocation->header.identity, restore_ops, &commit
+            );
+            if (restore.status != simpler::hbg::HbgRestoreStatus::Ok ||
+                commit.plan_generation != hbg_invocation->header.plan_generation ||
+                commit.plan_hash != hbg_invocation->header.plan_hash) {
+                LOG_ERROR(
+                    "Thread %d: HBG task package restore failed status=%u region=%u callback=%d", thread_idx,
+                    static_cast<unsigned>(restore.status), restore.region_index, restore.callback_error
+                );
+                rt = nullptr;
+                run_rc = -1;
+                boot_ok = false;
+            }
+        }
+
         if (boot_ok) {
             runtime_arena_.attach(prebuilt_arena, DeviceArena::kDefaultBaseAlign);
             rt = reinterpret_cast<PTO2Runtime *>(static_cast<char *>(prebuilt_arena) + off_runtime);
@@ -269,12 +316,23 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 run_rc = -1;
                 boot_ok = false;
             }
+            if (boot_ok && is_hbg_l1 &&
+                !simpler::hbg::hbg_prebuilt_invocation_matches(
+                    &rt->prebuilt_invocation, hbg_invocation->header.identity.function_binding_hash,
+                    hbg_invocation->header.identity.host_total_tasks
+                )) {
+                LOG_ERROR("Thread %d: restored HBG invocation identity does not match the graph image", thread_idx);
+                rt = nullptr;
+                run_rc = -1;
+                boot_ok = false;
+            }
         }
 
         if (boot_ok) {
             runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
 
-            void *sm_ptr = runtime->get_gm_sm_ptr();
+            void *sm_ptr = is_hbg_l1 ? reinterpret_cast<void *>(hbg_invocation->slot.binding.shared_memory_base) :
+                                       runtime->get_gm_sm_ptr();
             uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(rt->prebuilt_layout.task_window_sizes);
             memset(rt->sm_handle, 0, sizeof(*rt->sm_handle));
             if (!rt->sm_handle->attach_populated(sm_ptr, sm_size, rt->prebuilt_layout.task_window_sizes)) {
@@ -315,6 +373,7 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         // Publish "leader setup done" (SM attached, task count latched, queues
         // allocated). Every thread then classifies its slice below before any of
         // them may dispatch — the leader holds runtime_init_ready_ until then.
+        if (is_hbg_l1) hbg_restore_error_.store(run_rc, std::memory_order_release);
         classify_ready_.store(true, std::memory_order_release);
     }
 
@@ -327,7 +386,21 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
     while (!classify_ready_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
     }
-    if (!sched_ctx_.is_completed() && rt != nullptr) {
+    if (hbg_invocation != nullptr && thread_idx != aicpu_thread_num_ - 1) {
+        cache_invalidate_range(
+            reinterpret_cast<const void *>(hbg_invocation->slot.binding.shared_memory_base),
+            static_cast<size_t>(hbg_invocation->slot.binding.shared_memory_capacity)
+        );
+        cache_invalidate_range(
+            reinterpret_cast<const void *>(hbg_invocation->slot.binding.runtime_arena_base),
+            static_cast<size_t>(hbg_invocation->slot.binding.runtime_arena_capacity)
+        );
+    }
+    if (hbg_invocation != nullptr) {
+        const int32_t restore_error = hbg_restore_error_.load(std::memory_order_acquire);
+        if (restore_error != 0) run_rc = restore_error;
+    }
+    if (run_rc == 0 && !sched_ctx_.is_completed() && rt != nullptr) {
         sched_ctx_.classify_partition(thread_idx, aicpu_thread_num_);
     }
     classify_arrived_.fetch_add(1, std::memory_order_acq_rel);
@@ -396,6 +469,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
 
     completion_gate_.reset();
     runtime_init_ready_.store(false, std::memory_order_release);
+    hbg_restore_error_.store(0, std::memory_order_release);
 
     aicpu_thread_num_ = 0;
 
@@ -437,6 +511,83 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_regis
         return -1;
     }
     return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_register_callable(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_register_callable: null argument");
+        return -1;
+    }
+
+    simpler::hbg::HbgCallableRegistration registration{};
+    std::memcpy(&registration, arg, sizeof(registration));
+    const auto status = simpler::hbg::publish_hbg_callable_registration(&g_hbg_callable_registry, &registration);
+    if (status != simpler::hbg::HbgCallableRegistryStatus::Published &&
+        status != simpler::hbg::HbgCallableRegistryStatus::AlreadyRegistered) {
+        LOG_ERROR("simpler_aicpu_l1_hbg_register_callable: rejected status=%u", static_cast<unsigned>(status));
+        return -1;
+    }
+    return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: null argument");
+        return -1;
+    }
+
+    simpler::hbg::HbgExecutionSlotRegistration slot{};
+    const auto slot_status = simpler::hbg::acquire_hbg_execution_slot_registration(
+        &g_hbg_execution_slot_registry, get_orch_device_id(), &slot
+    );
+    if (slot_status != simpler::hbg::HbgExecutionSlotRegistryStatus::Acquired) {
+        LOG_ERROR(
+            "simpler_aicpu_l1_hbg_exec: execution slot unavailable status=%u", static_cast<unsigned>(slot_status)
+        );
+        return -1;
+    }
+
+    simpler::hbg::HbgLaunchBlobHeader header{};
+    std::memcpy(&header, arg, sizeof(header));
+    if (!simpler::hbg::hbg_valid_invocation_identity(header.identity)) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: invalid fixed invocation identity");
+        return -1;
+    }
+    simpler::hbg::HbgCallableRegistration callable{};
+    const auto callable_status = simpler::hbg::acquire_hbg_callable_registration(
+        &g_hbg_callable_registry, header.identity.callable_id, &callable
+    );
+    if (callable_status != simpler::hbg::HbgCallableRegistryStatus::Acquired) {
+        LOG_ERROR("simpler_aicpu_l1_hbg_exec: callable unavailable status=%u", static_cast<unsigned>(callable_status));
+        return -1;
+    }
+
+    simpler::hbg::HbgAicpuInvocationView invocation{};
+    const auto invocation_status = simpler::hbg::make_hbg_aicpu_invocation_view(arg, slot, callable, &invocation);
+    if (invocation_status != simpler::hbg::HbgAicpuInvocationStatus::Ok) {
+        LOG_ERROR(
+            "simpler_aicpu_l1_hbg_exec: fixed invocation rejected status=%u", static_cast<unsigned>(invocation_status)
+        );
+        return -1;
+    }
+    if (slot.device_kernel_args_size != sizeof(KernelArgs) || slot.outer_runtime_size != sizeof(Runtime)) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: registered runtime ABI size mismatch");
+        return -1;
+    }
+
+    auto *kernel_args = reinterpret_cast<const KernelArgs *>(slot.device_kernel_args_base);
+    cache_invalidate_range(kernel_args, sizeof(*kernel_args));
+    if (kernel_args->runtime_args == nullptr ||
+        reinterpret_cast<uint64_t>(kernel_args->runtime_args) != slot.outer_runtime_base) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
+        return -1;
+    }
+    cache_invalidate_range(kernel_args->runtime_args, sizeof(Runtime));
+    if (simpler_aicpu_execute_l1_hbg_platform == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: platform bridge is unavailable");
+        return -1;
+    }
+    return simpler_aicpu_execute_l1_hbg_platform(kernel_args, &invocation);
 }
 
 extern "C" int32_t aicpu_prewarm_callable(Runtime *runtime) {
@@ -505,4 +656,27 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
 
     LOG_INFO("%s", "aicpu_execute: Kernel execution completed successfully");
     return 0;
+}
+
+extern "C" int32_t aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation) {
+    if (runtime == nullptr || invocation == nullptr) {
+        LOG_ERROR("%s", "aicpu_execute_l1_hbg: invalid argument");
+        return -1;
+    }
+
+    if (g_aicpu_executor.init(runtime) != 0) {
+        LOG_ERROR("%s", "aicpu_execute_l1_hbg: initialization failed");
+        return -1;
+    }
+
+    int32_t rc = g_aicpu_executor.run(runtime, invocation);
+    g_aicpu_executor.completion_gate_.wait_for_finalization();
+    const bool restore_ok = g_aicpu_executor.hbg_restore_error_.load(std::memory_order_acquire) == 0;
+    const int32_t runtime_rc = restore_ok ? read_pto2_runtime_status(runtime) : 0;
+
+    if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
+        g_aicpu_executor.deinit(runtime);
+    }
+    if (runtime_rc != 0) return runtime_rc;
+    return rc;
 }

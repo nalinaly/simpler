@@ -44,6 +44,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -359,6 +360,8 @@ struct HostOrchEntryPoints {
     OrchestrationBindFunc bind{nullptr};
 };
 
+static void destroy_host_orch_entry_points(void *value) { delete reinterpret_cast<HostOrchEntryPoints *>(value); }
+
 // Build the destination-bound shared-memory image entirely on the host. `rt`
 // was built with its scheduler half pointing at the device SM; here we re-point
 // ONLY the orchestrator half at a host SM mirror, run the orchestration entry,
@@ -519,6 +522,11 @@ int32_t build_host_orchestration_image(
     rt_scope_end(rt);
     rt_orchestration_done(rt);
 
+    if (rt->orchestrator.fatal) {
+        LOG_ERROR("host-orch: orchestration reported a fatal error while building the graph image");
+        return -1;
+    }
+
     int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
 
     // Relocate the host-DDR cross-task pointers to their final DEVICE addresses
@@ -635,11 +643,17 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
         }
         // Safe to unlink now: the handle keeps the .so mapped regardless of path.
         unlink(so_path.c_str());
-        auto *eps = new HostOrchEntryPoints{};
+        auto *eps = new (std::nothrow) HostOrchEntryPoints{};
+        if (eps == nullptr) {
+            LOG_ERROR("host-orch: failed to allocate entry-point owner");
+            dlclose(handle);
+            return -1;
+        }
         eps->entry = reinterpret_cast<OrchestrationEntryFunc>(entry);
         eps->bind = reinterpret_cast<OrchestrationBindFunc>(bind_sym);
         out->host_dlopen_handle = handle;
         out->host_orch_func_ptr = eps;
+        out->destroy_host_orch_func_ptr = destroy_host_orch_entry_points;
         LOG_INFO("host-orch: loaded orchestration entry '%s' on host", orch_func_name);
     }
     LOG_INFO("Orchestration SO: %zu bytes staged", orch_so_size);
@@ -998,18 +1012,22 @@ extern "C" int query_l1_hbg_execution_binding_impl(const Runtime *runtime, simpl
 /**
  * Build one immutable HBG L1 graph plan against the already-frozen working
  * slot. External tensor storage is borrowed: this path performs no allocation,
- * H2D/D2H copy or stream synchronization. A platform host mapping is exposed
- * read-only while orchestration runs; set_tensor_data and unavailable device
- * value reads fail closed.
+ * H2D/D2H copy or stream synchronization. Device tensor bytes are deliberately
+ * unavailable to host orchestration: an asynchronous L1 call cannot prove
+ * preceding caller-stream writes complete without an illegal internal sync.
+ * Graph construction may use tensor metadata/addresses and host scalar args;
+ * get_tensor_data/set_tensor_data both fail closed.
  */
 extern "C" int build_l1_hbg_graph_plan_impl(
     Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
     const simpler::hbg::HbgExecutionBinding *binding, const simpler::hbg::HbgInvocationIdentity *identity,
-    uint64_t plan_generation, const uint64_t *ring_task_window, const uint64_t *ring_heap,
-    [[maybe_unused]] const uint64_t *ring_dep_pool, std::unique_ptr<const simpler::hbg::HbgGraphPlan> *out
+    const uint64_t *callable_function_table, size_t callable_function_count, uint64_t plan_generation,
+    const uint64_t *ring_task_window, const uint64_t *ring_heap, [[maybe_unused]] const uint64_t *ring_dep_pool,
+    std::unique_ptr<const simpler::hbg::HbgGraphPlan> *out
 ) {
     if (runtime == nullptr || api == nullptr || orch_args == nullptr || host_orch_func_ptr == nullptr ||
-        binding == nullptr || identity == nullptr || out == nullptr || plan_generation == 0) {
+        binding == nullptr || identity == nullptr || callable_function_table == nullptr || out == nullptr ||
+        plan_generation == 0) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: invalid argument");
         return -1;
     }
@@ -1030,11 +1048,6 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         LOG_ERROR("build_l1_hbg_graph_plan_impl: invocation identity count mismatch");
         return -1;
     }
-    if ((api->register_device_memory_to_host == nullptr) != (api->unregister_device_memory_from_host == nullptr)) {
-        LOG_ERROR("build_l1_hbg_graph_plan_impl: host-map register/unregister capability is incomplete");
-        return -1;
-    }
-
     uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH];
     uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
     if (!resolve_ring_config(ring_task_window, ring_heap, task_window_sizes, heap_sizes)) {
@@ -1049,41 +1062,10 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         return -1;
     }
 
-    std::vector<void *> mapped_tensors;
-    auto mapping_guard = RAIIScopeGuard([&]() {
+    auto tensor_access_guard = RAIIScopeGuard([]() {
         host_tensor_access_reset(nullptr);
-        if (api->unregister_device_memory_from_host != nullptr) {
-            for (void *address : mapped_tensors) {
-                api->unregister_device_memory_from_host(address);
-            }
-        }
     });
     host_tensor_access_reset_read_only();
-    if (api->register_device_memory_to_host != nullptr) {
-        try {
-            mapped_tensors.reserve(static_cast<size_t>(orch_args->tensor_count()));
-        } catch (...) {
-            return -1;
-        }
-        for (int index = 0; index < orch_args->tensor_count(); ++index) {
-            const Tensor &tensor = orch_args->tensor(index);
-            if (tensor.is_child_memory() || tensor.buffer.addr == 0) continue;
-            const uint64_t bytes = tensor.nbytes();
-            if (bytes == 0 || bytes > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) continue;
-            void *device_address = reinterpret_cast<void *>(tensor.buffer.addr);
-            void *host_view = api->register_device_memory_to_host(device_address, static_cast<size_t>(bytes));
-            if (host_view == nullptr) continue;
-            try {
-                mapped_tensors.push_back(device_address);
-            } catch (...) {
-                api->unregister_device_memory_from_host(device_address);
-                return -1;
-            }
-            if (!host_tensor_access_add(tensor.buffer.addr, bytes, host_view)) {
-                return -1;
-            }
-        }
-    }
 
     PTO2Runtime *rt = runtime_init_data_from_layout(
         host_arena, layout, PTO2_MODE_EXECUTE, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
@@ -1116,7 +1098,9 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
         "outer Runtime and task-owned HBG function tables must have identical capacity"
     );
-    if (!runtime_set_prebuilt_invocation_state(rt, runtime->func_id_to_addr_, RUNTIME_MAX_FUNC_ID, host_total_tasks)) {
+    if (!runtime_set_prebuilt_invocation_state(
+            rt, callable_function_table, callable_function_count, host_total_tasks
+        )) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: failed to snapshot task-owned invocation state");
         return -1;
     }
@@ -1277,10 +1261,21 @@ extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
 }
 
 // HBG L1 uses a registration ABI independent from TMARB's fixed callable
-// registration. Capability remains disabled until the run/restore path is
-// complete, but the symbol set is already exact and build-checked.
+// registration. Keep capability explicitly disabled—not merely dependent on
+// the common weak default—until onboard proof covers large variable HostArgs +
+// placeholder patching, event-only hidden-stream capture/replay, repeated
+// restore of a consumed image, and no-reset AICPU/AICore error teardown. The
+// Python L1 facade also intentionally rejects HBG until that gate is removed.
+extern "C" int l1_runtime_supported_impl(void) { return 0; }
+
+// The symbol set is nevertheless exact and build-checked so bring-up can test
+// the protocol without inventing a second ABI.
 extern "C" const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
-    static const char *const kExtra[] = {"simpler_aicpu_l1_hbg_register_execution_slot"};
+    static const char *const kExtra[] = {
+        "simpler_aicpu_l1_hbg_register_execution_slot",
+        "simpler_aicpu_l1_hbg_register_callable",
+        "simpler_aicpu_l1_hbg_exec",
+    };
     if (count != nullptr) {
         *count = sizeof(kExtra) / sizeof(kExtra[0]);
     }

@@ -549,7 +549,8 @@ int SimDeviceRunnerBase::record_device_orch_callable(
 
 int SimDeviceRunnerBase::record_host_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    void (*destroy_host_orch_func_ptr)(void *), std::vector<std::pair<int, uint64_t>> kernel_addrs,
+    std::vector<ArgDirection> signature
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -557,7 +558,7 @@ int SimDeviceRunnerBase::record_host_orch_callable(
         );
         return -1;
     }
-    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr) {
+    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr || destroy_host_orch_func_ptr == nullptr) {
         LOG_ERROR("record_host_orch_callable: null handle/fn for callable_id=%d", callable_id);
         return -1;
     }
@@ -574,6 +575,7 @@ int SimDeviceRunnerBase::record_host_orch_callable(
     state.chip_buffer_hash = chip_buffer_hash;
     state.host_dlopen_handle = host_dlopen_handle;
     state.host_orch_func_ptr = host_orch_func_ptr;
+    state.destroy_host_orch_func_ptr = destroy_host_orch_func_ptr;
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
@@ -594,6 +596,9 @@ int SimDeviceRunnerBase::unregister_callable(int32_t callable_id) {
 
     if (state.host_dlopen_handle != nullptr) {
         // hbg: dlclose the host handle; no device-side orch SO handle.
+        if (state.destroy_host_orch_func_ptr != nullptr && state.host_orch_func_ptr != nullptr) {
+            state.destroy_host_orch_func_ptr(state.host_orch_func_ptr);
+        }
         dlclose(state.host_dlopen_handle);
         return 0;
     }
@@ -809,6 +814,9 @@ void SimDeviceRunnerBase::release_callable_state() {
     // dlopen handle per (re)created Worker — observable in long-running
     // pytest sessions.
     for (auto &kv : callables_) {
+        if (kv.second.destroy_host_orch_func_ptr != nullptr && kv.second.host_orch_func_ptr != nullptr) {
+            kv.second.destroy_host_orch_func_ptr(kv.second.host_orch_func_ptr);
+        }
         if (kv.second.host_dlopen_handle != nullptr) {
             dlclose(kv.second.host_dlopen_handle);
         }

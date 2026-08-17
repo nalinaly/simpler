@@ -160,6 +160,19 @@ TEST(HbgExecutionSlot, FreezesEnoughPackageCapacityWithoutEncodingARuntimeLimit)
     );
 }
 
+TEST(HbgExecutionSlot, CapacityIncludesTheSerializerPaddingBetweenPristineRegions) {
+    HbgExecutionSlotRegistration registration = make_registration();
+    registration.binding.shared_memory_capacity = 15;
+    registration.binding.runtime_arena_capacity = 9;
+    uint64_t minimum_size = 0;
+    ASSERT_TRUE(hbg_minimum_launch_blob_size(registration.binding, &minimum_size));
+
+    // Two descriptors make the canonical header 240 bytes. The second source
+    // begins at align_up(shared_memory_capacity, 8), exactly as the serializer
+    // lays it out: 240 + 16 + 9.
+    EXPECT_EQ(minimum_size, 265u);
+}
+
 TEST(HbgExecutionSlot, RejectsAliasingBetweenAllMutableAndPersistentRegions) {
     HbgExecutionSlotRegistration registration = make_registration();
     registration.binding.runtime_arena_base = registration.binding.shared_memory_base + 0x1000;

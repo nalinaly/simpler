@@ -136,6 +136,7 @@ HbgInvocationIdentity make_identity() {
     identity.tensor_count = 2;
     identity.scalar_count = 1;
     identity.host_total_tasks = 3;
+    identity.callable_id = 4;
     return identity;
 }
 
@@ -418,6 +419,14 @@ TEST(HbgLaunchBlob, RejectsTruncationHeaderAndGenerationCorruption) {
 
     blob = make_blob();
     header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->identity.argument_snapshot_hash = 0;
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidIdentity
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
     header->identity.host_total_tasks = -1;
     EXPECT_EQ(
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
@@ -426,7 +435,7 @@ TEST(HbgLaunchBlob, RejectsTruncationHeaderAndGenerationCorruption) {
 
     blob = make_blob();
     header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
-    header->identity.reserved = 1;
+    header->identity.callable_id = MAX_REGISTERED_CALLABLE_IDS;
     EXPECT_EQ(
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
         HbgLaunchBlobStatus::InvalidIdentity

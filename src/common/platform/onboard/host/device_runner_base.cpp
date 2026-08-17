@@ -51,6 +51,8 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
+#include "hbg_argument_snapshot.h"
+#include "hbg_callable_function_binding.h"
 #include "hbg_l1_host_build.h"
 #include "l1_aicpu_args.h"
 #include "l1_callable_validation.h"
@@ -95,8 +97,9 @@ extern "C" __attribute__((weak)) int query_l1_hbg_execution_binding_impl(
 extern "C" __attribute__((weak)) int build_l1_hbg_graph_plan_impl(
     Runtime * /*runtime*/, const HostApi * /*api*/, const ChipStorageTaskArgs * /*orch_args*/,
     void * /*host_orch_func_ptr*/, const simpler::hbg::HbgExecutionBinding * /*binding*/,
-    const simpler::hbg::HbgInvocationIdentity * /*identity*/, uint64_t /*plan_generation*/,
-    const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/, const uint64_t * /*ring_dep_pool*/,
+    const simpler::hbg::HbgInvocationIdentity * /*identity*/, const uint64_t * /*callable_function_table*/,
+    size_t /*callable_function_count*/, uint64_t /*plan_generation*/, const uint64_t * /*ring_task_window*/,
+    const uint64_t * /*ring_heap*/, const uint64_t * /*ring_dep_pool*/,
     std::unique_ptr<const simpler::hbg::HbgGraphPlan> * /*out*/
 ) {
     return PTO_RUNTIME_ERR_UNSUPPORTED;
@@ -358,24 +361,33 @@ int DeviceRunnerBase::prepare_l1_callable_from_blob(
     });
     rc = register_callable_impl(callable, upload_l1_callable_transaction, &artifacts);
     if (rc != 0) return rc;
-    if (artifacts.host_dlopen_handle != nullptr) {
-        LOG_ERROR("L1 host orchestration runtime is unsupported");
-        dlclose(artifacts.host_dlopen_handle);
-        artifacts.host_dlopen_handle = nullptr;
-        return PTO_RUNTIME_ERR_UNSUPPORTED;
-    }
+    auto host_orch_guard = RAIIScopeGuard([&artifacts]() {
+        if (artifacts.destroy_host_orch_func_ptr != nullptr && artifacts.host_orch_func_ptr != nullptr) {
+            artifacts.destroy_host_orch_func_ptr(artifacts.host_orch_func_ptr);
+        }
+        if (artifacts.host_dlopen_handle != nullptr) dlclose(artifacts.host_dlopen_handle);
+    });
 
     std::vector<std::pair<int, uint64_t>> kernel_addrs;
     kernel_addrs.reserve(artifacts.kernel_addrs.size());
     for (const ChildKernelAddr &entry : artifacts.kernel_addrs) {
         kernel_addrs.emplace_back(entry.func_id, entry.device_addr);
     }
-    rc = record_device_orch_callable(
-        callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
-        artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
-        std::move(kernel_addrs), std::move(artifacts.signature), artifacts.scalar_count
-    );
+    if (artifacts.host_dlopen_handle != nullptr) {
+        rc = record_host_orch_callable(
+            callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.host_dlopen_handle,
+            artifacts.host_orch_func_ptr, artifacts.destroy_host_orch_func_ptr, std::move(kernel_addrs),
+            std::move(artifacts.signature), artifacts.scalar_count
+        );
+    } else {
+        rc = record_device_orch_callable(
+            callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
+            artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
+            std::move(kernel_addrs), std::move(artifacts.signature), artifacts.scalar_count
+        );
+    }
     if (rc != 0) return rc;
+    host_orch_guard.dismiss();
     chip_buffer_guard.dismiss();
     return prepare_l1_callable_locked(callable_id, caller_stream, api);
 }
@@ -478,6 +490,8 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (rc != 0) return poison(rc);
     rc = prepare_l1_hbg_execution_slot_registration();
     if (rc != 0) return poison(rc);
+    rc = prepare_l1_hbg_callable_registration(callable_id);
+    if (rc != 0) return poison(rc);
 
     if (!l1_prepared_callable_ids_.empty()) {
         rc = aclrtStreamWaitEvent(
@@ -504,29 +518,33 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
 
     rc = enqueue_l1_hbg_execution_slot_registration(caller_stream);
     if (rc != 0) return poison(rc);
-
-    L1RegisterCallableArgs register_args{};
-    register_args.struct_size = sizeof(register_args);
-    register_args.callable_id = callable_id;
-    register_args.kernel_count = static_cast<uint32_t>(callable_it->second.kernel_addrs.size());
-    register_args.dev_orch_so_addr = callable_it->second.dev_orch_so_addr;
-    register_args.dev_orch_so_size = callable_it->second.dev_orch_so_size;
-    std::snprintf(
-        register_args.device_orch_func_name, sizeof(register_args.device_orch_func_name), "%s",
-        callable_it->second.func_name.c_str()
-    );
-    std::snprintf(
-        register_args.device_orch_config_name, sizeof(register_args.device_orch_config_name), "%s",
-        callable_it->second.config_name.c_str()
-    );
-    for (uint32_t i = 0; i < register_args.kernel_count; ++i) {
-        register_args.kernel_addrs[i].func_id = callable_it->second.kernel_addrs[i].first;
-        register_args.kernel_addrs[i].device_addr = callable_it->second.kernel_addrs[i].second;
-    }
-    rc = load_aicpu_op_.LaunchWithHostArgs(
-        caller_stream, &register_args, sizeof(register_args), 1, host::KernelNames::L1RegisterCallableName
-    );
+    rc = enqueue_l1_hbg_callable_registration(callable_id, caller_stream);
     if (rc != 0) return poison(rc);
+
+    if (callable_it->second.host_dlopen_handle == nullptr) {
+        L1RegisterCallableArgs register_args{};
+        register_args.struct_size = sizeof(register_args);
+        register_args.callable_id = callable_id;
+        register_args.kernel_count = static_cast<uint32_t>(callable_it->second.kernel_addrs.size());
+        register_args.dev_orch_so_addr = callable_it->second.dev_orch_so_addr;
+        register_args.dev_orch_so_size = callable_it->second.dev_orch_so_size;
+        std::snprintf(
+            register_args.device_orch_func_name, sizeof(register_args.device_orch_func_name), "%s",
+            callable_it->second.func_name.c_str()
+        );
+        std::snprintf(
+            register_args.device_orch_config_name, sizeof(register_args.device_orch_config_name), "%s",
+            callable_it->second.config_name.c_str()
+        );
+        for (uint32_t i = 0; i < register_args.kernel_count; ++i) {
+            register_args.kernel_addrs[i].func_id = callable_it->second.kernel_addrs[i].first;
+            register_args.kernel_addrs[i].device_addr = callable_it->second.kernel_addrs[i].second;
+        }
+        rc = load_aicpu_op_.LaunchWithHostArgs(
+            caller_stream, &register_args, sizeof(register_args), 1, host::KernelNames::L1RegisterCallableName
+        );
+        if (rc != 0) return poison(rc);
+    }
 
     rc = aclrtRecordEvent(
         reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::PrepareTail)),
@@ -630,11 +648,52 @@ int DeviceRunnerBase::enqueue_l1_hbg_execution_slot_registration(rtStream_t call
     return 0;
 }
 
+int DeviceRunnerBase::prepare_l1_hbg_callable_registration(int32_t callable_id) {
+    auto callable_it = callables_.find(callable_id);
+    if (callable_it == callables_.end()) return PTO_RUNTIME_ERR_NOT_READY;
+    CallableState &state = callable_it->second;
+    if (state.host_dlopen_handle == nullptr) return 0;
+    if (l1_hbg_execution_slot_registration_ == nullptr || state.l1_hbg_callable_registration == nullptr) {
+        LOG_ERROR("HBG L1 callable registration is incomplete for callable_id=%d", callable_id);
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+    const auto status = simpler::hbg::validate_hbg_callable_registration(state.l1_hbg_callable_registration.get());
+    if (status != simpler::hbg::HbgCallableStatus::Ok ||
+        state.l1_hbg_callable_registration->callable_id != callable_id ||
+        state.l1_hbg_callable_registration->function_binding_hash != state.hbg_function_binding_hash) {
+        LOG_ERROR(
+            "HBG L1 callable registration is invalid for callable_id=%d status=%u", callable_id,
+            static_cast<unsigned>(status)
+        );
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    return 0;
+}
+
+int DeviceRunnerBase::enqueue_l1_hbg_callable_registration(int32_t callable_id, rtStream_t caller_stream) {
+    auto callable_it = callables_.find(callable_id);
+    if (callable_it == callables_.end()) return PTO_RUNTIME_ERR_NOT_READY;
+    CallableState &state = callable_it->second;
+    if (state.host_dlopen_handle == nullptr || state.l1_hbg_callable_registration_enqueued) return 0;
+    if (caller_stream == nullptr || !l1_hbg_execution_slot_registration_enqueued_ ||
+        state.l1_hbg_callable_registration == nullptr) {
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+
+    simpler::hbg::HbgCallableRegistration launch_args = *state.l1_hbg_callable_registration;
+    const int rc = load_aicpu_op_.LaunchWithHostArgs(
+        caller_stream, &launch_args, sizeof(launch_args), 1, host::KernelNames::L1HbgRegisterCallableName
+    );
+    if (rc != 0) return rc;
+    state.l1_hbg_callable_registration_enqueued = true;
+    return 0;
+}
+
 int DeviceRunnerBase::launch_l1_callable(
-    int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream
+    int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream, const HostApi *api
 ) {
     std::lock_guard<std::mutex> lock(l1_operation_mutex_);
-    if (caller_stream == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (caller_stream == nullptr || api == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
     const L1ContextPhase phase = l1_execution_state_.phase();
     if ((phase != L1ContextPhase::ReadyEnqueued && phase != L1ContextPhase::Sealed) ||
@@ -709,19 +768,116 @@ int DeviceRunnerBase::launch_l1_callable(
     if (l1_kernel_args_.args.runtime_args == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
     const size_t handshake_bytes = static_cast<size_t>(l1_runtime_->get_worker_count()) * sizeof(Handshake);
     void *device_handshakes = l1_kernel_args_.args.runtime_args->get_workers();
-    const L1AicpuInvocationArgs invocation = MakeL1AicpuInvocationArgs(l1_kernel_args_.args, callable_id, args);
     const int aicpu_launch_count = l1_runtime_->get_aicpu_launch_count();
     if (device_handshakes == nullptr || handshake_bytes == 0 || aicpu_launch_count <= 0) {
         return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    const bool is_hbg = callable_it->second.host_dlopen_handle != nullptr;
+    L1AicpuInvocationArgs trb_invocation{};
+    std::unique_ptr<const simpler::hbg::HbgGraphPlan> hbg_plan;
+    std::vector<uint8_t> hbg_launch_blob;
+    simpler::host_args::HostArgsPlaceholder hbg_placeholder{};
+    if (is_hbg) {
+        if (l1_hbg_execution_slot_registration_ == nullptr || !l1_hbg_execution_slot_registration_enqueued_ ||
+            callable_it->second.l1_hbg_callable_registration == nullptr ||
+            !callable_it->second.l1_hbg_callable_registration_enqueued) {
+            return PTO_RUNTIME_ERR_NOT_READY;
+        }
+        if (l1_hbg_next_plan_generation_ == 0) {
+            LOG_ERROR("HBG L1 plan generation exhausted");
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        const uint64_t plan_generation = l1_hbg_next_plan_generation_;
+        l1_hbg_next_plan_generation_ =
+            plan_generation == std::numeric_limits<uint64_t>::max() ? 0 : plan_generation + 1;
+
+        std::array<uint64_t, simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT> callable_function_table{};
+        uint64_t function_binding_hash = 0;
+        const auto binding_status = simpler::hbg::build_hbg_callable_function_binding(
+            callable_it->second.kernel_addrs, callable_function_table.data(), callable_function_table.size(),
+            &function_binding_hash
+        );
+        if (binding_status != simpler::hbg::HbgCallableFunctionBindingStatus::Ok ||
+            function_binding_hash != callable_it->second.hbg_function_binding_hash) {
+            LOG_ERROR(
+                "HBG L1 callable-local function binding failed for callable_id=%d status=%u", callable_id,
+                static_cast<unsigned>(binding_status)
+            );
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+
+        const uint64_t argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(args);
+        if (argument_snapshot_hash == 0) {
+            LOG_ERROR("HBG L1 argument snapshot is invalid for callable_id=%d", callable_id);
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+        simpler::hbg::HbgInvocationIdentity identity{};
+        identity.callable_hash = callable_it->second.hash;
+        identity.argument_snapshot_hash = argument_snapshot_hash;
+        identity.function_binding_hash = function_binding_hash;
+        identity.tensor_count = static_cast<uint32_t>(args.tensor_count());
+        identity.scalar_count = static_cast<uint32_t>(args.scalar_count());
+        identity.host_total_tasks = 0;
+        identity.callable_id = callable_id;
+        if (!simpler::hbg::hbg_valid_invocation_identity(identity)) {
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+
+        rc = build_l1_hbg_graph_plan_impl(
+            l1_runtime_.get(), api, &args, callable_it->second.host_orch_func_ptr,
+            &l1_hbg_execution_slot_registration_->binding, &identity, callable_function_table.data(),
+            callable_function_table.size(), plan_generation, l1_config_.runtime_env.ring_task_window,
+            l1_config_.runtime_env.ring_heap, l1_config_.runtime_env.ring_dep_pool, &hbg_plan
+        );
+        if (rc != 0 || hbg_plan == nullptr) {
+            LOG_ERROR("HBG L1 graph build failed for callable_id=%d: %d", callable_id, rc);
+            return rc != 0 ? rc : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        }
+        const simpler::hbg::HbgInvocationIdentity &plan_identity = hbg_plan->identity();
+        if (plan_identity.callable_id != callable_id || plan_identity.callable_hash != identity.callable_hash ||
+            plan_identity.argument_snapshot_hash != identity.argument_snapshot_hash ||
+            plan_identity.function_binding_hash != identity.function_binding_hash ||
+            plan_identity.tensor_count != identity.tensor_count ||
+            plan_identity.scalar_count != identity.scalar_count || plan_identity.host_total_tasks < 0) {
+            LOG_ERROR("HBG L1 graph builder returned a mismatched invocation identity");
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        const auto slot_size_status = simpler::hbg::validate_hbg_launch_blob_size_for_slot(
+            *l1_hbg_execution_slot_registration_, hbg_plan->serialized_size()
+        );
+        if (slot_size_status != simpler::hbg::HbgExecutionSlotStatus::Ok) {
+            LOG_ERROR("HBG L1 graph package exceeds the frozen slot capacity");
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
+        auto blob_status = hbg_plan->serialize(&hbg_launch_blob);
+        if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok) {
+            blob_status = simpler::hbg::make_hbg_launch_placeholder(
+                hbg_launch_blob.data(), hbg_launch_blob.size(), &hbg_placeholder,
+                &l1_hbg_execution_slot_registration_->binding, &plan_identity
+            );
+        }
+        if (blob_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+            LOG_ERROR("HBG L1 launch serialization failed: status=%u", static_cast<unsigned>(blob_status));
+            return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        }
+    } else {
+        trb_invocation = MakeL1AicpuInvocationArgs(l1_kernel_args_.args, callable_id, args);
     }
 
     struct LaunchContext {
         DeviceRunnerBase *runner;
         void *device_handshakes;
         size_t handshake_bytes;
-        const L1AicpuInvocationArgs *invocation;
+        const L1AicpuInvocationArgs *trb_invocation;
+        std::vector<uint8_t> *hbg_launch_blob;
+        simpler::host_args::HostArgsPlaceholder *hbg_placeholder;
+        bool is_hbg;
         int aicpu_launch_count;
-    } launch_context{this, device_handshakes, handshake_bytes, &invocation, aicpu_launch_count};
+    } launch_context{
+        this,   device_handshakes,  handshake_bytes, &trb_invocation, &hbg_launch_blob, &hbg_placeholder,
+        is_hbg, aicpu_launch_count,
+    };
 
     const L1LaunchSequenceOps launch_ops{
         .context = &launch_context,
@@ -748,8 +904,15 @@ int DeviceRunnerBase::launch_l1_callable(
         .launch_aicpu = [](void *context, void *stream) noexcept -> int {
             auto *launch = static_cast<LaunchContext *>(context);
             try {
+                if (launch->is_hbg) {
+                    return launch->runner->load_aicpu_op_.LaunchWithMutableHostArgs(
+                        reinterpret_cast<rtStream_t>(stream), launch->hbg_launch_blob->data(),
+                        launch->hbg_launch_blob->size(), launch->hbg_placeholder, 1, launch->aicpu_launch_count,
+                        host::KernelNames::L1HbgRunName
+                    );
+                }
                 return launch->runner->load_aicpu_op_.LaunchWithHostArgs(
-                    reinterpret_cast<rtStream_t>(stream), launch->invocation, sizeof(*launch->invocation),
+                    reinterpret_cast<rtStream_t>(stream), launch->trb_invocation, sizeof(*launch->trb_invocation),
                     launch->aicpu_launch_count, host::KernelNames::L1RunName
                 );
             } catch (...) {
@@ -782,12 +945,13 @@ int DeviceRunnerBase::launch_l1_callable(
         // switching streams; concurrent cross-stream invocation is unsupported.
         .wait_for_serial_tail = false,
     };
+    rc = enqueue_l1_launch_sequence(launch_ops, launch_handles);
+    if (rc != 0) return poison(rc);
+
     if (!callable_it->second.l1_metadata_bound) {
         *callable_it->second.l1_metadata = args;
         callable_it->second.l1_metadata_bound = true;
     }
-    rc = enqueue_l1_launch_sequence(launch_ops, launch_handles);
-    if (rc != 0) return poison(rc);
 
     l1_prepare_tail_consumed_ = true;
     l1_serial_tail_recorded_ = true;
@@ -877,6 +1041,9 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     }
 
     for (auto &entry : callables_) {
+        if (entry.second.destroy_host_orch_func_ptr != nullptr && entry.second.host_orch_func_ptr != nullptr) {
+            entry.second.destroy_host_orch_func_ptr(entry.second.host_orch_func_ptr);
+        }
         if (entry.second.host_dlopen_handle != nullptr) dlclose(entry.second.host_dlopen_handle);
     }
     callables_.clear();
@@ -899,6 +1066,7 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     l1_last_caller_stream_ = nullptr;
     l1_hbg_execution_slot_registration_.reset();
     l1_hbg_execution_slot_registration_enqueued_ = false;
+    l1_hbg_next_plan_generation_ = 1;
     l1_context_generation_ = 0;
     block_dim_ = 0;
     worker_count_ = 0;
@@ -1677,7 +1845,8 @@ int DeviceRunnerBase::record_device_orch_callable(
 
 int DeviceRunnerBase::record_host_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
-    void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    void *host_orch_func_ptr, void (*destroy_host_orch_func_ptr)(void *),
+    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -1685,7 +1854,7 @@ int DeviceRunnerBase::record_host_orch_callable(
         );
         return -1;
     }
-    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr) {
+    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr || destroy_host_orch_func_ptr == nullptr) {
         LOG_ERROR("record_host_orch_callable: null handle/fn for callable_id=%d", callable_id);
         return -1;
     }
@@ -1697,14 +1866,68 @@ int DeviceRunnerBase::record_host_orch_callable(
         LOG_ERROR("record_host_orch_callable: callable_id=%d already registered", callable_id);
         return -1;
     }
+    if (scalar_count < 0 || scalar_count > CHIP_MAX_SCALAR_ARGS) {
+        LOG_ERROR("record_host_orch_callable: scalar_count=%d is invalid", scalar_count);
+        return -1;
+    }
+    if (signature.size() > CHIP_MAX_TENSOR_ARGS) {
+        LOG_ERROR("record_host_orch_callable: tensor count=%zu is invalid", signature.size());
+        return -1;
+    }
+
+    static_assert(
+        RUNTIME_MAX_FUNC_ID == simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT,
+        "outer Runtime and HBG callable-local function tables must have identical capacity"
+    );
+    std::array<uint64_t, simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT> function_binding{};
+    uint64_t function_binding_hash = 0;
+    const auto binding_status = simpler::hbg::build_hbg_callable_function_binding(
+        kernel_addrs, function_binding.data(), function_binding.size(), &function_binding_hash
+    );
+    if (binding_status != simpler::hbg::HbgCallableFunctionBindingStatus::Ok) {
+        LOG_ERROR(
+            "record_host_orch_callable: invalid callable-local function table status=%u",
+            static_cast<unsigned>(binding_status)
+        );
+        return -1;
+    }
+
+    std::unique_ptr<const simpler::hbg::HbgCallableRegistration> l1_registration;
+    if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
+        simpler::hbg::HbgCallableRegistration registration{};
+        registration.callable_id = callable_id;
+        registration.tensor_count = static_cast<uint32_t>(signature.size());
+        registration.scalar_count = static_cast<uint32_t>(scalar_count);
+        registration.callable_hash = chip_buffer_hash;
+        registration.function_binding_hash = function_binding_hash;
+        const auto registration_status = simpler::hbg::seal_hbg_callable_registration(&registration);
+        if (registration_status != simpler::hbg::HbgCallableStatus::Ok) {
+            LOG_ERROR(
+                "record_host_orch_callable: failed to seal L1 registration status=%u",
+                static_cast<unsigned>(registration_status)
+            );
+            return -1;
+        }
+        auto *owner = new (std::nothrow) simpler::hbg::HbgCallableRegistration(registration);
+        if (owner == nullptr) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        l1_registration.reset(owner);
+    }
 
     CallableState state;
+    state.hash = chip_buffer_hash;
     state.chip_buffer_hash = chip_buffer_hash;
     state.aicore_image_hash = aicore_image_hash;
     state.host_dlopen_handle = host_dlopen_handle;
     state.host_orch_func_ptr = host_orch_func_ptr;
+    state.destroy_host_orch_func_ptr = destroy_host_orch_func_ptr;
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
+    state.scalar_count = scalar_count;
+    state.hbg_function_binding_hash = function_binding_hash;
+    state.l1_hbg_callable_registration = std::move(l1_registration);
+    if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
+        state.l1_metadata = std::make_unique<ChipStorageTaskArgs>();
+    }
     callables_.emplace(callable_id, std::move(state));
     ++host_dlopen_total_;
     LOG_INFO("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
@@ -1723,6 +1946,9 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 
     if (state.host_dlopen_handle != nullptr) {
         // hbg path: no device-side orch SO handle, just dlclose the host handle.
+        if (state.destroy_host_orch_func_ptr != nullptr && state.host_orch_func_ptr != nullptr) {
+            state.destroy_host_orch_func_ptr(state.host_orch_func_ptr);
+        }
         dlclose(state.host_dlopen_handle);
         return 0;
     }
@@ -1957,6 +2183,9 @@ int DeviceRunnerBase::finalize_common() {
     // dlopen handle per (re)created Worker — observable in long-running
     // pytest sessions.
     for (auto &kv : callables_) {
+        if (kv.second.destroy_host_orch_func_ptr != nullptr && kv.second.host_orch_func_ptr != nullptr) {
+            kv.second.destroy_host_orch_func_ptr(kv.second.host_orch_func_ptr);
+        }
         if (kv.second.host_dlopen_handle != nullptr) {
             dlclose(kv.second.host_dlopen_handle);
         }

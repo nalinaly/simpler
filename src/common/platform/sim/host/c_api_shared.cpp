@@ -463,6 +463,9 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
             return rc;
         }
         auto host_dlopen_guard = RAIIScopeGuard([&artifacts]() {
+            if (artifacts.destroy_host_orch_func_ptr != nullptr && artifacts.host_orch_func_ptr != nullptr) {
+                artifacts.destroy_host_orch_func_ptr(artifacts.host_orch_func_ptr);
+            }
             if (artifacts.host_dlopen_handle != nullptr) {
                 dlclose(artifacts.host_dlopen_handle);
             }
@@ -478,7 +481,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         if (artifacts.host_dlopen_handle != nullptr) {
             rc = runner->record_host_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.host_dlopen_handle, artifacts.host_orch_func_ptr,
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                artifacts.destroy_host_orch_func_ptr, std::move(kernel_addrs), std::move(artifacts.signature)
             );
             if (rc == 0) {
                 host_dlopen_guard.dismiss();

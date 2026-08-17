@@ -67,6 +67,7 @@
 #include "host/runtime_timeout_config.h"
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
+#include "hbg_callable_registry.h"
 #include "hbg_execution_slot.h"
 #include "l1_execution_state.h"
 #include "prepare_callable_common.h"
@@ -315,7 +316,9 @@ public:
     int prepare_l1_callable(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
 
     /** Enqueue one complete asynchronous L1 operator on a borrowed stream. */
-    int launch_l1_callable(int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream);
+    int launch_l1_callable(
+        int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream, const HostApi *api
+    );
 
     /** Release only resources owned by the borrowed L1 context. */
     int finalize_l1_borrowed();
@@ -446,8 +449,8 @@ public:
      */
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
-        void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs,
-        std::vector<ArgDirection> signature
+        void *host_orch_func_ptr, void (*destroy_host_orch_func_ptr)(void *),
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
     );
 
     /**
@@ -993,6 +996,10 @@ protected:
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
+        void (*destroy_host_orch_func_ptr)(void *){nullptr};
+        uint64_t hbg_function_binding_hash{0};
+        std::unique_ptr<const simpler::hbg::HbgCallableRegistration> l1_hbg_callable_registration;
+        bool l1_hbg_callable_registration_enqueued{false};
     };
     std::unordered_map<int32_t, CallableState> callables_;
     // Opaque provider handle from dma_workspace_provision(), owned for the
@@ -1063,10 +1070,16 @@ protected:
     // conservatively treats it as device-owned until the AICPU binary unload
     // succeeds; launch return is not a device-consumption signal.
     bool l1_hbg_execution_slot_registration_enqueued_{false};
+    // Monotonic per-context identity for a freshly built task package. A
+    // captured node keeps the generation carried by its runtime-owned HostArgs
+    // snapshot; replay does not consume another host generation.
+    uint64_t l1_hbg_next_plan_generation_{1};
 
     int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
     int prepare_l1_hbg_execution_slot_registration();
     int enqueue_l1_hbg_execution_slot_registration(rtStream_t caller_stream);
+    int prepare_l1_hbg_callable_registration(int32_t callable_id);
+    int enqueue_l1_hbg_callable_registration(int32_t callable_id, rtStream_t caller_stream);
 
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.
