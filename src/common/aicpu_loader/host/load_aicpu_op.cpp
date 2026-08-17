@@ -35,6 +35,23 @@ namespace host {
 
 namespace {
 
+static_assert(
+    sizeof(aclrtPlaceHolderInfo) == sizeof(simpler::host_args::HostArgsPlaceholder),
+    "CANN placeholder size differs from PyPTO bridge ABI"
+);
+static_assert(
+    alignof(aclrtPlaceHolderInfo) == alignof(simpler::host_args::HostArgsPlaceholder),
+    "CANN placeholder alignment differs from PyPTO bridge ABI"
+);
+static_assert(
+    offsetof(aclrtPlaceHolderInfo, addrOffset) == offsetof(simpler::host_args::HostArgsPlaceholder, addr_offset),
+    "CANN placeholder address offset field moved"
+);
+static_assert(
+    offsetof(aclrtPlaceHolderInfo, dataOffset) == offsetof(simpler::host_args::HostArgsPlaceholder, data_offset),
+    "CANN placeholder data offset field moved"
+);
+
 std::string MakeInnerSoBasename(uint64_t fp, int device_id) {
     char buf[64];
     snprintf(buf, sizeof(buf), "simpler_inner_%016lx_%d.so", fp, device_id);
@@ -497,8 +514,23 @@ int LoadAicpuOp::LaunchBuiltInOp(
 int LoadAicpuOp::LaunchWithHostArgs(
     rtStream_t stream, const void *host_args, size_t args_size, int aicpu_num, const char *func_name
 ) {
-    if (stream == nullptr || host_args == nullptr || args_size == 0 || aicpu_num <= 0 || func_name == nullptr) {
-        LOG_ERROR("LaunchWithHostArgs: invalid stream, host args, args size, or AICPU block count");
+    return LaunchWithMutableHostArgs(
+        stream, const_cast<void *>(host_args), args_size, nullptr, 0, aicpu_num, func_name
+    );
+}
+
+int LoadAicpuOp::LaunchWithMutableHostArgs(
+    rtStream_t stream, void *host_args, size_t args_size, simpler::host_args::HostArgsPlaceholder *placeholders,
+    size_t placeholder_count, int aicpu_num, const char *func_name
+) {
+    const simpler::host_args::HostArgsLaunchStatus layout_status =
+        simpler::host_args::validate_host_args_launch_layout(host_args, args_size, placeholders, placeholder_count);
+    if (stream == nullptr || aicpu_num <= 0 || func_name == nullptr ||
+        layout_status != simpler::host_args::HostArgsLaunchStatus::Ok) {
+        LOG_ERROR(
+            "LaunchWithMutableHostArgs: invalid stream/args/placeholders/block count (layout status=%u)",
+            static_cast<uint32_t>(layout_status)
+        );
         return -1;
     }
     rtFuncHandle func_handle = nullptr;
@@ -515,7 +547,8 @@ int LoadAicpuOp::LaunchWithHostArgs(
 
     aclError rc = aclrtLaunchKernelWithHostArgs(
         reinterpret_cast<aclrtFuncHandle>(func_handle), static_cast<uint32_t>(aicpu_num),
-        reinterpret_cast<aclrtStream>(stream), nullptr, const_cast<void *>(host_args), args_size, nullptr, 0
+        reinterpret_cast<aclrtStream>(stream), nullptr, host_args, args_size,
+        reinterpret_cast<aclrtPlaceHolderInfo *>(placeholders), placeholder_count
     );
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("aclrtLaunchKernelWithHostArgs failed for %s: %d", func_name, rc);

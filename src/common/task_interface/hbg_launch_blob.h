@@ -17,6 +17,7 @@
 #include <type_traits>
 
 #include "arg_direction.h"
+#include "host_args_launch.h"
 #include "utils/fnv1a_64.h"
 
 namespace simpler::hbg {
@@ -387,6 +388,35 @@ inline HbgLaunchBlobStatus validate_hbg_launch_blob(
         hbg_plan_hash(identity, regions, header->region_count, payload, header->inline_payload_size)) {
         return HbgLaunchBlobStatus::HashMismatch;
     }
+    return HbgLaunchBlobStatus::Ok;
+}
+
+/**
+ * Prepare the single inline-payload placeholder consumed by the HBG launch.
+ *
+ * The canonical blob is validated in its unpatched state and is not modified.
+ * The caller must give CANN a fresh writable copy because the runtime is
+ * allowed to patch the pointer field while constructing its task-owned args.
+ */
+inline HbgLaunchBlobStatus make_hbg_launch_placeholder(
+    const void *blob, size_t blob_size, host_args::HostArgsPlaceholder *out,
+    const HbgExecutionBinding *expected_binding = nullptr, const HbgInvocationIdentity *expected_identity = nullptr
+) noexcept {
+    if (out == nullptr) return HbgLaunchBlobStatus::NullArgument;
+    const HbgLaunchBlobStatus blob_status = validate_hbg_launch_blob(
+        blob, blob_size, HbgLaunchBlobAddressMode::HostUnpatched, expected_binding, expected_identity
+    );
+    if (blob_status != HbgLaunchBlobStatus::Ok) return blob_status;
+
+    const auto *header = static_cast<const HbgLaunchBlobHeader *>(blob);
+    const host_args::HostArgsPlaceholder candidate{
+        static_cast<uint32_t>(offsetof(HbgLaunchBlobHeader, inline_payload_addr)), header->header_size
+    };
+    if (host_args::validate_host_args_launch_layout(blob, blob_size, &candidate, 1) !=
+        host_args::HostArgsLaunchStatus::Ok) {
+        return HbgLaunchBlobStatus::InvalidHeader;
+    }
+    *out = candidate;
     return HbgLaunchBlobStatus::Ok;
 }
 

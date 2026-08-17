@@ -12,6 +12,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -34,7 +35,11 @@ using simpler::hbg::HbgLaunchBlobHeader;
 using simpler::hbg::HbgLaunchBlobStatus;
 using simpler::hbg::HbgLaunchRegion;
 using simpler::hbg::HbgLaunchRegionKind;
+using simpler::hbg::make_hbg_launch_placeholder;
 using simpler::hbg::validate_hbg_launch_blob;
+using simpler::host_args::HostArgsLaunchStatus;
+using simpler::host_args::HostArgsPlaceholder;
+using simpler::host_args::validate_host_args_launch_layout;
 
 constexpr uint32_t kRegionFlags = HBG_REGION_REQUIRED | HBG_REGION_IMMUTABLE_SOURCE;
 
@@ -142,6 +147,102 @@ TEST(HbgLaunchBlob, DistinguishesHostAndRuntimePatchedPointerStates) {
     EXPECT_EQ(
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::DevicePatched),
         HbgLaunchBlobStatus::InvalidHeader
+    );
+}
+
+TEST(HbgLaunchBlob, BuildsOnePlaceholderWithoutMutatingCanonicalBytes) {
+    std::vector<uint8_t> blob = make_blob();
+    const std::vector<uint8_t> canonical = blob;
+    const auto *header = reinterpret_cast<const HbgLaunchBlobHeader *>(blob.data());
+    const HbgExecutionBinding expected_binding = header->binding;
+    const HbgInvocationIdentity expected_identity = header->identity;
+    HostArgsPlaceholder placeholder{0xffffffffU, 0xffffffffU};
+
+    ASSERT_EQ(
+        make_hbg_launch_placeholder(blob.data(), blob.size(), &placeholder, &expected_binding, &expected_identity),
+        HbgLaunchBlobStatus::Ok
+    );
+    EXPECT_EQ(placeholder.addr_offset, offsetof(HbgLaunchBlobHeader, inline_payload_addr));
+    EXPECT_EQ(placeholder.data_offset, header->header_size);
+    EXPECT_EQ(blob, canonical);
+
+    std::vector<uint8_t> runtime_owned_copy = blob;
+    const uint64_t patched_payload_addr =
+        reinterpret_cast<uint64_t>(runtime_owned_copy.data()) + placeholder.data_offset;
+    std::memcpy(
+        runtime_owned_copy.data() + placeholder.addr_offset, &patched_payload_addr, sizeof(patched_payload_addr)
+    );
+    EXPECT_EQ(
+        validate_hbg_launch_blob(
+            runtime_owned_copy.data(), runtime_owned_copy.size(), HbgLaunchBlobAddressMode::DevicePatched,
+            &expected_binding, &expected_identity
+        ),
+        HbgLaunchBlobStatus::Ok
+    );
+}
+
+TEST(HbgLaunchBlob, PlaceholderPreparationRejectsWrongIdentityAndPreservesOutput) {
+    std::vector<uint8_t> blob = make_blob();
+    const auto *header = reinterpret_cast<const HbgLaunchBlobHeader *>(blob.data());
+    HbgInvocationIdentity expected_identity = header->identity;
+    ++expected_identity.argument_snapshot_hash;
+    const HostArgsPlaceholder sentinel{24, 32};
+    HostArgsPlaceholder output = sentinel;
+
+    EXPECT_EQ(
+        make_hbg_launch_placeholder(blob.data(), blob.size(), &output, nullptr, &expected_identity),
+        HbgLaunchBlobStatus::IdentityMismatch
+    );
+    EXPECT_EQ(output.addr_offset, sentinel.addr_offset);
+    EXPECT_EQ(output.data_offset, sentinel.data_offset);
+    EXPECT_EQ(make_hbg_launch_placeholder(blob.data(), blob.size(), nullptr), HbgLaunchBlobStatus::NullArgument);
+}
+
+TEST(HbgLaunchBlob, GenericHostArgsLayoutRejectsEveryLossyOrUnsafePlaceholder) {
+    alignas(8) std::array<uint8_t, 64> args{};
+    HostArgsPlaceholder placeholders[2]{{8, 32}, {16, 40}};
+    EXPECT_EQ(validate_host_args_launch_layout(args.data(), args.size(), placeholders, 2), HostArgsLaunchStatus::Ok);
+    EXPECT_EQ(
+        validate_host_args_launch_layout(nullptr, args.size(), placeholders, 2), HostArgsLaunchStatus::NullArguments
+    );
+    EXPECT_EQ(validate_host_args_launch_layout(args.data(), 0, placeholders, 2), HostArgsLaunchStatus::EmptyArguments);
+    EXPECT_EQ(
+        validate_host_args_launch_layout(
+            args.data(), static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1, placeholders, 2
+        ),
+        HostArgsLaunchStatus::ArgumentsTooLarge
+    );
+    EXPECT_EQ(
+        validate_host_args_launch_layout(args.data(), args.size(), nullptr, 1),
+        HostArgsLaunchStatus::PlaceholderPointerMismatch
+    );
+    EXPECT_EQ(
+        validate_host_args_launch_layout(
+            args.data(), args.size(), placeholders, static_cast<size_t>(std::numeric_limits<uint16_t>::max()) + 1
+        ),
+        HostArgsLaunchStatus::TooManyPlaceholders
+    );
+
+    placeholders[0] = {4, 32};
+    EXPECT_EQ(
+        validate_host_args_launch_layout(args.data(), args.size(), placeholders, 1),
+        HostArgsLaunchStatus::MisalignedAddressField
+    );
+    placeholders[0] = {64, 32};
+    EXPECT_EQ(
+        validate_host_args_launch_layout(args.data(), args.size(), placeholders, 1),
+        HostArgsLaunchStatus::AddressFieldOutOfBounds
+    );
+    placeholders[0] = {8, 64};
+    EXPECT_EQ(
+        validate_host_args_launch_layout(args.data(), args.size(), placeholders, 1),
+        HostArgsLaunchStatus::DataOffsetOutOfBounds
+    );
+    placeholders[0] = {8, 32};
+    placeholders[1] = {8, 40};
+    EXPECT_EQ(
+        validate_host_args_launch_layout(args.data(), args.size(), placeholders, 2),
+        HostArgsLaunchStatus::OverlappingAddressFields
     );
 }
 

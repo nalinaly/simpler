@@ -62,6 +62,7 @@
 #include "common/kernel_args.h"
 #include "runtime/runtime/rts/rts_kernel.h"
 #include "runtime/rt.h"
+#include "task_interface/host_args_launch.h"
 
 namespace host {
 
@@ -173,6 +174,29 @@ public:
      */
     int LaunchWithHostArgs(
         rtStream_t stream, const void *host_args, size_t args_size, int aicpu_num, const char *func_name
+    );
+
+    /**
+     * @brief Launch a mutable variable-length host-args image with inline placeholders.
+     *
+     * This is the HBG-facing bridge. Unlike the fixed TRB overload, callers
+     * must provide a fresh writable blob because CANN may patch pointer fields
+     * while snapshotting the task. The method validates all lossy size carriers
+     * and placeholder writes before invoking the runtime and performs no host
+     * allocation or synchronization.
+     *
+     * @param stream             Caller-owned stream
+     * @param host_args          Fresh writable host argument image
+     * @param args_size          Exact byte length of the argument image
+     * @param placeholders       Placeholder descriptors, or null when count is zero
+     * @param placeholder_count  Number of descriptors
+     * @param aicpu_num          Number of AICPU blocks
+     * @param func_name          Lookup key in func_handles_ (KernelNames::*)
+     * @return 0 on successful enqueue, error code otherwise
+     */
+    int LaunchWithMutableHostArgs(
+        rtStream_t stream, void *host_args, size_t args_size, simpler::host_args::HostArgsPlaceholder *placeholders,
+        size_t placeholder_count, int aicpu_num, const char *func_name
     );
 
 private:
