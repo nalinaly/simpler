@@ -277,7 +277,10 @@ private:
         void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *
     );
     using SimplerL1SupportedFn = int (*)(void *);
-    using SimplerL1InitFn = SimplerInitFn;
+    using SimplerL1InitFn = int (*)(
+        void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *,
+        uint64_t
+    );
     using SimplerL1PrepareCallableFn = int (*)(void *, int32_t, const void *, size_t, void *);
     using SimplerL1LaunchFn = int (*)(void *, int32_t, const void *, void *);
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);

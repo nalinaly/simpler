@@ -399,7 +399,7 @@ int simpler_l1_supported(DeviceContextHandle ctx) {
 int simpler_l1_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *config
+    const CallConfig *config, uint64_t context_generation
 ) {
     (void)ctx;
     (void)device_id;
@@ -410,6 +410,7 @@ int simpler_l1_init(
     (void)dispatcher_binary;
     (void)dispatcher_size;
     (void)config;
+    (void)context_generation;
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 

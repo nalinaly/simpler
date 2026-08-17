@@ -10,6 +10,7 @@
  */
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 #include <gtest/gtest.h>
@@ -18,10 +19,12 @@
 
 namespace {
 
+using simpler::hbg::build_hbg_execution_slot_registration;
 using simpler::hbg::HBG_EXECUTION_SLOT_CAPACITY_FROZEN;
 using simpler::hbg::HBG_EXECUTION_SLOT_REQUIRED_FLAGS;
 using simpler::hbg::hbg_minimum_launch_blob_size;
 using simpler::hbg::HbgExecutionSlotRegistration;
+using simpler::hbg::HbgExecutionSlotRegistrationSpec;
 using simpler::hbg::HbgExecutionSlotStatus;
 using simpler::hbg::seal_hbg_execution_slot_registration;
 using simpler::hbg::validate_hbg_execution_slot_registration;
@@ -47,6 +50,52 @@ HbgExecutionSlotRegistration make_registration() {
     EXPECT_TRUE(hbg_minimum_launch_blob_size(registration.binding, &minimum_size));
     registration.max_launch_blob_size = minimum_size + 0x1000;
     return registration;
+}
+
+HbgExecutionSlotRegistrationSpec make_registration_spec() {
+    const HbgExecutionSlotRegistration registration = make_registration();
+    return HbgExecutionSlotRegistrationSpec{
+        registration.device_id,
+        registration.max_launch_blob_size,
+        registration.binding,
+        registration.outer_runtime_base,
+        registration.outer_runtime_size,
+        registration.device_kernel_args_base,
+        registration.device_kernel_args_size,
+        registration.binary_generation,
+    };
+}
+
+TEST(HbgExecutionSlot, BuildsAndOwnsOneCompleteSealedRegistrationTransactionally) {
+    const HbgExecutionSlotRegistrationSpec spec = make_registration_spec();
+    HbgExecutionSlotRegistration registration{};
+
+    ASSERT_EQ(build_hbg_execution_slot_registration(spec, &registration), HbgExecutionSlotStatus::Ok);
+    EXPECT_EQ(registration.device_id, spec.device_id);
+    EXPECT_EQ(registration.max_launch_blob_size, spec.max_launch_blob_size);
+    EXPECT_TRUE(hbg_execution_binding_matches(registration.binding, spec.binding));
+    EXPECT_EQ(registration.binding.slot_generation, spec.binding.slot_generation);
+    EXPECT_EQ(registration.outer_runtime_base, spec.outer_runtime_base);
+    EXPECT_EQ(registration.outer_runtime_size, spec.outer_runtime_size);
+    EXPECT_EQ(registration.device_kernel_args_base, spec.device_kernel_args_base);
+    EXPECT_EQ(registration.device_kernel_args_size, spec.device_kernel_args_size);
+    EXPECT_EQ(registration.binary_generation, spec.binary_generation);
+    EXPECT_NE(registration.registration_hash, 0u);
+    EXPECT_EQ(validate_hbg_execution_slot_registration(&registration, spec.device_id), HbgExecutionSlotStatus::Ok);
+}
+
+TEST(HbgExecutionSlot, FailedBuildPreservesThePriorRegistrationOwner) {
+    HbgExecutionSlotRegistration registration = make_registration();
+    registration.registration_hash = 0xfeedfaceULL;
+    const HbgExecutionSlotRegistration before = registration;
+
+    HbgExecutionSlotRegistrationSpec spec = make_registration_spec();
+    spec.binding.slot_generation = 0;
+    EXPECT_EQ(build_hbg_execution_slot_registration(spec, &registration), HbgExecutionSlotStatus::InvalidGeneration);
+    EXPECT_EQ(std::memcmp(&registration, &before, sizeof(registration)), 0);
+    EXPECT_EQ(
+        build_hbg_execution_slot_registration(make_registration_spec(), nullptr), HbgExecutionSlotStatus::NullArgument
+    );
 }
 
 TEST(HbgExecutionSlot, SealsTheCompleteFrozenBindingAndDetectsMutation) {

@@ -276,12 +276,14 @@ int simpler_l1_supported(DeviceContextHandle ctx);
  * call does not take ACL/device-reset ownership and does not synchronize a
  * stream or device. It creates only context-owned persistent handles used by
  * asynchronous preparation and launch. `config` is context-static and launch
- * never mutates it.
+ * never mutates it. `context_generation` is minted by the process-lifetime
+ * ChipWorker owner, is never zero or reused, and is not exposed through the
+ * Python convenience API.
  */
 int simpler_l1_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *config
+    const CallConfig *config, uint64_t context_generation
 );
 
 /**

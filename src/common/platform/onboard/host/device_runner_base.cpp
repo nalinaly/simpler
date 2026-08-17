@@ -86,6 +86,12 @@ extern "C" __attribute__((weak)) int prepare_l1_runtime_impl(
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
+extern "C" __attribute__((weak)) int query_l1_hbg_execution_binding_impl(
+    const Runtime * /*runtime*/, simpler::hbg::HbgExecutionBinding * /*out*/
+) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 extern "C" __attribute__((weak)) int build_l1_hbg_graph_plan_impl(
     Runtime * /*runtime*/, const HostApi * /*api*/, const ChipStorageTaskArgs * /*orch_args*/,
     void * /*host_orch_func_ptr*/, const simpler::hbg::HbgExecutionBinding * /*binding*/,
@@ -265,7 +271,8 @@ int DeviceRunnerBase::claim_l2_execution_mode() { return execution_mode_state_.c
 
 int DeviceRunnerBase::initialize_l1_borrowed(
     int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
-    std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops
+    std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops,
+    uint64_t context_generation
 ) {
     try {
         config.validate();
@@ -273,8 +280,9 @@ int DeviceRunnerBase::initialize_l1_borrowed(
         LOG_ERROR("Invalid L1 CallConfig: %s", e.what());
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
-    if (config.diagnostics_any() || validate_launch_aicpu_num(config.aicpu_thread_num) != 0) {
-        LOG_ERROR("L1 v1 does not support diagnostics or an invalid AICPU thread count");
+    if (config.diagnostics_any() || validate_launch_aicpu_num(config.aicpu_thread_num) != 0 ||
+        context_generation == 0) {
+        LOG_ERROR("L1 v1 does not support diagnostics, an invalid AICPU thread count, or a zero context generation");
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
 
@@ -282,11 +290,13 @@ int DeviceRunnerBase::initialize_l1_borrowed(
     if (rc != 0) {
         return rc;
     }
+    l1_context_generation_ = context_generation;
 
     rc = l1_execution_state_.initialize(device_id, ops);
     if (rc != 0) {
         if (l1_execution_state_.phase() == L1ContextPhase::New) {
             (void)execution_mode_state_.abort_l1_initialization();
+            l1_context_generation_ = 0;
         } else {
             // A failed rollback can retain a stream/event handle. Keep the
             // context in borrowed mode so only explicit L1 close may retry the
@@ -466,6 +476,8 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (rc != 0) return poison(rc);
     rc = ensure_aicore_binary_registered();
     if (rc != 0) return poison(rc);
+    rc = prepare_l1_hbg_execution_slot_registration();
+    if (rc != 0) return poison(rc);
 
     if (!l1_prepared_callable_ids_.empty()) {
         rc = aclrtStreamWaitEvent(
@@ -526,6 +538,68 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     }
     rc = l1_execution_state_.mark_ready_enqueued();
     return rc == 0 ? 0 : poison(rc);
+}
+
+int DeviceRunnerBase::prepare_l1_hbg_execution_slot_registration() {
+    if (l1_hbg_execution_slot_registration_ != nullptr) {
+        const auto status = simpler::hbg::validate_hbg_execution_slot_registration(
+            l1_hbg_execution_slot_registration_.get(), device_id_
+        );
+        return status == simpler::hbg::HbgExecutionSlotStatus::Ok ? 0 : PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    if (l1_runtime_ == nullptr || l1_kernel_args_.args.runtime_args == nullptr ||
+        l1_kernel_args_.device_k_args_ == nullptr || aicore_bin_handle_ == nullptr || l1_context_generation_ == 0) {
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+
+    simpler::hbg::HbgExecutionBinding binding{};
+    int rc = query_l1_hbg_execution_binding_impl(l1_runtime_.get(), &binding);
+    if (rc == PTO_RUNTIME_ERR_UNSUPPORTED) return 0;
+    if (rc != 0) return rc;
+    if (binding.slot_generation != 0) {
+        LOG_ERROR("HBG runtime attempted to choose DeviceRunner-owned slot generation");
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+    binding.slot_generation = l1_context_generation_;
+
+    uint64_t launch_blob_capacity = 0;
+    if (!simpler::hbg::hbg_minimum_launch_blob_size(binding, &launch_blob_capacity)) {
+        LOG_ERROR("HBG execution-slot package capacity overflow");
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    // This field identifies the context-pinned generic AICore executor. Each
+    // callable's child binaries remain task-owned through the exact function
+    // table hash, so the two identities cover different lifetime roots.
+    const uint64_t binary_generation =
+        simpler::common::utils::elf_build_id_64(aicore_kernel_binary_.data(), aicore_kernel_binary_.size());
+    if (binary_generation == 0) {
+        LOG_ERROR("HBG AICore executor has an invalid zero content identity");
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    const simpler::hbg::HbgExecutionSlotRegistrationSpec spec{
+        device_id_,
+        launch_blob_capacity,
+        binding,
+        reinterpret_cast<uint64_t>(l1_kernel_args_.args.runtime_args),
+        runtime_device_copy_size(*l1_runtime_),
+        reinterpret_cast<uint64_t>(l1_kernel_args_.device_k_args_),
+        sizeof(KernelArgs),
+        binary_generation,
+    };
+    simpler::hbg::HbgExecutionSlotRegistration registration{};
+    const auto status = simpler::hbg::build_hbg_execution_slot_registration(spec, &registration);
+    if (status != simpler::hbg::HbgExecutionSlotStatus::Ok) {
+        LOG_ERROR("Failed to seal HBG execution-slot registration: status=%u", static_cast<unsigned>(status));
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+
+    std::unique_ptr<const simpler::hbg::HbgExecutionSlotRegistration> owner(
+        new (std::nothrow) simpler::hbg::HbgExecutionSlotRegistration(registration)
+    );
+    if (owner == nullptr) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    l1_hbg_execution_slot_registration_ = std::move(owner);
+    return 0;
 }
 
 int DeviceRunnerBase::launch_l1_callable(
@@ -785,6 +859,8 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     l1_prepare_tail_consumed_ = false;
     l1_serial_tail_recorded_ = false;
     l1_last_caller_stream_ = nullptr;
+    l1_hbg_execution_slot_registration_.reset();
+    l1_context_generation_ = 0;
     block_dim_ = 0;
     worker_count_ = 0;
     max_block_dim_ = 0;

@@ -971,6 +971,30 @@ extern "C" int prepare_l1_runtime_impl(
     return 0;
 }
 
+extern "C" int query_l1_hbg_execution_binding_impl(const Runtime *runtime, simpler::hbg::HbgExecutionBinding *out) {
+    if (runtime == nullptr || out == nullptr || !runtime->has_l1_static_execution_slot()) {
+        return -1;
+    }
+
+    simpler::hbg::HbgExecutionBinding candidate{};
+    candidate.shared_memory_base = reinterpret_cast<uint64_t>(runtime->get_gm_sm_ptr());
+    candidate.shared_memory_capacity = runtime->get_l1_shared_memory_capacity();
+    candidate.runtime_arena_base = reinterpret_cast<uint64_t>(runtime->get_prebuilt_arena_base());
+    candidate.runtime_arena_capacity = runtime->get_l1_runtime_arena_capacity();
+    candidate.gm_heap_base = reinterpret_cast<uint64_t>(runtime->get_gm_heap_ptr());
+    candidate.gm_heap_capacity = runtime->get_l1_gm_heap_capacity();
+    candidate.runtime_offset = runtime->get_prebuilt_runtime_offset();
+    candidate.slot_generation = 0;
+    if (!simpler::hbg::hbg_valid_device_window(candidate.shared_memory_base, candidate.shared_memory_capacity) ||
+        !simpler::hbg::hbg_valid_device_window(candidate.runtime_arena_base, candidate.runtime_arena_capacity) ||
+        !simpler::hbg::hbg_valid_device_window(candidate.gm_heap_base, candidate.gm_heap_capacity) ||
+        candidate.runtime_offset >= candidate.runtime_arena_capacity) {
+        return -1;
+    }
+    *out = candidate;
+    return 0;
+}
+
 /**
  * Build one immutable HBG L1 graph plan against the already-frozen working
  * slot. External tensor storage is borrowed: this path performs no allocation,

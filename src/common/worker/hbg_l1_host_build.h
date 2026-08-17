@@ -21,6 +21,16 @@
 class Runtime;
 
 /**
+ * Describe the exact HBG working arenas frozen by prepare_l1_runtime_impl.
+ *
+ * The runtime-specific hook owns the arena facts but deliberately leaves
+ * slot_generation zero. DeviceRunner adds its process-lifetime context
+ * generation only when outer Runtime, device KernelArgs and the executor
+ * binary are all ready to be sealed into one registration.
+ */
+extern "C" int query_l1_hbg_execution_binding_impl(const Runtime *runtime, simpler::hbg::HbgExecutionBinding *out);
+
+/**
  * Runtime-specific host-build hook used only by HBG L1.
  *
  * The caller supplies a trusted frozen destination binding and a validated

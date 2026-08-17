@@ -510,13 +510,14 @@ int simpler_l1_supported(DeviceContextHandle ctx) {
 int simpler_l1_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
     const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
-    const CallConfig *config
+    const CallConfig *config, uint64_t context_generation
 ) {
     if (l1_runtime_supported_impl() == 0) {
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
     if (ctx == nullptr || device_id < 0 || aicpu_binary == nullptr || aicpu_size == 0 || aicore_binary == nullptr ||
-        aicore_size == 0 || config == nullptr || (dispatcher_binary == nullptr && dispatcher_size != 0)) {
+        aicore_size == 0 || config == nullptr || context_generation == 0 ||
+        (dispatcher_binary == nullptr && dispatcher_size != 0)) {
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
 
@@ -545,7 +546,8 @@ int simpler_l1_init(
             dispatcher_vec.assign(dispatcher_binary, dispatcher_binary + dispatcher_size);
         }
         return runner->initialize_l1_borrowed(
-            device_id, std::move(aicpu_vec), std::move(aicore_vec), std::move(dispatcher_vec), *config, kL1RuntimeOps
+            device_id, std::move(aicpu_vec), std::move(aicore_vec), std::move(dispatcher_vec), *config, kL1RuntimeOps,
+            context_generation
         );
     } catch (...) {
         return PTO_RUNTIME_ERR_RUNTIME_FAILURE;

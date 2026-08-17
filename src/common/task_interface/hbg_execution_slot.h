@@ -59,6 +59,24 @@ struct alignas(8) HbgExecutionSlotRegistration {
     uint64_t registration_hash{0};
 };
 
+/** Host-owned inputs used to construct one complete registration. */
+struct HbgExecutionSlotRegistrationSpec {
+    int32_t device_id{-1};
+    uint64_t max_launch_blob_size{0};
+    HbgExecutionBinding binding{};
+    uint64_t outer_runtime_base{0};
+    uint64_t outer_runtime_size{0};
+    uint64_t device_kernel_args_base{0};
+    uint64_t device_kernel_args_size{0};
+    uint64_t binary_generation{0};
+};
+
+static_assert(
+    std::is_standard_layout_v<HbgExecutionSlotRegistrationSpec> &&
+        std::is_trivially_copyable_v<HbgExecutionSlotRegistrationSpec>,
+    "HBG execution-slot registration spec must be a host-copyable POD"
+);
+
 static_assert(sizeof(HbgExecutionSlotRegistration) == 144, "HBG execution-slot registration ABI changed");
 static_assert(
     offsetof(HbgExecutionSlotRegistration, max_launch_blob_size) == 24, "HBG execution-slot capacity offset changed"
@@ -210,6 +228,33 @@ inline HbgExecutionSlotStatus validate_hbg_execution_slot_registration(
     if (registration->registration_hash != hbg_execution_slot_registration_hash(*registration)) {
         return HbgExecutionSlotStatus::HashMismatch;
     }
+    return HbgExecutionSlotStatus::Ok;
+}
+
+/**
+ * Build and seal a registration without publishing a partial owner.
+ *
+ * The caller computes every generation and capacity before entering this
+ * helper. A failed validation leaves `out` byte-for-byte unchanged.
+ */
+inline HbgExecutionSlotStatus build_hbg_execution_slot_registration(
+    const HbgExecutionSlotRegistrationSpec &spec, HbgExecutionSlotRegistration *out
+) noexcept {
+    if (out == nullptr) return HbgExecutionSlotStatus::NullArgument;
+
+    HbgExecutionSlotRegistration candidate{};
+    candidate.device_id = spec.device_id;
+    candidate.max_launch_blob_size = spec.max_launch_blob_size;
+    candidate.binding = spec.binding;
+    candidate.outer_runtime_base = spec.outer_runtime_base;
+    candidate.outer_runtime_size = spec.outer_runtime_size;
+    candidate.device_kernel_args_base = spec.device_kernel_args_base;
+    candidate.device_kernel_args_size = spec.device_kernel_args_size;
+    candidate.binary_generation = spec.binary_generation;
+
+    const HbgExecutionSlotStatus status = seal_hbg_execution_slot_registration(&candidate, spec.device_id);
+    if (status != HbgExecutionSlotStatus::Ok) return status;
+    *out = candidate;
     return HbgExecutionSlotStatus::Ok;
 }
 

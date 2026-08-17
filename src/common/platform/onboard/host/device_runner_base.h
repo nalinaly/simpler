@@ -67,6 +67,7 @@
 #include "host/runtime_timeout_config.h"
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
+#include "hbg_execution_slot.h"
 #include "l1_execution_state.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
@@ -296,7 +297,8 @@ public:
      */
     int initialize_l1_borrowed(
         int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
-        std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops
+        std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops,
+        uint64_t context_generation
     );
 
     /**
@@ -1047,8 +1049,18 @@ protected:
     bool l1_prepare_tail_consumed_{false};
     bool l1_serial_tail_recorded_{false};
     rtStream_t l1_last_caller_stream_{nullptr};
+    // Minted by the process-lifetime ChipWorker owner and fixed before any
+    // prepare allocation. HBG copies it into its destination-bound slot
+    // registration; TRB carries it only as dormant context identity.
+    uint64_t l1_context_generation_{0};
+    // Host trust-root owner for HBG. It is allocated only when the runtime's
+    // strong binding query reports support, remains immutable after seal, and
+    // is retained until successful explicit close. A future independent HBG
+    // AICPU registration entry will receive these exact bytes.
+    std::unique_ptr<const simpler::hbg::HbgExecutionSlotRegistration> l1_hbg_execution_slot_registration_;
 
     int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
+    int prepare_l1_hbg_execution_slot_registration();
 
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.

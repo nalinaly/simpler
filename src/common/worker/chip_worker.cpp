@@ -45,7 +45,7 @@ T load_symbol(void *handle, const char *name) {
     return reinterpret_cast<T>(sym);
 }
 
-uint64_t next_native_run_epoch() {
+uint64_t next_process_epoch() {
     static std::atomic<uint64_t> epoch{0};
     uint64_t current = epoch.load(std::memory_order_relaxed);
     while (current != std::numeric_limits<uint64_t>::max()) {
@@ -53,7 +53,7 @@ uint64_t next_native_run_epoch() {
             return current + 1;
         }
     }
-    throw std::overflow_error("native-run epoch space is exhausted");
+    throw std::overflow_error("process epoch space is exhausted");
 }
 
 std::string format_native_run_identity(const ChipWorkerNativeRun &run) {
@@ -407,11 +407,18 @@ void ChipWorker::init_impl(
         if (borrowed_l1 && (config == nullptr || simpler_l1_supported_fn_(device_ctx_) == 0)) {
             throw std::runtime_error("selected host runtime does not support borrowed L1 execution");
         }
-        SimplerInitFn selected_init = borrowed_l1 ? simpler_l1_init_fn_ : simpler_init_fn_;
-        init_rc = selected_init(
-            device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(), aicore_bytes.size(),
-            dispatcher_ptr, dispatcher_bytes.size(), config
-        );
+        if (borrowed_l1) {
+            const uint64_t context_generation = next_process_epoch();
+            init_rc = simpler_l1_init_fn_(
+                device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(),
+                aicore_bytes.size(), dispatcher_ptr, dispatcher_bytes.size(), config, context_generation
+            );
+        } else {
+            init_rc = simpler_init_fn_(
+                device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(),
+                aicore_bytes.size(), dispatcher_ptr, dispatcher_bytes.size(), config
+            );
+        }
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
@@ -915,7 +922,7 @@ ChipWorkerNativeRun ChipWorker::prepare_native_run_on_slot(
     if (slot_id >= runtime_bufs_.size()) {
         throw std::runtime_error("prepare_native_run slot is outside the runtime PipelineContract");
     }
-    const uint64_t run_epoch = next_native_run_epoch();
+    const uint64_t run_epoch = next_process_epoch();
     const ChipWorkerNativeRun run_identity{slot_id, generation, run_epoch, run_id, dispatch_id};
     const bool allow_prepared_successor = supports_concurrent_native_prepare() && !config.diagnostics_any();
     {
