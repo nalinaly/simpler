@@ -465,6 +465,21 @@ set_tests_properties(test_l1_tensor_validation PROPERTIES LABELS "no_hardware")
 add_task_interface_test(test_l1_callable_validation types/test_l1_callable_validation.cpp)
 set_tests_properties(test_l1_callable_validation PROPERTIES LABELS "no_hardware")
 
+# Variable-length HBG graph-package ABI and host serializer. This is the
+# capture-independent H1/H2 foundation: it deep-copies pristine source bytes,
+# binds them to frozen execution-slot capacities, and rejects stale/partial or
+# overlapping restore manifests without any CANN dependency.
+add_executable(test_hbg_launch_blob types/test_hbg_launch_blob.cpp)
+target_include_directories(test_hbg_launch_blob PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_launch_blob PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_launch_blob COMMAND test_hbg_launch_blob)
+set_tests_properties(test_hbg_launch_blob PROPERTIES LABELS "no_hardware")
+
 # Contract test for upload_chip_callable_buffer caller-buffer immutability.
 # Pulls both task_interface (callable.h) and src/common (utils/fnv1a_64.h),
 # so it can't use add_task_interface_test as-is.

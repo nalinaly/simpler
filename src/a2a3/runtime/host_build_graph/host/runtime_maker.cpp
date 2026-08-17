@@ -355,13 +355,12 @@ struct HostOrchEntryPoints {
     OrchestrationBindFunc bind{nullptr};
 };
 
-// Run the orchestrator on the host. `rt` was built with its scheduler half
-// pointing at the device SM; here we re-point ONLY the orchestrator half at a
-// host SM mirror, run the orchestration entry against it, latch the submitted
-// task count, and H2D the populated SM to the device (the device scheduler
-// reads task descriptors from there). The device never dereferences the
-// orchestrator's SM pointers, so leaving them host-side is safe. Returns the
-// total task count (>= 0) on success, or -1 on failure.
+// Build the destination-bound shared-memory image entirely on the host. `rt`
+// was built with its scheduler half pointing at the device SM; here we re-point
+// ONLY the orchestrator half at a host SM mirror, run the orchestration entry,
+// and relocate cross-task pointers for the caller-selected device bases. This
+// function deliberately performs no H2D. The caller owns the returned bytes
+// and crosses the upload boundary only after the arena image is also complete.
 // host_build_graph host-orch: the orchestrator built the task graph in a host
 // SM mirror and (when wiring is folded into submit) the fanout adjacency in the
 // host arena, storing host-DDR addresses into the cross-task pointers. Relocate
@@ -447,17 +446,21 @@ static bool relocate_host_orch_image(
     return ok;
 }
 
-int32_t run_host_orchestration(
-    Runtime *runtime, const HostApi *api, PTO2Runtime *rt, DeviceArena &host_arena,
-    const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
-    const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
-    void *host_orch_func_ptr, const L2TaskArgs &orch_l2
+int32_t build_host_orchestration_image(
+    Runtime *runtime, PTO2Runtime *rt, DeviceArena &host_arena, const PTO2RuntimeArenaLayout &layout, void *device_sm,
+    uint64_t sm_size, void *device_arena, void *gm_heap, const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH],
+    const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH], void *host_orch_func_ptr, const L2TaskArgs &orch_l2,
+    std::vector<uint8_t> *out_sm_image
 ) {
+    if (out_sm_image == nullptr) {
+        LOG_ERROR("host-orch: output shared-memory image is null");
+        return -1;
+    }
     // The dep_gen graph belongs to the orchestration that is about to run.
     dep_gen_host_graph_begin_capture();
 
-    std::vector<uint8_t> host_sm_buf(sm_size, 0);
-    void *host_sm = host_sm_buf.data();
+    out_sm_image->assign(sm_size, 0);
+    void *host_sm = out_sm_image->data();
 
     // Re-point the orchestrator half at the host SM (scheduler keeps device SM).
     // init_data_from_layout resets the orchestrator state, so this is safe.
@@ -531,10 +534,6 @@ int32_t run_host_orchestration(
         return -1;
     }
 
-    if (api->copy_to_device(device_sm, host_sm, sm_size) != 0) {
-        LOG_ERROR("host-orch: H2D of populated SM failed");
-        return -1;
-    }
     return total_tasks;
 }
 
@@ -846,8 +845,8 @@ extern "C" int bind_callable_to_runtime_impl(
     runtime_wire_arena_pointers(host_arena, layout, rt);
 
     // host_build_graph host-orch: run the orchestrator on the host now, against
-    // a host SM mirror, and ship the populated SM to the device. The arena
-    // (copied to the device below) carries the resulting orchestrator/scheduler
+    // a host SM mirror, and finish both pristine host images before either is
+    // uploaded below. The arena carries the resulting orchestrator/scheduler
     // state; the device boots scheduler-only. register_callable_impl guarantees
     // host_orch_func_ptr is non-null on success (it fails the whole prepare
     // otherwise), so this is an assertion-style guard, not a fallback path.
@@ -855,22 +854,24 @@ extern "C" int bind_callable_to_runtime_impl(
         LOG_ERROR("host-orch: orchestration entry points were not resolved");
         return -1;
     }
+    std::vector<uint8_t> host_sm_image;
+    int32_t host_total_tasks = -1;
     {
         L2TaskArgs orch_l2;
         orch_l2.create_from_chip_args(device_args);
-        int32_t total_tasks = run_host_orchestration(
-            runtime, api, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,
-            eff_task_window_sizes, host_orch_func_ptr, orch_l2
+        host_total_tasks = build_host_orchestration_image(
+            runtime, rt, host_arena, layout, sm_ptr, sm_size, runtime_arena_dev, gm_heap, eff_heap_sizes,
+            eff_task_window_sizes, host_orch_func_ptr, orch_l2, &host_sm_image
         );
-        // The orchestrator is the only host-view reader; from here the device
-        // owns these buffers, so drop the window on both exits.
+        // The orchestrator is the only host-view reader. The complete graph is
+        // now represented by host_sm_image + host_arena; close the tensor-view
+        // window before crossing the explicit H2D boundary below.
         host_tensor_access_reset(nullptr);
-        if (total_tasks < 0) {
+        if (host_total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");
             return -1;
         }
-        runtime->host_total_tasks = total_tasks;
-        LOG_INFO("host-orch: submitted %d tasks on host", total_tasks);
+        LOG_INFO("host-orch: submitted %d tasks on host", host_total_tasks);
     }
 
     // Stash the layout inside the PTO2Runtime image so the AICPU can recover
@@ -880,11 +881,16 @@ extern "C" int bind_callable_to_runtime_impl(
     // *before* it can dereference the image.
     rt->prebuilt_layout = layout;
 
+    if (host_sm_image.size() != sm_size || api->copy_to_device(sm_ptr, host_sm_image.data(), sm_size) != 0) {
+        LOG_ERROR("host-orch: H2D of populated SM failed");
+        return -1;
+    }
     int rc_upload = api->copy_to_device(runtime_arena_dev, host_arena.base(), layout.arena_size);
     if (rc_upload != 0) {
         LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
         return -1;
     }
+    runtime->host_total_tasks = host_total_tasks;
     runtime->set_prebuilt_arena(runtime_arena_dev, layout.off_runtime);
     int64_t t_prebuilt_end = _now_ms();
 
