@@ -877,6 +877,15 @@ extern "C" int bind_callable_to_runtime_impl(
         LOG_INFO("host-orch: submitted %d tasks on host", host_total_tasks);
     }
 
+    static_assert(
+        RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
+        "outer Runtime and task-owned HBG function tables must have identical capacity"
+    );
+    if (!runtime_set_prebuilt_invocation_state(rt, runtime->func_id_to_addr_, RUNTIME_MAX_FUNC_ID, host_total_tasks)) {
+        LOG_ERROR("host-orch: failed to snapshot task-owned invocation state");
+        return -1;
+    }
+
     // Stash the layout inside the PTO2Runtime image so the AICPU can recover
     // every arena-internal offset after rtMemcpy. The runtime arena's device
     // base does NOT travel in this image — it's on the host Runtime
@@ -1077,6 +1086,14 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     );
     if (host_total_tasks < 0) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: host orchestration failed");
+        return -1;
+    }
+    static_assert(
+        RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
+        "outer Runtime and task-owned HBG function tables must have identical capacity"
+    );
+    if (!runtime_set_prebuilt_invocation_state(rt, runtime->func_id_to_addr_, RUNTIME_MAX_FUNC_ID, host_total_tasks)) {
+        LOG_ERROR("build_l1_hbg_graph_plan_impl: failed to snapshot task-owned invocation state");
         return -1;
     }
     rt->prebuilt_layout = layout;

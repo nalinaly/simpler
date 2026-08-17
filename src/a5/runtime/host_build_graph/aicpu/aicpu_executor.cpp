@@ -260,6 +260,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
         if (boot_ok) {
             runtime_arena_.attach(prebuilt_arena, DeviceArena::kDefaultBaseAlign);
             rt = reinterpret_cast<PTO2Runtime *>(static_cast<char *>(prebuilt_arena) + off_runtime);
+            if (!runtime_has_valid_prebuilt_invocation_state(rt)) {
+                LOG_ERROR("Thread %d: host-orch: invalid task-owned invocation state", thread_idx);
+                rt = nullptr;
+                run_rc = -1;
+                boot_ok = false;
+            }
+        }
+
+        if (boot_ok) {
             runtime_wire_arena_pointers(runtime_arena_, rt->prebuilt_layout, rt);
 
             void *sm_ptr = runtime->get_gm_sm_ptr();
@@ -295,8 +304,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
             // dereference host memory and fault the AICPU. on_orchestration_done
             // only needs total_tasks and the scalar
             // orchestrator.inline_completed_tasks, both already valid.
-            sched_ctx_.on_orchestration_done(runtime, rt, thread_idx, runtime->host_total_tasks);
-            LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, runtime->host_total_tasks);
+            const int32_t host_total_tasks = rt->prebuilt_invocation.host_total_tasks;
+            sched_ctx_.on_orchestration_done(runtime, rt, thread_idx, host_total_tasks);
+            LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, host_total_tasks);
         }
 
         // Publish "leader setup done" (SM attached, task count latched, queues

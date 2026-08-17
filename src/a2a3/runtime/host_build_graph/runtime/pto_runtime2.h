@@ -123,6 +123,28 @@ struct PTO2RuntimeArenaLayout {
     size_t arena_size{0};
 };
 
+// Task-owned invocation state carried inside the pristine runtime-arena image.
+// The outer Runtime is context-persistent platform state and may be reused by
+// many callables.  Function ids, their resolved addresses, and the number of
+// host-built tasks instead belong to one graph plan: keeping the complete
+// table here makes a restored arena self-contained and prevents a later build
+// from changing the meaning of an older eager task or captured node.
+constexpr uint32_t PTO2_PREBUILT_INVOCATION_MAGIC = 0x49474248U;  // "HBGI"
+constexpr uint32_t PTO2_PREBUILT_INVOCATION_ABI_VERSION = 1;
+constexpr size_t PTO2_PREBUILT_FUNC_ID_COUNT = 1024;
+
+struct alignas(8) PTO2PrebuiltInvocationState {
+    uint32_t magic{0};
+    uint32_t abi_version{0};
+    uint32_t func_id_count{0};
+    int32_t host_total_tasks{-1};
+    uint32_t reserved[2]{};
+    uint64_t func_id_to_addr[PTO2_PREBUILT_FUNC_ID_COUNT]{};
+};
+
+static_assert(sizeof(PTO2PrebuiltInvocationState) == 8216, "HBG prebuilt invocation ABI changed");
+static_assert(offsetof(PTO2PrebuiltInvocationState, func_id_to_addr) == 24, "HBG function table offset changed");
+
 /**
  * PTO Runtime2 context
  *
@@ -151,6 +173,11 @@ struct PTO2Runtime {
     // Statistics
     int64_t total_cycles;
 
+    // Immutable invocation semantics restored from the task-owned graph plan
+    // on every eager execution / ACLGraph replay.  Scheduler dispatch must use
+    // this callable-local table rather than outer Runtime::func_id_to_addr_.
+    PTO2PrebuiltInvocationState prebuilt_invocation;
+
     // Prebuilt-arena fast path metadata. Carries every offset
     // wire_arena_pointers needs at AICPU boot so the AICPU can reconstruct
     // all arena-internal pointer fields without re-running init_data. The
@@ -161,6 +188,42 @@ struct PTO2Runtime {
     // aicpu_executor.cpp.
     PTO2RuntimeArenaLayout prebuilt_layout;
 };
+
+/** Validate the task-owned invocation metadata before scheduler publication. */
+inline bool runtime_has_valid_prebuilt_invocation_state(const PTO2Runtime *rt) {
+    if (rt == nullptr) return false;
+    const PTO2PrebuiltInvocationState &state = rt->prebuilt_invocation;
+    return state.magic == PTO2_PREBUILT_INVOCATION_MAGIC && state.abi_version == PTO2_PREBUILT_INVOCATION_ABI_VERSION &&
+           state.func_id_count == PTO2_PREBUILT_FUNC_ID_COUNT && state.host_total_tasks >= 0 &&
+           state.reserved[0] == 0 && state.reserved[1] == 0;
+}
+
+/**
+ * Deep-copy one complete callable-local function table into the pristine
+ * arena. Invalid input is rejected before mutation; a successful replacement
+ * clears every stale entry because the exact fixed-size table is copied.
+ */
+inline bool runtime_set_prebuilt_invocation_state(
+    PTO2Runtime *rt, const uint64_t *func_id_to_addr, size_t func_id_count, int32_t host_total_tasks
+) {
+    if (rt == nullptr || func_id_to_addr == nullptr || func_id_count != PTO2_PREBUILT_FUNC_ID_COUNT ||
+        host_total_tasks < 0) {
+        return false;
+    }
+
+    PTO2PrebuiltInvocationState &state = rt->prebuilt_invocation;
+    state.magic = 0;
+    for (size_t i = 0; i < PTO2_PREBUILT_FUNC_ID_COUNT; ++i) {
+        state.func_id_to_addr[i] = func_id_to_addr[i];
+    }
+    state.host_total_tasks = host_total_tasks;
+    state.func_id_count = static_cast<uint32_t>(PTO2_PREBUILT_FUNC_ID_COUNT);
+    state.reserved[0] = 0;
+    state.reserved[1] = 0;
+    state.abi_version = PTO2_PREBUILT_INVOCATION_ABI_VERSION;
+    state.magic = PTO2_PREBUILT_INVOCATION_MAGIC;
+    return true;
+}
 
 // =============================================================================
 // Runtime Lifecycle API

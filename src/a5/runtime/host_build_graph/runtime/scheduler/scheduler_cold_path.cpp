@@ -968,8 +968,6 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         }
     }
 
-    func_id_to_addr_ = runtime->func_id_to_addr_;
-
     return 0;
 }
 
@@ -1031,6 +1029,11 @@ void SchedulerContext::deinit() {
 void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
     rt_ = rt;
     sched_ = &rt->scheduler;
+    static_assert(
+        RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
+        "outer Runtime and task-owned HBG function tables must have identical capacity"
+    );
+    func_id_to_addr_ = rt->prebuilt_invocation.func_id_to_addr;
 }
 
 // =============================================================================
