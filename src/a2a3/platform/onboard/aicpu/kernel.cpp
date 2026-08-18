@@ -107,7 +107,13 @@ static int ExecuteAicpuKernel(
     // OCCUPY and wrote it into Runtime; the device side only matches
     // sched_getcpu() against that table and exposes the table position as
     // exec_idx.
-    const int32_t allowed_cpu_count = runtime->get_aicpu_allowed_cpu_count();
+    // A non-null HBG invocation with a test marker has already passed the
+    // runtime-side complete package authentication before this platform bridge
+    // is entered. Feed one representative invalid value through the production
+    // validator; the no-hardware matrix covers every other invalid count shape.
+    const auto requested_fault = simpler::hbg::hbg_aicpu_fault_stage(hbg_invocation);
+    const bool inject_affinity_fault = requested_fault == simpler::hbg::HbgL1FaultStage::AffinityInputs;
+    const int32_t allowed_cpu_count = inject_affinity_fault ? -1 : runtime->get_aicpu_allowed_cpu_count();
     const int32_t aicpu_launch_count = runtime->get_aicpu_launch_count();
     if (!platform_aicpu_affinity_config_valid(allowed_cpu_count, aicpu_launch_count)) {
         LOG_ERROR(
@@ -115,7 +121,7 @@ static int ExecuteAicpuKernel(
             aicpu_launch_count, MAX_GATE_THREADS
         );
         PublishHbgPrelaunchCancel(hbg_invocation);
-        return -1;
+        return inject_affinity_fault ? 0 : -1;
     }
     if (!platform_aicpu_affinity_gate_filter(
             runtime->get_aicpu_allowed_cpus(), allowed_cpu_count, aicpu_launch_count

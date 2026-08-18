@@ -867,7 +867,7 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
     return 0;
 }
 
-int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
+int32_t SchedulerContext::post_handshake_init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault) {
     if (handshake_failed_.load(std::memory_order_acquire)) {
         emergency_shutdown(runtime);
         return -1;
@@ -894,6 +894,11 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     aic_count_ = la;
     aiv_count_ = lv;
     LOG_INFO("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
+
+    if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerAssign) {
+        emergency_shutdown(runtime);
+        return simpler::hbg::hbg_l1_fault_error(requested_fault);
+    }
 
     if (!assign_cores_to_threads()) {
         emergency_shutdown(runtime);

@@ -189,13 +189,18 @@ static int hbg_restore_publish(
     return 0;
 }
 
-static int reject_hbg_l1_via_control(simpler::hbg::HbgL1LaunchControl *control) noexcept {
+static bool publish_hbg_l1_prelaunch_cancel(simpler::hbg::HbgL1LaunchControl *control) noexcept {
     if (control == nullptr) {
         LOG_ERROR("HBG L1 prelaunch rejection has no valid cancellation control");
-        return -1;
+        return false;
     }
     __atomic_store_n(&control->prelaunch_state, simpler::hbg::HBG_L1_PRELAUNCH_CANCEL, __ATOMIC_RELEASE);
     cache_flush_range(control, sizeof(*control));
+    return true;
+}
+
+static int reject_hbg_l1_via_control(simpler::hbg::HbgL1LaunchControl *control) noexcept {
+    (void)publish_hbg_l1_prelaunch_cancel(control);
     return -1;
 }
 
@@ -294,8 +299,17 @@ int32_t AicpuExecutor::init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requ
         while (hs_arrived_.load(std::memory_order_acquire) < nthreads) {
             SPIN_WAIT_HINT();
         }
-        if (!init_failed_.load(std::memory_order_acquire) && sched_ctx_.post_handshake_init(runtime) != 0) {
-            init_failed_.store(true, std::memory_order_release);
+        if (!init_failed_.load(std::memory_order_acquire)) {
+            const int32_t post_handshake_rc = sched_ctx_.post_handshake_init(runtime, requested_fault);
+            if (post_handshake_rc != 0) {
+                if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerAssign &&
+                    post_handshake_rc == simpler::hbg::hbg_l1_fault_error(requested_fault)) {
+                    hbg_fault_stage_.store(static_cast<uint32_t>(requested_fault), std::memory_order_relaxed);
+                    hbg_fault_injected_.store(true, std::memory_order_relaxed);
+                    latch_run_error(post_handshake_rc);
+                }
+                init_failed_.store(true, std::memory_order_release);
+            }
         }
         if (!init_failed_.load(std::memory_order_acquire) &&
             requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerInit) {
@@ -540,8 +554,12 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
             // rest are core-owning schedulers (S).
             int32_t completed = (thread_idx == sched_ctx_.p_thread_idx()) ?
                                     sched_ctx_.run_resolution_thread(runtime, thread_idx) :
-                                    sched_ctx_.resolve_and_dispatch(runtime, thread_idx);
+                                    sched_ctx_.resolve_and_dispatch(runtime, thread_idx, requested_fault);
             if (completed < 0) {
+                if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerDispatch &&
+                    completed == simpler::hbg::hbg_l1_fault_error(requested_fault)) {
+                    hbg_fault_injected_.store(true, std::memory_order_release);
+                }
                 LOG_ERROR("Thread %d: Scheduler failed with rc=%d", thread_idx, completed);
                 run_rc = completed;
             } else {
@@ -693,14 +711,6 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         return reject_hbg_l1_before_generation(slot);
     }
 
-    auto *kernel_args = reinterpret_cast<const KernelArgs *>(slot.device_kernel_args_base);
-    cache_invalidate_range(kernel_args, sizeof(*kernel_args));
-    if (kernel_args->runtime_args == nullptr ||
-        reinterpret_cast<uint64_t>(kernel_args->runtime_args) != slot.outer_runtime_base) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
-        return reject_hbg_l1_before_generation(slot);
-    }
-
     simpler::hbg::HbgLaunchBlobHeader header{};
     std::memcpy(&header, arg, sizeof(header));
     if (!simpler::hbg::hbg_valid_invocation_identity(header.identity)) {
@@ -723,6 +733,31 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
             "simpler_aicpu_l1_hbg_exec: fixed invocation rejected status=%u", static_cast<unsigned>(invocation_status)
         );
         return reject_hbg_l1_before_generation(slot);
+    }
+    auto prelaunch_fault = simpler::hbg::HbgL1FaultStage::None;
+    if ((invocation.header.flags & simpler::hbg::HBG_LAUNCH_TEST_FAULT_INJECTION) != 0) {
+        cache_invalidate_range(invocation.blob, static_cast<size_t>(invocation.blob_size));
+        const auto fault_status = simpler::hbg::authenticate_hbg_aicpu_fault_stage(&invocation, &prelaunch_fault);
+        if (fault_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+            LOG_ERROR(
+                "HBG L1 prelaunch fault package authentication failed status=%u", static_cast<unsigned>(fault_status)
+            );
+            return reject_hbg_l1_before_generation(slot);
+        }
+    }
+
+    auto *kernel_args = reinterpret_cast<const KernelArgs *>(slot.device_kernel_args_base);
+    cache_invalidate_range(kernel_args, sizeof(*kernel_args));
+    const bool kernel_args_match = kernel_args->runtime_args != nullptr &&
+                                   reinterpret_cast<uint64_t>(kernel_args->runtime_args) == slot.outer_runtime_base;
+    const bool inject_kernel_args_fault = prelaunch_fault == simpler::hbg::HbgL1FaultStage::KernelArgsRuntime;
+    if (!kernel_args_match || inject_kernel_args_fault) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
+        const bool cancelled = publish_hbg_l1_prelaunch_cancel(simpler::hbg::hbg_l1_launch_control(slot));
+        return inject_kernel_args_fault && kernel_args_match && cancelled ? 0 : -1;
+    }
+    if (prelaunch_fault == simpler::hbg::HbgL1FaultStage::PlatformBridge) {
+        return publish_hbg_l1_prelaunch_cancel(simpler::hbg::hbg_l1_launch_control(slot)) ? 0 : -1;
     }
     cache_invalidate_range(kernel_args->runtime_args, sizeof(Runtime));
     if (simpler_aicpu_execute_l1_hbg_platform == nullptr) {
@@ -785,8 +820,9 @@ execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
     if (shared_error != 0) rc = shared_error;
     const auto requested_fault =
         static_cast<simpler::hbg::HbgL1FaultStage>(g_aicpu_executor.hbg_fault_stage_.load(std::memory_order_acquire));
+    const int32_t requested_fault_error = simpler::hbg::hbg_l1_fault_error(requested_fault);
     const bool controlled_fault = g_aicpu_executor.hbg_fault_injected_.load(std::memory_order_acquire) &&
-                                  shared_error == simpler::hbg::hbg_l1_fault_error(requested_fault);
+                                  requested_fault_error != 0 && shared_error == requested_fault_error;
     const int32_t unexpected_teardown_error =
         g_aicpu_executor.hbg_unexpected_teardown_error_.load(std::memory_order_acquire);
 
@@ -798,7 +834,7 @@ execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
     if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
         g_aicpu_executor.deinit(runtime);
     }
-    if (runtime_rc != 0) return runtime_rc;
+    if (runtime_rc != 0 && (!controlled_fault || runtime_rc != requested_fault_error)) return runtime_rc;
     if (unexpected_teardown_error != 0) return unexpected_teardown_error;
     if (controlled_fault) return 0;
     return rc;

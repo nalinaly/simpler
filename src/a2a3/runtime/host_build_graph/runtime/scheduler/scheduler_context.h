@@ -15,6 +15,7 @@
 #include "aicpu/platform_regs.h"
 #include "common/l2_swimlane_profiling.h"
 #include "common/unified_log.h"
+#include "hbg_l1_fault_injection.h"
 #include "scheduler_types.h"
 
 #include "scheduler/pto_scheduler.h"
@@ -124,7 +125,7 @@ public:
     void handshake_partition(Runtime *runtime, int32_t tidx, int32_t nthreads);
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
-    int32_t post_handshake_init(Runtime *runtime);
+    int32_t post_handshake_init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault);
 
     // Reset all SchedulerContext-owned state to its post-construction defaults.
     // Called by AicpuExecutor::deinit() during per-run teardown.
@@ -135,7 +136,7 @@ public:
     // =========================================================================
 
     // Main scheduler thread entry: poll completion + dispatch ready tasks.
-    int32_t resolve_and_dispatch(Runtime *runtime, int32_t thread_idx);
+    int32_t resolve_and_dispatch(Runtime *runtime, int32_t thread_idx, simpler::hbg::HbgL1FaultStage requested_fault);
 
     // Dedicated resolution (P) thread entry (3S+1P). Owns no cores: drains the
     // per-S CompletedTaskQueues and runs on_task_complete for each finished task

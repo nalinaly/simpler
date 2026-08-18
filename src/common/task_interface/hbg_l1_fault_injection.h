@@ -33,13 +33,18 @@ enum class HbgL1FaultStage : uint32_t {
     Shutdown = 6,
     RuntimeDestroy = 7,
     SchedulerInit = 8,
+    SchedulerAssign = 9,
+    SchedulerDispatch = 10,
+    PlatformBridge = 11,
+    AffinityInputs = 12,
+    KernelArgsRuntime = 13,
 };
 
 inline constexpr uint32_t HBG_L1_FAULT_MARKER_MAGIC = 0x544C3146U;  // "F1LT" in little-endian memory.
 inline constexpr int32_t HBG_L1_FAULT_ERROR_BASE = -1700;
 
 inline constexpr bool hbg_l1_valid_fault_stage(HbgL1FaultStage stage) noexcept {
-    return stage >= HbgL1FaultStage::RestoreCopy && stage <= HbgL1FaultStage::SchedulerInit;
+    return stage >= HbgL1FaultStage::RestoreCopy && stage <= HbgL1FaultStage::KernelArgsRuntime;
 }
 
 inline constexpr uint64_t hbg_l1_encode_fault_marker(HbgL1FaultStage stage) noexcept {
