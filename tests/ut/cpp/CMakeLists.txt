@@ -582,6 +582,23 @@ target_link_libraries(test_hbg_aicpu_invocation PRIVATE ${GTEST_MAIN_LIB} ${GTES
 add_test(NAME test_hbg_aicpu_invocation COMMAND test_hbg_aicpu_invocation)
 set_tests_properties(test_hbg_aicpu_invocation PROPERTIES LABELS "no_hardware")
 
+# The standalone device probe under tests/st uses a minimal AICPU parser that
+# intentionally does not depend on PyPTO's HBG parser. Build the same source as
+# a host executable on every no-hardware run: its self-test supplies an
+# unaligned task-args image, three manually patched pointers, and one corrupt
+# pointer diagnostic. This keeps the probe ABI continuously compiled even when
+# no Ascend device is available.
+set(HOST_ARGS_PROBE_DIR ${CMAKE_SOURCE_DIR}/../../st/l1/host_args_probe)
+add_executable(test_host_args_probe_parser
+    ${HOST_ARGS_PROBE_DIR}/host/host_args_probe_self_test.cpp
+    ${HOST_ARGS_PROBE_DIR}/aicpu/host_args_probe_aicpu.cpp
+)
+target_include_directories(test_host_args_probe_parser PRIVATE
+    ${HOST_ARGS_PROBE_DIR}/common
+)
+add_test(NAME test_host_args_probe_parser COMMAND test_host_args_probe_parser)
+set_tests_properties(test_host_args_probe_parser PROPERTIES LABELS "no_hardware")
+
 # HBG L1 static working-slot allocation and capacity freeze. The production
 # helper is host-only and uses an injected HostApi, so exact base/capacity
 # publication and failure ordering stay testable without CANN or a device.
