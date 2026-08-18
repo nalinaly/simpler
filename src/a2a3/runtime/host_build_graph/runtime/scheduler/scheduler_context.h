@@ -122,7 +122,9 @@ public:
     int32_t pre_handshake_init(Runtime *runtime, int32_t aicpu_thread_num, uint64_t regs_base);
     // All threads: handshake this thread's contiguous slice [lo, hi) of cores
     // (partitioned by tidx/nthreads). Each core is touched by exactly one thread.
-    void handshake_partition(Runtime *runtime, int32_t tidx, int32_t nthreads);
+    void handshake_partition(
+        Runtime *runtime, int32_t tidx, int32_t nthreads, simpler::hbg::HbgL1FaultStage requested_fault
+    );
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
     int32_t post_handshake_init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault);
@@ -257,6 +259,15 @@ private:
     // Set by any thread whose slice hits an invalid physical_core_id in
     // handshake_partition; checked by the leader in post_handshake_init.
     std::atomic<bool> handshake_failed_{false};
+    // Test-only physical-core mapping injection is tracked separately from a
+    // natural invalid report/mapping.  The leader may convert only an isolated,
+    // authenticated injected failure to controlled success; a simultaneous
+    // natural failure must remain fail-closed.
+    // Bit 0/1 record that one otherwise-valid AIC/AIV report respectively took
+    // the injected rejection path.  Requiring both bits avoids inferring that
+    // worker 0 happens to cover both platform kernel-entry variants.
+    std::atomic<uint32_t> handshake_mapping_fault_injected_types_{0};
+    std::atomic<bool> handshake_unexpected_failure_{false};
 
     // Platform AICore-register base array (set by AicpuExecutor before init()).
     uint64_t regs_{0};

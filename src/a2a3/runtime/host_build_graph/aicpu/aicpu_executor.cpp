@@ -290,7 +290,7 @@ int32_t AicpuExecutor::init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requ
     // while peers remain blocked in this generation, which cannot be recovered
     // by resetting an L1 borrowed device context.
     if (!init_failed_.load(std::memory_order_acquire)) {
-        sched_ctx_.handshake_partition(runtime, tidx, nthreads);
+        sched_ctx_.handshake_partition(runtime, tidx, nthreads, requested_fault);
     }
 
     // Barrier: leader waits for every slice to finish, then completes init.
@@ -302,7 +302,8 @@ int32_t AicpuExecutor::init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requ
         if (!init_failed_.load(std::memory_order_acquire)) {
             const int32_t post_handshake_rc = sched_ctx_.post_handshake_init(runtime, requested_fault);
             if (post_handshake_rc != 0) {
-                if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerAssign &&
+                if ((requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerAssign ||
+                     requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping) &&
                     post_handshake_rc == simpler::hbg::hbg_l1_fault_error(requested_fault)) {
                     hbg_fault_stage_.store(static_cast<uint32_t>(requested_fault), std::memory_order_relaxed);
                     hbg_fault_injected_.store(true, std::memory_order_relaxed);
