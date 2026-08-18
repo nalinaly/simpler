@@ -658,20 +658,35 @@ void SchedulerContext::handshake_partition(
             const bool naturally_invalid =
                 aicore_register_mapping_invalid(physical_core_id, max_physical_cores_count, reported_reg_addr);
             const uint32_t core_type_bit = core_type == CoreType::AIC ? 1U : (core_type == CoreType::AIV ? 2U : 0U);
-            bool inject_mapping_fault = false;
-            if (requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping && !naturally_invalid &&
-                core_type_bit != 0) {
+            const bool requests_physical_fault =
+                requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping ||
+                requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId;
+            bool inject_physical_fault = false;
+            if (requests_physical_fault && !naturally_invalid && core_type_bit != 0) {
                 const uint32_t previous =
-                    handshake_mapping_fault_injected_types_.fetch_or(core_type_bit, std::memory_order_acq_rel);
-                inject_mapping_fault = (previous & core_type_bit) == 0;
+                    handshake_physical_fault_injected_types_.fetch_or(core_type_bit, std::memory_order_acq_rel);
+                inject_physical_fault = (previous & core_type_bit) == 0;
             }
-            const uint64_t reg_addr = inject_mapping_fault ? 0 : reported_reg_addr;
-            if (naturally_invalid || inject_mapping_fault) {
-                if (inject_mapping_fault) {
-                    LOG_WARN(
-                        "Injecting physical-core mapping rejection for worker=%d physical_core_id=%u", i,
-                        physical_core_id
-                    );
+            const bool inject_core_id =
+                inject_physical_fault && requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId;
+            const bool inject_mapping =
+                inject_physical_fault && requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping;
+            const uint32_t effective_core_id = inject_core_id ? max_physical_cores_count : physical_core_id;
+            const uint64_t reg_addr =
+                inject_mapping ? 0 : (effective_core_id < max_physical_cores_count ? regs[effective_core_id] : 0);
+            if (aicore_register_mapping_invalid(effective_core_id, max_physical_cores_count, reg_addr)) {
+                if (inject_physical_fault) {
+                    if (inject_core_id) {
+                        LOG_WARN(
+                            "Injecting out-of-range physical core id for worker=%d reported=%u effective=%u", i,
+                            physical_core_id, effective_core_id
+                        );
+                    } else {
+                        LOG_WARN(
+                            "Injecting physical-core mapping rejection for worker=%d physical_core_id=%u", i,
+                            physical_core_id
+                        );
+                    }
                 } else {
                     LOG_ERROR(
                         "Core %d reported unusable physical_core_id=%u (platform max=%u, reg_addr=0x%" PRIx64 ")", i,
@@ -686,7 +701,7 @@ void SchedulerContext::handshake_partition(
                 continue;
             }
             __builtin_prefetch(&core_exec_states_[i], 1, 3);
-            ready[n_ready++] = {i, physical_core_id, reg_addr, core_type};
+            ready[n_ready++] = {i, effective_core_id, reg_addr, core_type};
             core_serviced[i] = true;
             remaining--;
         }
@@ -882,7 +897,7 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
     }
     aic_count_ = 0;
     aiv_count_ = 0;
-    handshake_mapping_fault_injected_types_.store(0, std::memory_order_release);
+    handshake_physical_fault_injected_types_.store(0, std::memory_order_release);
     handshake_unexpected_failure_.store(false, std::memory_order_release);
     handshake_failed_.store(false, std::memory_order_release);
 
@@ -893,8 +908,9 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
 int32_t SchedulerContext::post_handshake_init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault) {
     if (handshake_failed_.load(std::memory_order_acquire)) {
         emergency_shutdown(runtime);
-        if (requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping &&
-            (handshake_mapping_fault_injected_types_.load(std::memory_order_acquire) & 0x3U) == 0x3U &&
+        if ((requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping ||
+             requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId) &&
+            (handshake_physical_fault_injected_types_.load(std::memory_order_acquire) & 0x3U) == 0x3U &&
             !handshake_unexpected_failure_.load(std::memory_order_acquire)) {
             return simpler::hbg::hbg_l1_fault_error(requested_fault);
         }
@@ -1073,7 +1089,7 @@ void SchedulerContext::deinit() {
 
     regs_ = 0;
     l1_aicore_reports_ = nullptr;
-    handshake_mapping_fault_injected_types_.store(0, std::memory_order_release);
+    handshake_physical_fault_injected_types_.store(0, std::memory_order_release);
     handshake_unexpected_failure_.store(false, std::memory_order_release);
     handshake_failed_.store(false, std::memory_order_release);
     sched_ = nullptr;

@@ -39,13 +39,14 @@ enum class HbgL1FaultStage : uint32_t {
     AffinityInputs = 12,
     KernelArgsRuntime = 13,
     PhysicalCoreMapping = 14,
+    PhysicalCoreId = 15,
 };
 
 inline constexpr uint32_t HBG_L1_FAULT_MARKER_MAGIC = 0x544C3146U;  // "F1LT" in little-endian memory.
 inline constexpr int32_t HBG_L1_FAULT_ERROR_BASE = -1700;
 
 inline constexpr bool hbg_l1_valid_fault_stage(HbgL1FaultStage stage) noexcept {
-    return stage >= HbgL1FaultStage::RestoreCopy && stage <= HbgL1FaultStage::PhysicalCoreMapping;
+    return stage >= HbgL1FaultStage::RestoreCopy && stage <= HbgL1FaultStage::PhysicalCoreId;
 }
 
 inline constexpr uint64_t hbg_l1_encode_fault_marker(HbgL1FaultStage stage) noexcept {

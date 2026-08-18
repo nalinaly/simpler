@@ -259,14 +259,14 @@ private:
     // Set by any thread whose slice hits an invalid physical_core_id in
     // handshake_partition; checked by the leader in post_handshake_init.
     std::atomic<bool> handshake_failed_{false};
-    // Test-only physical-core mapping injection is tracked separately from a
+    // Test-only physical-core id/mapping injection is tracked separately from a
     // natural invalid report/mapping.  The leader may convert only an isolated,
     // authenticated injected failure to controlled success; a simultaneous
     // natural failure must remain fail-closed.
     // Bit 0/1 record that one otherwise-valid AIC/AIV report respectively took
     // the injected rejection path.  Requiring both bits avoids inferring that
     // worker 0 happens to cover both platform kernel-entry variants.
-    std::atomic<uint32_t> handshake_mapping_fault_injected_types_{0};
+    std::atomic<uint32_t> handshake_physical_fault_injected_types_{0};
     std::atomic<bool> handshake_unexpected_failure_{false};
 
     // Platform AICore-register base array (set by AicpuExecutor before init()).
