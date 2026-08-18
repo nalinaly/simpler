@@ -131,4 +131,17 @@ inline HbgL1FaultStage hbg_aicpu_fault_stage(const HbgAicpuInvocationView *invoc
     return hbg_l1_decode_fault_marker(first_region.reserved);
 }
 
+/** Authenticate a test-only stage against the complete task package. */
+inline HbgLaunchBlobStatus
+authenticate_hbg_aicpu_fault_stage(const HbgAicpuInvocationView *invocation, HbgL1FaultStage *out) noexcept {
+    if (invocation == nullptr || out == nullptr) return HbgLaunchBlobStatus::NullArgument;
+    const HbgLaunchBlobStatus status = validate_hbg_launch_blob(
+        invocation->blob, static_cast<size_t>(invocation->blob_size), HbgLaunchBlobAddressMode::DevicePatched,
+        &invocation->slot.binding, &invocation->header.identity
+    );
+    if (status != HbgLaunchBlobStatus::Ok) return status;
+    *out = hbg_aicpu_fault_stage(invocation);
+    return HbgLaunchBlobStatus::Ok;
+}
+
 }  // namespace simpler::hbg

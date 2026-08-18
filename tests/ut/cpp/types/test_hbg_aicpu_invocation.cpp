@@ -111,6 +111,30 @@ TEST(HbgAicpuInvocation, ExtractsTheTaskOwnedFaultMarkerWithoutTypedUnalignedAcc
     EXPECT_EQ(hbg_aicpu_fault_stage(&view), HbgL1FaultStage::None);
 }
 
+TEST(HbgAicpuInvocation, AuthenticatesTheFaultMarkerAgainstTheCompletePackage) {
+    FixtureData data;
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(data.blob.data());
+    auto *regions = const_cast<HbgLaunchRegion *>(hbg_launch_regions(header));
+    header->flags |= HBG_LAUNCH_TEST_FAULT_INJECTION;
+    regions[0].reserved = hbg_l1_encode_fault_marker(HbgL1FaultStage::SchedulerInit);
+    header->plan_hash = hbg_plan_hash(
+        header->identity, regions, header->region_count, hbg_inline_payload(header), header->inline_payload_size
+    );
+
+    HbgAicpuInvocationView view{};
+    ASSERT_EQ(
+        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
+    );
+    HbgL1FaultStage stage = HbgL1FaultStage::None;
+    EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(stage, HbgL1FaultStage::SchedulerInit);
+
+    ++header->plan_hash;
+    stage = HbgL1FaultStage::BeforeDispatch;
+    EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::HashMismatch);
+    EXPECT_EQ(stage, HbgL1FaultStage::BeforeDispatch);
+}
+
 TEST(HbgAicpuInvocation, IdentityOrCapacityMismatchDoesNotPublishOutput) {
     FixtureData data;
     HbgAicpuInvocationView output{};

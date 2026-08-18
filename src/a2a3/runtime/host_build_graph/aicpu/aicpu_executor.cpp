@@ -134,7 +134,7 @@ struct AicpuExecutor {
     SchedulerContext sched_ctx_;
 
     // ===== Methods =====
-    int32_t init(Runtime *runtime);
+    int32_t init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault);
     int32_t run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation = nullptr);
     void arrive_and_finalize_run();
     void deinit(Runtime *runtime);
@@ -217,7 +217,7 @@ static int reject_hbg_l1_without_slot() noexcept {
 
 // ===== AicpuExecutor Method Implementations =====
 
-int32_t AicpuExecutor::init(Runtime *runtime) {
+int32_t AicpuExecutor::init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault) {
     if (runtime == nullptr) {
         LOG_ERROR("runtime is nullptr");
         return -1;
@@ -295,6 +295,13 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
             SPIN_WAIT_HINT();
         }
         if (!init_failed_.load(std::memory_order_acquire) && sched_ctx_.post_handshake_init(runtime) != 0) {
+            init_failed_.store(true, std::memory_order_release);
+        }
+        if (!init_failed_.load(std::memory_order_acquire) &&
+            requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerInit) {
+            hbg_fault_stage_.store(static_cast<uint32_t>(requested_fault), std::memory_order_relaxed);
+            hbg_fault_injected_.store(true, std::memory_order_relaxed);
+            latch_run_error(simpler::hbg::hbg_l1_fault_error(requested_fault));
             init_failed_.store(true, std::memory_order_release);
         }
         init_done_.store(true, std::memory_order_release);
@@ -738,7 +745,17 @@ extern "C" int32_t aicpu_prewarm_callable(Runtime *runtime) {
 
 static int32_t
 execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation) {
-    const int32_t init_rc = g_aicpu_executor.init(runtime);
+    auto init_fault = simpler::hbg::HbgL1FaultStage::None;
+    if (hbg_invocation != nullptr &&
+        (hbg_invocation->header.flags & simpler::hbg::HBG_LAUNCH_TEST_FAULT_INJECTION) != 0) {
+        cache_invalidate_range(hbg_invocation->blob, static_cast<size_t>(hbg_invocation->blob_size));
+        const auto status = simpler::hbg::authenticate_hbg_aicpu_fault_stage(hbg_invocation, &init_fault);
+        if (status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+            LOG_ERROR("HBG L1 test fault package authentication failed status=%u", static_cast<unsigned>(status));
+            return -1;
+        }
+    }
+    const int32_t init_rc = g_aicpu_executor.init(runtime, init_fault);
     int32_t rc = 0;
     if (init_rc != 0) {
         const int32_t failed_thread_idx = platform_aicpu_affinity_thread_idx();
@@ -746,11 +763,17 @@ execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
             failed_thread_idx >= g_aicpu_executor.aicpu_thread_num_) {
             return -1;
         }
+        const int32_t shutdown_rc = g_aicpu_executor.sched_ctx_.shutdown(failed_thread_idx);
+        if (shutdown_rc != 0) {
+            int32_t expected = 0;
+            (void)g_aicpu_executor.hbg_unexpected_teardown_error_.compare_exchange_strong(
+                expected, shutdown_rc, std::memory_order_acq_rel, std::memory_order_acquire
+            );
+        }
         g_aicpu_executor.latch_run_error(-1);
-        // Shared setup or post-handshake initialization failed after this
-        // participant joined the generation. It must still join the N-way
-        // finalize/depart protocol so the static executor can be reused without
-        // relying on a host device reset.
+        // Every participant closes its assigned AICore windows before joining
+        // the generation-wide finalize/depart protocol. shutdown() is
+        // idempotent, including failures that already ran emergency_shutdown().
         g_aicpu_executor.arrive_and_finalize_run();
         rc = -1;
     } else {

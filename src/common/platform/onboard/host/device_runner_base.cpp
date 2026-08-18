@@ -134,6 +134,7 @@ bool parse_hbg_l1_test_fault(const char *value, simpler::hbg::HbgL1FaultStage *o
         {"before_dispatch", simpler::hbg::HbgL1FaultStage::BeforeDispatch},
         {"shutdown", simpler::hbg::HbgL1FaultStage::Shutdown},
         {"runtime_destroy", simpler::hbg::HbgL1FaultStage::RuntimeDestroy},
+        {"scheduler_init", simpler::hbg::HbgL1FaultStage::SchedulerInit},
     };
     for (const auto &candidate : stages) {
         if (std::strcmp(value, candidate.name) == 0) {
