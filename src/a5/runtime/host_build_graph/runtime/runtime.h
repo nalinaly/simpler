@@ -40,6 +40,8 @@
 #include "common/l2_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
+#include "aicore_handshake_protocol.h"
+#include "hbg_l1_launch_control.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -94,7 +96,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * - physical_core_id: Written by AICore (with aicore_done), read by AICPU
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;  // AICPU ready signal: 0=not ready, 1=ready
+    volatile uint32_t aicpu_ready;  // Pre-window control: WAIT/legacy PROCEED/error-only CANCEL
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
     volatile uint64_t task;         // Init: PTO2DispatchPayload* (set before aicpu_ready); runtime: unused
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
@@ -149,6 +151,11 @@ struct Task {
  */
 class Runtime {
 public:
+    // A separate cache line lets an AICPU task reject a malformed HBG launch
+    // before per-core handshakes exist without leaving the hidden AICore
+    // kernel waiting for register windows forever.
+    simpler::hbg::HbgL1LaunchControl l1_launch_control;
+
     // Handshake buffers for AICPU-AICore communication
     Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
     int worker_count;                       // Number of active workers

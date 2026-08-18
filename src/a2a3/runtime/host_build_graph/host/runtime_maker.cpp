@@ -524,7 +524,13 @@ int32_t build_host_orchestration_image(
 
     if (rt->orchestrator.fatal) {
         LOG_ERROR("host-orch: orchestration reported a fatal error while building the graph image");
-        return -1;
+        const int32_t orch_error_code = rt->orchestrator.sm_header->orch_error_code.load(std::memory_order_acquire);
+        const int32_t sched_error_code = rt->orchestrator.sm_header->sched_error_code.load(std::memory_order_acquire);
+        const int32_t status = runtime_status_from_error_codes(orch_error_code, sched_error_code);
+        if (status != 0) {
+            LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, status);
+        }
+        return status != 0 ? status : -1;
     }
 
     int32_t total_tasks = pto2_sm_layout::ring_current_task_index_addr(host_sm)->load(std::memory_order_acquire);
@@ -886,7 +892,7 @@ extern "C" int bind_callable_to_runtime_impl(
         host_tensor_access_reset(nullptr);
         if (host_total_tasks < 0) {
             LOG_ERROR("host-orch: orchestration run failed");
-            return -1;
+            return host_total_tasks;
         }
         LOG_INFO("host-orch: submitted %d tasks on host", host_total_tasks);
     }
@@ -1009,6 +1015,16 @@ extern "C" int query_l1_hbg_execution_binding_impl(const Runtime *runtime, simpl
     return 0;
 }
 
+extern "C" int query_l1_hbg_prelaunch_control_offset_impl(const Runtime *runtime, uint32_t *out) {
+    if (runtime == nullptr || out == nullptr) return -1;
+    const auto *runtime_base = reinterpret_cast<const uint8_t *>(runtime);
+    const auto *control = reinterpret_cast<const uint8_t *>(&runtime->l1_launch_control);
+    const uint64_t offset = static_cast<uint64_t>(control - runtime_base);
+    if (offset > std::numeric_limits<uint32_t>::max()) return -1;
+    *out = static_cast<uint32_t>(offset);
+    return 0;
+}
+
 /**
  * Build one immutable HBG L1 graph plan against the already-frozen working
  * slot. External tensor storage is borrowed: this path performs no allocation,
@@ -1092,7 +1108,7 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     );
     if (host_total_tasks < 0) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: host orchestration failed");
-        return -1;
+        return host_total_tasks;
     }
     static_assert(
         RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,

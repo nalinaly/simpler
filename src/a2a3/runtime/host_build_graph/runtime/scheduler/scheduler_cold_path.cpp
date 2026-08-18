@@ -19,6 +19,7 @@
 #include "aicpu/platform_regs.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
+#include "aicpu/cache_maintenance.h"
 #include "common/memory_barrier.h"
 #include "common/l2_swimlane_profiling.h"
 #include "common/platform_config.h"
@@ -30,6 +31,14 @@
 // =============================================================================
 // Cold-path helpers for the main dispatch loop (noinline to reduce hot-loop icache)
 // =============================================================================
+
+static void publish_pre_window_cancel(Handshake *handshake) {
+    // This runs only after the AICPU has observed the current AICore report.
+    // The report's CACHELINE_OUT therefore cannot race later and overwrite the
+    // error-only CANCEL publication in the same 64-byte line.
+    handshake->aicpu_ready = AICORE_PRE_WINDOW_CANCEL;
+    cache_flush_range(handshake, sizeof(*handshake));
+}
 
 static void latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
     if (header == nullptr || error_code == PTO2_ERROR_NONE) {
@@ -602,7 +611,7 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
     // read (not the nGnRE MMIO reg window), so sweeping is not forced serial the
     // way RegId::COND polling is.
     //
-    // Servicing a core = validate its physical_core_id, then open its register
+    // Servicing a core = validate its physical_core_id and register mapping, then open its register
     // window (platform_init_aicore_regs: FAST_PATH + DATA_MAIN_BASE=IDLE). That
     // IDLE write is *also* the signal the core polls for to leave its
     // post-report wait — so opening the window IS the acknowledgement. There is
@@ -637,18 +646,20 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
                 continue;
             }
             uint32_t physical_core_id = hank->physical_core_id;
-            if (physical_core_id >= max_physical_cores_count) {
+            const uint64_t reg_addr = physical_core_id < max_physical_cores_count ? regs[physical_core_id] : 0;
+            if (aicore_register_mapping_invalid(physical_core_id, max_physical_cores_count, reg_addr)) {
                 LOG_ERROR(
-                    "Core %d reported invalid physical_core_id=%u (platform max=%u)", i, physical_core_id,
-                    max_physical_cores_count
+                    "Core %d reported unusable physical_core_id=%u (platform max=%u, reg_addr=0x%" PRIx64 ")", i,
+                    physical_core_id, max_physical_cores_count, reg_addr
                 );
+                publish_pre_window_cancel(hank);
                 handshake_failed_.store(true, std::memory_order_release);
                 core_serviced[i] = true;
                 remaining--;
                 continue;
             }
             __builtin_prefetch(&core_exec_states_[i], 1, 3);
-            ready[n_ready++] = {i, physical_core_id, regs[physical_core_id], hank->core_type};
+            ready[n_ready++] = {i, physical_core_id, reg_addr, hank->core_type};
             core_serviced[i] = true;
             remaining--;
         }
@@ -778,10 +789,9 @@ void SchedulerContext::emergency_shutdown(Runtime *runtime) {
     LOG_WARN("Emergency shutdown: sending exit signal to all initialized cores");
     int32_t timeout_count = 0;
     for (int32_t i = 0; i < cores_total_num_; i++) {
-        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which both
-        // releases a core still polling for its window to open and signals it to
-        // exit. Cores never opened (reg_addr==0) are reaped by the host device
-        // reset that follows a handshake failure.
+        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which signals
+        // every opened core to exit. A reported core whose window could not be
+        // opened receives the GM pre-window CANCEL in handshake_partition.
         if (core_exec_states_[i].reg_addr != 0) {
             if (platform_deinit_aicore_regs(core_exec_states_[i].reg_addr) != 0) {
                 timeout_count++;
@@ -879,6 +889,7 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     LOG_INFO("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
 
     if (!assign_cores_to_threads()) {
+        emergency_shutdown(runtime);
         return -1;
     }
 

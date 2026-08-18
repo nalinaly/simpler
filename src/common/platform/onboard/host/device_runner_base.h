@@ -683,7 +683,9 @@ public:
     int ensure_aicore_binary_registered();
 
     /** Launch only through an already-registered AICore executor handle. */
-    int launch_prepared_aicore_kernel(rtStream_t stream, KernelArgs *k_args);
+    int launch_prepared_aicore_kernel(
+        rtStream_t stream, KernelArgs *k_args, Runtime *trusted_l1_runtime_override = nullptr
+    );
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.

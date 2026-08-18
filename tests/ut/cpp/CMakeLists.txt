@@ -509,6 +509,34 @@ target_link_libraries(test_hbg_execution_slot_registry PRIVATE ${GTEST_MAIN_LIB}
 add_test(NAME test_hbg_execution_slot_registry COMMAND test_hbg_execution_slot_registry)
 set_tests_properties(test_hbg_execution_slot_registry PROPERTIES LABELS "no_hardware")
 
+# Pure validation for the fixed-size AICPU affinity gate. Invalid shapes must
+# be rejected before any launched thread enters the N-way barrier; HBG L1 then
+# publishes its independent prelaunch CANCEL instead of silently dropping all
+# participants while the hidden AICore launch spins.
+add_executable(test_platform_aicpu_affinity_config types/test_platform_aicpu_affinity_config.cpp)
+target_include_directories(test_platform_aicpu_affinity_config PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
+target_link_libraries(test_platform_aicpu_affinity_config PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_platform_aicpu_affinity_config COMMAND test_platform_aicpu_affinity_config)
+set_tests_properties(test_platform_aicpu_affinity_config PROPERTIES LABELS "no_hardware")
+
+# Resident AICPU configuration keeps the prepare-time HBG cancellation trust
+# root independently from the per-run slot registry and KernelArgs.
+add_executable(test_aicpu_device_config
+    types/test_aicpu_device_config.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/aicpu_device_config.cpp
+)
+target_include_directories(test_aicpu_device_config PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
+target_link_libraries(test_aicpu_device_config PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_aicpu_device_config COMMAND test_aicpu_device_config)
+set_tests_properties(test_aicpu_device_config PROPERTIES LABELS "no_hardware")
+
 add_executable(test_hbg_callable_registry types/test_hbg_callable_registry.cpp)
 target_include_directories(test_hbg_callable_registry PRIVATE
     ${GTEST_INCLUDE_DIRS}

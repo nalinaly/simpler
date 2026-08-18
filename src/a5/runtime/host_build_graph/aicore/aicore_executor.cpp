@@ -91,7 +91,26 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     // the poll cannot miss it and mistake a later task for the reset value.
     // Window-open is the sync point for everything the AICPU publishes (task
     // pointer, swimlane head): the AICPU writes those before opening the window.
+    uint32_t pre_window_spins = 0;
     while (read_reg(RegId::DATA_MAIN_BASE) == 0) {
+        if (((++pre_window_spins) & AICORE_PRE_WINDOW_CANCEL_POLL_MASK) == 0) {
+            dcci(&runtime->l1_launch_control, SINGLE_CACHE_LINE);
+            if (runtime->l1_launch_control.prelaunch_state == simpler::hbg::HBG_L1_PRELAUNCH_CANCEL) {
+                // The AICPU rejected the invocation before a scheduler
+                // generation or per-core handshake could exist. This control
+                // line is independent from our report cache line, so an early
+                // cancel cannot be overwritten by CACHELINE_OUT above.
+                return;
+            }
+            dcci(my_hank, SINGLE_CACHE_LINE);
+            if (my_hank->aicpu_ready == AICORE_PRE_WINDOW_CANCEL) {
+                // The AICPU observed this launch's report but could not safely
+                // resolve a register window for its physical id. Do not touch
+                // any SPR. The full AICore launch completion is the collective
+                // acknowledgement for this error-only cancel.
+                return;
+            }
+        }
         SPIN_WAIT_HINT();
     }
     // Report initial idle status via register (FAST_PATH is now open).

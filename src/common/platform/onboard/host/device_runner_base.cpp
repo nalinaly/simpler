@@ -94,6 +94,11 @@ extern "C" __attribute__((weak)) int query_l1_hbg_execution_binding_impl(
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
+extern "C" __attribute__((weak)) int
+query_l1_hbg_prelaunch_control_offset_impl(const Runtime * /*runtime*/, uint32_t * /*out*/) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 extern "C" __attribute__((weak)) int build_l1_hbg_graph_plan_impl(
     Runtime * /*runtime*/, const HostApi * /*api*/, const ChipStorageTaskArgs * /*orch_args*/,
     void * /*host_orch_func_ptr*/, const simpler::hbg::HbgExecutionBinding * /*binding*/,
@@ -509,6 +514,11 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
             init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
         }
+        if (l1_hbg_execution_slot_registration_ != nullptr) {
+            auto *control = simpler::hbg::hbg_l1_launch_control(*l1_hbg_execution_slot_registration_);
+            if (control == nullptr) return poison(PTO_RUNTIME_ERR_INVALID_STATE);
+            init_args.hbg_l1_prelaunch_control_addr = reinterpret_cast<uint64_t>(control);
+        }
         rc = load_aicpu_op_.LaunchWithHostArgs(
             caller_stream, &init_args, sizeof(init_args), 1, host::KernelNames::InitName
         );
@@ -598,8 +608,16 @@ int DeviceRunnerBase::prepare_l1_hbg_execution_slot_registration() {
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
 
+    uint32_t prelaunch_control_offset = 0;
+    rc = query_l1_hbg_prelaunch_control_offset_impl(l1_runtime_.get(), &prelaunch_control_offset);
+    if (rc != 0) {
+        LOG_ERROR("HBG prelaunch control is unavailable: %d", rc);
+        return rc;
+    }
+
     const simpler::hbg::HbgExecutionSlotRegistrationSpec spec{
         device_id_,
+        prelaunch_control_offset,
         launch_blob_capacity,
         binding,
         reinterpret_cast<uint64_t>(l1_kernel_args_.args.runtime_args),
@@ -774,6 +792,21 @@ int DeviceRunnerBase::launch_l1_callable(
     }
 
     const bool is_hbg = callable_it->second.host_dlopen_handle != nullptr;
+    void *device_launch_state = device_handshakes;
+    size_t launch_state_bytes = handshake_bytes;
+    if (is_hbg) {
+        if (l1_hbg_execution_slot_registration_ == nullptr) return PTO_RUNTIME_ERR_NOT_READY;
+        auto *device_prelaunch_control = simpler::hbg::hbg_l1_launch_control(*l1_hbg_execution_slot_registration_);
+        if (device_prelaunch_control == nullptr ||
+            reinterpret_cast<uint8_t *>(device_prelaunch_control) + sizeof(*device_prelaunch_control) !=
+                device_handshakes ||
+            handshake_bytes > std::numeric_limits<size_t>::max() - sizeof(*device_prelaunch_control)) {
+            LOG_ERROR("HBG launch control and per-core handshakes do not form one trusted clear span");
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        device_launch_state = device_prelaunch_control;
+        launch_state_bytes = sizeof(*device_prelaunch_control) + handshake_bytes;
+    }
     L1AicpuInvocationArgs trb_invocation{};
     std::unique_ptr<const simpler::hbg::HbgGraphPlan> hbg_plan;
     std::vector<uint8_t> hbg_launch_blob;
@@ -867,16 +900,24 @@ int DeviceRunnerBase::launch_l1_callable(
 
     struct LaunchContext {
         DeviceRunnerBase *runner;
-        void *device_handshakes;
-        size_t handshake_bytes;
+        void *device_launch_state;
+        size_t launch_state_bytes;
         const L1AicpuInvocationArgs *trb_invocation;
         std::vector<uint8_t> *hbg_launch_blob;
         simpler::host_args::HostArgsPlaceholder *hbg_placeholder;
         bool is_hbg;
+        Runtime *trusted_aicore_runtime_override;
         int aicpu_launch_count;
     } launch_context{
-        this,   device_handshakes,  handshake_bytes, &trb_invocation, &hbg_launch_blob, &hbg_placeholder,
-        is_hbg, aicpu_launch_count,
+        this,
+        device_launch_state,
+        launch_state_bytes,
+        &trb_invocation,
+        &hbg_launch_blob,
+        &hbg_placeholder,
+        is_hbg,
+        is_hbg ? reinterpret_cast<Runtime *>(l1_hbg_execution_slot_registration_->outer_runtime_base) : nullptr,
+        aicpu_launch_count,
     };
 
     const L1LaunchSequenceOps launch_ops{
@@ -891,7 +932,7 @@ int DeviceRunnerBase::launch_l1_callable(
             [](void *context, void *stream) noexcept {
                 auto *launch = static_cast<LaunchContext *>(context);
                 return static_cast<int>(aclrtMemsetAsync(
-                    launch->device_handshakes, launch->handshake_bytes, 0, launch->handshake_bytes,
+                    launch->device_launch_state, launch->launch_state_bytes, 0, launch->launch_state_bytes,
                     reinterpret_cast<aclrtStream>(stream)
                 ));
             },
@@ -923,7 +964,8 @@ int DeviceRunnerBase::launch_l1_callable(
             auto *launch = static_cast<LaunchContext *>(context);
             try {
                 return launch->runner->launch_prepared_aicore_kernel(
-                    reinterpret_cast<rtStream_t>(stream), launch->runner->l1_kernel_args_.device_k_args_
+                    reinterpret_cast<rtStream_t>(stream), launch->runner->l1_kernel_args_.device_k_args_,
+                    launch->trusted_aicore_runtime_override
                 );
             } catch (...) {
                 return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
@@ -2271,7 +2313,9 @@ int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args
     return launch_prepared_aicore_kernel(stream, k_args);
 }
 
-int DeviceRunnerBase::launch_prepared_aicore_kernel(rtStream_t stream, KernelArgs *k_args) {
+int DeviceRunnerBase::launch_prepared_aicore_kernel(
+    rtStream_t stream, KernelArgs *k_args, Runtime *trusted_l1_runtime_override
+) {
     if (aicore_bin_handle_ == nullptr || stream == nullptr || k_args == nullptr) {
         LOG_ERROR("AICore launch requires a prepared binary handle, stream, and KernelArgs");
         return PTO_RUNTIME_ERR_NOT_READY;
@@ -2279,8 +2323,14 @@ int DeviceRunnerBase::launch_prepared_aicore_kernel(rtStream_t stream, KernelArg
 
     struct Args {
         KernelArgs *k_args;
+        Runtime *trusted_l1_runtime_override;
     };
-    Args args = {k_args};
+    static_assert(sizeof(Args) == 2 * sizeof(void *), "AICore launch ABI must remain two packed pointer arguments");
+    static_assert(offsetof(Args, k_args) == 0, "AICore KernelArgs launch offset changed");
+    static_assert(
+        offsetof(Args, trusted_l1_runtime_override) == sizeof(void *), "AICore Runtime override launch offset changed"
+    );
+    Args args = {k_args, trusted_l1_runtime_override};
     rtArgsEx_t rt_args;
     std::memset(&rt_args, 0, sizeof(rt_args));
     rt_args.args = &args;

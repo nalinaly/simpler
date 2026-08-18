@@ -149,6 +149,11 @@ struct InitArgs {
     // Per-engine async-DMA workspace dev addrs -> set_dma_workspace_addr(kind, .);
     // indexed by DmaWorkspaceKind; 0 = that engine unavailable.
     uint64_t dma_workspace_addr[DMA_WORKSPACE_KIND_COUNT]{};
+    // Prepare-time HBG L1 trust root.  It deliberately does not ride on the
+    // mutable per-run KernelArgs: an invalid KernelArgs::runtime_args must not
+    // prevent the AICPU from releasing the already-launched hidden AICore
+    // kernel. Zero for TRB and all legacy L2/L3 modes.
+    uint64_t hbg_l1_prelaunch_control_addr{0};
 };
 
 /**

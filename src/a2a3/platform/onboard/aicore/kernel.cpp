@@ -85,9 +85,12 @@ extern __aicore__ void aicore_execute(__gm__ Runtime *runtime, int block_idx, Co
  * runtime's Handshake stays profiling-free and aicore_execute keeps its
  * original signature.
  *
- * @param runtime Address of Runtime structure in device memory
+ * @param k_args Address of the persistent KernelArgs structure in device memory
+ * @param trusted_l1_runtime_override Host-validated Runtime address for HBG L1;
+ *        nullptr for legacy L2/L3 and TRB L1
  */
-extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelArgs *k_args) {
+extern "C" __global__ __aicore__ void
+KERNEL_ENTRY(aicore_kernel)(__gm__ KernelArgs *k_args, __gm__ Runtime *trusted_l1_runtime_override) {
     // Calculate block_idx for this core
 #ifdef __DAV_VEC__
     block_idx = get_block_idx() * get_subblockdim() + get_subblockid() + get_block_num();
@@ -129,5 +132,12 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
         set_l2_swimlane_aicore_head_slot(nullptr);
     }
 
-    aicore_execute(k_args->runtime_args, block_idx, core_type);
+    // HBG L1 does not let a mutable/corrupt KernelArgs::runtime_args choose a
+    // different prelaunch-control line from the one trusted by AICPU. The
+    // second launch argument comes directly from the immutable host-side slot
+    // registration. All historical launch modes pass nullptr and preserve the
+    // original KernelArgs path.
+    __gm__ Runtime *runtime =
+        trusted_l1_runtime_override != nullptr ? trusted_l1_runtime_override : k_args->runtime_args;
+    aicore_execute(runtime, block_idx, core_type);
 }

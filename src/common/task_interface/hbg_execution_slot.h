@@ -16,13 +16,14 @@
 #include <limits>
 #include <type_traits>
 
+#include "hbg_l1_launch_control.h"
 #include "hbg_launch_blob.h"
 
 namespace simpler::hbg {
 
 inline constexpr uint32_t HBG_EXECUTION_SLOT_MAGIC = 0x31534748U;  // "HGS1" in little-endian memory.
 inline constexpr uint16_t HBG_EXECUTION_SLOT_ABI_MAJOR = 1;
-inline constexpr uint16_t HBG_EXECUTION_SLOT_ABI_MINOR = 0;
+inline constexpr uint16_t HBG_EXECUTION_SLOT_ABI_MINOR = 1;
 
 enum HbgExecutionSlotFlags : uint32_t {
     HBG_EXECUTION_SLOT_CAPACITY_FROZEN = 1U << 0,
@@ -48,7 +49,7 @@ struct alignas(8) HbgExecutionSlotRegistration {
     uint32_t struct_size{sizeof(HbgExecutionSlotRegistration)};
     int32_t device_id{-1};
     uint32_t flags{HBG_EXECUTION_SLOT_REQUIRED_FLAGS};
-    uint32_t reserved{0};
+    uint32_t prelaunch_control_offset{0};
     uint64_t max_launch_blob_size{0};
     HbgExecutionBinding binding{};
     uint64_t outer_runtime_base{0};
@@ -62,6 +63,7 @@ struct alignas(8) HbgExecutionSlotRegistration {
 /** Host-owned inputs used to construct one complete registration. */
 struct HbgExecutionSlotRegistrationSpec {
     int32_t device_id{-1};
+    uint32_t prelaunch_control_offset{0};
     uint64_t max_launch_blob_size{0};
     HbgExecutionBinding binding{};
     uint64_t outer_runtime_base{0};
@@ -80,6 +82,9 @@ static_assert(
 static_assert(sizeof(HbgExecutionSlotRegistration) == 144, "HBG execution-slot registration ABI changed");
 static_assert(
     offsetof(HbgExecutionSlotRegistration, max_launch_blob_size) == 24, "HBG execution-slot capacity offset changed"
+);
+static_assert(
+    offsetof(HbgExecutionSlotRegistration, prelaunch_control_offset) == 20, "HBG prelaunch-control offset changed"
 );
 static_assert(offsetof(HbgExecutionSlotRegistration, binding) == 32, "HBG execution-slot binding offset changed");
 static_assert(
@@ -104,6 +109,7 @@ enum class HbgExecutionSlotStatus : uint32_t {
     InvalidGeneration,
     InvalidBinding,
     InvalidRuntimeWindow,
+    InvalidLaunchControl,
     InvalidKernelArgsWindow,
     InvalidBinaryGeneration,
     InvalidPackageCapacity,
@@ -152,7 +158,7 @@ inline HbgExecutionSlotStatus hbg_validate_execution_slot_registration_fields(
         registration.abi_minor != HBG_EXECUTION_SLOT_ABI_MINOR) {
         return HbgExecutionSlotStatus::UnsupportedVersion;
     }
-    if (registration.struct_size != sizeof(HbgExecutionSlotRegistration) || registration.reserved != 0) {
+    if (registration.struct_size != sizeof(HbgExecutionSlotRegistration)) {
         return HbgExecutionSlotStatus::InvalidHeader;
     }
     if (registration.flags != HBG_EXECUTION_SLOT_REQUIRED_FLAGS) {
@@ -174,6 +180,14 @@ inline HbgExecutionSlotStatus hbg_validate_execution_slot_registration_fields(
     }
     if (!hbg_valid_device_window(registration.outer_runtime_base, registration.outer_runtime_size)) {
         return HbgExecutionSlotStatus::InvalidRuntimeWindow;
+    }
+    uint64_t prelaunch_control_end = 0;
+    if (registration.prelaunch_control_offset % alignof(HbgL1LaunchControl) != 0 ||
+        !hbg_checked_add_u64(
+            registration.prelaunch_control_offset, sizeof(HbgL1LaunchControl), &prelaunch_control_end
+        ) ||
+        prelaunch_control_end > registration.outer_runtime_size) {
+        return HbgExecutionSlotStatus::InvalidLaunchControl;
     }
     if (!hbg_valid_device_window(registration.device_kernel_args_base, registration.device_kernel_args_size)) {
         return HbgExecutionSlotStatus::InvalidKernelArgsWindow;
@@ -214,6 +228,38 @@ inline uint64_t hbg_execution_slot_registration_hash(const HbgExecutionSlotRegis
     return common::utils::fnv1a_64(&registration, offsetof(HbgExecutionSlotRegistration, registration_hash));
 }
 
+/** Resolve the trusted device control line embedded in outer Runtime. */
+inline HbgL1LaunchControl *hbg_l1_launch_control(const HbgExecutionSlotRegistration &registration) noexcept {
+    if (hbg_validate_execution_slot_registration_fields(registration) != HbgExecutionSlotStatus::Ok ||
+        registration.registration_hash != hbg_execution_slot_registration_hash(registration)) {
+        return nullptr;
+    }
+    uint64_t address = 0;
+    if (!hbg_checked_add_u64(registration.outer_runtime_base, registration.prelaunch_control_offset, &address)) {
+        return nullptr;
+    }
+    return reinterpret_cast<HbgL1LaunchControl *>(address);
+}
+
+/**
+ * Resolve the per-context cancellation trust root without trusting a failed
+ * per-invocation registry read.
+ *
+ * The fallback address is latched by simpler_aicpu_init from prepare-time
+ * HostArgs before registration/run tasks. It is used only when the immutable
+ * registration is missing or fails validation; callers still own the cache
+ * publish required after storing CANCEL.
+ */
+inline HbgL1LaunchControl *hbg_l1_launch_control_or_fallback(
+    const HbgExecutionSlotRegistration *registration, uint64_t fallback_address
+) noexcept {
+    if (registration != nullptr) {
+        HbgL1LaunchControl *registered = hbg_l1_launch_control(*registration);
+        if (registered != nullptr) return registered;
+    }
+    return reinterpret_cast<HbgL1LaunchControl *>(fallback_address);
+}
+
 /** Seal a host-built registration without publishing a partially valid hash. */
 inline HbgExecutionSlotStatus seal_hbg_execution_slot_registration(
     HbgExecutionSlotRegistration *registration, int32_t expected_device_id = -1
@@ -252,6 +298,7 @@ inline HbgExecutionSlotStatus build_hbg_execution_slot_registration(
 
     HbgExecutionSlotRegistration candidate{};
     candidate.device_id = spec.device_id;
+    candidate.prelaunch_control_offset = spec.prelaunch_control_offset;
     candidate.max_launch_blob_size = spec.max_launch_blob_size;
     candidate.binding = spec.binding;
     candidate.outer_runtime_base = spec.outer_runtime_base;

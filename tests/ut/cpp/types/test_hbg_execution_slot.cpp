@@ -22,6 +22,8 @@ namespace {
 using simpler::hbg::build_hbg_execution_slot_registration;
 using simpler::hbg::HBG_EXECUTION_SLOT_CAPACITY_FROZEN;
 using simpler::hbg::HBG_EXECUTION_SLOT_REQUIRED_FLAGS;
+using simpler::hbg::hbg_l1_launch_control;
+using simpler::hbg::hbg_l1_launch_control_or_fallback;
 using simpler::hbg::hbg_minimum_launch_blob_size;
 using simpler::hbg::HbgExecutionSlotRegistration;
 using simpler::hbg::HbgExecutionSlotRegistrationSpec;
@@ -56,6 +58,7 @@ HbgExecutionSlotRegistrationSpec make_registration_spec() {
     const HbgExecutionSlotRegistration registration = make_registration();
     return HbgExecutionSlotRegistrationSpec{
         registration.device_id,
+        registration.prelaunch_control_offset,
         registration.max_launch_blob_size,
         registration.binding,
         registration.outer_runtime_base,
@@ -72,6 +75,7 @@ TEST(HbgExecutionSlot, BuildsAndOwnsOneCompleteSealedRegistrationTransactionally
 
     ASSERT_EQ(build_hbg_execution_slot_registration(spec, &registration), HbgExecutionSlotStatus::Ok);
     EXPECT_EQ(registration.device_id, spec.device_id);
+    EXPECT_EQ(registration.prelaunch_control_offset, spec.prelaunch_control_offset);
     EXPECT_EQ(registration.max_launch_blob_size, spec.max_launch_blob_size);
     EXPECT_TRUE(hbg_execution_binding_matches(registration.binding, spec.binding));
     EXPECT_EQ(registration.binding.slot_generation, spec.binding.slot_generation);
@@ -82,6 +86,26 @@ TEST(HbgExecutionSlot, BuildsAndOwnsOneCompleteSealedRegistrationTransactionally
     EXPECT_EQ(registration.binary_generation, spec.binary_generation);
     EXPECT_NE(registration.registration_hash, 0u);
     EXPECT_EQ(validate_hbg_execution_slot_registration(&registration, spec.device_id), HbgExecutionSlotStatus::Ok);
+    EXPECT_EQ(reinterpret_cast<uint64_t>(hbg_l1_launch_control(registration)), registration.outer_runtime_base);
+}
+
+TEST(HbgExecutionSlot, ResolvesPrepareTimeFallbackWhenRegistryTrustRootIsUnavailable) {
+    HbgExecutionSlotRegistration registration = make_registration();
+    ASSERT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::Ok);
+    EXPECT_EQ(
+        reinterpret_cast<uint64_t>(hbg_l1_launch_control_or_fallback(&registration, 0xabc000)),
+        registration.outer_runtime_base + registration.prelaunch_control_offset
+    );
+
+    registration.magic = 0;
+    EXPECT_EQ(reinterpret_cast<uint64_t>(hbg_l1_launch_control_or_fallback(&registration, 0xabc000)), 0xabc000u);
+
+    registration = make_registration();
+    ASSERT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::Ok);
+    registration.registration_hash ^= 1;
+    EXPECT_EQ(reinterpret_cast<uint64_t>(hbg_l1_launch_control_or_fallback(&registration, 0xabc000)), 0xabc000u);
+    EXPECT_EQ(reinterpret_cast<uint64_t>(hbg_l1_launch_control_or_fallback(nullptr, 0xdef000)), 0xdef000u);
+    EXPECT_EQ(hbg_l1_launch_control_or_fallback(nullptr, 0), nullptr);
 }
 
 TEST(HbgExecutionSlot, FailedBuildPreservesThePriorRegistrationOwner) {
@@ -125,6 +149,14 @@ TEST(HbgExecutionSlot, RequiresFrozenSerialOnlyAndEveryPersistentWindow) {
     registration = make_registration();
     registration.outer_runtime_base = 0;
     EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::InvalidRuntimeWindow);
+
+    registration = make_registration();
+    registration.prelaunch_control_offset = 1;
+    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::InvalidLaunchControl);
+
+    registration = make_registration();
+    registration.prelaunch_control_offset = static_cast<uint32_t>(registration.outer_runtime_size);
+    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::InvalidLaunchControl);
 
     registration = make_registration();
     registration.device_kernel_args_size = 0;
@@ -203,8 +235,8 @@ TEST(HbgExecutionSlot, RejectsOverflowingWindowsAndMinimumPackageArithmetic) {
 TEST(HbgExecutionSlot, FailedSealDoesNotPublishANewHash) {
     HbgExecutionSlotRegistration registration = make_registration();
     registration.registration_hash = 0xabcdef;
-    registration.reserved = 1;
-    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::InvalidHeader);
+    registration.prelaunch_control_offset = 1;
+    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::InvalidLaunchControl);
     EXPECT_EQ(registration.registration_hash, 0xabcdefu);
 }
 

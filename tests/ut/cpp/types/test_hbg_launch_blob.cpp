@@ -64,7 +64,7 @@ struct Sources {
 struct RestoreHarness {
     std::array<uint8_t, 16> working_sm{};
     std::array<uint8_t, 24> working_arena{};
-    std::array<uint8_t, 32> outer_runtime{};
+    std::array<uint8_t, sizeof(simpler::hbg::HbgL1LaunchControl)> outer_runtime{};
     std::array<uint8_t, 16> device_kernel_args{};
     int copy_calls{0};
     int publish_calls{0};

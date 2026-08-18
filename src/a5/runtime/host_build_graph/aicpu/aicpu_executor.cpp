@@ -117,6 +117,7 @@ struct AicpuExecutor {
     // ===== Task queue state (managed by scheduler ready queues) =====
 
     simpler::ThreadCompletionGate completion_gate_;
+    std::atomic<int32_t> run_error_{0};
     std::atomic<bool> runtime_init_ready_{false};
     std::atomic<int32_t> hbg_restore_error_{0};
 
@@ -131,7 +132,14 @@ struct AicpuExecutor {
     // ===== Methods =====
     int32_t init(Runtime *runtime);
     int32_t run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation = nullptr);
+    void arrive_and_finalize_run();
     void deinit(Runtime *runtime);
+
+    void latch_run_error(int32_t error) {
+        if (error == 0) return;
+        int32_t expected = 0;
+        (void)run_error_.compare_exchange_strong(expected, error, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
 };
 
 static AicpuExecutor g_aicpu_executor;
@@ -151,12 +159,37 @@ hbg_restore_publish(void *, simpler::hbg::HbgLaunchRegionKind, const void *desti
     return 0;
 }
 
+static int reject_hbg_l1_via_control(simpler::hbg::HbgL1LaunchControl *control) noexcept {
+    if (control == nullptr) {
+        LOG_ERROR("HBG L1 prelaunch rejection has no valid cancellation control");
+        return -1;
+    }
+    __atomic_store_n(&control->prelaunch_state, simpler::hbg::HBG_L1_PRELAUNCH_CANCEL, __ATOMIC_RELEASE);
+    cache_flush_range(control, sizeof(*control));
+    return -1;
+}
+
+static int reject_hbg_l1_before_generation(const simpler::hbg::HbgExecutionSlotRegistration &slot) noexcept {
+    return reject_hbg_l1_via_control(simpler::hbg::hbg_l1_launch_control(slot));
+}
+
+static int reject_hbg_l1_without_slot() noexcept {
+    // simpler_aicpu_init latched this address from the host-owned immutable
+    // slot before any HBG registration or invocation task was enqueued. It is
+    // therefore the only safe writer target when the registry being validated
+    // is itself unavailable/corrupt; never recover a device pointer from the
+    // unvalidated per-invocation HostArgs blob.
+    auto *control = simpler::hbg::hbg_l1_launch_control_or_fallback(
+        nullptr, static_cast<uint64_t>(get_hbg_l1_prelaunch_control_addr())
+    );
+    return reject_hbg_l1_via_control(control);
+}
+
 // ===== AicpuExecutor Method Implementations =====
 
 int32_t AicpuExecutor::init(Runtime *runtime) {
     if (runtime == nullptr) {
         LOG_ERROR("runtime is nullptr");
-        init_failed_.store(true, std::memory_order_release);
         return -1;
     }
 
@@ -169,7 +202,6 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     if (nthreads == 0) nthreads = 1;
     if (nthreads < 1 || nthreads > MAX_AICPU_THREADS) {
         LOG_ERROR("Invalid aicpu_thread_num: %d", nthreads);
-        init_failed_.store(true, std::memory_order_release);
         return -1;
     }
     // Each thread needs a distinct index in [0, nthreads) to pick the leader and
@@ -182,6 +214,7 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     // rest), so the counter yields a gap-free [0, nthreads).
     int32_t tidx = platform_aicpu_affinity_thread_idx();
     if (tidx < 0) tidx = hs_thread_seq_.fetch_add(1, std::memory_order_acq_rel);
+    platform_aicpu_affinity_set_thread_idx(tidx);
     // A thread whose index still falls outside [0, nthreads) owns no core slice:
     // handshake_partition would compute lo/hi past cores_total_num_ and index
     // all_handshakes[]/core_exec_states_ out of bounds. Reject it here (mirrors
@@ -199,42 +232,48 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
         // The 0 → 1 fixup already applied above.
         aicpu_thread_num_ = nthreads;
 
+        completion_gate_.reset();
+        run_error_.store(0, std::memory_order_relaxed);
+        init_done_.store(false, std::memory_order_relaxed);
+        init_failed_.store(false, std::memory_order_relaxed);
         hs_arrived_.store(0, std::memory_order_relaxed);
         if (sched_ctx_.pre_handshake_init(runtime, aicpu_thread_num_, get_platform_regs()) != 0) {
             init_failed_.store(true, std::memory_order_release);
-            hs_setup_done_.store(true, std::memory_order_release);
-            return -1;
         }
         hs_setup_done_.store(true, std::memory_order_release);
     } else {
         while (!hs_setup_done_.load(std::memory_order_acquire)) {
-            if (init_failed_.load(std::memory_order_acquire)) return -1;
+            SPIN_WAIT_HINT();
         }
-        if (init_failed_.load(std::memory_order_acquire)) return -1;
     }
 
-    // All threads: handshake this thread's slice of cores in parallel.
-    sched_ctx_.handshake_partition(runtime, tidx, nthreads);
+    // Every valid participant joins the same init barrier even when the leader's
+    // shared setup failed. Skipping that arrival would let one AICPU task return
+    // while peers remain blocked in this generation, which cannot be recovered
+    // by resetting an L1 borrowed device context.
+    if (!init_failed_.load(std::memory_order_acquire)) {
+        sched_ctx_.handshake_partition(runtime, tidx, nthreads);
+    }
 
     // Barrier: leader waits for every slice to finish, then completes init.
     hs_arrived_.fetch_add(1, std::memory_order_acq_rel);
     if (is_leader) {
-        while (hs_arrived_.load(std::memory_order_acquire) < nthreads) {}
-        completion_gate_.reset();
-        if (sched_ctx_.post_handshake_init(runtime) != 0) {
+        while (hs_arrived_.load(std::memory_order_acquire) < nthreads) {
+            SPIN_WAIT_HINT();
+        }
+        if (!init_failed_.load(std::memory_order_acquire) && sched_ctx_.post_handshake_init(runtime) != 0) {
             init_failed_.store(true, std::memory_order_release);
-            init_done_.store(true, std::memory_order_release);
-            return -1;
         }
         init_done_.store(true, std::memory_order_release);
-        LOG_INFO("AicpuExecutor: Init complete");
+        if (!init_failed_.load(std::memory_order_acquire)) {
+            LOG_INFO("AicpuExecutor: Init complete");
+        }
     } else {
         while (!init_done_.load(std::memory_order_acquire)) {
-            if (init_failed_.load(std::memory_order_acquire)) return -1;
+            SPIN_WAIT_HINT();
         }
-        if (init_failed_.load(std::memory_order_acquire)) return -1;
     }
-    return 0;
+    return init_failed_.load(std::memory_order_acquire) ? -1 : 0;
 }
 
 /**
@@ -251,6 +290,10 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
         return -1;
     }
     int32_t run_rc = 0;
+    if (const int32_t shared_error = run_error_.load(std::memory_order_acquire); shared_error != 0) {
+        run_rc = shared_error;
+        goto run_epilogue;
+    }
 
     // Boot: the last AICPU thread (aicpu_thread_num_ - 1) performs the one-time
     // host-orch attach. host_build_graph's orchestrator already ran on the host,
@@ -435,15 +478,24 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
         }
     }
 
+run_epilogue:
     // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
     // platform_deinit_aicore_regs is idempotent.
     int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
     if (shutdown_rc != 0 && run_rc == 0) {
         run_rc = shutdown_rc;
     }
+    latch_run_error(run_rc);
 
     LOG_INFO("Thread %d: Completed", thread_idx);
 
+    arrive_and_finalize_run();
+
+    const int32_t shared_error = run_error_.load(std::memory_order_acquire);
+    return shared_error != 0 ? shared_error : run_rc;
+}
+
+void AicpuExecutor::arrive_and_finalize_run() {
     completion_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
         // Destroy the host_build_graph runtime. sm_handle / rt are recreated
         // every run, so always tear them down here.
@@ -454,8 +506,6 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
             rt = nullptr;
         }
     });
-
-    return run_rc;
 }
 
 void AicpuExecutor::deinit(Runtime *runtime) {
@@ -468,6 +518,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     sched_ctx_.deinit();
 
     completion_gate_.reset();
+    run_error_.store(0, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
     hbg_restore_error_.store(0, std::memory_order_release);
 
@@ -531,11 +582,6 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_regis
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(void *arg) {
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: null argument");
-        return -1;
-    }
-
     simpler::hbg::HbgExecutionSlotRegistration slot{};
     const auto slot_status = simpler::hbg::acquire_hbg_execution_slot_registration(
         &g_hbg_execution_slot_registry, get_orch_device_id(), &slot
@@ -544,14 +590,30 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         LOG_ERROR(
             "simpler_aicpu_l1_hbg_exec: execution slot unavailable status=%u", static_cast<unsigned>(slot_status)
         );
-        return -1;
+        return reject_hbg_l1_without_slot();
+    }
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: null argument");
+        return reject_hbg_l1_before_generation(slot);
+    }
+    if (slot.device_kernel_args_size != sizeof(KernelArgs) || slot.outer_runtime_size != sizeof(Runtime)) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: registered runtime ABI size mismatch");
+        return reject_hbg_l1_before_generation(slot);
+    }
+
+    auto *kernel_args = reinterpret_cast<const KernelArgs *>(slot.device_kernel_args_base);
+    cache_invalidate_range(kernel_args, sizeof(*kernel_args));
+    if (kernel_args->runtime_args == nullptr ||
+        reinterpret_cast<uint64_t>(kernel_args->runtime_args) != slot.outer_runtime_base) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
+        return reject_hbg_l1_before_generation(slot);
     }
 
     simpler::hbg::HbgLaunchBlobHeader header{};
     std::memcpy(&header, arg, sizeof(header));
     if (!simpler::hbg::hbg_valid_invocation_identity(header.identity)) {
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: invalid fixed invocation identity");
-        return -1;
+        return reject_hbg_l1_before_generation(slot);
     }
     simpler::hbg::HbgCallableRegistration callable{};
     const auto callable_status = simpler::hbg::acquire_hbg_callable_registration(
@@ -559,7 +621,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
     );
     if (callable_status != simpler::hbg::HbgCallableRegistryStatus::Acquired) {
         LOG_ERROR("simpler_aicpu_l1_hbg_exec: callable unavailable status=%u", static_cast<unsigned>(callable_status));
-        return -1;
+        return reject_hbg_l1_before_generation(slot);
     }
 
     simpler::hbg::HbgAicpuInvocationView invocation{};
@@ -568,24 +630,12 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         LOG_ERROR(
             "simpler_aicpu_l1_hbg_exec: fixed invocation rejected status=%u", static_cast<unsigned>(invocation_status)
         );
-        return -1;
-    }
-    if (slot.device_kernel_args_size != sizeof(KernelArgs) || slot.outer_runtime_size != sizeof(Runtime)) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: registered runtime ABI size mismatch");
-        return -1;
-    }
-
-    auto *kernel_args = reinterpret_cast<const KernelArgs *>(slot.device_kernel_args_base);
-    cache_invalidate_range(kernel_args, sizeof(*kernel_args));
-    if (kernel_args->runtime_args == nullptr ||
-        reinterpret_cast<uint64_t>(kernel_args->runtime_args) != slot.outer_runtime_base) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
-        return -1;
+        return reject_hbg_l1_before_generation(slot);
     }
     cache_invalidate_range(kernel_args->runtime_args, sizeof(Runtime));
     if (simpler_aicpu_execute_l1_hbg_platform == nullptr) {
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: platform bridge is unavailable");
-        return -1;
+        return reject_hbg_l1_before_generation(slot);
     }
     return simpler_aicpu_execute_l1_hbg_platform(kernel_args, &invocation);
 }
@@ -599,6 +649,43 @@ extern "C" int32_t aicpu_prewarm_callable(Runtime *runtime) {
     // simpler_aicpu_prewarm_callable; removing it would break the onboard link.
     (void)runtime;
     return 0;
+}
+
+static int32_t
+execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *hbg_invocation) {
+    const int32_t init_rc = g_aicpu_executor.init(runtime);
+    int32_t rc = 0;
+    if (init_rc != 0) {
+        const int32_t failed_thread_idx = platform_aicpu_affinity_thread_idx();
+        if (g_aicpu_executor.aicpu_thread_num_ <= 0 || failed_thread_idx < 0 ||
+            failed_thread_idx >= g_aicpu_executor.aicpu_thread_num_) {
+            return -1;
+        }
+        g_aicpu_executor.latch_run_error(-1);
+        // Shared setup or post-handshake initialization failed after this
+        // participant joined the generation. It must still join the N-way
+        // finalize/depart protocol so the static executor can be reused without
+        // relying on a host device reset.
+        g_aicpu_executor.arrive_and_finalize_run();
+        rc = -1;
+    } else {
+        rc = g_aicpu_executor.run(runtime, hbg_invocation);
+    }
+
+    g_aicpu_executor.completion_gate_.wait_for_finalization();
+    const int32_t shared_error = g_aicpu_executor.run_error_.load(std::memory_order_acquire);
+    if (shared_error != 0) rc = shared_error;
+
+    const bool runtime_state_readable =
+        init_rc == 0 &&
+        (hbg_invocation == nullptr || g_aicpu_executor.hbg_restore_error_.load(std::memory_order_acquire) == 0);
+    const int32_t runtime_rc = runtime_state_readable ? read_pto2_runtime_status(runtime) : 0;
+
+    if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
+        g_aicpu_executor.deinit(runtime);
+    }
+    if (runtime_rc != 0) return runtime_rc;
+    return rc;
 }
 
 /**
@@ -623,34 +710,9 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
 
     LOG_INFO("%s", "aicpu_execute: Starting AICPU kernel execution");
 
-    // init() barriers every thread internally until init is complete on the
-    // leader (or a thread failed), then returns the status — so a non-zero
-    // return is authoritative on all threads and no extra spin is needed.
-    if (g_aicpu_executor.init(runtime) != 0) {
-        LOG_ERROR("%s", "aicpu_execute: Initialization failed, aborting execution");
-        return -1;
-    }
-
-    int32_t rc = g_aicpu_executor.run(runtime);
-    g_aicpu_executor.completion_gate_.wait_for_finalization();
+    const int32_t rc = execute_runtime_generation(runtime, nullptr);
     if (rc != 0) {
         LOG_ERROR("aicpu_execute: Thread execution failed with rc=%d", rc);
-    }
-
-    int32_t runtime_rc = read_pto2_runtime_status(runtime);
-
-    // The finalizer publishes cleanup eligibility only after runtime destruction.
-    if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
-        LOG_INFO("aicpu_execute: All threads finished, cleaning up");
-        g_aicpu_executor.deinit(runtime);
-    }
-
-    if (runtime_rc != 0) {
-        LOG_ERROR("aicpu_execute: PTO2 runtime failed with rc=%d", runtime_rc);
-        return runtime_rc;
-    }
-
-    if (rc != 0) {
         return rc;
     }
 
@@ -664,19 +726,5 @@ extern "C" int32_t aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::Hb
         return -1;
     }
 
-    if (g_aicpu_executor.init(runtime) != 0) {
-        LOG_ERROR("%s", "aicpu_execute_l1_hbg: initialization failed");
-        return -1;
-    }
-
-    int32_t rc = g_aicpu_executor.run(runtime, invocation);
-    g_aicpu_executor.completion_gate_.wait_for_finalization();
-    const bool restore_ok = g_aicpu_executor.hbg_restore_error_.load(std::memory_order_acquire) == 0;
-    const int32_t runtime_rc = restore_ok ? read_pto2_runtime_status(runtime) : 0;
-
-    if (g_aicpu_executor.completion_gate_.depart_and_claim_cleanup_if_last(g_aicpu_executor.aicpu_thread_num_)) {
-        g_aicpu_executor.deinit(runtime);
-    }
-    if (runtime_rc != 0) return runtime_rc;
-    return rc;
+    return execute_runtime_generation(runtime, invocation);
 }

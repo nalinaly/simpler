@@ -30,6 +30,9 @@ class Runtime;
  */
 extern "C" int query_l1_hbg_execution_binding_impl(const Runtime *runtime, simpler::hbg::HbgExecutionBinding *out);
 
+/** Return the byte offset of HBG's pre-generation cancel line in Runtime. */
+extern "C" int query_l1_hbg_prelaunch_control_offset_impl(const Runtime *runtime, uint32_t *out);
+
 /**
  * Runtime-specific host-build hook used only by HBG L1.
  *

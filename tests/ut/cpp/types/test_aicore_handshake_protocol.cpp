@@ -12,6 +12,25 @@
 #include <gtest/gtest.h>
 
 #include "aicore_handshake_protocol.h"
+#include "hbg_l1_launch_control.h"
+
+TEST(AicoreHandshakeProtocol, KeepsSuccessAndErrorOnlyControlValuesDistinct) {
+    EXPECT_EQ(AICORE_PRE_WINDOW_WAIT, 0U);
+    EXPECT_EQ(AICORE_PRE_WINDOW_LEGACY_PROCEED, 1U);
+    EXPECT_EQ(AICORE_PRE_WINDOW_CANCEL, 2U);
+    EXPECT_NE(AICORE_PRE_WINDOW_CANCEL, AICORE_PRE_WINDOW_LEGACY_PROCEED);
+    EXPECT_EQ(AICORE_PRE_WINDOW_CANCEL_POLL_MASK + 1U, AICORE_PRE_WINDOW_CANCEL_POLL_INTERVAL);
+}
+
+TEST(AicoreHandshakeProtocol, UsesAnIndependentCacheLineForPreGenerationCancellation) {
+    simpler::hbg::HbgL1LaunchControl control{};
+
+    EXPECT_EQ(sizeof(control), 64u);
+    EXPECT_EQ(control.prelaunch_state, simpler::hbg::HBG_L1_PRELAUNCH_CONTINUE);
+    EXPECT_FALSE(simpler::hbg::hbg_l1_prelaunch_cancelled(&control));
+    control.prelaunch_state = simpler::hbg::HBG_L1_PRELAUNCH_CANCEL;
+    EXPECT_TRUE(simpler::hbg::hbg_l1_prelaunch_cancelled(&control));
+}
 
 TEST(AicoreHandshakeProtocol, AcceptsOnlyInRangeNonzeroRegisterMappings) {
     constexpr uint32_t max_physical_cores = 24;

@@ -16,6 +16,7 @@
 #include "hbg_aicpu_invocation.h"
 #include "l1_aicpu_args.h"
 #include "common/platform_config.h"
+#include "aicpu/cache_maintenance.h"
 #include "aicpu/aicpu_device_config.h"
 #include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_log.h"
@@ -48,6 +49,16 @@ aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, i
 extern "C" __attribute__((weak)) int
 aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation);
 
+static void PublishHbgPrelaunchCancel(const simpler::hbg::HbgAicpuInvocationView *invocation) {
+    const auto *slot = invocation == nullptr ? nullptr : &invocation->slot;
+    auto *control = simpler::hbg::hbg_l1_launch_control_or_fallback(
+        slot, static_cast<uint64_t>(get_hbg_l1_prelaunch_control_addr())
+    );
+    if (control == nullptr) return;
+    __atomic_store_n(&control->prelaunch_state, simpler::hbg::HBG_L1_PRELAUNCH_CANCEL, __ATOMIC_RELEASE);
+    cache_flush_range(control, sizeof(*control));
+}
+
 /**
  * AICPU kernel main execution entry point.
  *
@@ -71,6 +82,7 @@ static int ExecuteAicpuKernel(
 
     if (runtime == nullptr) {
         LOG_ERROR("%s", "Invalid runtime_args: null pointer");
+        PublishHbgPrelaunchCancel(hbg_invocation);
         return -1;
     }
 
@@ -106,15 +118,18 @@ static int ExecuteAicpuKernel(
     // and we'd silently return success without ever calling aicpu_execute.
     // That's a host-side bug; fail loud so it surfaces instead of
     // producing nothing at runtime.
-    if (runtime->get_aicpu_allowed_cpu_count() <= 0 || runtime->get_aicpu_launch_count() <= 0) {
+    const int32_t allowed_cpu_count = runtime->get_aicpu_allowed_cpu_count();
+    const int32_t aicpu_launch_count = runtime->get_aicpu_launch_count();
+    if (!platform_aicpu_affinity_config_valid(allowed_cpu_count, aicpu_launch_count)) {
         LOG_ERROR(
-            "AICPU affinity inputs missing: allowed_cpu_count=%d launch_count=%d (host probe must run before exec)",
-            runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+            "Invalid AICPU affinity inputs: allowed_cpu_count=%d launch_count=%d max=%d", allowed_cpu_count,
+            aicpu_launch_count, MAX_GATE_THREADS
         );
+        PublishHbgPrelaunchCancel(hbg_invocation);
         return -1;
     }
     if (!platform_aicpu_affinity_gate_filter(
-            runtime->get_aicpu_allowed_cpus(), runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+            runtime->get_aicpu_allowed_cpus(), allowed_cpu_count, aicpu_launch_count
         )) {
         return 0;
     }
@@ -131,6 +146,7 @@ static int ExecuteAicpuKernel(
     if (hbg_invocation != nullptr) {
         if (aicpu_execute_l1_hbg == nullptr) {
             LOG_ERROR("%s", "HBG L1 AICPU execution is unavailable in this runtime");
+            PublishHbgPrelaunchCancel(hbg_invocation);
             return -1;
         }
         rc = aicpu_execute_l1_hbg(runtime, hbg_invocation);
@@ -141,6 +157,11 @@ static int ExecuteAicpuKernel(
     }
     if (rc != 0) {
         LOG_ERROR("AICPU executor failed with rc=%d", rc);
+        // This is redundant after a fully initialized generation (its common
+        // epilogue already closes every register window), but it also covers
+        // failures that occur before the generation can establish its N-way
+        // cleanup gate.
+        PublishHbgPrelaunchCancel(hbg_invocation);
         return rc;
     }
 
@@ -186,6 +207,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_execute_l1_h
 ) {
     if (kernel_args == nullptr || invocation == nullptr) {
         LOG_ERROR("%s", "Invalid HBG L1 platform invocation");
+        PublishHbgPrelaunchCancel(invocation);
         return -1;
     }
     return ExecuteAicpuKernel(kernel_args, nullptr, invocation);
@@ -217,6 +239,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
     for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
         set_dma_workspace_addr(k, init_args->dma_workspace_addr[k]);
     }
+    set_hbg_l1_prelaunch_control_addr(init_args->hbg_l1_prelaunch_control_addr);
 
     return 0;
 }

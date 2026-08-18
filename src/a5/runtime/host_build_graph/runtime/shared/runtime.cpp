@@ -29,7 +29,8 @@ Runtime::Runtime() {
     // NOTE: host_api is initialized in InitRuntime() (host-only code)
     // because the CApi functions don't exist when compiled for device.
 
-    // Initialize handshake buffers
+    // Initialize the pre-generation control line and handshake buffers.
+    memset(&l1_launch_control, 0, sizeof(l1_launch_control));
     memset(workers, 0, sizeof(workers));
     worker_count = 0;
     aicpu_thread_num = 1;
