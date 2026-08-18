@@ -208,7 +208,7 @@ static int reject_hbg_l1_before_generation(const simpler::hbg::HbgExecutionSlotR
     return reject_hbg_l1_via_control(simpler::hbg::hbg_l1_launch_control(slot));
 }
 
-static int reject_hbg_l1_without_slot() noexcept {
+static bool publish_hbg_l1_without_slot_cancel() noexcept {
     // simpler_aicpu_init latched this address from the host-owned immutable
     // slot before any HBG registration or invocation task was enqueued. It is
     // therefore the only safe writer target when the registry being validated
@@ -217,7 +217,12 @@ static int reject_hbg_l1_without_slot() noexcept {
     auto *control = simpler::hbg::hbg_l1_launch_control_or_fallback(
         nullptr, static_cast<uint64_t>(get_hbg_l1_prelaunch_control_addr())
     );
-    return reject_hbg_l1_via_control(control);
+    return publish_hbg_l1_prelaunch_cancel(control);
+}
+
+static int reject_hbg_l1_without_slot() noexcept {
+    (void)publish_hbg_l1_without_slot_cancel();
+    return -1;
 }
 
 // ===== AicpuExecutor Method Implementations =====
@@ -757,6 +762,9 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: KernelArgs runtime does not match the registered slot");
         const bool cancelled = publish_hbg_l1_prelaunch_cancel(simpler::hbg::hbg_l1_launch_control(slot));
         return inject_kernel_args_fault && kernel_args_match && cancelled ? 0 : -1;
+    }
+    if (prelaunch_fault == simpler::hbg::HbgL1FaultStage::SlotFallbackControl) {
+        return publish_hbg_l1_without_slot_cancel() ? 0 : -1;
     }
     if (prelaunch_fault == simpler::hbg::HbgL1FaultStage::PlatformBridge) {
         return publish_hbg_l1_prelaunch_cancel(simpler::hbg::hbg_l1_launch_control(slot)) ? 0 : -1;

@@ -320,6 +320,10 @@ TEST(HbgLaunchBlob, TestFaultMarkerIsTaskLocalHashedAndStrictlyValidated) {
         hbg_l1_decode_fault_marker(hbg_l1_encode_fault_marker(HbgL1FaultStage::PhysicalCoreId)),
         HbgL1FaultStage::PhysicalCoreId
     );
+    EXPECT_EQ(
+        hbg_l1_decode_fault_marker(hbg_l1_encode_fault_marker(HbgL1FaultStage::SlotFallbackControl)),
+        HbgL1FaultStage::SlotFallbackControl
+    );
 
     blob = make_blob();
     header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());

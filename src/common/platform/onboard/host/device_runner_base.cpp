@@ -142,6 +142,7 @@ bool parse_hbg_l1_test_fault(const char *value, simpler::hbg::HbgL1FaultStage *o
         {"kernel_args_runtime", simpler::hbg::HbgL1FaultStage::KernelArgsRuntime},
         {"physical_core_mapping", simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping},
         {"physical_core_id", simpler::hbg::HbgL1FaultStage::PhysicalCoreId},
+        {"slot_fallback_control", simpler::hbg::HbgL1FaultStage::SlotFallbackControl},
     };
     for (const auto &candidate : stages) {
         if (std::strcmp(value, candidate.name) == 0) {
