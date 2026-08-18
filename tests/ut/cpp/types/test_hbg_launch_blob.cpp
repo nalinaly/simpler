@@ -72,6 +72,16 @@ struct RestoreHarness {
     int fail_publish_at{-1};
 };
 
+struct MultiLineRestoreHarness {
+    std::vector<uint8_t> working_sm;
+    std::vector<uint8_t> working_arena;
+    std::array<uint8_t, sizeof(simpler::hbg::HbgL1LaunchControl)> outer_runtime{};
+    std::array<uint8_t, 16> device_kernel_args{};
+    std::array<size_t, 4> published_sizes{};
+    int copy_calls{0};
+    int publish_calls{0};
+};
+
 int restore_copy(void *context, HbgLaunchRegionKind, void *destination, const void *source, size_t size) noexcept {
     auto *harness = static_cast<RestoreHarness *>(context);
     const int call = harness->copy_calls++;
@@ -84,6 +94,24 @@ int restore_publish(void *context, HbgLaunchRegionKind, const void *, size_t) no
     auto *harness = static_cast<RestoreHarness *>(context);
     const int call = harness->publish_calls++;
     return call == harness->fail_publish_at ? -92 : 0;
+}
+
+int multi_line_restore_copy(
+    void *context, HbgLaunchRegionKind, void *destination, const void *source, size_t size
+) noexcept {
+    auto *harness = static_cast<MultiLineRestoreHarness *>(context);
+    ++harness->copy_calls;
+    std::memcpy(destination, source, size);
+    return 0;
+}
+
+int multi_line_restore_publish(void *context, HbgLaunchRegionKind, const void *, size_t size) noexcept {
+    auto *harness = static_cast<MultiLineRestoreHarness *>(context);
+    if (harness->publish_calls < static_cast<int>(harness->published_sizes.size())) {
+        harness->published_sizes[static_cast<size_t>(harness->publish_calls)] = size;
+    }
+    ++harness->publish_calls;
+    return 0;
 }
 
 HbgExecutionBinding make_restore_binding(const RestoreHarness &harness) {
@@ -126,6 +154,33 @@ HbgExecutionBinding make_binding(const Sources &sources, bool with_heap = false)
         binding.gm_heap_capacity = 64;
     }
     return binding;
+}
+
+HbgExecutionBinding make_multi_line_binding(const MultiLineRestoreHarness &harness) {
+    HbgExecutionBinding binding;
+    binding.shared_memory_base = reinterpret_cast<uint64_t>(harness.working_sm.data());
+    binding.shared_memory_capacity = harness.working_sm.size();
+    binding.runtime_arena_base = reinterpret_cast<uint64_t>(harness.working_arena.data());
+    binding.runtime_arena_capacity = harness.working_arena.size();
+    binding.runtime_offset = 64;
+    binding.slot_generation = 29;
+    return binding;
+}
+
+HbgExecutionSlotRegistration make_multi_line_registration(
+    const MultiLineRestoreHarness &harness, const HbgExecutionBinding &binding, size_t max_launch_blob_size
+) {
+    HbgExecutionSlotRegistration registration;
+    registration.device_id = 1;
+    registration.max_launch_blob_size = max_launch_blob_size;
+    registration.binding = binding;
+    registration.outer_runtime_base = reinterpret_cast<uint64_t>(harness.outer_runtime.data());
+    registration.outer_runtime_size = harness.outer_runtime.size();
+    registration.device_kernel_args_base = reinterpret_cast<uint64_t>(harness.device_kernel_args.data());
+    registration.device_kernel_args_size = harness.device_kernel_args.size();
+    registration.binary_generation = 31;
+    EXPECT_EQ(seal_hbg_execution_slot_registration(&registration, 1), HbgExecutionSlotStatus::Ok);
+    return registration;
 }
 
 HbgInvocationIdentity make_identity() {
@@ -657,6 +712,61 @@ TEST(HbgLaunchBlob, RestoresThePristineWorkingImageOnEveryReplay) {
     EXPECT_EQ(harness.publish_calls, 4);
 }
 
+TEST(HbgLaunchBlob, EveryReplayRestoresFirstMiddleAndTailAcrossMultipleCacheLines) {
+    constexpr size_t sm_size = 5 * 64 + 13;
+    constexpr size_t arena_size = 7 * 64 + 31;
+    std::vector<uint8_t> pristine_sm(sm_size);
+    std::vector<uint8_t> pristine_arena(arena_size);
+    for (size_t index = 0; index < pristine_sm.size(); ++index) {
+        pristine_sm[index] = static_cast<uint8_t>((index * 17U + 0x31U) & 0xffU);
+    }
+    for (size_t index = 0; index < pristine_arena.size(); ++index) {
+        pristine_arena[index] = static_cast<uint8_t>((index * 29U + 0x72U) & 0xffU);
+    }
+
+    MultiLineRestoreHarness harness;
+    harness.working_sm.resize(sm_size, 0xee);
+    harness.working_arena.resize(arena_size, 0xdd);
+    const HbgExecutionBinding binding = make_multi_line_binding(harness);
+    const HbgInvocationIdentity identity = make_identity();
+    const std::vector<HbgHostRegionInput> inputs{
+        {HbgLaunchRegionKind::SharedMemoryImage, kRegionFlags, pristine_sm.data(), pristine_sm.size(), 0},
+        {HbgLaunchRegionKind::RuntimeArenaImage, kRegionFlags, pristine_arena.data(), pristine_arena.size(), 0},
+    };
+    std::vector<uint8_t> blob;
+    ASSERT_EQ(build_hbg_launch_blob(binding, identity, 61, inputs, &blob), HbgLaunchBlobStatus::Ok);
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->inline_payload_addr = reinterpret_cast<uint64_t>(blob.data()) + header->header_size;
+    const HbgExecutionSlotRegistration registration = make_multi_line_registration(harness, binding, blob.size());
+    const HbgRestoreOps ops{&harness, multi_line_restore_copy, multi_line_restore_publish};
+    HbgRestoreCommit commit{};
+
+    ASSERT_EQ(
+        restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit).status,
+        HbgRestoreStatus::Ok
+    );
+    EXPECT_EQ(harness.working_sm, pristine_sm);
+    EXPECT_EQ(harness.working_arena, pristine_arena);
+    EXPECT_EQ(commit.plan_generation, 61u);
+
+    const std::array<size_t, 3> sm_poison_offsets{0, pristine_sm.size() / 2U, pristine_sm.size() - 1U};
+    const std::array<size_t, 3> arena_poison_offsets{0, pristine_arena.size() / 2U, pristine_arena.size() - 1U};
+    for (const size_t offset : sm_poison_offsets)
+        harness.working_sm[offset] ^= 0xffU;
+    for (const size_t offset : arena_poison_offsets)
+        harness.working_arena[offset] ^= 0xffU;
+
+    ASSERT_EQ(
+        restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit).status,
+        HbgRestoreStatus::Ok
+    );
+    EXPECT_EQ(harness.working_sm, pristine_sm);
+    EXPECT_EQ(harness.working_arena, pristine_arena);
+    EXPECT_EQ(harness.copy_calls, 4);
+    EXPECT_EQ(harness.publish_calls, 4);
+    EXPECT_EQ(harness.published_sizes, (std::array<size_t, 4>{sm_size, arena_size, sm_size, arena_size}));
+}
+
 TEST(HbgLaunchBlob, AlternatingCapturedPackagesRestoreTheirOwnSnapshotIntoOneSlot) {
     Sources sources_a;
     Sources sources_b;
@@ -748,6 +858,19 @@ TEST(HbgLaunchBlob, FailedRestoreNeverPublishesAReadyCommit) {
     EXPECT_EQ(result.region_index, 0u);
     EXPECT_EQ(result.callback_error, -92);
     EXPECT_EQ(std::memcmp(&commit, &sentinel, sizeof(commit)), 0);
+
+    // A failed attempt may have partially modified the mutable slot, but it
+    // never publishes a commit. A subsequent complete restore is the only
+    // supported in-context repair and must overwrite every pristine byte.
+    harness.fail_publish_at = -1;
+    harness.working_sm.fill(0x19);
+    harness.working_arena.fill(0x2a);
+    result = restore_hbg_launch_blob(blob.data(), blob.size(), registration, identity, ops, &commit);
+    ASSERT_EQ(result.status, HbgRestoreStatus::Ok);
+    EXPECT_EQ(harness.working_sm, sources.sm);
+    EXPECT_EQ(harness.working_arena, sources.arena);
+    EXPECT_EQ(commit.plan_generation, 51u);
+    EXPECT_EQ(commit.plan_hash, reinterpret_cast<const HbgLaunchBlobHeader *>(blob.data())->plan_hash);
 }
 
 }  // namespace
