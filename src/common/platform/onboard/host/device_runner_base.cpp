@@ -448,8 +448,8 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         }
         seen_func_id[entry.first] = true;
     }
-    if (!l1_aicpu_binary_loaded_ && aicpu_so_binary_.empty()) {
-        LOG_ERROR("L1 AICPU executor binary is empty");
+    if (!l1_aicpu_binary_loaded_ && (aicpu_so_binary_.empty() || dispatcher_so_binary_.empty())) {
+        LOG_ERROR("L1 AICPU executor or dispatcher binary is empty");
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
 
@@ -460,7 +460,20 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         for (size_t i = 0; i < extra_count && extra != nullptr; ++i) {
             if (extra[i] != nullptr) extra_symbols.emplace_back(extra[i]);
         }
-        rc = load_aicpu_op_.InitFromData(aicpu_so_binary_.data(), aicpu_so_binary_.size(), extra_symbols);
+        // L1 must run in the standard AICPU scheduler: that process owns the
+        // AIC_CTRL MMIO mapping consumed by platform_init_aicore_regs. Direct
+        // cpuKernelMode=2 loading enters a custom scheduler process and faults
+        // on the first register-window write. Enqueue the existing dispatcher
+        // on the caller stream, retain all device inputs until explicit close,
+        // and parse the mode-0 JSON immediately. Mode 0 is host metadata-only;
+        // subsequent init/register/run tasks are ordered after the device-side
+        // SO write by caller-stream FIFO, with no internal synchronize.
+        rc = load_aicpu_op_.BootstrapDispatcherAsync(
+            dispatcher_so_binary_.data(), dispatcher_so_binary_.size(), aicpu_so_binary_.data(),
+            aicpu_so_binary_.size(), caller_stream, device_id_
+        );
+        if (rc != 0) return poison(rc);
+        rc = load_aicpu_op_.InitPreinstalledAcl(extra_symbols);
         if (rc != 0) return poison(rc);
         l1_aicpu_binary_loaded_ = true;
     }
@@ -487,9 +500,34 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         l1_static_state_prepared_ = true;
     }
 
+    const int32_t l1_worker_count = l1_runtime_->get_worker_count();
+    if (l1_worker_count <= 0 || l1_worker_count > RUNTIME_MAX_WORKER) {
+        LOG_ERROR("L1 startup-report worker count is invalid: %d", l1_worker_count);
+        return poison(PTO_RUNTIME_ERR_INVALID_STATE);
+    }
+    const size_t expected_report_bytes = static_cast<size_t>(l1_worker_count) * sizeof(L1AicoreReport);
+    if (l1_aicore_reports_ == nullptr) {
+        void *reports = mem_alloc_.alloc(expected_report_bytes);
+        if (reports == nullptr || reinterpret_cast<uintptr_t>(reports) % alignof(L1AicoreReport) != 0) {
+            LOG_ERROR("L1 failed to allocate a cache-line-aligned AICore startup-report array");
+            if (reports != nullptr) (void)mem_alloc_.free(reports);
+            return poison(PTO_RUNTIME_ERR_RUNTIME_FAILURE);
+        }
+        l1_aicore_reports_ = static_cast<L1AicoreReport *>(reports);
+        l1_aicore_report_bytes_ = expected_report_bytes;
+    } else if (l1_aicore_report_bytes_ != expected_report_bytes) {
+        LOG_ERROR("L1 startup-report capacity changed after prepare");
+        return poison(PTO_RUNTIME_ERR_INVALID_STATE);
+    }
+    // This is the sole report-address trust root consumed by both AICPU and
+    // AICore. It is fixed before the persistent Runtime image is uploaded.
+    l1_runtime_->set_l1_aicore_reports(l1_aicore_reports_);
+
     rc = l1_kernel_args_.init_runtime_args(*l1_runtime_, mem_alloc_);
     if (rc != 0) return poison(rc);
     rc = l1_kernel_args_.init_device_kernel_args(mem_alloc_);
+    if (rc != 0) return poison(rc);
+    rc = l1_kernel_args_.validate_device_copies(*l1_runtime_);
     if (rc != 0) return poison(rc);
     rc = ensure_aicore_binary_registered();
     if (rc != 0) return poison(rc);
@@ -783,7 +821,9 @@ int DeviceRunnerBase::launch_l1_callable(
         l1_execution_state_.poison(error);
         return error != 0 ? error : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
     };
-    if (l1_kernel_args_.args.runtime_args == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+    if (l1_kernel_args_.args.runtime_args == nullptr || l1_aicore_reports_ == nullptr || l1_aicore_report_bytes_ == 0) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
     const size_t handshake_bytes = static_cast<size_t>(l1_runtime_->get_worker_count()) * sizeof(Handshake);
     void *device_handshakes = l1_kernel_args_.args.runtime_args->get_workers();
     const int aicpu_launch_count = l1_runtime_->get_aicpu_launch_count();
@@ -907,6 +947,8 @@ int DeviceRunnerBase::launch_l1_callable(
         simpler::host_args::HostArgsPlaceholder *hbg_placeholder;
         bool is_hbg;
         Runtime *trusted_aicore_runtime_override;
+        L1AicoreReport *l1_aicore_reports;
+        size_t l1_aicore_report_bytes;
         int aicpu_launch_count;
     } launch_context{
         this,
@@ -916,7 +958,10 @@ int DeviceRunnerBase::launch_l1_callable(
         &hbg_launch_blob,
         &hbg_placeholder,
         is_hbg,
-        is_hbg ? reinterpret_cast<Runtime *>(l1_hbg_execution_slot_registration_->outer_runtime_base) : nullptr,
+        is_hbg ? reinterpret_cast<Runtime *>(l1_hbg_execution_slot_registration_->outer_runtime_base) :
+                 l1_kernel_args_.args.runtime_args,
+        l1_aicore_reports_,
+        l1_aicore_report_bytes_,
         aicpu_launch_count,
     };
 
@@ -931,8 +976,13 @@ int DeviceRunnerBase::launch_l1_callable(
         .memset_handshake =
             [](void *context, void *stream) noexcept {
                 auto *launch = static_cast<LaunchContext *>(context);
-                return static_cast<int>(aclrtMemsetAsync(
+                int rc = static_cast<int>(aclrtMemsetAsync(
                     launch->device_launch_state, launch->launch_state_bytes, 0, launch->launch_state_bytes,
+                    reinterpret_cast<aclrtStream>(stream)
+                ));
+                if (rc != ACL_SUCCESS) return rc;
+                return static_cast<int>(aclrtMemsetAsync(
+                    launch->l1_aicore_reports, launch->l1_aicore_report_bytes, 0, launch->l1_aicore_report_bytes,
                     reinterpret_cast<aclrtStream>(stream)
                 ));
             },
@@ -970,6 +1020,17 @@ int DeviceRunnerBase::launch_l1_callable(
             } catch (...) {
                 return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
             }
+        },
+        .cancel_waiting_aicore = [](void *context, void *stream) noexcept -> int {
+            auto *launch = static_cast<LaunchContext *>(context);
+            // Byte-fill makes every Handshake::aicpu_ready word exactly
+            // UINT32_MAX without allocating a pinned Host scalar. This branch
+            // runs only before the AICPU task was enqueued, so overwriting the
+            // remaining legacy Handshake bytes is safe.
+            return static_cast<int>(aclrtMemsetAsync(
+                launch->device_launch_state, launch->launch_state_bytes, 0xFF, launch->launch_state_bytes,
+                reinterpret_cast<aclrtStream>(stream)
+            ));
         },
     };
     const L1LaunchSequenceHandles launch_handles{
@@ -1100,6 +1161,8 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
     aicore_bin_handle_ = nullptr;
     l1_runtime_.reset();
     l1_kernel_args_ = KernelArgsHelper{};
+    l1_aicore_reports_ = nullptr;
+    l1_aicore_report_bytes_ = 0;
     l1_prepared_callable_ids_.clear();
     l1_aicpu_init_enqueued_ = false;
     l1_static_state_prepared_ = false;

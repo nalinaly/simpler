@@ -19,6 +19,10 @@
 inline constexpr uint32_t AICORE_PRE_WINDOW_WAIT = 0;
 inline constexpr uint32_t AICORE_PRE_WINDOW_LEGACY_PROCEED = 1;
 inline constexpr uint32_t AICORE_PRE_WINDOW_CANCEL = 2;
+// A host-side byte memset can publish this value without allocating a pinned
+// scalar source. It closes the branch where hidden AICore was enqueued but the
+// caller-stream custom-AICPU launch failed synchronously.
+inline constexpr uint32_t AICORE_PRE_WINDOW_HOST_CANCEL = UINT32_MAX;
 
 // The normal register window opens in a few microseconds. Check the GM cancel
 // line only occasionally while that MMIO register is still zero. CANCEL stays
@@ -26,6 +30,10 @@ inline constexpr uint32_t AICORE_PRE_WINDOW_CANCEL = 2;
 // miss it.
 inline constexpr uint32_t AICORE_PRE_WINDOW_CANCEL_POLL_INTERVAL = 256;
 inline constexpr uint32_t AICORE_PRE_WINDOW_CANCEL_POLL_MASK = AICORE_PRE_WINDOW_CANCEL_POLL_INTERVAL - 1;
+
+inline constexpr bool aicore_pre_window_cancelled(uint32_t value) noexcept {
+    return value == AICORE_PRE_WINDOW_CANCEL || value == AICORE_PRE_WINDOW_HOST_CANCEL;
+}
 
 inline constexpr bool aicore_register_index_valid(uint32_t physical_core_id, uint32_t register_address_count) noexcept {
     return physical_core_id < register_address_count;

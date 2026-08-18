@@ -16,7 +16,7 @@
 /**
  * Allocation-free operation table for one borrowed-stream L1 enqueue.
  *
- * The table deliberately contains only the six operations permitted inside
+ * The table deliberately contains only the operations permitted inside
  * an L1 launch. In particular, synchronization, allocation, stream/event
  * creation, capture inspection, and model attachment cannot be expressed.
  * The opaque context normally points to a stack snapshot owned by the caller.
@@ -28,10 +28,11 @@ struct L1LaunchSequenceOps {
     int (*record_event)(void *context, void *event, void *stream) noexcept {nullptr};
     int (*launch_aicpu)(void *context, void *caller_stream) noexcept {nullptr};
     int (*launch_aicore)(void *context, void *hidden_stream) noexcept {nullptr};
+    int (*cancel_waiting_aicore)(void *context, void *caller_stream) noexcept {nullptr};
 
     bool valid() const {
         return wait_event != nullptr && memset_handshake != nullptr && record_event != nullptr &&
-               launch_aicpu != nullptr && launch_aicore != nullptr;
+               launch_aicpu != nullptr && launch_aicore != nullptr && cancel_waiting_aicore != nullptr;
     }
 };
 
@@ -54,8 +55,10 @@ struct L1LaunchSequenceHandles {
 /**
  * Enqueue the exact caller/hidden-stream fork-join protocol for one L1 op.
  *
- * Returns immediately on the first failed enqueue. The caller must poison the
- * context because a prefix may already be resident on either stream.
+ * Once hidden AICore has been enqueued, failures before the custom-AICPU
+ * branch is resident are closed by an async host-cancel plus the ordinary
+ * hidden completion join. The caller must still poison the context: the
+ * operator failed even when its already-enqueued prefix was safely drained.
  */
 inline int enqueue_l1_launch_sequence(const L1LaunchSequenceOps &ops, const L1LaunchSequenceHandles &handles) noexcept {
     if (!ops.valid() || !handles.valid()) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
@@ -73,14 +76,43 @@ inline int enqueue_l1_launch_sequence(const L1LaunchSequenceOps &ops, const L1La
     if (rc != 0) return rc;
     rc = ops.record_event(ops.context, handles.start_event, handles.caller_stream);
     if (rc != 0) return rc;
-    rc = ops.launch_aicpu(ops.context, handles.caller_stream);
-    if (rc != 0) return rc;
+
+    // Submit the hidden AICore branch before the custom-AICPU branch. Both are
+    // still gated by the same caller-stream Start event, so this adds no
+    // cross-branch execution ordering and never crosses the single-operator
+    // boundary. The submit order matters on CANN configurations where a
+    // running custom-AICPU task that waits for the AICore handshake prevents a
+    // later AICore SQE on another stream from being scheduled; submitting the
+    // AICore waiter first avoids that circular device-scheduler dependency.
     rc = ops.wait_event(ops.context, handles.hidden_stream, handles.start_event);
     if (rc != 0) return rc;
     rc = ops.launch_aicore(ops.context, handles.hidden_stream);
     if (rc != 0) return rc;
     rc = ops.record_event(ops.context, handles.aicore_done_event, handles.hidden_stream);
-    if (rc != 0) return rc;
+    if (rc != 0) {
+        const int original_error = rc;
+        rc = ops.cancel_waiting_aicore(ops.context, handles.caller_stream);
+        if (rc != 0) return rc;
+        // Retry the completion record after publishing cancel. If the first
+        // failure was transient, this gives the caller a nonblocking proof
+        // that every hidden block observed the sentinel and exited.
+        rc = ops.record_event(ops.context, handles.aicore_done_event, handles.hidden_stream);
+        if (rc != 0) return rc;
+        rc = ops.wait_event(ops.context, handles.caller_stream, handles.aicore_done_event);
+        if (rc != 0) return rc;
+        rc = ops.record_event(ops.context, handles.serial_tail_event, handles.caller_stream);
+        return rc != 0 ? rc : original_error;
+    }
+    rc = ops.launch_aicpu(ops.context, handles.caller_stream);
+    if (rc != 0) {
+        const int original_error = rc;
+        rc = ops.cancel_waiting_aicore(ops.context, handles.caller_stream);
+        if (rc != 0) return rc;
+        rc = ops.wait_event(ops.context, handles.caller_stream, handles.aicore_done_event);
+        if (rc != 0) return rc;
+        rc = ops.record_event(ops.context, handles.serial_tail_event, handles.caller_stream);
+        return rc != 0 ? rc : original_error;
+    }
     rc = ops.wait_event(ops.context, handles.caller_stream, handles.aicore_done_event);
     if (rc != 0) return rc;
     return ops.record_event(ops.context, handles.serial_tail_event, handles.caller_stream);

@@ -77,8 +77,8 @@ SlotTransition SchedulerContext::decide_slot_transition(
 // Complete one slot's task: subtask counting, mixed completion, deferred release, profiling.
 void SchedulerContext::complete_slot_task(
     PTO2TaskSlotState &slot_state, int32_t expected_reg_task_id, [[maybe_unused]] PTO2SubtaskSlot subslot,
-    [[maybe_unused]] int32_t thread_idx, int32_t core_id, Handshake *hank, int32_t &completed_this_turn,
-    PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
+    [[maybe_unused]] int32_t thread_idx, int32_t core_id, [[maybe_unused]] Handshake *hank,
+    int32_t &completed_this_turn, PTO2TaskSlotState *deferred_release_slot_states[], int32_t &deferred_release_count
 #if SIMPLER_DFX
     ,
     uint64_t dispatch_ts, uint64_t finish_ts
@@ -234,7 +234,8 @@ void SchedulerContext::complete_slot_task(
         // for the PmuRecord.
         pmu_aicpu_complete_record(
             core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), slot_state.task->task_id.raw,
-            slot_state.task->kernel_id[static_cast<int32_t>(subslot)], hank[core_id].core_type
+            slot_state.task->kernel_id[static_cast<int32_t>(subslot)],
+            static_cast<CoreType>(core_type_compact_[core_id])
         );
     }
 #endif

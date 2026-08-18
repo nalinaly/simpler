@@ -45,7 +45,7 @@
 // exported directly by the TMARB runtime (host_build_graph does not export it).
 extern "C" int aicpu_execute(Runtime *arg);
 extern "C" __attribute__((weak)) int
-aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id);
+aicpu_execute_l1(Runtime *runtime, const void *unaligned_orch_args, int32_t invocation_callable_id);
 extern "C" __attribute__((weak)) int
 aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation);
 
@@ -73,7 +73,7 @@ static void PublishHbgPrelaunchCancel(const simpler::hbg::HbgAicpuInvocationView
  * @return 0 on success, non-zero on error
  */
 static int ExecuteAicpuKernel(
-    const KernelArgs *k_args, const L1AicpuInvocationArgs *l1_invocation,
+    const KernelArgs *k_args, const void *l1_orch_args_bytes, int32_t l1_callable_id,
     const simpler::hbg::HbgAicpuInvocationView *hbg_invocation
 ) {
     // Log severity was snapshot once by simpler_aicpu_init at worker init; the
@@ -85,7 +85,6 @@ static int ExecuteAicpuKernel(
         PublishHbgPrelaunchCancel(hbg_invocation);
         return -1;
     }
-
     // Per-device invariants (log config, orch device id) were latched once by
     // simpler_aicpu_init at worker init; only the per-run register tables and
     // profiling-buffer bases are pushed here.
@@ -139,8 +138,8 @@ static int ExecuteAicpuKernel(
             return -1;
         }
         rc = aicpu_execute_l1_hbg(runtime, hbg_invocation);
-    } else if (l1_invocation != nullptr) {
-        rc = aicpu_execute_l1(runtime, &l1_invocation->orch_args, l1_invocation->callable_id);
+    } else if (l1_orch_args_bytes != nullptr) {
+        rc = aicpu_execute_l1(runtime, l1_orch_args_bytes, l1_callable_id);
     } else {
         rc = aicpu_execute(runtime);
     }
@@ -164,7 +163,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
         LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
         return -1;
     }
-    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr, nullptr);
+    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr, -1, nullptr);
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void *arg) {
@@ -172,15 +171,16 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void
         LOG_ERROR("%s", "Invalid L1 invocation arguments: null pointer");
         return -1;
     }
-    // aclrtLaunchKernelWithHostArgs only guarantees a runtime-owned byte
-    // image; the task-argument pool is not required to preserve alignas(64).
-    // Copy to an aligned local object before any typed access.
-    L1AicpuInvocationArgs invocation{};
-    std::memcpy(&invocation, arg, sizeof(invocation));
-    if (!IsValidL1AicpuInvocation(invocation)) {
+    // The runtime-owned task image is only a byte buffer.  Copy its small,
+    // naturally-aligned prefix before typed access; the unique TRB
+    // orchestrator worker snapshots the large orch payload into persistent
+    // aligned storage.  This keeps the per-worker stack bounded and does not
+    // assume the CANN argument pool preserves alignas(64).
+    L1AicpuInvocationPrefix prefix{};
+    if (!ReadL1AicpuInvocationPrefix(arg, &prefix) || !IsValidL1AicpuInvocationPrefix(prefix)) {
         LOG_ERROR(
-            "Invalid L1 invocation ABI: version=%u size=%u reserved=%u", invocation.abi_version, invocation.struct_size,
-            invocation.reserved
+            "Invalid L1 invocation ABI: version=%u size=%u reserved=%u", prefix.abi_version, prefix.struct_size,
+            prefix.reserved
         );
         return -1;
     }
@@ -188,7 +188,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void
         LOG_ERROR("%s", "L1 AICPU execution is unavailable in this runtime");
         return -1;
     }
-    return ExecuteAicpuKernel(&invocation.kernel_args, &invocation, nullptr);
+    return ExecuteAicpuKernel(&prefix.kernel_args, L1AicpuInvocationOrchArgsBytes(arg), prefix.callable_id, nullptr);
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_execute_l1_hbg_platform(
@@ -199,7 +199,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_execute_l1_h
         PublishHbgPrelaunchCancel(invocation);
         return -1;
     }
-    return ExecuteAicpuKernel(kernel_args, nullptr, invocation);
+    return ExecuteAicpuKernel(kernel_args, nullptr, -1, invocation);
 }
 
 /**

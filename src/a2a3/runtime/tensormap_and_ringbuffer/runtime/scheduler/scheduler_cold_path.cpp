@@ -729,18 +729,23 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
     };
     ReadyCore ready[RUNTIME_MAX_WORKER];
     int32_t n_ready = 0;
-
     // Phase 1: collect every reported core in this slice and prefetch its
     // CoreExecState line for write, so the Phase 4 struct store hits a warm line.
     for (int32_t remaining = hi - lo; remaining > 0;) {
         for (int32_t i = lo; i < hi; i++) {
             if (core_serviced[i]) continue;
             Handshake *hank = &all_handshakes[i];
-            if (hank->aicore_done == 0) {
+            L1AicoreReport *l1_report = l1_aicore_reports_ == nullptr ? nullptr : &l1_aicore_reports_[i];
+            if (l1_report != nullptr) cache_invalidate_range(l1_report, sizeof(*l1_report));
+            const uint32_t aicore_done = l1_report == nullptr ? hank->aicore_done : l1_report->aicore_done;
+            if (aicore_done == 0) {
                 SPIN_WAIT_HINT();
                 continue;
             }
-            uint32_t physical_core_id = hank->physical_core_id;
+            const uint32_t physical_core_id =
+                l1_report == nullptr ? hank->physical_core_id : l1_report->physical_core_id;
+            const CoreType core_type =
+                l1_report == nullptr ? hank->core_type : static_cast<CoreType>(l1_report->core_type);
             const uint64_t reg_addr = physical_core_id < max_physical_cores_count ? regs[physical_core_id] : 0;
             if (aicore_register_mapping_invalid(physical_core_id, max_physical_cores_count, reg_addr)) {
                 LOG_ERROR(
@@ -754,7 +759,7 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
                 continue;
             }
             __builtin_prefetch(&core_exec_states_[i], 1, 3);
-            ready[n_ready++] = {i, physical_core_id, reg_addr, hank->core_type};
+            ready[n_ready++] = {i, physical_core_id, reg_addr, core_type};
             core_serviced[i] = true;
             remaining--;
         }
@@ -815,7 +820,6 @@ void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, 
         owned[own_n++] = aic_n + 2 * ci;      // AIV0
         owned[own_n++] = aic_n + 2 * ci + 1;  // AIV1
     }
-
     uint32_t max_physical_cores_count = platform_get_physical_cores_count();
     uint64_t *regs = reinterpret_cast<uint64_t *>(regs_);
     bool core_serviced[RUNTIME_MAX_WORKER] = {false};
@@ -832,18 +836,23 @@ void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, 
     };
     ReadyCore ready[RUNTIME_MAX_WORKER];
     int32_t n_ready = 0;
-
     // Phase 1: collect every reported owned core, prefetch its CoreExecState line.
     for (int32_t remaining = own_n; remaining > 0;) {
         for (int32_t k = 0; k < own_n; k++) {
             int32_t i = owned[k];
             if (core_serviced[i]) continue;
             Handshake *hank = &all_handshakes[i];
-            if (hank->aicore_done == 0) {
+            L1AicoreReport *l1_report = l1_aicore_reports_ == nullptr ? nullptr : &l1_aicore_reports_[i];
+            if (l1_report != nullptr) cache_invalidate_range(l1_report, sizeof(*l1_report));
+            const uint32_t aicore_done = l1_report == nullptr ? hank->aicore_done : l1_report->aicore_done;
+            if (aicore_done == 0) {
                 SPIN_WAIT_HINT();
                 continue;
             }
-            uint32_t physical_core_id = hank->physical_core_id;
+            const uint32_t physical_core_id =
+                l1_report == nullptr ? hank->physical_core_id : l1_report->physical_core_id;
+            const CoreType core_type =
+                l1_report == nullptr ? hank->core_type : static_cast<CoreType>(l1_report->core_type);
             const uint64_t reg_addr = physical_core_id < max_physical_cores_count ? regs[physical_core_id] : 0;
             if (aicore_register_mapping_invalid(physical_core_id, max_physical_cores_count, reg_addr)) {
                 LOG_ERROR(
@@ -857,12 +866,11 @@ void SchedulerContext::handshake_owned_clusters(Runtime *runtime, int32_t tidx, 
                 continue;
             }
             __builtin_prefetch(&core_exec_states_[i], 1, 3);
-            ready[n_ready++] = {i, physical_core_id, reg_addr, hank->core_type};
+            ready[n_ready++] = {i, physical_core_id, reg_addr, core_type};
             core_serviced[i] = true;
             remaining--;
         }
     }
-
     // Phase 2: publish every task pointer, then ONE barrier. The core reads task
     // only after its window opens (Phase 3), so a single barrier orders all task
     // stores before any window STR.
@@ -1096,6 +1104,7 @@ int32_t SchedulerContext::pre_handshake_init(
     aicpu_thread_num_ = aicpu_thread_num;
     sched_thread_num_ = sched_thread_num;
     regs_ = regs_base;
+    l1_aicore_reports_ = runtime->get_l1_aicore_reports();
 
 #if SIMPLER_DFX
     // l2_swimlane_aicpu_init promotes g_l2_swimlane_level from the shared-memory
@@ -1349,6 +1358,7 @@ void SchedulerContext::deinit() {
     }
 
     regs_ = 0;
+    l1_aicore_reports_ = nullptr;
     sched_ = nullptr;
     rt_ = nullptr;
     func_id_to_addr_ = nullptr;

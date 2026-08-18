@@ -81,6 +81,11 @@ struct DeviceBuf {
         if (ptr != nullptr) (void)aclrtFree(ptr);
     }
     aclError alloc(size_t bytes) { return aclrtMalloc(&ptr, bytes, ACL_MEM_MALLOC_HUGE_FIRST); }
+    void *release() {
+        void *result = ptr;
+        ptr = nullptr;
+        return result;
+    }
 };
 
 // Process-level cache of (inner-SO fingerprint, device_id) pairs we've already
@@ -109,12 +114,39 @@ int LoadAicpuOp::BootstrapDispatcher(
     const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
     rtStream_t stream, int device_id
 ) {
+    return BootstrapDispatcherImpl(
+        dispatcher_so_data, dispatcher_so_len, inner_so_data, inner_so_len, stream, device_id, true
+    );
+}
+
+int LoadAicpuOp::BootstrapDispatcherAsync(
+    const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+    rtStream_t stream, int device_id
+) {
+    return BootstrapDispatcherImpl(
+        dispatcher_so_data, dispatcher_so_len, inner_so_data, inner_so_len, stream, device_id, false
+    );
+}
+
+int LoadAicpuOp::BootstrapDispatcherImpl(
+    const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+    rtStream_t stream, int device_id, bool synchronize
+) {
     if (dispatcher_so_data == nullptr || dispatcher_so_len == 0) {
-        LOG_ERROR("BootstrapDispatcher: empty dispatcher SO bytes");
+        LOG_ERROR("BootstrapDispatcher%s: empty dispatcher SO bytes", synchronize ? "" : "Async");
         return -1;
     }
     if (inner_so_data == nullptr || inner_so_len == 0) {
-        LOG_ERROR("BootstrapDispatcher: empty inner SO bytes");
+        LOG_ERROR("BootstrapDispatcher%s: empty inner SO bytes", synchronize ? "" : "Async");
+        return -1;
+    }
+    if (stream == nullptr) {
+        LOG_ERROR("BootstrapDispatcher%s: caller stream is null", synchronize ? "" : "Async");
+        return -1;
+    }
+    if (!synchronize && (async_bootstrap_dispatcher_ != nullptr || async_bootstrap_inner_ != nullptr ||
+                         async_bootstrap_args_ != nullptr)) {
+        LOG_ERROR("BootstrapDispatcherAsync: bootstrap inputs are already retained");
         return -1;
     }
     device_id_ = device_id;
@@ -127,7 +159,7 @@ int LoadAicpuOp::BootstrapDispatcher(
     // → 507899 cascade). Suffixing device_id isolates each die's file.
     inner_so_basename_ = MakeInnerSoBasename(inner_fp_, device_id_);
 
-    {
+    if (synchronize) {
         std::lock_guard<std::mutex> lk(BootstrappedFpsMutex());
         if (BootstrappedFps().count({inner_fp_, device_id_}) > 0) {
             LOG_INFO(
@@ -215,13 +247,33 @@ int LoadAicpuOp::BootstrapDispatcher(
     rt_args.kernelNameAddrOffset = offsetof(Args, kernel_name);
     rt_args.soNameAddrOffset = offsetof(Args, so_name);
 
+    // The async path transfers ownership before calling the launch API. A
+    // synchronous launch error is normally all-or-nothing, but retaining the
+    // addresses even on error is the conservative choice: an explicit close
+    // after external quiescence can safely reclaim them, while an eager local
+    // free could race a partially accepted task.
+    if (!synchronize) {
+        async_bootstrap_dispatcher_ = dev_dispatcher.release();
+        async_bootstrap_inner_ = dev_inner.release();
+        async_bootstrap_args_ = dev_args.release();
+    }
+
     rtError_t rrc = rtAicpuKernelLaunchExWithArgs(
         rtKernelType_t::KERNEL_TYPE_AICPU_KFC, "AST_DYN_AICPU", 1, &rt_args, nullptr, stream, 0
     );
     if (rrc != RT_ERROR_NONE) {
-        LOG_ERROR("BootstrapDispatcher: rtAicpuKernelLaunchExWithArgs failed: %d", rrc);
+        LOG_ERROR("BootstrapDispatcher%s: rtAicpuKernelLaunchExWithArgs failed: %d", synchronize ? "" : "Async", rrc);
         return rrc;
     }
+    if (!synchronize) {
+        LOG_INFO(
+            "BootstrapDispatcherAsync: queued bundled dispatcher (%zu B) + inner SO (%zu B) on caller stream; "
+            "retained inputs until close; target=%s",
+            dispatcher_len, inner_len, inner_so_basename_.c_str()
+        );
+        return 0;
+    }
+
     rc = aclrtSynchronizeStream(stream);
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("BootstrapDispatcher: aclrtSynchronizeStream failed: %d", rc);
@@ -239,33 +291,59 @@ int LoadAicpuOp::BootstrapDispatcher(
 }
 
 int LoadAicpuOp::Finalize() {
-    int unload_rc = 0;
+    int first_error = 0;
     if (binary_handle_ != nullptr) {
-        if (binary_load_mode_ == BinaryLoadMode::AclData) {
+        const bool acl_owned =
+            binary_load_mode_ == BinaryLoadMode::AclFile || binary_load_mode_ == BinaryLoadMode::AclData;
+        if (acl_owned) {
             aclError rc = aclrtBinaryUnLoad(reinterpret_cast<aclrtBinHandle>(binary_handle_));
             if (rc != ACL_SUCCESS) {
                 LOG_WARN("aclrtBinaryUnLoad failed: %d", rc);
             }
-            unload_rc = static_cast<int>(rc);
+            first_error = static_cast<int>(rc);
         } else {
             rtError_t rc = rtsBinaryUnload(binary_handle_);
             if (rc != RT_ERROR_NONE) {
                 LOG_WARN("rtsBinaryUnload failed: %d", rc);
             }
-            unload_rc = static_cast<int>(rc);
+            first_error = static_cast<int>(rc);
         }
-        if (unload_rc != 0 && binary_load_mode_ == BinaryLoadMode::AclData) return unload_rc;
+        // Borrowed-device ACL handles must remain owned on unload failure so
+        // close can be retried before the host runtime DSO is released. The
+        // legacy L2 RTS path keeps its historical best-effort behavior because
+        // its enclosing teardown destroys the owned RTS context immediately.
+        if (first_error != 0 && acl_owned) return first_error;
         binary_handle_ = nullptr;
     }
     binary_load_mode_ = BinaryLoadMode::None;
     func_handles_.clear();
+
+    auto free_async_bootstrap = [&first_error](void *&ptr, const char *name) {
+        if (ptr == nullptr) return;
+        const aclError rc = aclrtFree(ptr);
+        if (rc == ACL_SUCCESS) {
+            ptr = nullptr;
+            return;
+        }
+        LOG_WARN("aclrtFree failed for retained async bootstrap %s buffer %p: %d", name, ptr, rc);
+        if (first_error == 0) first_error = static_cast<int>(rc);
+    };
+    free_async_bootstrap(async_bootstrap_args_, "args");
+    free_async_bootstrap(async_bootstrap_inner_, "inner SO");
+    free_async_bootstrap(async_bootstrap_dispatcher_, "dispatcher SO");
+    if (async_bootstrap_args_ != nullptr || async_bootstrap_inner_ != nullptr ||
+        async_bootstrap_dispatcher_ != nullptr) {
+        return first_error != 0 ? first_error : -1;
+    }
+
     inner_fp_ = 0;
     inner_so_basename_.clear();
+    kernel_symbols_.clear();
     if (!json_file_path_.empty()) {
         std::remove(json_file_path_.c_str());
         json_file_path_.clear();
     }
-    return unload_rc;
+    return first_error;
 }
 
 LoadAicpuOp::~LoadAicpuOp() { (void)Finalize(); }
@@ -317,18 +395,23 @@ bool LoadAicpuOp::GenerateAicpuOpJson(const std::string &json_path, const std::s
     return true;
 }
 
-int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
+int LoadAicpuOp::PrepareJsonDescriptor(const std::vector<std::string> &extra_symbols) {
     if (inner_fp_ == 0) {
-        LOG_ERROR("LoadAicpuOp::Init: BootstrapDispatcher must be called first");
+        LOG_ERROR("LoadAicpuOp: dispatcher bootstrap metadata is not initialized");
         return -1;
     }
 
     SetKernelSymbols(extra_symbols);
 
-    // Per-process JSON path. /tmp is always writable.
-    char json_name_buf[128];
+    // Make the descriptor unique per loader. A fingerprint-only per-process
+    // name races when two devices register the same runtime concurrently: the
+    // JSON bodies differ because their preinstall basenames include device_id.
+    // The pointer component also prevents an identical same-device loader from
+    // removing another loader's file between generate and load.
+    char json_name_buf[192];
     snprintf(
-        json_name_buf, sizeof(json_name_buf), "/tmp/simpler_inner_%016lx_%d.json", inner_fp_, static_cast<int>(getpid())
+        json_name_buf, sizeof(json_name_buf), "/tmp/simpler_inner_%016lx_%d_%d_%p.json", inner_fp_, device_id_,
+        static_cast<int>(getpid()), static_cast<void *>(this)
     );
     json_file_path_ = json_name_buf;
 
@@ -336,6 +419,16 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
         json_file_path_.clear();
         return -1;
     }
+    return 0;
+}
+
+int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
+    if (binary_handle_ != nullptr) {
+        LOG_ERROR("LoadAicpuOp::Init: loader is already initialized");
+        return -1;
+    }
+    int prepare_rc = PrepareJsonDescriptor(extra_symbols);
+    if (prepare_rc != 0) return prepare_rc;
 
     // RAII cleanups: any non-zero return path below unwinds via these guards.
     // .release() flips them off once the corresponding state becomes part of
@@ -403,6 +496,88 @@ int LoadAicpuOp::Init(const std::vector<std::string> &extra_symbols) {
     binary_guard.release();
     json_guard.release();
     binary_load_mode_ = BinaryLoadMode::RtsFile;
+    return 0;
+}
+
+int LoadAicpuOp::InitPreinstalledAcl(const std::vector<std::string> &extra_symbols) {
+    if (binary_handle_ != nullptr) {
+        LOG_ERROR("LoadAicpuOp::InitPreinstalledAcl: loader is already initialized");
+        return -1;
+    }
+    if (async_bootstrap_dispatcher_ == nullptr || async_bootstrap_inner_ == nullptr ||
+        async_bootstrap_args_ == nullptr) {
+        LOG_ERROR("LoadAicpuOp::InitPreinstalledAcl: async bootstrap was not enqueued");
+        return -1;
+    }
+    int rc = PrepareJsonDescriptor(extra_symbols);
+    if (rc != 0) return rc;
+
+    aclrtBinaryLoadOption option = {};
+    option.type = ACL_RT_BINARY_LOAD_OPT_CPU_KERNEL_MODE;
+    option.value.cpuKernelMode = 0;
+    aclrtBinaryLoadOptions load_options = {};
+    load_options.options = &option;
+    load_options.numOpt = 1;
+
+    aclrtBinHandle binary_handle = nullptr;
+    LOG_INFO(
+        "LoadAicpuOp::InitPreinstalledAcl: JSON=%s inner_basename=%s", json_file_path_.c_str(),
+        inner_so_basename_.c_str()
+    );
+    aclError acl_rc = aclrtBinaryLoadFromFile(json_file_path_.c_str(), &load_options, &binary_handle);
+    if (binary_handle != nullptr) {
+        // Adopt the handle immediately. If any later resolution step fails,
+        // the caller stream may still be consuming async bootstrap inputs, so
+        // cleanup must be deferred to externally-quiescent Finalize().
+        binary_handle_ = reinterpret_cast<void *>(binary_handle);
+        binary_load_mode_ = BinaryLoadMode::AclFile;
+    }
+    if (acl_rc != ACL_SUCCESS) {
+        LOG_ERROR("aclrtBinaryLoadFromFile failed for %s: %d", json_file_path_.c_str(), acl_rc);
+        return static_cast<int>(acl_rc);
+    }
+    if (binary_handle_ == nullptr) {
+        LOG_ERROR("aclrtBinaryLoadFromFile succeeded with a null binary handle");
+        return -1;
+    }
+
+    try {
+        for (const std::string &name : kernel_symbols_) {
+            const std::string op_type = MakeUniqueOpType(name.c_str(), inner_fp_);
+            aclrtFuncHandle func_handle = nullptr;
+            acl_rc = aclrtBinaryGetFunction(binary_handle, op_type.c_str(), &func_handle);
+            if (acl_rc != ACL_SUCCESS) {
+                // Some CANN revisions parse the mode-0 descriptor but require
+                // an explicit public registration before returning a handle.
+                // RegisterCpuFunc is still metadata-only for mode 0: it stores
+                // the SO/function literal names and does not read the SO file.
+                LOG_INFO(
+                    "aclrtBinaryGetFunction did not resolve %s (rc=%d); trying aclrtRegisterCpuFunc", op_type.c_str(),
+                    acl_rc
+                );
+                acl_rc = aclrtRegisterCpuFunc(binary_handle, name.c_str(), op_type.c_str(), &func_handle);
+            }
+            if (acl_rc != ACL_SUCCESS || func_handle == nullptr) {
+                LOG_ERROR(
+                    "failed to resolve ACL function for %s (opType=%s): %d", name.c_str(), op_type.c_str(), acl_rc
+                );
+                return acl_rc != ACL_SUCCESS ? static_cast<int>(acl_rc) : -1;
+            }
+            func_handles_.emplace(name, reinterpret_cast<rtFuncHandle>(func_handle));
+            LOG_INFO(
+                "LoadAicpuOp: resolved preinstalled ACL handle for %s (opType=%s): %p", name.c_str(), op_type.c_str(),
+                func_handle
+            );
+        }
+    } catch (...) {
+        LOG_ERROR("LoadAicpuOp::InitPreinstalledAcl failed while recording function handles");
+        return -1;
+    }
+
+    LOG_INFO(
+        "LoadAicpuOp: mode-0 metadata ready while async bootstrap remains ordered on the caller stream, handle=%p",
+        binary_handle_
+    );
     return 0;
 }
 

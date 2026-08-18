@@ -35,6 +35,7 @@
 // Forward declarations — avoid pulling in full headers for pointer/reference params.
 class Runtime;
 struct Handshake;
+struct L1AicoreReport;
 struct PTO2Runtime;
 
 // SPSC ring carrying completed-but-unresolved task slots from one scheduler (S)
@@ -246,6 +247,11 @@ private:
     // per-core volatile GM load from the 64B-aligned Handshake struct. Filled by
     // each handshake thread for its own [lo,hi) slice during the parallel sweep.
     uint8_t core_type_compact_[RUNTIME_MAX_WORKER]{};
+
+    // Non-null only for borrowed L1. Each entry is exclusively written by one
+    // AICore and only read by AICPU, so cache invalidation cannot overwrite an
+    // AICPU-owned control/task field.
+    L1AicoreReport *l1_aicore_reports_{nullptr};
 
     // Set by any thread whose slice hits an invalid physical_core_id in
     // handshake_partition; checked by the leader in post_handshake_init.

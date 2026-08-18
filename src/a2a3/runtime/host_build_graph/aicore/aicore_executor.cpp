@@ -70,17 +70,27 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ PTO2Di
  */
 __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type) {
     __gm__ Handshake *my_hank = (__gm__ Handshake *)(&runtime->workers[block_idx]);
+    __gm__ L1AicoreReport *l1_reports = reinterpret_cast<__gm__ L1AicoreReport *>(runtime->l1_aicore_reports_addr_);
+    __gm__ L1AicoreReport *my_l1_report = l1_reports == nullptr ? nullptr : &l1_reports[block_idx];
 
     // Phase 1: report physical core ID + core type and signal done in one write,
     // with no wait for the AICPU — both fields are self-known. The AICPU opens
     // this core's register window only after it observes aicore_done, so a single
     // report suffices. The host clears aicore_done before this kernel launches,
     // so the value the AICPU reads is this run's report, never a stale prior one.
-    my_hank->physical_core_id = get_physical_core_id();
-    my_hank->core_type = core_type;
-    OUT_OF_ORDER_STORE_BARRIER();
-    my_hank->aicore_done = block_idx + 1;  // Signal ready (use block_idx + 1 to avoid 0)
-    dcci(my_hank, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    if (my_l1_report != nullptr) {
+        my_l1_report->physical_core_id = get_physical_core_id();
+        my_l1_report->core_type = static_cast<uint32_t>(core_type);
+        OUT_OF_ORDER_STORE_BARRIER();
+        my_l1_report->aicore_done = block_idx + 1;
+        dcci(my_l1_report, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    } else {
+        my_hank->physical_core_id = get_physical_core_id();
+        my_hank->core_type = core_type;
+        OUT_OF_ORDER_STORE_BARRIER();
+        my_hank->aicore_done = block_idx + 1;  // Signal ready (use block_idx + 1 to avoid 0)
+        dcci(my_hank, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    }
 
     // Phase 2: Wait for the AICPU to open our register window. A kernel launch
     // resets DATA_MAIN_BASE to 0 (verified on a2a3 silicon); the AICPU writes
@@ -103,7 +113,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 return;
             }
             dcci(my_hank, SINGLE_CACHE_LINE);
-            if (my_hank->aicpu_ready == AICORE_PRE_WINDOW_CANCEL) {
+            const uint32_t control = my_hank->aicpu_ready;
+            if (control == AICORE_PRE_WINDOW_CANCEL || control == AICORE_PRE_WINDOW_HOST_CANCEL) {
                 // The AICPU observed this launch's report but could not safely
                 // resolve a register window for its physical id. Do not touch
                 // any SPR. The full AICore launch completion is the collective

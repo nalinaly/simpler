@@ -29,6 +29,7 @@ public:
             .record_event = record_event,
             .launch_aicpu = launch_aicpu,
             .launch_aicore = launch_aicore,
+            .cancel_waiting_aicore = cancel_waiting_aicore,
         };
     }
 
@@ -52,6 +53,10 @@ public:
         return static_cast<FakeLaunchSequence *>(context)->append("aicore", stream, nullptr);
     }
 
+    static int cancel_waiting_aicore(void *context, void *stream) noexcept {
+        return static_cast<FakeLaunchSequence *>(context)->append("cancel", stream, nullptr);
+    }
+
     int append(const char *operation, void *stream, void *event) noexcept {
         try {
             calls.push_back(
@@ -61,12 +66,15 @@ public:
         } catch (...) {
             return -999;
         }
-        return calls.size() == fail_at ? failure : 0;
+        if (calls.size() == fail_at) return failure;
+        return calls.size() == cleanup_fail_at ? cleanup_failure : 0;
     }
 
     std::vector<std::string> calls;
     size_t fail_at{0};
     int failure{-77};
+    size_t cleanup_fail_at{0};
+    int cleanup_failure{-88};
 };
 
 L1LaunchSequenceHandles handles(bool wait_for_serial_tail, bool wait_for_prepare_tail = true) {
@@ -87,8 +95,8 @@ TEST(L1LaunchSequence, FirstInvocationHasExactSingleOperatorForkJoinOrder) {
     ASSERT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(false)), 0);
     EXPECT_EQ(
         fake.calls, (std::vector<std::string>{
-                        "wait:s1:e3", "memset:s1:e0", "record:s1:e4", "aicpu:s1:e0", "wait:s2:e4", "aicore:s2:e0",
-                        "record:s2:e5", "wait:s1:e5", "record:s1:e6"
+                        "wait:s1:e3", "memset:s1:e0", "record:s1:e4", "wait:s2:e4", "aicore:s2:e0", "record:s2:e5",
+                        "aicpu:s1:e0", "wait:s1:e5", "record:s1:e6"
                     })
     );
 }
@@ -98,14 +106,59 @@ TEST(L1LaunchSequence, SubsequentInvocationWaitsForPriorSerialTailBeforeMutation
     ASSERT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), 0);
     EXPECT_EQ(
         fake.calls, (std::vector<std::string>{
-                        "wait:s1:e6", "memset:s1:e0", "record:s1:e4", "aicpu:s1:e0", "wait:s2:e4", "aicore:s2:e0",
-                        "record:s2:e5", "wait:s1:e5", "record:s1:e6"
+                        "wait:s1:e6", "memset:s1:e0", "record:s1:e4", "wait:s2:e4", "aicore:s2:e0", "record:s2:e5",
+                        "aicpu:s1:e0", "wait:s1:e5", "record:s1:e6"
                     })
     );
 }
 
-TEST(L1LaunchSequence, StopsAtEveryFailedEnqueuePrefix) {
-    for (size_t failure_index = 1; failure_index <= 9; ++failure_index) {
+TEST(L1LaunchSequence, StopsBeforeHiddenAicoreBecomesResident) {
+    for (size_t failure_index = 1; failure_index <= 5; ++failure_index) {
+        FakeLaunchSequence fake;
+        fake.fail_at = failure_index;
+        EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), fake.failure);
+        EXPECT_EQ(fake.calls.size(), failure_index);
+    }
+}
+
+TEST(L1LaunchSequence, CompletionRecordFailureCancelsAndRetriesTheJoin) {
+    FakeLaunchSequence fake;
+    fake.fail_at = 6;
+
+    EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), fake.failure);
+    EXPECT_EQ(
+        fake.calls, (std::vector<std::string>{
+                        "wait:s1:e6", "memset:s1:e0", "record:s1:e4", "wait:s2:e4", "aicore:s2:e0", "record:s2:e5",
+                        "cancel:s1:e0", "record:s2:e5", "wait:s1:e5", "record:s1:e6"
+                    })
+    );
+}
+
+TEST(L1LaunchSequence, AicpuLaunchFailureCancelsAndJoinsHiddenAicore) {
+    FakeLaunchSequence fake;
+    fake.fail_at = 7;
+
+    EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), fake.failure);
+    EXPECT_EQ(
+        fake.calls, (std::vector<std::string>{
+                        "wait:s1:e6", "memset:s1:e0", "record:s1:e4", "wait:s2:e4", "aicore:s2:e0", "record:s2:e5",
+                        "aicpu:s1:e0", "cancel:s1:e0", "wait:s1:e5", "record:s1:e6"
+                    })
+    );
+}
+
+TEST(L1LaunchSequence, ReportsCleanupFailureWhenHostCancelCannotBeEnqueued) {
+    FakeLaunchSequence fake;
+    fake.fail_at = 7;
+    fake.cleanup_fail_at = 8;
+
+    EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), fake.cleanup_failure);
+    EXPECT_EQ(fake.calls.back(), "cancel:s1:e0");
+    EXPECT_EQ(fake.calls.size(), 8U);
+}
+
+TEST(L1LaunchSequence, StopsAtPostLaunchJoinAndTailFailures) {
+    for (size_t failure_index : {8U, 9U}) {
         FakeLaunchSequence fake;
         fake.fail_at = failure_index;
         EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), handles(true, false)), fake.failure);
@@ -130,6 +183,14 @@ TEST(L1LaunchSequence, RejectsMissingHandlesBeforeEnqueue) {
     auto invalid = handles(false);
     invalid.hidden_stream = nullptr;
     EXPECT_EQ(enqueue_l1_launch_sequence(fake.ops(), invalid), PTO_RUNTIME_ERR_INVALID_ARGUMENT);
+    EXPECT_TRUE(fake.calls.empty());
+}
+
+TEST(L1LaunchSequence, RejectsMissingHostCancelBeforeEnqueue) {
+    FakeLaunchSequence fake;
+    auto invalid = fake.ops();
+    invalid.cancel_waiting_aicore = nullptr;
+    EXPECT_EQ(enqueue_l1_launch_sequence(invalid, handles(false)), PTO_RUNTIME_ERR_INVALID_ARGUMENT);
     EXPECT_TRUE(fake.calls.empty());
 }
 

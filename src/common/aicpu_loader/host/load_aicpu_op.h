@@ -43,12 +43,17 @@
  *
  * L1 borrowed-device architecture:
  *
- *   1. InitFromData loads the AICPU runtime SO directly from its host byte
- *      image with cpuKernelMode=2 and registers every entry with
- *      aclrtRegisterCpuFunc. No dispatcher task, device-side file, JSON, or
- *      stream synchronization participates in this path.
+ *   1. BootstrapDispatcherAsync enqueues the same dispatcher bootstrap on the
+ *      caller stream without synchronizing it. The dispatcher/inner-SO/args
+ *      device buffers stay owned by this loader until an externally-quiescent
+ *      explicit close.
  *
- *   2. LaunchWithHostArgs enqueues a runtime-owned argument snapshot on the
+ *   2. InitPreinstalledAcl parses the mode-0 JSON immediately on the host and
+ *      resolves public ACL function handles. Mode 0 does not read the device
+ *      SO; the subsequent init/register/run tasks execute after bootstrap by
+ *      caller-stream FIFO and therefore enter the standard AICPU scheduler.
+ *
+ *   3. LaunchWithHostArgs enqueues a runtime-owned argument snapshot on the
  *      caller-provided stream through aclrtLaunchKernelWithHostArgs.
  */
 
@@ -118,6 +123,21 @@ public:
     );
 
     /**
+     * @brief Enqueue dispatcher bootstrap without an internal stream sync.
+     *
+     * This is the L1 prepare variant. Device inputs referenced by the queued
+     * dispatcher task are retained by this object until Finalize(); callers
+     * must externally quiesce the stream/graph before close. The process-wide
+     * completed-bootstrap cache is deliberately not consulted or populated:
+     * without synchronizing, the host cannot claim that a previous enqueue has
+     * completed, and L1 v1 already permits only one context per device.
+     */
+    int BootstrapDispatcherAsync(
+        const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+        rtStream_t stream, int device_id
+    );
+
+    /**
      * @brief JSON-register the runtime SO and resolve its entry handles.
      *
      * @param extra_symbols  Runtime-specific AICPU entry symbols beyond the base
@@ -128,6 +148,16 @@ public:
      *                       loader free of any runtime-specific symbol knowledge.
      */
     int Init(const std::vector<std::string> &extra_symbols);
+
+    /**
+     * @brief Register the asynchronously preinstalled runtime SO through ACL.
+     *
+     * The mode-0 load consumes only the host JSON descriptor. Resolving a
+     * function stores its SO/function literal names on the device but does not
+     * read the target SO. Device-side loading therefore remains ordered after
+     * BootstrapDispatcherAsync by the caller stream, without a host sync.
+     */
+    int InitPreinstalledAcl(const std::vector<std::string> &extra_symbols);
 
     /**
      * @brief Load the runtime SO from host bytes and register its AICPU entries.
@@ -142,10 +172,11 @@ public:
     /**
      * @brief Release binary handle, function handles, and temporary JSON.
      *
-     * A data-loaded borrowed-device binary remains owned when unload fails so
-     * explicit L1 close can retry. A file-loaded owned-device binary clears
-     * its host handle even when RTS reports an unload failure because the L2
-     * teardown immediately destroys that RTS context.
+     * An ACL-loaded borrowed-device binary (mode-0 file descriptor or direct
+     * host bytes) remains owned when unload fails so explicit L1 close can
+     * retry. A legacy RTS-file owned-device binary clears its host handle even
+     * when RTS reports an unload failure because the L2 teardown immediately
+     * destroys that RTS context.
      */
     int Finalize();
 
@@ -203,6 +234,7 @@ private:
     enum class BinaryLoadMode : uint8_t {
         None,
         RtsFile,
+        AclFile,
         AclData,
     };
 
@@ -217,7 +249,21 @@ private:
     // {RunName, InitName} plus the runtime-reported extras passed to Init().
     std::vector<std::string> kernel_symbols_;
 
+    // L1 async bootstrap inputs. The queued dispatcher dereferences all three
+    // addresses after BootstrapDispatcherAsync returns, so stack/local RAII
+    // ownership would be a use-after-free. Each non-null pointer is released
+    // only by an externally-quiescent Finalize(), and a failed aclrtFree keeps
+    // that exact pointer for an explicit retry.
+    void *async_bootstrap_dispatcher_ = nullptr;
+    void *async_bootstrap_inner_ = nullptr;
+    void *async_bootstrap_args_ = nullptr;
+
     bool GenerateAicpuOpJson(const std::string &json_path, const std::string &kernel_so);
+    int PrepareJsonDescriptor(const std::vector<std::string> &extra_symbols);
+    int BootstrapDispatcherImpl(
+        const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+        rtStream_t stream, int device_id, bool synchronize
+    );
     void SetKernelSymbols(const std::vector<std::string> &extra_symbols);
     int AicpuKernelLaunch(rtFuncHandle func_handle, rtStream_t stream, void *args, size_t args_size, int aicpu_num);
 };

@@ -154,6 +154,14 @@ struct AicpuExecutor {
     // before scheduler init; consumed by the (*p_func)(orch_args_cached_) below.
     L2TaskArgs orch_args_cached_;
 
+    // L1 host args arrive as a runtime-owned byte image whose base alignment
+    // is weaker than ChipStorageTaskArgs/Tensor's alignas(64).  Only the one
+    // orchestrator worker materializes it here; scheduler workers use the raw
+    // pointer solely as an L1-mode marker.  One process-wide snapshot is safe
+    // under the L1 v1 no-concurrent-invocations contract and avoids a ~34 KiB
+    // stack frame in every launched AICPU worker.
+    ChipStorageTaskArgs l1_orch_args_snapshot_{};
+
     // Per-callable_id table. Single orch thread today, so first-write/read
     // race is not possible; if multiple orch threads are ever introduced,
     // guard the in_use=false→true transition with a mutex.
@@ -172,10 +180,8 @@ struct AicpuExecutor {
         int32_t callable_id, uint64_t dev_orch_so_addr, uint64_t dev_orch_so_size, const char *entry_symbol,
         const char *config_symbol, int32_t thread_idx
     );
-    int32_t run(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id);
-    void arrive_and_finalize_run(
-        Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id
-    );
+    int32_t run(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id);
+    void arrive_and_finalize_run(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id);
     void deinit(Runtime *runtime);
 
     ~AicpuExecutor() {
@@ -480,8 +486,7 @@ int32_t AicpuExecutor::load_orch_so(
 /**
  * Shutdown AICore - Send exit signal via registers to all AICore kernels
  */
-int32_t
-AicpuExecutor::run(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id) {
+int32_t AicpuExecutor::run(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id) {
     int32_t affinity_exec_idx = platform_aicpu_affinity_thread_idx();
     int32_t thread_idx = (affinity_exec_idx >= 0) ? affinity_exec_idx : (thread_idx_++);
     if (thread_idx < 0 || thread_idx >= aicpu_thread_num_ || thread_idx >= MAX_AICPU_THREADS) {
@@ -590,8 +595,24 @@ AicpuExecutor::run(Runtime *runtime, const ChipStorageTaskArgs *invocation_args,
 
                 // Build the entry-arg once per run; both the config call below and
                 // the orchestration entry (consumed at orch_args_cached_) use it.
-                const ChipStorageTaskArgs &orch_args =
-                    invocation_args != nullptr ? *invocation_args : runtime->get_orch_args();
+                const ChipStorageTaskArgs *orch_args_ptr = nullptr;
+                if (invocation_args != nullptr) {
+                    std::memcpy(&l1_orch_args_snapshot_, invocation_args, sizeof(l1_orch_args_snapshot_));
+                    if (!HasValidL1OrchArgCounts(l1_orch_args_snapshot_)) {
+                        LOG_ERROR(
+                            "Thread %d: invalid L1 arg counts tensors=%d scalars=%d", thread_idx,
+                            l1_orch_args_snapshot_.tensor_count_, l1_orch_args_snapshot_.scalar_count_
+                        );
+                        run_rc = -1;
+                        latch_run_error(run_rc);
+                        runtime_init_ready_.store(true, std::memory_order_release);
+                        goto run_epilogue;
+                    }
+                    orch_args_ptr = &l1_orch_args_snapshot_;
+                } else {
+                    orch_args_ptr = &runtime->get_orch_args();
+                }
+                const ChipStorageTaskArgs &orch_args = *orch_args_ptr;
                 orch_args_cached_.create_from_chip_args(orch_args);
 
                 // Validate arg count on every run against the registered SO.
@@ -946,7 +967,7 @@ run_epilogue:
 }
 
 void AicpuExecutor::arrive_and_finalize_run(
-    Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id
+    Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id
 ) {
     completion_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
         // Destroy PTO2 runtime. sm_handle / rt are recreated every run so we
@@ -1110,8 +1131,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_register_
  * @param runtime Pointer to Runtime structure
  * @return 0 on success, non-zero on error
  */
-static int32_t
-aicpu_execute_impl(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id) {
+static int32_t aicpu_execute_impl(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id) {
     if (runtime == nullptr) {
         LOG_ERROR("%s", "Invalid argument: null Runtime pointer");
         return -1;
@@ -1189,8 +1209,7 @@ aicpu_execute_impl(Runtime *runtime, const ChipStorageTaskArgs *invocation_args,
 
 extern "C" int32_t aicpu_execute(Runtime *runtime) { return aicpu_execute_impl(runtime, nullptr, -1); }
 
-extern "C" int32_t
-aicpu_execute_l1(Runtime *runtime, const ChipStorageTaskArgs *invocation_args, int32_t invocation_callable_id) {
+extern "C" int32_t aicpu_execute_l1(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id) {
     if (invocation_args == nullptr || invocation_callable_id < 0 ||
         invocation_callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR("aicpu_execute_l1: invalid invocation args or callable id %d", invocation_callable_id);

@@ -11,14 +11,24 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+
 #include "aicore_handshake_protocol.h"
 #include "hbg_l1_launch_control.h"
+#include "l1_aicore_report.h"
 
 TEST(AicoreHandshakeProtocol, KeepsSuccessAndErrorOnlyControlValuesDistinct) {
     EXPECT_EQ(AICORE_PRE_WINDOW_WAIT, 0U);
     EXPECT_EQ(AICORE_PRE_WINDOW_LEGACY_PROCEED, 1U);
     EXPECT_EQ(AICORE_PRE_WINDOW_CANCEL, 2U);
+    EXPECT_EQ(AICORE_PRE_WINDOW_HOST_CANCEL, UINT32_MAX);
     EXPECT_NE(AICORE_PRE_WINDOW_CANCEL, AICORE_PRE_WINDOW_LEGACY_PROCEED);
+    EXPECT_TRUE(aicore_pre_window_cancelled(AICORE_PRE_WINDOW_CANCEL));
+    EXPECT_TRUE(aicore_pre_window_cancelled(AICORE_PRE_WINDOW_HOST_CANCEL));
+    EXPECT_FALSE(aicore_pre_window_cancelled(AICORE_PRE_WINDOW_WAIT));
+    EXPECT_FALSE(aicore_pre_window_cancelled(AICORE_PRE_WINDOW_LEGACY_PROCEED));
     EXPECT_EQ(AICORE_PRE_WINDOW_CANCEL_POLL_MASK + 1U, AICORE_PRE_WINDOW_CANCEL_POLL_INTERVAL);
 }
 
@@ -51,4 +61,31 @@ TEST(AicoreHandshakeProtocol, RejectsOutOfRangeRegisterIndicesBeforeLookup) {
     EXPECT_FALSE(aicore_register_index_valid(register_address_count, register_address_count));
     EXPECT_FALSE(aicore_register_index_valid(UINT32_MAX, register_address_count));
     EXPECT_FALSE(aicore_register_index_valid(0, 0));
+}
+
+TEST(L1AicoreReport, GivesEveryCoreAnExclusiveCacheLine) {
+    alignas(64) std::array<L1AicoreReport, 4> reports{};
+
+    EXPECT_EQ(sizeof(L1AicoreReport), 64U);
+    EXPECT_EQ(alignof(L1AicoreReport), 64U);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(reports.data()) % 64U, 0U);
+    for (size_t i = 1; i < reports.size(); ++i) {
+        const auto current = reinterpret_cast<uintptr_t>(&reports[i]);
+        const auto previous = reinterpret_cast<uintptr_t>(&reports[i - 1]);
+        EXPECT_EQ(current - previous, 64U);
+        EXPECT_NE(current / 64U, previous / 64U);
+    }
+}
+
+TEST(L1AicoreReport, KeepsAicoreOwnedFieldsInsideTheDedicatedLine) {
+    L1AicoreReport report{};
+    report.aicore_done = 7;
+    report.physical_core_id = 19;
+    report.core_type = 1;
+
+    EXPECT_EQ(report.aicore_done, 7U);
+    EXPECT_EQ(report.physical_core_id, 19U);
+    EXPECT_EQ(report.core_type, 1U);
+    EXPECT_EQ(offsetof(L1AicoreReport, aicore_done), 0U);
+    EXPECT_LT(offsetof(L1AicoreReport, core_type) + sizeof(report.core_type), sizeof(report));
 }

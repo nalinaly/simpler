@@ -69,6 +69,7 @@
 #include "host/args_dump_collector.h"
 #include "hbg_callable_registry.h"
 #include "hbg_execution_slot.h"
+#include "l1_aicore_report.h"
 #include "l1_execution_state.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
@@ -1047,6 +1048,10 @@ protected:
     CallConfig l1_config_{};
     std::unique_ptr<Runtime> l1_runtime_;
     KernelArgsHelper l1_kernel_args_;
+    // One AICore-owned, AICPU-read-only cache line per L1 block. Kept outside
+    // Runtime so L2/L3 retain their historical Handshake ABI and cache path.
+    L1AicoreReport *l1_aicore_reports_{nullptr};
+    size_t l1_aicore_report_bytes_{0};
     std::unordered_set<int32_t> l1_prepared_callable_ids_;
     bool l1_aicpu_binary_loaded_{false};
     bool l1_aicpu_init_enqueued_{false};

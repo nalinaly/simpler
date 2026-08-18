@@ -39,6 +39,7 @@ Runtime::Runtime() {
     aicpu_allowed_cpu_count = 0;
     aicpu_launch_count = 0;
     host_total_tasks = 0;
+    l1_aicore_reports_addr_ = 0;
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;

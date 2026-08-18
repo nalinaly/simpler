@@ -242,6 +242,15 @@ protected:
 
 }  // namespace
 
+TEST(TrbRuntimeL1AicoreReport, DefaultsToLegacyProtocolUntilL1PrepareBindsReports) {
+    Runtime runtime;
+    EXPECT_EQ(runtime.get_l1_aicore_reports(), nullptr);
+
+    alignas(64) L1AicoreReport reports[2]{};
+    runtime.set_l1_aicore_reports(reports);
+    EXPECT_EQ(runtime.get_l1_aicore_reports(), reports);
+}
+
 TEST_F(TrbRuntimeTempBufferTest, SuccessfulValidateCopiesOnlyOutputTensor) {
     fake_.reset();
     Runtime runtime = make_runtime();

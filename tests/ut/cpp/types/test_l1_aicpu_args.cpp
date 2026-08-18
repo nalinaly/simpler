@@ -11,7 +11,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 
 #include "l1_aicpu_args.h"
 
@@ -58,6 +61,65 @@ TEST(L1AicpuInvocationArgs, RejectsEveryHeaderMismatch) {
 
     invocation.reserved = 1;
     EXPECT_FALSE(IsValidL1AicpuInvocation(invocation));
+}
+
+TEST(L1AicpuInvocationArgs, ReadsPrefixAndPayloadFromUnderAlignedRuntimeBytes) {
+    KernelArgs kernel_args;
+    kernel_args.runtime_args = reinterpret_cast<Runtime *>(static_cast<uintptr_t>(0x12340000));
+    kernel_args.regs = 0x22340000;
+
+    ChipStorageTaskArgs orch_args;
+    orch_args.tensor_count_ = 0;
+    orch_args.scalar_count_ = 2;
+    orch_args.scalars_[0] = 17;
+    orch_args.scalars_[1] = 29;
+    const L1AicpuInvocationArgs invocation = MakeL1AicpuInvocationArgs(kernel_args, 7, orch_args);
+
+    alignas(64) std::array<uint8_t, sizeof(L1AicpuInvocationArgs) + 8> runtime_storage{};
+    void *under_aligned = runtime_storage.data() + 8;
+    ASSERT_NE(reinterpret_cast<uintptr_t>(under_aligned) % alignof(L1AicpuInvocationArgs), 0u);
+    std::memcpy(under_aligned, &invocation, sizeof(invocation));
+
+    L1AicpuInvocationPrefix prefix{};
+    ASSERT_TRUE(ReadL1AicpuInvocationPrefix(under_aligned, &prefix));
+    EXPECT_TRUE(IsValidL1AicpuInvocationPrefix(prefix));
+    EXPECT_EQ(prefix.callable_id, 7);
+    EXPECT_EQ(prefix.kernel_args.runtime_args, reinterpret_cast<Runtime *>(static_cast<uintptr_t>(0x12340000)));
+    EXPECT_EQ(prefix.kernel_args.regs, 0x22340000u);
+
+    ChipStorageTaskArgs aligned_snapshot{};
+    const void *raw_orch_args = L1AicpuInvocationOrchArgsBytes(under_aligned);
+    ASSERT_NE(raw_orch_args, nullptr);
+    EXPECT_EQ(
+        raw_orch_args, static_cast<const void *>(
+                           static_cast<const uint8_t *>(under_aligned) + offsetof(L1AicpuInvocationArgs, orch_args)
+                       )
+    );
+    std::memcpy(&aligned_snapshot, raw_orch_args, sizeof(aligned_snapshot));
+    EXPECT_TRUE(HasValidL1OrchArgCounts(aligned_snapshot));
+    EXPECT_EQ(aligned_snapshot.scalar_count(), 2);
+    EXPECT_EQ(aligned_snapshot.scalar(0), 17u);
+    EXPECT_EQ(aligned_snapshot.scalar(1), 29u);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(&aligned_snapshot) % alignof(ChipStorageTaskArgs), 0u);
+}
+
+TEST(L1AicpuInvocationArgs, RejectsInvalidSnapshotCountsAndNullRawPointers) {
+    L1AicpuInvocationPrefix prefix{};
+    EXPECT_FALSE(ReadL1AicpuInvocationPrefix(nullptr, &prefix));
+    EXPECT_FALSE(ReadL1AicpuInvocationPrefix(&prefix, nullptr));
+    EXPECT_EQ(L1AicpuInvocationOrchArgsBytes(nullptr), nullptr);
+
+    ChipStorageTaskArgs args{};
+    EXPECT_TRUE(HasValidL1OrchArgCounts(args));
+    args.tensor_count_ = -1;
+    EXPECT_FALSE(HasValidL1OrchArgCounts(args));
+    args.tensor_count_ = CHIP_MAX_TENSOR_ARGS + 1;
+    EXPECT_FALSE(HasValidL1OrchArgCounts(args));
+    args.tensor_count_ = 0;
+    args.scalar_count_ = -1;
+    EXPECT_FALSE(HasValidL1OrchArgCounts(args));
+    args.scalar_count_ = CHIP_MAX_SCALAR_ARGS + 1;
+    EXPECT_FALSE(HasValidL1OrchArgCounts(args));
 }
 
 TEST(L1RegisterCallableArgs, VersionedCallableLocalKernelSnapshot) {

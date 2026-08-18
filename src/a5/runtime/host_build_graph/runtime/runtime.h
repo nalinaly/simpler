@@ -41,6 +41,7 @@
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "aicore_handshake_protocol.h"
+#include "l1_aicore_report.h"
 #include "hbg_l1_launch_control.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
@@ -189,6 +190,9 @@ public:
     // the boot thread reads this instead of counting SM ring heads.
     int32_t host_total_tasks;
 
+    // L1-only AICore-owned startup reports. Null preserves the L2 protocol.
+    uint64_t l1_aicore_reports_addr_;
+
 private:
     // Kernel binary tracking for cleanup
     int registered_kernel_func_ids_[RUNTIME_MAX_FUNC_ID];
@@ -247,6 +251,12 @@ public:
     int get_aicpu_thread_num() const { return aicpu_thread_num; }
     void set_aicpu_thread_num(int n) { aicpu_thread_num = n; }
     Handshake *get_workers() { return workers; }
+    L1AicoreReport *get_l1_aicore_reports() const {
+        return reinterpret_cast<L1AicoreReport *>(static_cast<uintptr_t>(l1_aicore_reports_addr_));
+    }
+    void set_l1_aicore_reports(L1AicoreReport *reports) {
+        l1_aicore_reports_addr_ = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reports));
+    }
     int32_t get_aicpu_allowed_cpu_count() const { return aicpu_allowed_cpu_count; }
     void set_aicpu_allowed_cpu_count(int32_t n) { aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return aicpu_launch_count; }
