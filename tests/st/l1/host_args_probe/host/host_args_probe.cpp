@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "host_args_probe_abi.h"
+#include "host_args_probe_loader_contract.h"
 
 namespace {
 
@@ -380,9 +381,12 @@ int LoadAicpuRunHandle(
 ) {
     const uint64_t fingerprint = FingerprintBytes(inner.data(), inner.size());
     char so_basename[96]{};
-    std::snprintf(
-        so_basename, sizeof(so_basename), "simpler_host_args_probe_%016" PRIx64 "_%d.so", fingerprint, device_id
-    );
+    if (!simpler::test::host_args_probe::format_dispatcher_inner_so_basename(
+            fingerprint, device_id, so_basename, sizeof(so_basename)
+        )) {
+        std::fprintf(stderr, "failed to format dispatcher inner SO basename\n");
+        return 1;
+    }
     char descriptor_path[] = "/tmp/gpt_host_args_probe_XXXXXX.json";
     const int descriptor_fd = mkstemps(descriptor_path, 5);
     if (descriptor_fd < 0) {

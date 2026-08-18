@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "host_args_probe_abi.h"
+#include "host_args_probe_loader_contract.h"
 
 extern "C" int simpler_host_args_probe_run(void *args);
 
@@ -64,6 +65,18 @@ bool BuildPatchedImage(uint8_t *args, HostArgsProbeResult *result) {
 }  // namespace
 
 int main() {
+    char basename[64]{};
+    if (!simpler::test::host_args_probe::format_dispatcher_inner_so_basename(
+            0x0123456789abcdefULL, 1, basename, sizeof(basename)
+        ) ||
+        std::strcmp(basename, "simpler_inner_0123456789abcdef_1.so") != 0 ||
+        simpler::test::host_args_probe::format_dispatcher_inner_so_basename(
+            0x0123456789abcdefULL, -1, basename, sizeof(basename)
+        )) {
+        std::fprintf(stderr, "dispatcher inner SO basename contract failed: %s\n", basename);
+        return 1;
+    }
+
     // Deliberately offset the argument image by one byte.  The probe kernel
     // must copy its prefix into an aligned local object before typed access.
     std::vector<uint8_t> storage(kArgsSize + 1U, 0);
@@ -77,7 +90,7 @@ int main() {
             static_cast<unsigned long long>(result.magic), result.status,
             static_cast<unsigned long long>(result.args_base)
         );
-        return 1;
+        return 2;
     }
 
     HostArgsProbeHeader header{};
@@ -87,9 +100,9 @@ int main() {
     result = HostArgsProbeResult{};
     if (simpler_host_args_probe_run(args) != 0 || (result.status & HOST_ARGS_PROBE_BAD_PLACEHOLDER_1) == 0) {
         std::fprintf(stderr, "bad placeholder was not diagnosed: status=0x%08x\n", result.status);
-        return 2;
+        return 3;
     }
 
-    std::printf("HOST_ARGS_PROBE_SELF_TEST PASS unaligned_prefix_and_placeholder_diagnostic\n");
+    std::printf("HOST_ARGS_PROBE_SELF_TEST PASS basename_unaligned_prefix_and_placeholder_diagnostic\n");
     return 0;
 }
