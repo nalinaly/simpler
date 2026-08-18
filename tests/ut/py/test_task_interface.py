@@ -1175,6 +1175,30 @@ class TestChipCallable:
         assert chip.buffer_ptr() != 0
         assert chip.buffer_size() > 100
 
+    def test_scalar_count_survives_wire_bytes_roundtrip(self):
+        chip = ChipCallable.build(
+            signature=[ArgDirection.IN, ArgDirection.OUT],
+            func_name="scalar_orch",
+            binary=b"\x11\x22",
+            children=[],
+            scalar_count=3,
+        )
+        blob = ctypes.string_at(int(chip.buffer_ptr()), int(chip.buffer_size()))
+        restored = ChipCallable.from_bytes(blob)
+
+        assert restored.sig_count == 2
+        assert restored.scalar_count == 3
+        assert restored.func_name == "scalar_orch"
+
+    def test_default_scalar_count_is_legacy_zero(self):
+        chip = ChipCallable.build(
+            signature=[ArgDirection.IN],
+            func_name="legacy_zero",
+            binary=b"",
+            children=[],
+        )
+        assert chip.scalar_count == 0
+
     def test_repr(self):
         child = self._make_child([ArgDirection.IN], b"\x00")
         chip = ChipCallable.build(

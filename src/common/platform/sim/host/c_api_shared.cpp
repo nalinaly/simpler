@@ -203,6 +203,21 @@ static int setup_static_arena_wrapper(
     }
 }
 
+static int freeze_static_arena_wrapper(
+    void *runner_ctx, uint32_t arena_bank, const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base,
+    size_t gm_sm_size, const void *runtime_arena_base, size_t runtime_arena_size
+) {
+    if (runner_ctx == nullptr) return -1;
+    try {
+        return static_cast<SimDeviceRunnerBase *>(runner_ctx)
+            ->freeze_static_arena(
+                arena_bank, gm_heap_base, gm_heap_size, gm_sm_base, gm_sm_size, runtime_arena_base, runtime_arena_size
+            );
+    } catch (...) {
+        return -1;
+    }
+}
+
 static void *acquire_pooled_gm_heap_wrapper(void *runner_ctx, uint32_t arena_bank) {
     if (runner_ctx == nullptr) return nullptr;
     try {
@@ -283,6 +298,7 @@ static const HostApiOps g_host_api_ops = {
     .acquire_graph_execution_buffer = acquire_graph_execution_buffer,
     .acquire_graph_definition_buffer = acquire_graph_definition_buffer,
     .setup_static_arena = setup_static_arena_wrapper,
+    .freeze_static_arena = freeze_static_arena_wrapper,
     .acquire_pooled_gm_heap = acquire_pooled_gm_heap_wrapper,
     .acquire_pooled_gm_sm = acquire_pooled_gm_sm_wrapper,
     .acquire_pooled_runtime_arena = acquire_pooled_runtime_arena_wrapper,
@@ -422,6 +438,48 @@ int simpler_init(
     return 0;
 }
 
+int simpler_l1_supported(DeviceContextHandle ctx) {
+    (void)ctx;
+    return 0;
+}
+
+int simpler_l1_init(
+    DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
+    const uint8_t *aicore_binary, size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size,
+    const CallConfig *config, uint64_t context_generation
+) {
+    (void)ctx;
+    (void)device_id;
+    (void)aicpu_binary;
+    (void)aicpu_size;
+    (void)aicore_binary;
+    (void)aicore_size;
+    (void)dispatcher_binary;
+    (void)dispatcher_size;
+    (void)config;
+    (void)context_generation;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+int simpler_l1_prepare_callable(
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
+) {
+    (void)ctx;
+    (void)callable_id;
+    (void)callable;
+    (void)callable_size;
+    (void)caller_stream;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+int simpler_l1_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
+    (void)ctx;
+    (void)callable_id;
+    (void)args;
+    (void)caller_stream;
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 /* ===========================================================================
  * Per-callable_id preparation
  * =========================================================================== */
@@ -447,6 +505,9 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
             return rc;
         }
         auto host_dlopen_guard = RAIIScopeGuard([&artifacts]() {
+            if (artifacts.destroy_host_orch_func_ptr != nullptr && artifacts.host_orch_func_ptr != nullptr) {
+                artifacts.destroy_host_orch_func_ptr(artifacts.host_orch_func_ptr);
+            }
             if (artifacts.host_dlopen_handle != nullptr) {
                 dlclose(artifacts.host_dlopen_handle);
             }
@@ -462,7 +523,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         if (artifacts.host_dlopen_handle != nullptr) {
             rc = runner->record_host_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.host_dlopen_handle, artifacts.host_orch_func_ptr,
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                artifacts.destroy_host_orch_func_ptr, std::move(kernel_addrs), std::move(artifacts.signature)
             );
             if (rc == 0) {
                 host_dlopen_guard.dismiss();

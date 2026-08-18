@@ -120,6 +120,29 @@ TEST_F(HostTensorAccessTest, MirroredWriteReportsCopyFailure) {
     EXPECT_FALSE(host_tensor_write(&accessor, kFakeDeviceBase, &written, sizeof(written)));
 }
 
+TEST_F(HostTensorAccessTest, ReadOnlyWindowRejectsDirectAndMirroredWritesBeforeMutation) {
+    int32_t direct[2] = {1, 2};
+    int32_t mirror[2] = {3, 4};
+    g_registered_view = direct;
+    HostTensorAccessor accessor(&kHostApi, false);
+    ASSERT_TRUE(accessor.add(reinterpret_cast<uint64_t>(direct), sizeof(direct), direct));
+    g_registered_view = nullptr;
+    ASSERT_TRUE(accessor.add(kFakeDeviceBase, sizeof(mirror), mirror));
+
+    int32_t value = 0;
+    ASSERT_TRUE(host_tensor_read(&accessor, reinterpret_cast<uint64_t>(direct), &value, sizeof(value)));
+    EXPECT_EQ(value, 1);
+    ASSERT_TRUE(host_tensor_read(&accessor, kFakeDeviceBase, &value, sizeof(value)));
+    EXPECT_EQ(value, 3);
+
+    const int32_t written = 99;
+    EXPECT_FALSE(host_tensor_write(&accessor, reinterpret_cast<uint64_t>(direct), &written, sizeof(written)));
+    EXPECT_FALSE(host_tensor_write(&accessor, kFakeDeviceBase, &written, sizeof(written)));
+    EXPECT_EQ(direct[0], 1);
+    EXPECT_EQ(mirror[0], 3);
+    EXPECT_TRUE(g_copies.empty());
+}
+
 // The fail-closed contract: an address outside every registered region — a
 // GM-heap tensor the orchestrator created, or a pass-through child-memory
 // buffer — resolves to nothing instead of being dereferenced.

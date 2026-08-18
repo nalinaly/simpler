@@ -64,6 +64,26 @@ void set_dma_workspace_addr(int kind, unsigned long long addr);
 /** Get the async-DMA workspace device address for one engine kind (0 if unavailable). */
 unsigned long long get_dma_workspace_addr(int kind);
 
+/**
+ * Publish the context-owned HBG L1 prelaunch-control device address.
+ *
+ * This is a prepare-time trust root, not a per-invocation argument.  The HBG
+ * execution-slot registry normally supplies the same address; the resident
+ * copy exists so an invocation can still cancel its already-launched hidden
+ * AICore kernel when the registry itself is unavailable or corrupt.
+ * Zero means the current runtime is not an HBG L1 context.
+ */
+void set_hbg_l1_prelaunch_control_addr(unsigned long long addr);
+
+/** Get the prepare-time HBG L1 prelaunch-control address (0 if unavailable). */
+unsigned long long get_hbg_l1_prelaunch_control_addr();
+
+/** Publish the DeviceRunner-owned HBG context registry address. */
+void set_hbg_l1_context_registry_addr(unsigned long long addr);
+
+/** Get the current borrowed context's HBG registry address (0 for TRB/L2/L3). */
+unsigned long long get_hbg_l1_context_registry_addr();
+
 #ifdef __cplusplus
 }
 #endif

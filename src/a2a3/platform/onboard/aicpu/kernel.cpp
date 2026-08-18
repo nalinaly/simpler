@@ -9,10 +9,14 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 #include <cstdio>
+#include <cstring>
 
 #include "common/unified_log.h"
 #include "common/kernel_args.h"
+#include "hbg_aicpu_invocation.h"
+#include "l1_aicpu_args.h"
 #include "common/platform_config.h"
+#include "aicpu/cache_maintenance.h"
 #include "aicpu/aicpu_device_config.h"
 #include "aicpu/dep_gen_collector_aicpu.h"
 #include "aicpu/device_log.h"
@@ -36,6 +40,20 @@
 // simpler_aicpu_register_callable is NOT declared/forwarded here: it is
 // exported directly by the TMARB runtime (host_build_graph does not export it).
 extern "C" int aicpu_execute(Runtime *arg);
+extern "C" __attribute__((weak)) int
+aicpu_execute_l1(Runtime *runtime, const void *unaligned_orch_args, int32_t invocation_callable_id);
+extern "C" __attribute__((weak)) int
+aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation);
+
+static void PublishHbgPrelaunchCancel(const simpler::hbg::HbgAicpuInvocationView *invocation) {
+    const auto *slot = invocation == nullptr ? nullptr : &invocation->slot;
+    auto *control = simpler::hbg::hbg_l1_launch_control_or_fallback(
+        slot, static_cast<uint64_t>(get_hbg_l1_prelaunch_control_addr())
+    );
+    if (control == nullptr) return;
+    __atomic_store_n(&control->prelaunch_state, simpler::hbg::HBG_L1_PRELAUNCH_CANCEL, __ATOMIC_RELEASE);
+    cache_flush_range(control, sizeof(*control));
+}
 
 /**
  * AICPU kernel main execution entry point.
@@ -50,22 +68,19 @@ extern "C" int aicpu_execute(Runtime *arg);
  * @param arg Pointer to the front-less KernelArgs payload (runtime_args @ 0)
  * @return 0 on success, non-zero on error
  */
-extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *arg) {
+static int ExecuteAicpuKernel(
+    const KernelArgs *k_args, const void *l1_orch_args_bytes, int32_t l1_callable_id,
+    const simpler::hbg::HbgAicpuInvocationView *hbg_invocation
+) {
     // Log severity was snapshot once by simpler_aicpu_init at worker init; the
     // resident SO keeps it across launches, so exec does not re-snapshot.
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
-        return -1;
-    }
-
-    KernelArgs *k_args = reinterpret_cast<KernelArgs *>(arg);
     Runtime *runtime = k_args->runtime_args;
 
     if (runtime == nullptr) {
         LOG_ERROR("%s", "Invalid runtime_args: null pointer");
+        PublishHbgPrelaunchCancel(hbg_invocation);
         return -1;
     }
-
     // Per-device invariants (log config, orch device id) were latched once by
     // simpler_aicpu_init at worker init; only the per-run register tables and
     // profiling-buffer bases are pushed here.
@@ -87,15 +102,24 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     // OCCUPY and wrote it into Runtime; the device side only matches
     // sched_getcpu() against that table and exposes the table position as
     // exec_idx.
-    if (runtime->get_aicpu_allowed_cpu_count() <= 0 || runtime->get_aicpu_launch_count() <= 0) {
+    // A non-null HBG invocation with a test marker has already passed the
+    // runtime-side complete package authentication before this platform bridge
+    // is entered. Feed one representative invalid value through the production
+    // validator; the no-hardware matrix covers every other invalid count shape.
+    const auto requested_fault = simpler::hbg::hbg_aicpu_fault_stage(hbg_invocation);
+    const bool inject_affinity_fault = requested_fault == simpler::hbg::HbgL1FaultStage::AffinityInputs;
+    const int32_t allowed_cpu_count = inject_affinity_fault ? -1 : runtime->get_aicpu_allowed_cpu_count();
+    const int32_t aicpu_launch_count = runtime->get_aicpu_launch_count();
+    if (!platform_aicpu_affinity_config_valid(allowed_cpu_count, aicpu_launch_count)) {
         LOG_ERROR(
-            "AICPU affinity inputs missing: allowed_cpu_count=%d launch_count=%d (host probe must run before exec)",
-            runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+            "Invalid AICPU affinity inputs: allowed_cpu_count=%d launch_count=%d max=%d", allowed_cpu_count,
+            aicpu_launch_count, MAX_GATE_THREADS
         );
-        return -1;
+        PublishHbgPrelaunchCancel(hbg_invocation);
+        return inject_affinity_fault ? 0 : -1;
     }
     if (!platform_aicpu_affinity_gate_filter(
-            runtime->get_aicpu_allowed_cpus(), runtime->get_aicpu_allowed_cpu_count(), runtime->get_aicpu_launch_count()
+            runtime->get_aicpu_allowed_cpus(), allowed_cpu_count, aicpu_launch_count
         )) {
         return 0;
     }
@@ -108,15 +132,81 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *a
     set_platform_phase_base(k_args->device_wall_data_base);
     AicpuPhaseScope run_wall(AicpuPhase::RunWall);
 
-    int rc = aicpu_execute(runtime);
+    int rc = 0;
+    if (hbg_invocation != nullptr) {
+        if (aicpu_execute_l1_hbg == nullptr) {
+            LOG_ERROR("%s", "HBG L1 AICPU execution is unavailable in this runtime");
+            PublishHbgPrelaunchCancel(hbg_invocation);
+            return -1;
+        }
+        rc = aicpu_execute_l1_hbg(runtime, hbg_invocation);
+    } else if (l1_orch_args_bytes != nullptr) {
+        rc = aicpu_execute_l1(runtime, l1_orch_args_bytes, l1_callable_id);
+    } else {
+        rc = aicpu_execute(runtime);
+    }
     if (rc != 0) {
-        LOG_ERROR("simpler_aicpu_exec: aicpu_execute failed with rc=%d", rc);
+        LOG_ERROR("AICPU executor failed with rc=%d", rc);
+        // This is redundant after a fully initialized generation (its common
+        // epilogue already closes every register window), but it also covers
+        // failures that occur before the generation can establish its N-way
+        // cleanup gate.
+        PublishHbgPrelaunchCancel(hbg_invocation);
         return rc;
     }
 
     // Run-wall end is stamped by run_wall's destructor (covers the early return
     // above too); host reduces max(end) - min(start) → ns.
     return rc;
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "Invalid kernel arguments: null pointer");
+        return -1;
+    }
+    return ExecuteAicpuKernel(reinterpret_cast<const KernelArgs *>(arg), nullptr, -1, nullptr);
+}
+
+extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void *arg) {
+    if (arg == nullptr) {
+        LOG_ERROR("%s", "Invalid L1 invocation arguments: null pointer");
+        return -1;
+    }
+    // The runtime-owned task image is only a byte buffer.  Copy its small,
+    // naturally-aligned prefix before typed access; the unique TRB
+    // orchestrator worker snapshots the large orch payload into persistent
+    // aligned storage.  This keeps the per-worker stack bounded and does not
+    // assume the CANN argument pool preserves alignas(64).
+    L1AicpuInvocationPrefix prefix{};
+    if (!ReadL1AicpuInvocationPrefix(arg, &prefix) || !IsValidL1AicpuInvocationPrefix(prefix)) {
+        LOG_ERROR(
+            "Invalid L1 invocation ABI: version=%u size=%u reserved=%u", prefix.abi_version, prefix.struct_size,
+            prefix.reserved
+        );
+        return -1;
+    }
+    if (aicpu_execute_l1 == nullptr) {
+        LOG_ERROR("%s", "L1 AICPU execution is unavailable in this runtime");
+        return -1;
+    }
+    return ExecuteAicpuKernel(&prefix.kernel_args, L1AicpuInvocationOrchArgsBytes(arg), prefix.callable_id, nullptr);
+}
+
+// Internal HBG trampoline. AICPU scheduler keeps inner runtime DSOs in one
+// process-global namespace; exporting this helper lets a previously loaded TRB
+// DSO preempt the HBG definition and route the HBG entry through TRB's null
+// weak executor. CANN launches simpler_aicpu_l1_hbg_exec, not this bridge, so
+// bind it to the DSO that contains it.
+extern "C" __attribute__((visibility("hidden"))) int simpler_aicpu_execute_l1_hbg_platform(
+    const KernelArgs *kernel_args, const simpler::hbg::HbgAicpuInvocationView *invocation
+) {
+    if (kernel_args == nullptr || invocation == nullptr) {
+        LOG_ERROR("%s", "Invalid HBG L1 platform invocation");
+        PublishHbgPrelaunchCancel(invocation);
+        return -1;
+    }
+    return ExecuteAicpuKernel(kernel_args, nullptr, -1, invocation);
 }
 
 /**
@@ -145,6 +235,8 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
     for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
         set_dma_workspace_addr(k, init_args->dma_workspace_addr[k]);
     }
+    set_hbg_l1_prelaunch_control_addr(init_args->hbg_l1_prelaunch_control_addr);
+    set_hbg_l1_context_registry_addr(init_args->hbg_l1_context_registry_addr);
 
     return 0;
 }

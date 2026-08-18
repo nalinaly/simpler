@@ -26,6 +26,7 @@
 #include "../platform_comm/comm.h"
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
+#include "l1_queue_call.h"
 #include "pipeline_slot_pool.h"
 #include "pto_runtime_c_api.h"
 #include "types.h"
@@ -79,6 +80,24 @@ public:
         const std::string &dispatcher_path, int device_id, const CallConfig *prewarm_config = nullptr,
         uint32_t dma_workspace_mask = 0, const std::string &sim_context_path = ""
     );
+
+    /** Initialize the borrowed-device L1 mode on an already-current device. */
+    void init_l1(
+        const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
+        const std::string &dispatcher_path, int device_id, const CallConfig &config
+    );
+
+    /** Asynchronously prepare one L1 callable on a borrowed raw stream. */
+    void prepare_l1_callable(int32_t callable_id, const void *callable, size_t callable_size, uint64_t caller_stream);
+
+    /** Enqueue one L1 invocation; caller_stream is an opaque aclrtStream value. */
+    void launch_l1(int32_t callable_id, const ChipStorageTaskArgs *args, uint64_t caller_stream);
+
+    /** Build an immutable, ref-counted prepare snapshot for a taskQueue adapter. */
+    SimplerL1QueueCall *make_l1_prepare_queue_call(int32_t callable_id, const void *callable, size_t callable_size);
+
+    /** Build an immutable, ref-counted launch snapshot for a taskQueue adapter. */
+    SimplerL1QueueCall *make_l1_launch_queue_call(int32_t callable_id, const ChipStorageTaskArgs &args);
 
     /// Tear down everything: device resources and runtime library.
     /// Terminal — the object cannot be reused after this.
@@ -220,6 +239,7 @@ public:
 
     int device_id() const { return device_id_; }
     bool initialized() const { return initialized_; }
+    bool l1_mode() const { return l1_mode_; }
     unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
     size_t runtime_slot_count() const { return runtime_bufs_.size(); }
     bool supports_concurrent_native_prepare() const;
@@ -239,6 +259,15 @@ public:
     size_t committed_device_memory() const;
 
 private:
+    struct L1DispatchState;
+    struct L1QueuedCall;
+
+    void init_impl(
+        const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
+        const std::string &dispatcher_path, int device_id, const CallConfig *config, uint32_t dma_workspace_mask,
+        bool borrowed_l1, const std::string &sim_context_path
+    );
+
     using CreateDeviceContextFn = void *(*)();
     using DestroyDeviceContextFn = void (*)(void *);
     using DeviceMallocCtxFn = void *(*)(void *, size_t);
@@ -252,6 +281,13 @@ private:
     // attach + device-id record, (b) executor binary takeover, (c) onboard
     // CANN dlog sync. Reads the current log level off HostLogger itself.
     using SimplerInitFn = decltype(&simpler_init);
+    using SimplerL1SupportedFn = int (*)(void *);
+    using SimplerL1InitFn = int (*)(
+        void *, int, const uint8_t *, size_t, const uint8_t *, size_t, const uint8_t *, size_t, const CallConfig *,
+        uint64_t
+    );
+    using SimplerL1PrepareCallableFn = int (*)(void *, int32_t, const void *, size_t, void *);
+    using SimplerL1LaunchFn = int (*)(void *, int32_t, const void *, void *);
     using SimplerRegisterCallableFn = int (*)(void *, int32_t, const void *);
     using SimplerRunFn = decltype(&simpler_run);
     using SimplerPrepareRunFn = decltype(&simpler_prepare_run);
@@ -310,6 +346,10 @@ private:
     GetRuntimeAlignmentFn get_runtime_alignment_fn_ = nullptr;
     GetCommittedDeviceMemoryFn device_committed_memory_fn_ = nullptr;
     SimplerInitFn simpler_init_fn_ = nullptr;
+    SimplerL1SupportedFn simpler_l1_supported_fn_ = nullptr;
+    SimplerL1InitFn simpler_l1_init_fn_ = nullptr;
+    SimplerL1PrepareCallableFn simpler_l1_prepare_callable_fn_ = nullptr;
+    SimplerL1LaunchFn simpler_l1_launch_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
     SimplerPrepareRunFn prepare_run_fn_ = nullptr;
@@ -409,4 +449,6 @@ private:
     int device_id_ = -1;
     bool initialized_ = false;
     bool finalized_ = false;
+    bool l1_mode_ = false;
+    std::shared_ptr<L1DispatchState> l1_dispatch_state_;
 };

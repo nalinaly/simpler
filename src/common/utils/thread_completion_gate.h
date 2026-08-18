@@ -42,24 +42,47 @@ public:
         }
 
         finalize();
-        cleanup_ready_.store(true, std::memory_order_release);
+        legacy_cleanup_ready_.store(true, std::memory_order_release);
+        finalization_ready_.store(true, std::memory_order_release);
     }
 
+    /**
+     * Legacy one-phase cleanup claim retained for runtimes that have not yet
+     * adopted the post-finalization departure barrier.
+     */
     bool claim_cleanup() {
         bool expected = true;
-        return cleanup_ready_.compare_exchange_strong(
+        return legacy_cleanup_ready_.compare_exchange_strong(
             expected, false, std::memory_order_acquire, std::memory_order_relaxed
         );
     }
 
+    /** Wait until the last arriver has completed the per-run finalizer. */
+    void wait_for_finalization() const {
+        while (!finalization_ready_.load(std::memory_order_acquire)) {}
+    }
+
+    /**
+     * Publish that this participant has taken every post-finalization snapshot.
+     * Exactly the last departing participant owns shared-state cleanup/deinit.
+     */
+    bool depart_and_claim_cleanup_if_last(int32_t thread_count) {
+        int32_t previous = departed_.fetch_add(1, std::memory_order_acq_rel);
+        return previous + 1 == thread_count;
+    }
+
     void reset() {
         arrived_.store(0, std::memory_order_release);
-        cleanup_ready_.store(false, std::memory_order_release);
+        departed_.store(0, std::memory_order_release);
+        legacy_cleanup_ready_.store(false, std::memory_order_release);
+        finalization_ready_.store(false, std::memory_order_release);
     }
 
 private:
     std::atomic<int32_t> arrived_{0};
-    std::atomic<bool> cleanup_ready_{false};
+    std::atomic<int32_t> departed_{0};
+    std::atomic<bool> legacy_cleanup_ready_{false};
+    std::atomic<bool> finalization_ready_{false};
 };
 
 }  // namespace simpler

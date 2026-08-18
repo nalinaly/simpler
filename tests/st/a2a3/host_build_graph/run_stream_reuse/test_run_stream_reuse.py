@@ -325,6 +325,27 @@ class TestRunStreamReuseHbg(SceneTestCase):
         finally:
             st_worker.unregister(add_handle)
 
+    def test_alternating_callables_keep_func_id_zero_callable_local(self, st_platform, st_worker):
+        """Two callables may both start numbering their kernels at func_id=0.
+
+        The selected callable must supply the complete function table for its
+        own graph image. Alternating add/sub callables catches accidental reuse
+        of a context-wide func_id=0 binding on simulation as well as onboard.
+        """
+        add_handle = st_worker.register(self.build_callable(st_platform))
+        sub_handle = st_worker.register(_SubtractCallable.compile_chip_callable(st_platform))
+        try:
+            for handle, subtract in (
+                (add_handle, False),
+                (sub_handle, True),
+                (add_handle, False),
+                (sub_handle, True),
+            ):
+                self._run_registered(st_worker, handle, subtract=subtract)
+        finally:
+            st_worker.unregister(sub_handle)
+            st_worker.unregister(add_handle)
+
     def test_depth_two_slots_own_separate_resources(self, st_platform, st_worker):
         """Each slot owns its own host Runtime buffer and its own arena bank.
 

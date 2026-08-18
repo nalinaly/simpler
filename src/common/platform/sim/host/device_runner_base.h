@@ -169,6 +169,10 @@ public:
     // --- Shared methods --------------------------------------------------
 
     int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
+    int freeze_static_arena(
+        uint32_t arena_bank, const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    );
 
     void *acquire_pooled_gm_heap(uint32_t arena_bank);
     void *acquire_pooled_gm_sm(uint32_t arena_bank);
@@ -216,7 +220,8 @@ public:
     );
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        void (*destroy_host_orch_func_ptr)(void *), std::vector<std::pair<int, uint64_t>> kernel_addrs,
+        std::vector<ArgDirection> signature
     );
     int unregister_callable(int32_t callable_id);
     bool has_callable(int32_t callable_id) const;
@@ -349,14 +354,14 @@ protected:
     using GraphDefinitionBufferMap = std::unordered_map<uint64_t, RetainedGraphExecutionBuffer>;
     std::array<GraphDefinitionBufferMap, PTO_PIPELINE_MAX_DEPTH> graph_definition_buffers_{};
 
-    // Each arena bank backs the three pooled regions (PTO2 GM heap / PTO2
-    // shared memory / trb prebuilt runtime arena) for one pipeline slot. They
+    // Each arena bank backs the three pooled regions (GM heap, shared memory
+    // and runtime arena) for one pipeline slot. They
     // are separate allocations because the combined size can exceed the device
     // allocator's largest contiguous block. Released explicitly in finalize()
     // before mem_alloc_.finalize().
     //
-    // A bank's runtime pool stays unreserved when setup_static_arena was
-    // invoked with runtime_arena_size == 0 (hbg path).
+    // A bank's runtime pool stays unreserved when setup_static_arena receives
+    // runtime_arena_size == 0.
     static void *arena_alloc_trampoline(void *ctx, size_t size) {
         return static_cast<MemoryAllocator *>(ctx)->alloc(size);
     }
@@ -380,6 +385,7 @@ protected:
         size_t cached_gm_heap_size{0};
         size_t cached_gm_sm_size{0};
         size_t cached_runtime_arena_size{0};
+        bool static_arena_frozen{false};
     };
     std::array<std::unique_ptr<ArenaBank>, PTO_PIPELINE_MAX_DEPTH> arena_banks_;
     ArenaBank &arena_bank(uint32_t bank_id) { return *arena_banks_[bank_id]; }
@@ -441,6 +447,7 @@ protected:
         // hbg path
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
+        void (*destroy_host_orch_func_ptr)(void *){nullptr};
     };
     std::unordered_map<int32_t, CallableState> callables_;
     std::unordered_set<int32_t> aicpu_seen_callable_ids_;

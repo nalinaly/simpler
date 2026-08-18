@@ -70,6 +70,11 @@
 #include "host/runtime_timeout_config.h"
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
+#include "hbg_callable_registry.h"
+#include "hbg_context_registry.h"
+#include "hbg_execution_slot.h"
+#include "l1_aicore_report.h"
+#include "l1_execution_state.h"
 #include "prepare_callable_common.h"
 #include "pto_runtime_c_api.h"
 #include "native_run_execution.h"
@@ -168,13 +173,12 @@ public:
     virtual void unregister_device_memory_from_host(void *dev_ptr) { (void)dev_ptr; }
 
     /**
-     * Commit the three per-Worker pooled regions (PTO2 GM heap, PTO2
-     * shared memory, trb prebuilt runtime arena) as three independent
-     * device allocations. Must be called before any `acquire_pooled_*`.
+     * Commit the three per-Worker pooled regions (GM heap, shared memory and
+     * runtime arena) as three independent device allocations. Must be called
+     * before any `acquire_pooled_*`.
      * Idempotent on identical (or smaller) sizes; an equal-or-smaller
-     * follow-up request leaves the arena untouched. `runtime_arena_size`
-     * is 0 for the hbg path (no prebuilt runtime arena) — the
-     * corresponding arena stays uncommitted.
+     * follow-up request leaves the arena untouched. A zero
+     * `runtime_arena_size` leaves the corresponding arena uncommitted.
      *
      * On failure to commit a later region, earlier committed regions are
      * rolled back (a5's prior semantics). This is the safer default: a
@@ -188,13 +192,16 @@ public:
      */
     int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
+    /** Freeze the selected arena bank at one exact, already-committed layout. */
+    int freeze_static_arena(
+        uint32_t arena_bank, const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    );
+
     /**
      * Return the pooled GM heap / PTO2 SM / runtime arena base pointer of the
-     * selected arena bank. `setup_static_arena` (arch subclass) must have
-     * already committed the relevant region on that bank; otherwise returns
-     * nullptr. The runtime arena accessor is trb-only — hbg's
-     * `setup_static_arena(...,0)` leaves the runtime pool uncommitted and this
-     * returns nullptr.
+     * selected arena bank. `setup_static_arena` must have already committed
+     * the relevant region on that bank; otherwise returns nullptr.
      */
     void *acquire_pooled_gm_heap(uint32_t arena_bank);
     void *acquire_pooled_gm_sm(uint32_t arena_bank);
@@ -260,6 +267,54 @@ public:
         aicpu_so_binary_ = std::move(aicpu_so_binary);
         aicore_kernel_binary_ = std::move(aicore_kernel_binary);
     }
+
+    /** Claim this context for the historical owned-device L2/L3 path. */
+    int claim_l2_execution_mode();
+
+    /**
+     * Initialize the borrowed L1 lifecycle without attaching/resetting the
+     * device. The caller must already have `device_id` current. Executor bytes
+     * are retained for later asynchronous prepare; no binary bootstrap occurs
+     * here because the existing bootstrap contains an internal stream sync.
+     */
+    int initialize_l1_borrowed(
+        int device_id, std::vector<uint8_t> aicpu_so_binary, std::vector<uint8_t> aicore_kernel_binary,
+        std::vector<uint8_t> dispatcher_so_binary, const CallConfig &config, const L1RuntimeOps &ops,
+        uint64_t context_generation
+    );
+
+    /**
+     * Atomically validate/upload/register/prepare one L1 callable. The single
+     * L1 operation lock spans the complete transaction, including the phase
+     * check before any device allocation.
+     */
+    int prepare_l1_callable_from_blob(
+        int32_t callable_id, const ChipCallable *callable, size_t callable_size, rtStream_t caller_stream,
+        const HostApi *api
+    );
+
+    /** Prepare already-recorded persistent L1 state (primarily for focused tests). */
+    int prepare_l1_callable(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
+
+    /** Enqueue one complete asynchronous L1 operator on a borrowed stream. */
+    int launch_l1_callable(
+        int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream, const HostApi *api
+    );
+
+    /** Release only resources owned by the borrowed L1 context. */
+    int finalize_l1_borrowed();
+
+    /** Mark the owned L2/L3 lifecycle terminal after its existing finalize. */
+    void complete_l2_finalize();
+
+    DeviceExecutionMode execution_mode() const { return execution_mode_state_.mode(); }
+    bool accepts_l2_calls() const { return execution_mode_state_.accepts_l2_calls(); }
+    bool accepts_l1_calls() const { return execution_mode_state_.accepts_l1_calls(); }
+    bool accepts_l1_dispatch() const {
+        return execution_mode_state_.accepts_l1_calls() && l1_execution_state_.accepts_dispatch();
+    }
+    bool requires_explicit_l1_close() const { return execution_mode_state_.requires_explicit_l1_close(); }
+    L1ContextPhase l1_phase() const { return l1_execution_state_.phase(); }
 
     /**
      * Take ownership of the dispatcher SO bytes. Called by simpler_init
@@ -360,7 +415,7 @@ public:
     int record_device_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, uint64_t chip_dev,
         const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
     );
 
     /**
@@ -375,8 +430,8 @@ public:
      */
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash, void *host_dlopen_handle,
-        void *host_orch_func_ptr, std::vector<std::pair<int, uint64_t>> kernel_addrs,
-        std::vector<ArgDirection> signature
+        void *host_orch_func_ptr, void (*destroy_host_orch_func_ptr)(void *),
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
     );
 
     /**
@@ -394,6 +449,9 @@ public:
      * calls without a matching `simpler_register_callable`.
      */
     bool has_callable(int32_t callable_id) const;
+
+    /** True when an existing callable id names the same pinned binary image. */
+    bool callable_identity_matches(int32_t callable_id, uint64_t chip_buffer_hash, uint64_t aicore_image_hash) const;
 
     /**
      * Provision the async-DMA workspaces named in `required_mask` once at Worker
@@ -605,6 +663,10 @@ public:
      */
     virtual int drain_execution(ActiveExecution &active) = 0;
 
+    /** Populate arch-specific topology/register state for persistent L1 execution. */
+    virtual int
+    prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) = 0;
+
     /**
      * Cleanup all resources. Each arch's `finalize()` wraps
      * `finalize_common()` with arch-specific device-reset behaviour:
@@ -664,6 +726,14 @@ public:
      * device-resident KernelArgs payload pointer.
      */
     int launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args);
+
+    /** Register the AICore executor binary without launching a task. */
+    int ensure_aicore_binary_registered();
+
+    /** Launch only through an already-registered AICore executor handle. */
+    int launch_prepared_aicore_kernel(
+        rtStream_t stream, KernelArgs *k_args, Runtime *trusted_l1_runtime_override = nullptr
+    );
 
     /**
      * Enablement setters for the four shared diagnostics sub-features.
@@ -982,9 +1052,24 @@ protected:
         // common
         std::vector<std::pair<int, uint64_t>> kernel_addrs;
         std::vector<ArgDirection> signature;
+        int32_t scalar_count{0};
+        // L1 v1 binds tensor metadata on the first eager warmup launch. The
+        // fixed POD storage is allocated with CallableState during prepare, so
+        // later capture-time launches only compare/copy bytes and never grow a
+        // host container.
+        // Allocated only while registering a borrowed L1 callable. Keeping the
+        // 33-KiB POD out of the common state avoids charging every L2/L3
+        // callable for graph-only metadata, while prepare-time allocation
+        // keeps the L1 launch path allocation-free.
+        std::unique_ptr<ChipStorageTaskArgs> l1_metadata;
+        bool l1_metadata_bound{false};
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
+        void (*destroy_host_orch_func_ptr)(void *){nullptr};
+        uint64_t hbg_function_binding_hash{0};
+        std::unique_ptr<const simpler::hbg::HbgCallableRegistration> l1_hbg_callable_registration;
+        bool l1_hbg_callable_registration_enqueued{false};
     };
     std::unordered_map<int32_t, CallableState> callables_;
     // Opaque provider handle from dma_workspace_provision(), owned for the
@@ -1020,6 +1105,60 @@ protected:
 
     // ---- State shared by both a2a3 and a5 ---------------------------------
     //
+    // A context chooses exactly one ownership model. The L1 object owns only
+    // borrowed-mode resources and deliberately does not clean itself up from
+    // its destructor; destroy_device_context refuses an unclosed L1 context.
+    DeviceExecutionModeState execution_mode_state_;
+    L1ExecutionState l1_execution_state_;
+    mutable std::mutex l1_operation_mutex_;
+    CallConfig l1_config_{};
+    std::unique_ptr<Runtime> l1_runtime_;
+    KernelArgsHelper l1_kernel_args_;
+    // One AICore-owned, AICPU-read-only cache line per L1 block. Kept outside
+    // Runtime so L2/L3 retain their historical Handshake ABI and cache path.
+    L1AicoreReport *l1_aicore_reports_{nullptr};
+    size_t l1_aicore_report_bytes_{0};
+    std::unordered_set<int32_t> l1_prepared_callable_ids_;
+    bool l1_aicpu_binary_loaded_{false};
+    bool l1_aicpu_init_enqueued_{false};
+    bool l1_static_state_prepared_{false};
+    // Only the first launch consumes the external prepare chain. Subsequent
+    // capture launches must not import a prepare event recorded outside their
+    // graph. Cross-caller-stream transitions require external quiescence in
+    // L1 v1 because CANN also rejects importing an old SerialTail into capture.
+    bool l1_prepare_tail_consumed_{false};
+    bool l1_serial_tail_recorded_{false};
+    rtStream_t l1_last_caller_stream_{nullptr};
+    // Minted by the process-lifetime ChipWorker owner and fixed before any
+    // prepare allocation. HBG copies it into its destination-bound slot
+    // registration; TRB carries it only as dormant context identity.
+    uint64_t l1_context_generation_{0};
+    // Device-memory owner for the HBG slot/callable registries. Unlike the
+    // former AICPU DSO statics, this address and all state behind it belong to
+    // exactly one DeviceRunner context and are released only after successful
+    // explicit close.
+    simpler::hbg::HbgContextRegistry *l1_hbg_context_registry_{nullptr};
+    // Host trust-root owner for HBG. It is allocated only when the runtime's
+    // strong binding query reports support, remains immutable after seal, and
+    // is retained until successful explicit close. A future independent HBG
+    // AICPU registration entry will receive these exact bytes.
+    std::unique_ptr<const simpler::hbg::HbgExecutionSlotRegistration> l1_hbg_execution_slot_registration_;
+    // Set after the immutable registration task has been accepted onto the
+    // caller stream. The task may already belong to an ACLGraph, so teardown
+    // conservatively treats it as device-owned until the AICPU binary unload
+    // succeeds; launch return is not a device-consumption signal.
+    bool l1_hbg_execution_slot_registration_enqueued_{false};
+    // Monotonic per-context identity for a freshly built task package. A
+    // captured node keeps the generation carried by its runtime-owned HostArgs
+    // snapshot; replay does not consume another host generation.
+    uint64_t l1_hbg_next_plan_generation_{1};
+
+    int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
+    int prepare_l1_hbg_execution_slot_registration(const HostApi *api);
+    int enqueue_l1_hbg_execution_slot_registration(rtStream_t caller_stream);
+    int prepare_l1_hbg_callable_registration(int32_t callable_id);
+    int enqueue_l1_hbg_callable_registration(int32_t callable_id, rtStream_t caller_stream);
+
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.
     int device_id_{-1};
@@ -1108,6 +1247,7 @@ protected:
         size_t cached_gm_heap_size{0};
         size_t cached_gm_sm_size{0};
         size_t cached_runtime_arena_size{0};
+        bool static_arena_frozen{false};
     };
     // Held by pointer because DeviceArena is non-copyable and non-movable, so
     // the array cannot be brace-initialised without naming every bank.

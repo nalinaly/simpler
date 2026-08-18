@@ -59,12 +59,16 @@ struct ChildKernelAddr {
 struct CallableArtifacts {
     std::vector<ChildKernelAddr> kernel_addrs;
     // Chip-level entry-tensor directions, copied from ChipCallable::signature_[].
-    // Scalars are also present (ArgDirection::SCALAR) and follow the tensor
-    // entries. Consumed at bind time to decide H2D/D2H per tensor — see
-    // runtime_maker.cpp.
+    // Scalars are deliberately separate because signature_ is indexed 1:1
+    // with the tensor payload. Consumed at bind time to decide H2D/D2H per
+    // tensor — see runtime_maker.cpp.
     std::vector<ArgDirection> signature;
+    int32_t scalar_count{0};
     void *host_dlopen_handle{nullptr};  // hbg only
     void *host_orch_func_ptr{nullptr};  // hbg only
+    // hbg-only destructor for the runtime-specific entry-point bundle. It
+    // must run before host_dlopen_handle is closed.
+    void (*destroy_host_orch_func_ptr)(void *){nullptr};
     uint64_t chip_buffer_hash{0};       // FNV-1a hash for the whole ChipCallable buffer
     uint64_t aicore_image_hash{0};      // FNV-1a hash for func ids and AICore child binaries
     uint64_t chip_buffer_dev{0};        // device address of the ChipCallable header

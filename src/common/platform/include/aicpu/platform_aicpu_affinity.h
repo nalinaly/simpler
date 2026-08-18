@@ -20,6 +20,17 @@
 // the gate in lockstep by referencing this constant instead of a literal.
 constexpr int32_t MAX_GATE_THREADS = 16;
 
+/**
+ * Validate the fixed-capacity filter-gate shape before any thread enters its
+ * barrier. In addition to the array bound, allowed_count cannot exceed the
+ * number of launched participants or at least one scheduler/orchestrator role
+ * would be permanently absent.
+ */
+inline constexpr bool platform_aicpu_affinity_config_valid(int32_t allowed_count, int32_t total_launched) {
+    return allowed_count > 0 && allowed_count <= MAX_GATE_THREADS && total_launched > 0 &&
+           total_launched <= MAX_GATE_THREADS && allowed_count <= total_launched;
+}
+
 // Returns true if this thread should call aicpu_execute().
 // Returns false if this thread should exit (dropped).
 // logical_count: desired active threads (from runtime.aicpu_thread_num)

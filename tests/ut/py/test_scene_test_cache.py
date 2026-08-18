@@ -681,3 +681,58 @@ def test_source_scan_is_memoized_per_file(monkeypatch, tmp_path):
 
     assert reads.count(header.resolve()) == 1
     assert len(reads) == 4
+
+
+def test_compile_chip_callable_preserves_orchestration_scalar_count(monkeypatch, tmp_path):
+    """Generated ORCHESTRATION scalar arity must reach the native callable ABI."""
+    orch_source = tmp_path / "orch.cpp"
+    orch_source.write_text("// scalar-count cache input\n")
+
+    class FakeKernelCompiler:
+        _sanitizers = ""
+
+        def __init__(self, platform):
+            assert platform == "a2a3_sim"
+
+        def compile_orchestration(self, runtime, source):
+            assert runtime == "tensormap_and_ringbuffer"
+            assert source == orch_source
+            return b"orch-binary"
+
+        def get_orchestration_include_dirs(self, runtime):
+            assert runtime == "tensormap_and_ringbuffer"
+            return []
+
+        def get_orchestration_cache_inputs(self, runtime):
+            assert runtime == "tensormap_and_ringbuffer"
+            return [], []
+
+        def compile_cache_token(self, runtime, core_types):
+            assert runtime == "tensormap_and_ringbuffer"
+            assert core_types == []
+            return {"compiler": "fake"}
+
+        def compile_incore(self, source, *, core_type, pto_isa_root, extra_include_dirs):
+            raise AssertionError("this scalar-only test has no incore children")
+
+    monkeypatch.setattr("simpler_setup.kernel_compiler.KernelCompiler", FakeKernelCompiler)
+    monkeypatch.setattr("simpler_setup.pto_isa.ensure_pto_isa_root", lambda: tmp_path)
+    _compile_cache.clear()
+    callable_obj = _compile_chip_callable_from_spec(
+        {
+            "orchestration": {
+                "source": orch_source,
+                "function_name": "orch_entry",
+                "signature": [ArgDirection.IN],
+                "scalar_count": 2,
+            },
+            "incores": [],
+        },
+        "a2a3_sim",
+        "tensormap_and_ringbuffer",
+        ("scalar-count",),
+    )
+
+    assert callable_obj.sig_count == 1
+    assert callable_obj.scalar_count == 2
+    clear_compile_cache()

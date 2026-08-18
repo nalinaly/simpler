@@ -816,6 +816,7 @@ int DeviceRunner::finalize() {
         bank->cached_gm_heap_size = 0;
         bank->cached_gm_sm_size = 0;
         bank->cached_runtime_arena_size = 0;
+        bank->static_arena_frozen = false;
     }
     prebuilt_runtime_arena_cache_valid_ = false;
     prebuilt_runtime_arena_cache_key_.clear();

@@ -1287,6 +1287,7 @@ def _compile_chip_callable_from_spec(spec, platform, runtime, cache_key):
             binary=orch_binary,
             children=kernel_binaries,
             config_name=orch.get("config_name", ""),
+            scalar_count=int(orch.get("scalar_count", 0)),
         )
 
     chip_callable = get_or_compile(artifact_key, compile_callable)

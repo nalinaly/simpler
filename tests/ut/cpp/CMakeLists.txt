@@ -252,6 +252,7 @@ function(add_hierarchical_test name src)
         ${GTEST_MAIN_LIB}
         ${GTEST_LIB}
         pthread
+        ${CMAKE_DL_LIBS}
     )
     # worker_manager.cpp uses shm_open/shm_unlink; librt on glibc < 2.34, libSystem on macOS.
     if(UNIX AND NOT APPLE)
@@ -369,6 +370,8 @@ function(add_task_interface_test name src)
     add_executable(${name} ${src})
     target_include_directories(${name} PRIVATE
         ${GTEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../../../src/common
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
         ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
     )
     target_link_libraries(${name} PRIVATE
@@ -473,6 +476,36 @@ target_link_libraries(test_sim_run_completion PRIVATE ${GTEST_MAIN_LIB} ${GTEST_
 add_test(NAME test_sim_run_completion COMMAND test_sim_run_completion)
 set_tests_properties(test_sim_run_completion PROPERTIES LABELS "no_hardware")
 
+# Borrowed-device L1 mode and resource lifecycle. The production state object
+# accepts a tiny injected operation table whose type does not contain CANN
+# handles or any sync/reset/capture operation, so fault ordering and the
+# no-owned-device-teardown contract remain testable on no-hardware CI.
+add_executable(test_l1_execution_state
+    common/test_l1_execution_state.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host/l1_execution_state.cpp
+)
+target_include_directories(test_l1_execution_state PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_l1_execution_state PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_l1_execution_state COMMAND test_l1_execution_state)
+set_tests_properties(test_l1_execution_state PROPERTIES LABELS "no_hardware")
+
+# Exact borrowed-stream L1 enqueue topology. The production helper is
+# allocation-free and accepts only wait/memset/record/AICPU/AICore callbacks,
+# so the test proves both ordering and first-error prefix behavior without CANN.
+add_executable(test_l1_launch_sequence common/test_l1_launch_sequence.cpp)
+target_include_directories(test_l1_launch_sequence PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_l1_launch_sequence PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_l1_launch_sequence COMMAND test_l1_launch_sequence)
+set_tests_properties(test_l1_launch_sequence PROPERTIES LABELS "no_hardware")
+
 # ---------------------------------------------------------------------------
 # Types / task_interface tests (src/common/task_interface/)
 # ---------------------------------------------------------------------------
@@ -480,6 +513,151 @@ add_task_interface_test(test_buffer types/test_buffer.cpp)
 add_task_interface_test(test_child_memory types/test_child_memory.cpp)
 add_task_interface_test(test_chip_max_tensor_args types/test_chip_max_tensor_args.cpp)
 add_task_interface_test(test_call_config types/test_call_config.cpp)
+add_task_interface_test(test_aicore_handshake_protocol types/test_aicore_handshake_protocol.cpp)
+set_tests_properties(test_aicore_handshake_protocol PROPERTIES LABELS "no_hardware")
+add_a2a3_test(test_l1_aicpu_args types/test_l1_aicpu_args.cpp)
+set_tests_properties(test_l1_aicpu_args PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_l1_tensor_validation types/test_l1_tensor_validation.cpp)
+set_tests_properties(test_l1_tensor_validation PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_l1_callable_validation types/test_l1_callable_validation.cpp)
+set_tests_properties(test_l1_callable_validation PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_orchestration_requirements types/test_orchestration_requirements.cpp)
+set_tests_properties(test_orchestration_requirements PROPERTIES LABELS "no_hardware")
+
+# Variable-length HBG graph-package ABI and host serializer. This is the
+# capture-independent H1/H2 foundation: it deep-copies pristine source bytes,
+# binds them to frozen execution-slot capacities, and rejects stale/partial or
+# overlapping restore manifests without any CANN dependency.
+add_executable(test_hbg_launch_blob types/test_hbg_launch_blob.cpp)
+target_include_directories(test_hbg_launch_blob PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_launch_blob PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_launch_blob COMMAND test_hbg_launch_blob)
+set_tests_properties(test_hbg_launch_blob PROPERTIES LABELS "no_hardware")
+
+# Prepare-time HBG execution-slot trust root. The POD records every frozen
+# device window, generation, binary epoch and package-capacity ceiling without
+# allocating or touching CANN, so host and future AICPU consumers share one
+# byte-exact validator.
+add_executable(test_hbg_execution_slot types/test_hbg_execution_slot.cpp)
+target_include_directories(test_hbg_execution_slot PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_link_libraries(test_hbg_execution_slot PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_execution_slot COMMAND test_hbg_execution_slot)
+set_tests_properties(test_hbg_execution_slot PROPERTIES LABELS "no_hardware")
+
+# Device-resident immutable HBG slot registration state machine.  This pure
+# C++ test pins publication ordering, idempotence and conflict rejection
+# without requiring an AICPU process or CANN.
+add_executable(test_hbg_execution_slot_registry types/test_hbg_execution_slot_registry.cpp)
+target_include_directories(test_hbg_execution_slot_registry PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_link_libraries(test_hbg_execution_slot_registry PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_execution_slot_registry COMMAND test_hbg_execution_slot_registry)
+set_tests_properties(test_hbg_execution_slot_registry PROPERTIES LABELS "no_hardware")
+
+# Pure validation for the fixed-size AICPU affinity gate. Invalid shapes must
+# be rejected before any launched thread enters the N-way barrier; HBG L1 then
+# publishes its independent prelaunch CANCEL instead of silently dropping all
+# participants while the hidden AICore launch spins.
+add_executable(test_platform_aicpu_affinity_config types/test_platform_aicpu_affinity_config.cpp)
+target_include_directories(test_platform_aicpu_affinity_config PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
+target_link_libraries(test_platform_aicpu_affinity_config PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_platform_aicpu_affinity_config COMMAND test_platform_aicpu_affinity_config)
+set_tests_properties(test_platform_aicpu_affinity_config PROPERTIES LABELS "no_hardware")
+
+# Resident AICPU configuration keeps the prepare-time HBG cancellation trust
+# root independently from the per-run slot registry and KernelArgs.
+add_executable(test_aicpu_device_config
+    types/test_aicpu_device_config.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/aicpu/aicpu_device_config.cpp
+)
+target_include_directories(test_aicpu_device_config PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
+target_link_libraries(test_aicpu_device_config PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_aicpu_device_config COMMAND test_aicpu_device_config)
+set_tests_properties(test_aicpu_device_config PROPERTIES LABELS "no_hardware")
+
+add_executable(test_hbg_callable_registry types/test_hbg_callable_registry.cpp)
+target_include_directories(test_hbg_callable_registry PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_link_libraries(test_hbg_callable_registry PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_callable_registry COMMAND test_hbg_callable_registry)
+set_tests_properties(test_hbg_callable_registry PROPERTIES LABELS "no_hardware")
+
+add_executable(test_hbg_argument_snapshot types/test_hbg_argument_snapshot.cpp)
+target_include_directories(test_hbg_argument_snapshot PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_argument_snapshot PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_argument_snapshot COMMAND test_hbg_argument_snapshot)
+set_tests_properties(test_hbg_argument_snapshot PROPERTIES LABELS "no_hardware")
+
+add_executable(test_hbg_callable_function_binding types/test_hbg_callable_function_binding.cpp)
+target_include_directories(test_hbg_callable_function_binding PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_callable_function_binding PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_callable_function_binding COMMAND test_hbg_callable_function_binding)
+set_tests_properties(test_hbg_callable_function_binding PROPERTIES LABELS "no_hardware")
+
+add_executable(test_hbg_aicpu_invocation types/test_hbg_aicpu_invocation.cpp)
+target_include_directories(test_hbg_aicpu_invocation PRIVATE
+    ${GTEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+    ${CMAKE_SOURCE_DIR}/../../../src/common/worker
+)
+target_link_libraries(test_hbg_aicpu_invocation PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+add_test(NAME test_hbg_aicpu_invocation COMMAND test_hbg_aicpu_invocation)
+set_tests_properties(test_hbg_aicpu_invocation PROPERTIES LABELS "no_hardware")
+
+# The standalone device probe under tests/st uses a minimal AICPU parser that
+# intentionally does not depend on PyPTO's HBG parser. Build the same source as
+# a host executable on every no-hardware run: its self-test supplies an
+# unaligned task-args image, three manually patched pointers, and one corrupt
+# pointer diagnostic. This keeps the probe ABI continuously compiled even when
+# no Ascend device is available.
+set(HOST_ARGS_PROBE_DIR ${CMAKE_SOURCE_DIR}/../../st/l1/host_args_probe)
+add_executable(test_host_args_probe_parser
+    ${HOST_ARGS_PROBE_DIR}/host/host_args_probe_self_test.cpp
+    ${HOST_ARGS_PROBE_DIR}/aicpu/host_args_probe_aicpu.cpp
+)
+target_include_directories(test_host_args_probe_parser PRIVATE
+    ${HOST_ARGS_PROBE_DIR}/common
+)
+add_test(NAME test_host_args_probe_parser COMMAND test_host_args_probe_parser)
+set_tests_properties(test_host_args_probe_parser PROPERTIES LABELS "no_hardware")
+
+# HBG L1 static working-slot allocation and capacity freeze. The production
+# helper is host-only and uses an injected HostApi, so exact base/capacity
+# publication and failure ordering stay testable without CANN or a device.
+add_task_interface_test(test_hbg_static_execution_slot types/test_hbg_static_execution_slot.cpp)
 
 # Contract test for upload_chip_callable_buffer caller-buffer immutability.
 # Pulls both task_interface (callable.h) and src/common (utils/fnv1a_64.h),
@@ -565,7 +743,10 @@ add_executable(test_trb_runtime_temp_buffer
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/platform_compile_info.cpp
 )
-target_compile_definitions(test_trb_runtime_temp_buffer PRIVATE SIMPLER_PLATFORM_NAME="a2a3sim")
+target_compile_definitions(test_trb_runtime_temp_buffer PRIVATE
+    SIMPLER_PLATFORM_NAME="a2a3sim"
+    SIMPLER_TEST_A2A3_L1=1
+)
 target_include_directories(test_trb_runtime_temp_buffer PRIVATE
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/tensormap_and_ringbuffer/host
@@ -913,6 +1094,7 @@ target_sources(test_a5_graph_activation PRIVATE
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/pto_runtime2_init.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/a5/runtime/host_build_graph/runtime/shared/runtime.cpp
 )
+add_a2a3_hbg_runtime_test(test_hbg_prebuilt_invocation common/test_hbg_prebuilt_invocation.cpp)
 # PTO2TensorMap's out-of-line members (reserve_layout / init / valid_count) live
 # in this .cpp; no other add_a2a3_hbg_runtime_test target needs them.
 target_sources(test_hbg_tensormap PRIVATE
@@ -1052,6 +1234,7 @@ target_link_libraries(test_sim_device_log PRIVATE
     ${GTEST_MAIN_LIB}
     ${GTEST_LIB}
     pthread
+    ${CMAKE_DL_LIBS}
 )
 add_test(NAME test_sim_device_log COMMAND test_sim_device_log)
 set_tests_properties(test_sim_device_log PROPERTIES LABELS "no_hardware")

@@ -43,6 +43,7 @@ Runtime::Runtime() {
     dev.prebuilt_arena_base_ = nullptr;
     dev.prebuilt_runtime_offset_ = 0;
     dev.active_callable_id_ = -1;
+    dev.l1_aicore_reports_addr_ = 0;
     for (int i = 0; i < RUNTIME_MAX_FUNC_ID; i++) {
         dev.func_id_to_addr_[i] = 0;
     }

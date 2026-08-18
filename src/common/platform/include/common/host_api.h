@@ -80,6 +80,15 @@ struct HostApiOps {
     int (*setup_static_arena)(
         void *runner_ctx, uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size
     );
+    // Freeze one fully committed arena bank at the exact bases and capacities
+    // observed by its caller. Once frozen, setup_static_arena accepts only the
+    // identical triple and can never release, grow or replace any region.
+    // HBG L1 uses this as the platform-owned trust boundary before publishing
+    // a destination binding to task-owned graph packages.
+    int (*freeze_static_arena)(
+        void *runner_ctx, uint32_t arena_bank, const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base,
+        size_t gm_sm_size, const void *runtime_arena_base, size_t runtime_arena_size
+    );
     // Return the per-Worker pooled pointer for the GM heap / runtime shared
     // memory / prebuilt runtime arena. setup_static_arena must have already
     // committed the relevant region; the returned pointer is owned by the
@@ -181,6 +190,19 @@ public:
     }
     int setup_static_arena(size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size) const {
         return ops_->setup_static_arena(runner_ctx_, arena_bank_, gm_heap_size, gm_sm_size, runtime_arena_size);
+    }
+    int freeze_static_arena(
+        const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+        const void *runtime_arena_base, size_t runtime_arena_size
+    ) const {
+        if (ops_->freeze_static_arena == nullptr) return -1;
+        return ops_->freeze_static_arena(
+            runner_ctx_, arena_bank_, gm_heap_base, gm_heap_size, gm_sm_base, gm_sm_size, runtime_arena_base,
+            runtime_arena_size
+        );
+    }
+    bool supports_freeze_static_arena() const noexcept {
+        return ops_ != nullptr && ops_->freeze_static_arena != nullptr;
     }
     void *acquire_pooled_gm_heap() const { return ops_->acquire_pooled_gm_heap(runner_ctx_, arena_bank_); }
     void *acquire_pooled_gm_sm() const { return ops_->acquire_pooled_gm_sm(runner_ctx_, arena_bank_); }

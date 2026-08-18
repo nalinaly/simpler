@@ -92,6 +92,11 @@ struct LocalAclMemAccessDesc {
 
 void append_cleanup_error(std::string &cleanup_error, const std::string &message);
 
+void release_l1_queue_call_capsule(void *ptr) noexcept {
+    auto *call = static_cast<SimplerL1QueueCall *>(ptr);
+    if (call != nullptr && call->release != nullptr) call->release(call->opaque);
+}
+
 class AclRuntimeApi {
 public:
     AclRuntimeApi() = default;
@@ -1016,6 +1021,7 @@ NB_MODULE(_task_interface, m) {
         .value("UINT64", DataType::UINT64)
         .value("UINT16", DataType::UINT16)
         .value("UINT32", DataType::UINT32)
+        .value("BOOL", DataType::BOOL)
         .value("FP8E4M3FN", DataType::FP8E4M3FN)  // A5 only
         .value("FP8E8M0", DataType::FP8E8M0)      // A5 only
         .value("FP4E2M1", DataType::FP4E2M1);     // A5 only
@@ -1035,6 +1041,8 @@ NB_MODULE(_task_interface, m) {
     );
 
     // --- Constants ---
+    m.attr("CHIP_MAX_TENSOR_ARGS") = CHIP_MAX_TENSOR_ARGS;
+    m.attr("CHIP_MAX_SCALAR_ARGS") = CHIP_MAX_SCALAR_ARGS;
     m.attr("MAX_TENSOR_DIMS") = MAX_TENSOR_DIMS;
     m.attr("MAX_REGISTERED_CALLABLE_IDS") = MAX_REGISTERED_CALLABLE_IDS;
     m.attr("RUNTIME_ENV_RING_COUNT") = RUNTIME_ENV_RING_COUNT;
@@ -1371,6 +1379,66 @@ NB_MODULE(_task_interface, m) {
             "Create a contiguous ChipTensor over pre-allocated memory. Set child_memory=True when "
             "data is a device pointer allocated by the child process (skips H2D copy in "
             "init_runtime_impl)."
+        )
+
+        .def_static(
+            "make_strided",
+            [](uint64_t data, nb::tuple shapes, nb::tuple strides, DataType dtype, bool child_memory) -> ChipTensor {
+                const size_t rank = nb::len(shapes);
+                if (rank == 0 || rank > MAX_TENSOR_DIMS || nb::len(strides) != rank) {
+                    throw std::invalid_argument(
+                        "ChipTensor.make_strided: shapes/strides must have the same rank in [1, MAX_TENSOR_DIMS]"
+                    );
+                }
+                uint32_t shape_values[MAX_TENSOR_DIMS]{};
+                uint32_t stride_values[MAX_TENSOR_DIMS]{};
+                bool empty = false;
+                for (size_t i = 0; i < rank; ++i) {
+                    shape_values[i] = nb::cast<uint32_t>(shapes[i]);
+                    stride_values[i] = nb::cast<uint32_t>(strides[i]);
+                    if (stride_values[i] == 0) {
+                        throw std::invalid_argument("ChipTensor.make_strided: every stride must be positive");
+                    }
+                    empty = empty || shape_values[i] == 0;
+                }
+
+                ChipTensor tensor = make_tensor_external(
+                    reinterpret_cast<void *>(static_cast<uintptr_t>(data)), shape_values, static_cast<uint32_t>(rank),
+                    dtype, /*manual_dep=*/false, /*version=*/0, child_memory ? AddressSpace::DEVICE : AddressSpace::HOST
+                );
+                uint64_t extent = empty ? 0 : 1;
+                uint64_t expected_stride = 1;
+                bool contiguous = true;
+                for (size_t reverse = rank; reverse > 0; --reverse) {
+                    const size_t i = reverse - 1;
+                    tensor.strides[i] = stride_values[i];
+                    contiguous = contiguous && stride_values[i] == expected_stride;
+                    if (!empty) {
+                        const uint64_t span = static_cast<uint64_t>(shape_values[i] - 1) * stride_values[i];
+                        if (span > std::numeric_limits<uint64_t>::max() - extent) {
+                            throw std::overflow_error("ChipTensor.make_strided: tensor extent overflows uint64_t");
+                        }
+                        extent += span;
+                    }
+                    if (shape_values[i] != 0 &&
+                        expected_stride > std::numeric_limits<uint64_t>::max() / shape_values[i]) {
+                        contiguous = false;
+                    } else {
+                        expected_stride *= shape_values[i];
+                    }
+                }
+                const uint64_t element_size = get_element_size(dtype);
+                if (extent > std::numeric_limits<uint64_t>::max() / element_size) {
+                    throw std::overflow_error("ChipTensor.make_strided: tensor byte extent overflows uint64_t");
+                }
+                tensor.extent_elem_cache = extent;
+                tensor.is_contiguous = contiguous;
+                tensor.buffer.size = extent * element_size;
+                return tensor;
+            },
+            nb::arg("data"), nb::arg("shapes"), nb::arg("strides"), nb::arg("dtype"), nb::arg("child_memory") = false,
+            "Create a positive-stride ChipTensor whose buffer base is data. The data pointer is treated as the view "
+            "origin, so start_offset remains zero."
         )
 
         // `data` is the tensor's memory address — i.e. ChipTensor::buffer.addr.
@@ -1724,7 +1792,8 @@ NB_MODULE(_task_interface, m) {
         .def_static(
             "build",
             [](std::vector<ArgDirection> signature, std::string func_name, nb::bytes binary,
-               std::vector<std::tuple<int32_t, PyCoreCallable>> children, std::string config_name) -> PyChipCallable {
+               std::vector<std::tuple<int32_t, PyCoreCallable>> children, std::string config_name,
+               int32_t scalar_count) -> PyChipCallable {
                 auto bin_ptr = reinterpret_cast<const void *>(binary.c_str());
                 auto bin_size = static_cast<uint32_t>(binary.size());
                 auto child_count = static_cast<int32_t>(children.size());
@@ -1737,13 +1806,13 @@ NB_MODULE(_task_interface, m) {
                 }
 
                 auto buf = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
-                    signature.data(), static_cast<int32_t>(signature.size()), func_name.c_str(), bin_ptr, bin_size,
-                    func_ids.data(), child_bufs.data(), child_count, config_name.c_str()
+                    signature.data(), static_cast<int32_t>(signature.size()), scalar_count, func_name.c_str(), bin_ptr,
+                    bin_size, func_ids.data(), child_bufs.data(), child_count, config_name.c_str()
                 );
                 return PyChipCallable{std::move(buf)};
             },
             nb::arg("signature"), nb::arg("func_name"), nb::arg("binary"), nb::arg("children"),
-            nb::arg("config_name") = "",
+            nb::arg("config_name") = "", nb::arg("scalar_count") = 0,
             "Build a ChipCallable from signature, func_name, binary, and list of (func_id, CoreCallable) children."
         )
 
@@ -1784,6 +1853,13 @@ NB_MODULE(_task_interface, m) {
                 return self.get().sig_count();
             },
             "Number of signature entries."
+        )
+
+        .def_prop_ro(
+            "scalar_count",
+            [](const PyChipCallable &self) -> int32_t {
+                return self.get().scalar_count();
+            }
         )
 
         .def_prop_ro(
@@ -2177,7 +2253,54 @@ NB_MODULE(_task_interface, m) {
             "When enable_sdma is True, provisions the async-DMA (SDMA) workspace at init so "
             "kernels can use get_dma_workspace; init raises if the platform lacks SDMA."
         )
+        .def(
+            "init_l1",
+            [](ChipWorker &self, const std::string &host_lib_path, const std::string &aicpu_path,
+               const std::string &aicore_path, const std::string &dispatcher_path, int device_id,
+               const CallConfig &config) {
+                self.init_l1(host_lib_path, aicpu_path, aicore_path, dispatcher_path, device_id, config);
+            },
+            nb::arg("host_lib_path"), nb::arg("aicpu_path"), nb::arg("aicore_path"), nb::arg("dispatcher_path"),
+            nb::arg("device_id"), nb::arg("config"), nb::call_guard<nb::gil_scoped_release>(),
+            "Initialize borrowed-device L1 mode. The caller must already have device_id current."
+        )
         .def("finalize", &ChipWorker::finalize)
+        .def(
+            "l1_prepare_callable",
+            [](ChipWorker &self, int32_t callable_id, const PyChipCallable &callable, uint64_t caller_stream) {
+                self.prepare_l1_callable(callable_id, callable.buffer_.data(), callable.buffer_.size(), caller_stream);
+            },
+            nb::arg("callable_id"), nb::arg("callable"), nb::arg("caller_stream"),
+            nb::call_guard<nb::gil_scoped_release>(),
+            "Prepare and pin one L1 callable asynchronously on a borrowed raw stream."
+        )
+        .def(
+            "l1_launch",
+            [](ChipWorker &self, int32_t callable_id, ChipStorageTaskArgs &args, uint64_t caller_stream) {
+                self.launch_l1(callable_id, &args, caller_stream);
+            },
+            nb::arg("callable_id"), nb::arg("args"), nb::arg("caller_stream"), nb::call_guard<nb::gil_scoped_release>(),
+            "Enqueue one asynchronous L1 operator invocation on a borrowed raw stream."
+        )
+        .def(
+            "l1_make_prepare_queue_call",
+            [](ChipWorker &self, int32_t callable_id, const PyChipCallable &callable) {
+                SimplerL1QueueCall *call =
+                    self.make_l1_prepare_queue_call(callable_id, callable.buffer_.data(), callable.buffer_.size());
+                return nb::capsule(call, SIMPLER_L1_QUEUE_CALL_CAPSULE_NAME, &release_l1_queue_call_capsule);
+            },
+            nb::arg("callable_id"), nb::arg("callable"),
+            "Return an immutable deferred prepare call for a taskQueue-aware adapter."
+        )
+        .def(
+            "l1_make_launch_queue_call",
+            [](ChipWorker &self, int32_t callable_id, const ChipStorageTaskArgs &args) {
+                SimplerL1QueueCall *call = self.make_l1_launch_queue_call(callable_id, args);
+                return nb::capsule(call, SIMPLER_L1_QUEUE_CALL_CAPSULE_NAME, &release_l1_queue_call_capsule);
+            },
+            nb::arg("callable_id"), nb::arg("args"),
+            "Return an immutable deferred launch call for a taskQueue-aware adapter."
+        )
         .def(
             "register_callable",
             [](ChipWorker &self, int32_t callable_id, const PyChipCallable &callable) {
@@ -2325,6 +2448,7 @@ NB_MODULE(_task_interface, m) {
         )
         .def_prop_ro("device_id", &ChipWorker::device_id)
         .def_prop_ro("initialized", &ChipWorker::initialized)
+        .def_prop_ro("l1_mode", &ChipWorker::l1_mode)
         .def_prop_ro("pipeline_depth", &ChipWorker::pipeline_depth)
         .def_prop_ro("runtime_slot_count", &ChipWorker::runtime_slot_count)
         .def_prop_ro(

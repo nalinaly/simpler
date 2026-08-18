@@ -215,7 +215,9 @@ HostApi make_host_api() {
         .get_retained_temp_buffer = fake_get_retained_temp_buffer,
         .set_retained_temp_buffer = fake_set_retained_temp_buffer,
         .acquire_graph_execution_buffer = nullptr,
+        .acquire_graph_definition_buffer = nullptr,
         .setup_static_arena = fake_setup_static_arena,
+        .freeze_static_arena = nullptr,
         .acquire_pooled_gm_heap = fake_acquire_pooled_gm_heap,
         .acquire_pooled_gm_sm = fake_acquire_pooled_gm_sm,
         .acquire_pooled_runtime_arena = fake_acquire_pooled_runtime_arena,
@@ -269,6 +271,17 @@ protected:
 };
 
 }  // namespace
+
+#if defined(SIMPLER_TEST_A2A3_L1)
+TEST(TrbRuntimeL1AicoreReport, DefaultsToLegacyProtocolUntilL1PrepareBindsReports) {
+    Runtime runtime;
+    EXPECT_EQ(runtime.get_l1_aicore_reports(), nullptr);
+
+    alignas(64) L1AicoreReport reports[2]{};
+    runtime.set_l1_aicore_reports(reports);
+    EXPECT_EQ(runtime.get_l1_aicore_reports(), reports);
+}
+#endif
 
 TEST_F(TrbRuntimeTempBufferTest, SuccessfulValidateCopiesOnlyOutputTensor) {
     fake_.reset();

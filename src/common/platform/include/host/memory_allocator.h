@@ -26,8 +26,7 @@
  * - Idempotent finalize() for explicit cleanup with error checking
  */
 
-#ifndef SRC_COMMON_PLATFORM_INCLUDE_HOST_MEMORY_ALLOCATOR_H_
-#define SRC_COMMON_PLATFORM_INCLUDE_HOST_MEMORY_ALLOCATOR_H_
+#pragma once
 
 #include <cstddef>
 #include <mutex>
@@ -83,13 +82,16 @@ public:
     /**
      * Free all remaining tracked allocations
      *
-     * Iterates through all tracked pointers, frees them, and clears the
-     * tracking set. Can be called explicitly for error checking, or
-     * automatically via destructor. Idempotent - safe to call multiple times.
+     * Iterates through all tracked pointers and frees them. Owned-device
+     * teardown drops failed entries before resetting its RTS context; borrowed
+     * teardown can preserve failed entries for an explicit retry. Can be called
+     * explicitly for error checking, or automatically via destructor.
      *
+     * @param preserve_failures Keep failed allocations tracked so borrowed-device
+     *                          teardown can retry while the RTS context remains live.
      * @return 0 on success, error code if any frees failed
      */
-    int finalize();
+    int finalize(bool preserve_failures = false);
 
     /**
      * Forget tracked device pointers without calling the platform free API.
@@ -134,5 +136,3 @@ private:
     std::unordered_map<void *, size_t> ptr_size_map_;
     size_t committed_bytes_ = 0;
 };
-
-#endif  // SRC_COMMON_PLATFORM_INCLUDE_HOST_MEMORY_ALLOCATOR_H_

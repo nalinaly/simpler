@@ -80,7 +80,7 @@ struct HostApi;  // common/host_api.h — fwd-declared so this header stays out 
  */
 class HostTensorAccessor {
 public:
-    explicit HostTensorAccessor(const HostApi *api);
+    explicit HostTensorAccessor(const HostApi *api, bool writes_allowed = true);
     ~HostTensorAccessor();
 
     HostTensorAccessor(const HostTensorAccessor &) = delete;

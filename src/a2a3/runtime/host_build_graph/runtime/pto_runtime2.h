@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include "hbg_prebuilt_invocation.h"
 #include "utils/device_arena.h"
 #include "pto_runtime2_types.h"
 #include "graph_cache.h"
@@ -127,6 +128,9 @@ struct PTO2RuntimeArenaLayout {
     size_t arena_size{0};
 };
 
+using PTO2PrebuiltInvocationState = simpler::hbg::HbgPrebuiltInvocationState;
+constexpr size_t PTO2_PREBUILT_FUNC_ID_COUNT = simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT;
+
 /**
  * PTO Runtime2 context
  *
@@ -165,6 +169,11 @@ struct PTO2Runtime {
     // .so's partial PTO2Runtime definition neither sees nor needs it.
     HostTensorAccessor *tensor_access;
 
+    // Immutable invocation semantics restored from the task-owned graph plan
+    // on every eager execution / ACLGraph replay.  Scheduler dispatch must use
+    // this callable-local table rather than outer Runtime::func_id_to_addr_.
+    PTO2PrebuiltInvocationState prebuilt_invocation;
+
     // Prebuilt-arena fast path metadata. Carries every offset
     // wire_arena_pointers needs at AICPU boot so the AICPU can reconstruct
     // all arena-internal pointer fields without re-running init_data. The
@@ -175,6 +184,24 @@ struct PTO2Runtime {
     // aicpu_executor.cpp.
     PTO2RuntimeArenaLayout prebuilt_layout;
 };
+
+/** Validate the task-owned invocation metadata before scheduler publication. */
+inline bool runtime_has_valid_prebuilt_invocation_state(const PTO2Runtime *rt) {
+    return rt != nullptr && simpler::hbg::hbg_has_valid_prebuilt_invocation_state(&rt->prebuilt_invocation);
+}
+
+/**
+ * Deep-copy one complete callable-local function table into the pristine
+ * arena. Invalid input is rejected before mutation; a successful replacement
+ * clears every stale entry because the exact fixed-size table is copied.
+ */
+inline bool runtime_set_prebuilt_invocation_state(
+    PTO2Runtime *rt, const uint64_t *func_id_to_addr, size_t func_id_count, int32_t host_total_tasks
+) {
+    return rt != nullptr && simpler::hbg::hbg_set_prebuilt_invocation_state(
+                                &rt->prebuilt_invocation, func_id_to_addr, func_id_count, host_total_tasks
+                            );
+}
 
 // =============================================================================
 // Runtime Lifecycle API

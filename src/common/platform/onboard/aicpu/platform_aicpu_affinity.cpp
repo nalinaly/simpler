@@ -62,8 +62,7 @@ bool platform_aicpu_affinity_gate_filter(const int32_t *allowed_cpus, int32_t al
     // Without this, allowed_count or total_launched > MAX_GATE_THREADS
     // would silently truncate the classification loop and let the
     // diagnostic dump read past `allowed_cpus[]`.
-    if (allowed_cpus == nullptr || allowed_count <= 0 || allowed_count > MAX_GATE_THREADS || total_launched <= 0 ||
-        total_launched > MAX_GATE_THREADS) {
+    if (allowed_cpus == nullptr || !platform_aicpu_affinity_config_valid(allowed_count, total_launched)) {
         LOG_ERROR(
             "AICPU filter gate: invalid config allowed_count=%d total_launched=%d (max=%d) — dropping all threads",
             allowed_count, total_launched, MAX_GATE_THREADS

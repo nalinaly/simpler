@@ -35,6 +35,7 @@
 // Forward declarations — avoid pulling in full headers for pointer/reference params.
 class Runtime;
 struct Handshake;
+struct L1AicoreReport;
 struct PTO2Runtime;
 
 /**
@@ -187,6 +188,10 @@ private:
     int32_t sched_thread_num_{0};
     int32_t aicpu_thread_num_{0};
     int32_t cores_total_num_{0};
+    // Non-null only for borrowed L1. Each entry is an AICore-owned cache line,
+    // so AICPU may safely `dc civac` it while polling. L2/L3 keep nullptr and
+    // read their historical in-Runtime Handshake fields without maintenance.
+    L1AicoreReport *l1_aicore_reports_{nullptr};
 
     // Cluster-ordered worker_id lists, populated by post_handshake_init().
     int32_t aic_worker_ids_[RUNTIME_MAX_WORKER]{};

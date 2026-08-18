@@ -84,9 +84,12 @@ extern __aicore__ void aicore_execute(__gm__ Runtime *runtime, int block_idx, Co
  * runtime's Handshake stays profiling-free and aicore_execute keeps its
  * original signature.
  *
- * @param runtime Address of Runtime structure in device memory
+ * @param k_args Address of the persistent KernelArgs structure in device memory
+ * @param trusted_l1_runtime_override Host-validated Runtime address for L1;
+ *        nullptr only for legacy L2/L3
  */
-extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelArgs *k_args) {
+extern "C" __global__ __aicore__ void
+KERNEL_ENTRY(aicore_kernel)(__gm__ KernelArgs *k_args, __gm__ Runtime *trusted_l1_runtime_override) {
     // Calculate block_idx for this core
 #ifdef __DAV_VEC__
     block_idx = get_block_idx() * get_subblockdim() + get_subblockid() + get_block_num();
@@ -128,5 +131,12 @@ extern "C" __global__ __aicore__ void KERNEL_ENTRY(aicore_kernel)(__gm__ KernelA
         set_chip_swimlane_aicore_head_slot(nullptr);
     }
 
-    aicore_execute(k_args->runtime_args, block_idx, core_type);
+    // L1 does not let a stale/mutable device KernelArgs::runtime_args split the
+    // AICPU and AICore handshake address spaces. The second launch argument
+    // comes directly from prepare's host-owned persistent Runtime allocation
+    // (or the immutable HBG slot registration). Legacy L2/L3 pass nullptr and
+    // preserve the historical KernelArgs path.
+    __gm__ Runtime *runtime =
+        trusted_l1_runtime_override != nullptr ? trusted_l1_runtime_override : k_args->runtime_args;
+    aicore_execute(runtime, block_idx, core_type);
 }

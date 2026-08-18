@@ -97,8 +97,23 @@ struct KernelArgsHelper {
      */
     int init_device_kernel_args(MemoryAllocator &allocator);
 
+    /**
+     * Read the two persistent device images back during L1 prepare and verify
+     * that they are exact snapshots of the host Runtime / KernelArgs objects.
+     * This is deliberately a prepare-only synchronous diagnostic: launch and
+     * replay stay allocation-free and never synchronize a caller stream.
+     */
+    int validate_device_copies(const Runtime &host_runtime) const;
+
     /** Free device memory allocated for the device-resident `KernelArgs` copy. */
     int finalize_device_kernel_args();
+
+    /** Restore the empty non-owning state after every owned allocation was freed. */
+    void reset_after_finalize() {
+        args = KernelArgs{};
+        allocator_ = nullptr;
+        device_k_args_ = nullptr;
+    }
 
     /**
      * Clear device-pointer bookkeeping without calling the allocator.

@@ -362,6 +362,10 @@ class RuntimeBuilder:
         def _compile_target(target: str) -> Path:
             include_dirs, source_dirs = self._resolve_target_dirs(config_dir, build_config, target)
             defines = dict(effective_profiling_config or {})
+            # The platform CMake project is shared by every runtime variant.
+            # Pass the selected runtime explicitly so target-local link policy
+            # never has to infer the variant from source-directory spelling.
+            defines["SIMPLER_RUNTIME_NAME"] = name
             if target == "host":
                 if build_pto_isa_commit:
                     defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit

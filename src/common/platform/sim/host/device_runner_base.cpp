@@ -128,6 +128,12 @@ int SimDeviceRunnerBase::setup_static_arena(
 ) {
     if (arena_bank >= arena_banks_.size()) return -1;
     ArenaBank &bank = this->arena_bank(arena_bank);
+    if (bank.static_arena_frozen) {
+        return gm_heap_size == bank.cached_gm_heap_size && gm_sm_size == bank.cached_gm_sm_size &&
+                       runtime_arena_size == bank.cached_runtime_arena_size ?
+                   0 :
+                   -1;
+    }
     // Three independent device_malloc'd buffers: GM heap, PTO2 SM, prebuilt
     // runtime arena. Split out from a single large allocation because the
     // combined size can exceed the device allocator's largest contiguous
@@ -175,15 +181,18 @@ int SimDeviceRunnerBase::setup_static_arena(
         bank.cached_gm_heap_size = 0;
         bank.cached_gm_sm_size = 0;
         bank.cached_runtime_arena_size = 0;
-        prebuilt_runtime_arena_cache_valid_ = false;
-        prebuilt_runtime_arena_cache_key_.clear();
-        prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
-        prebuilt_runtime_arena_cache_sm_base_ = nullptr;
-        prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
-        prebuilt_runtime_arena_cache_image_.clear();
+        bank.static_arena_frozen = false;
+        if (arena_bank == 0) {
+            prebuilt_runtime_arena_cache_valid_ = false;
+            prebuilt_runtime_arena_cache_key_.clear();
+            prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
+            prebuilt_runtime_arena_cache_sm_base_ = nullptr;
+            prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
+            prebuilt_runtime_arena_cache_image_.clear();
+        }
         return -1;
     }
-    if (arena_changed) {
+    if (arena_changed && arena_bank == 0) {
         prebuilt_runtime_arena_cache_valid_ = false;
         prebuilt_runtime_arena_cache_key_.clear();
         prebuilt_runtime_arena_cache_gm_heap_base_ = nullptr;
@@ -191,6 +200,24 @@ int SimDeviceRunnerBase::setup_static_arena(
         prebuilt_runtime_arena_cache_runtime_arena_base_ = nullptr;
         prebuilt_runtime_arena_cache_image_.clear();
     }
+    return 0;
+}
+
+int SimDeviceRunnerBase::freeze_static_arena(
+    uint32_t arena_bank, const void *gm_heap_base, size_t gm_heap_size, const void *gm_sm_base, size_t gm_sm_size,
+    const void *runtime_arena_base, size_t runtime_arena_size
+) {
+    if (arena_bank >= arena_banks_.size()) return -1;
+    ArenaBank &bank = this->arena_bank(arena_bank);
+    const bool exact_layout = gm_heap_base != nullptr && gm_sm_base != nullptr && runtime_arena_base != nullptr &&
+                              bank.gm_heap.is_committed() && bank.gm_sm.is_committed() &&
+                              bank.runtime_pool.is_committed() && bank.gm_heap.base() == gm_heap_base &&
+                              bank.gm_sm.base() == gm_sm_base && bank.runtime_pool.base() == runtime_arena_base &&
+                              bank.cached_gm_heap_size == gm_heap_size && bank.cached_gm_sm_size == gm_sm_size &&
+                              bank.cached_runtime_arena_size == runtime_arena_size && gm_heap_size != 0 &&
+                              gm_sm_size != 0 && runtime_arena_size != 0;
+    if (!exact_layout) return -1;
+    bank.static_arena_frozen = true;
     return 0;
 }
 
@@ -599,7 +626,8 @@ int SimDeviceRunnerBase::record_device_orch_callable(
 
 int SimDeviceRunnerBase::record_host_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    void (*destroy_host_orch_func_ptr)(void *), std::vector<std::pair<int, uint64_t>> kernel_addrs,
+    std::vector<ArgDirection> signature
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -607,7 +635,7 @@ int SimDeviceRunnerBase::record_host_orch_callable(
         );
         return -1;
     }
-    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr) {
+    if (host_dlopen_handle == nullptr || host_orch_func_ptr == nullptr || destroy_host_orch_func_ptr == nullptr) {
         LOG_ERROR("record_host_orch_callable: null handle/fn for callable_id=%d", callable_id);
         return -1;
     }
@@ -624,6 +652,7 @@ int SimDeviceRunnerBase::record_host_orch_callable(
     state.chip_buffer_hash = chip_buffer_hash;
     state.host_dlopen_handle = host_dlopen_handle;
     state.host_orch_func_ptr = host_orch_func_ptr;
+    state.destroy_host_orch_func_ptr = destroy_host_orch_func_ptr;
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
     callables_.emplace(callable_id, std::move(state));
@@ -644,6 +673,9 @@ int SimDeviceRunnerBase::unregister_callable(int32_t callable_id) {
 
     if (state.host_dlopen_handle != nullptr) {
         // hbg: dlclose the host handle; no device-side orch SO handle.
+        if (state.destroy_host_orch_func_ptr != nullptr && state.host_orch_func_ptr != nullptr) {
+            state.destroy_host_orch_func_ptr(state.host_orch_func_ptr);
+        }
         dlclose(state.host_dlopen_handle);
         return 0;
     }
@@ -931,6 +963,9 @@ void SimDeviceRunnerBase::release_callable_state() {
     // dlopen handle per (re)created Worker — observable in long-running
     // pytest sessions.
     for (auto &kv : callables_) {
+        if (kv.second.destroy_host_orch_func_ptr != nullptr && kv.second.host_orch_func_ptr != nullptr) {
+            kv.second.destroy_host_orch_func_ptr(kv.second.host_orch_func_ptr);
+        }
         if (kv.second.host_dlopen_handle != nullptr) {
             dlclose(kv.second.host_dlopen_handle);
         }

@@ -12,7 +12,7 @@
  * @file load_aicpu_op.h
  * @brief Host-side AICPU operation loader.
  *
- * Three-phase architecture:
+ * L2/L3 owned-device architecture:
  *
  *   1. BootstrapDispatcher (per-DeviceRunner, idempotent across instances in
  *      the same process via a content-fingerprint cache): bundles dispatcher
@@ -40,10 +40,24 @@
  * See common/aicpu_loader/device/aicpu_dispatcher.h for the bootstrap protocol
  * details (extended DeviceArgs with inner_so_bin/inner_so_len,
  * fingerprint-named preinstall files).
+ *
+ * L1 borrowed-device architecture:
+ *
+ *   1. BootstrapDispatcherAsync enqueues the same dispatcher bootstrap on the
+ *      caller stream without synchronizing it. The dispatcher/inner-SO/args
+ *      device buffers stay owned by this loader until an externally-quiescent
+ *      explicit close.
+ *
+ *   2. InitPreinstalledAcl parses the mode-0 JSON immediately on the host and
+ *      resolves public ACL function handles. Mode 0 does not read the device
+ *      SO; the subsequent init/register/run tasks execute after bootstrap by
+ *      caller-stream FIFO and therefore enter the standard AICPU scheduler.
+ *
+ *   3. LaunchWithHostArgs enqueues a runtime-owned argument snapshot on the
+ *      caller-provided stream through aclrtLaunchKernelWithHostArgs.
  */
 
-#ifndef COMMON_HOST_LOAD_AICPU_OP_H_
-#define COMMON_HOST_LOAD_AICPU_OP_H_
+#pragma once
 
 #include <cstdint>
 #include <string>
@@ -53,6 +67,7 @@
 #include "common/kernel_args.h"
 #include "runtime/runtime/rts/rts_kernel.h"
 #include "runtime/rt.h"
+#include "task_interface/host_args_launch.h"
 
 namespace host {
 
@@ -108,6 +123,21 @@ public:
     );
 
     /**
+     * @brief Enqueue dispatcher bootstrap without an internal stream sync.
+     *
+     * This is the L1 prepare variant. Device inputs referenced by the queued
+     * dispatcher task are retained by this object until Finalize(); callers
+     * must externally quiesce the stream/graph before close. The process-wide
+     * completed-bootstrap cache is deliberately not consulted or populated:
+     * without synchronizing, the host cannot claim that a previous enqueue has
+     * completed, and L1 v1 already permits only one context per device.
+     */
+    int BootstrapDispatcherAsync(
+        const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+        rtStream_t stream, int device_id
+    );
+
+    /**
      * @brief JSON-register the runtime SO and resolve its entry handles.
      *
      * @param extra_symbols  Runtime-specific AICPU entry symbols beyond the base
@@ -119,8 +149,36 @@ public:
      */
     int Init(const std::vector<std::string> &extra_symbols);
 
-    /** @brief Release binary handle + function handles + temporary JSON. */
-    void Finalize();
+    /**
+     * @brief Register the asynchronously preinstalled runtime SO through ACL.
+     *
+     * The mode-0 load consumes only the host JSON descriptor. Resolving a
+     * function stores its SO/function literal names on the device but does not
+     * read the target SO. Device-side loading therefore remains ordered after
+     * BootstrapDispatcherAsync by the caller stream, without a host sync.
+     */
+    int InitPreinstalledAcl(const std::vector<std::string> &extra_symbols);
+
+    /**
+     * @brief Load the runtime SO from host bytes and register its AICPU entries.
+     *
+     * @param inner_so_data  Runtime SO bytes (caller-owned, must outlive call)
+     * @param inner_so_len   Runtime SO size
+     * @param extra_symbols  Runtime-specific entries beyond {RunName, InitName}
+     * @return 0 on success, error code on failure
+     */
+    int InitFromData(const void *inner_so_data, size_t inner_so_len, const std::vector<std::string> &extra_symbols);
+
+    /**
+     * @brief Release binary handle, function handles, and temporary JSON.
+     *
+     * An ACL-loaded borrowed-device binary (mode-0 file descriptor or direct
+     * host bytes) remains owned when unload fails so explicit L1 close can
+     * retry. A legacy RTS-file owned-device binary clears its host handle even
+     * when RTS reports an unload failure because the L2 teardown immediately
+     * destroys that RTS context.
+     */
+    int Finalize();
 
     /**
      * @brief Forget runtime handles without calling rtsBinaryUnload.
@@ -143,8 +201,53 @@ public:
      */
     int LaunchBuiltInOp(rtStream_t stream, void *args, size_t args_size, int aicpu_num, const std::string &func_name);
 
+    /**
+     * @brief Launch a registered AICPU entry with a runtime-owned host-args snapshot.
+     *
+     * @param stream       Caller-owned stream
+     * @param host_args    Host argument image copied by the runtime during enqueue
+     * @param args_size    Size of the host argument image
+     * @param aicpu_num    Number of AICPU blocks
+     * @param func_name    Lookup key in func_handles_ (KernelNames::*)
+     * @return 0 on success, error code on failure
+     */
+    int LaunchWithHostArgs(
+        rtStream_t stream, const void *host_args, size_t args_size, int aicpu_num, const char *func_name
+    );
+
+    /**
+     * @brief Launch a mutable variable-length host-args image with inline placeholders.
+     *
+     * This is the HBG-facing bridge. Unlike the fixed TRB overload, callers
+     * must provide a fresh writable blob because CANN may patch pointer fields
+     * while snapshotting the task. The method validates all lossy size carriers
+     * and placeholder writes before invoking the runtime and performs no host
+     * allocation or synchronization.
+     *
+     * @param stream             Caller-owned stream
+     * @param host_args          Fresh writable host argument image
+     * @param args_size          Exact byte length of the argument image
+     * @param placeholders       Placeholder descriptors, or null when count is zero
+     * @param placeholder_count  Number of descriptors
+     * @param aicpu_num          Number of AICPU blocks
+     * @param func_name          Lookup key in func_handles_ (KernelNames::*)
+     * @return 0 on successful enqueue, error code otherwise
+     */
+    int LaunchWithMutableHostArgs(
+        rtStream_t stream, void *host_args, size_t args_size, simpler::host_args::HostArgsPlaceholder *placeholders,
+        size_t placeholder_count, int aicpu_num, const char *func_name
+    );
+
 private:
+    enum class BinaryLoadMode : uint8_t {
+        None,
+        RtsFile,
+        AclFile,
+        AclData,
+    };
+
     void *binary_handle_ = nullptr;
+    BinaryLoadMode binary_load_mode_ = BinaryLoadMode::None;
     std::unordered_map<std::string, rtFuncHandle> func_handles_;
     std::string json_file_path_;
     uint64_t inner_fp_ = 0;
@@ -154,7 +257,22 @@ private:
     // {RunName, InitName} plus the runtime-reported extras passed to Init().
     std::vector<std::string> kernel_symbols_;
 
+    // L1 async bootstrap inputs. The queued dispatcher dereferences all three
+    // addresses after BootstrapDispatcherAsync returns, so stack/local RAII
+    // ownership would be a use-after-free. Each non-null pointer is released
+    // only by an externally-quiescent Finalize(), and a failed aclrtFree keeps
+    // that exact pointer for an explicit retry.
+    void *async_bootstrap_dispatcher_ = nullptr;
+    void *async_bootstrap_inner_ = nullptr;
+    void *async_bootstrap_args_ = nullptr;
+
     bool GenerateAicpuOpJson(const std::string &json_path, const std::string &kernel_so);
+    int PrepareJsonDescriptor(const std::vector<std::string> &extra_symbols);
+    int BootstrapDispatcherImpl(
+        const void *dispatcher_so_data, size_t dispatcher_so_len, const void *inner_so_data, size_t inner_so_len,
+        rtStream_t stream, int device_id, bool synchronize
+    );
+    void SetKernelSymbols(const std::vector<std::string> &extra_symbols);
     int AicpuKernelLaunch(rtFuncHandle func_handle, rtStream_t stream, void *args, size_t args_size, int aicpu_num);
 };
 
@@ -164,8 +282,11 @@ namespace KernelNames {
 constexpr const char *RunName = "simpler_aicpu_exec";   // multi-threaded exec
 constexpr const char *InitName = "simpler_aicpu_init";  // per-device one-shot invariants
 constexpr const char *RegisterCallableName = "simpler_aicpu_register_callable";
+constexpr const char *L1RegisterCallableName = "simpler_aicpu_l1_register_callable";
+constexpr const char *L1HbgRegisterExecutionSlotName = "simpler_aicpu_l1_hbg_register_execution_slot";
+constexpr const char *L1HbgRegisterCallableName = "simpler_aicpu_l1_hbg_register_callable";
+constexpr const char *L1HbgRunName = "simpler_aicpu_l1_hbg_exec";
+constexpr const char *L1RunName = "simpler_aicpu_l1_exec";
 }  // namespace KernelNames
 
 }  // namespace host
-
-#endif  // COMMON_HOST_LOAD_AICPU_OP_H_

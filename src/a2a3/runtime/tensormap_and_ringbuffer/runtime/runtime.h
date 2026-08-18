@@ -43,6 +43,8 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
+#include "aicore_handshake_protocol.h"
+#include "l1_aicore_report.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -70,7 +72,8 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  *
  * Protocol State Machine:
  * 1. AICore publishes physical_core_id, core_type, and aicore_done on launch
- * 2. AICPU publishes the task pointer and opens the register window with DATA_MAIN_BASE=IDLE
+ * 2. AICPU publishes the task pointer and opens the register window with DATA_MAIN_BASE=IDLE;
+ *    an invalid-id failure publishes CANCEL instead
  * 3. AICore observes window-open, reports initial idle state, and reads the task pointer
  * 4. Task Dispatch: AICPU writes DATA_MAIN_BASE after updating the per-core payload
  * 5. Task Execution: AICore reads the cached PTO2DispatchPayload and executes
@@ -97,7 +100,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * - physical_core_id: Written by AICore (with aicore_done), read by AICPU
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;  // Legacy layout field; unused by the current handshake
+    volatile uint32_t aicpu_ready;  // Pre-window error control: WAIT=0, legacy=1, CANCEL=2
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
     volatile uint64_t task;         // PTO2DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
@@ -201,6 +204,10 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Per-callable_id dispatch. AICPU dispatches via
     // `orch_so_table_[active_callable_id_]`.
     int32_t active_callable_id_;
+
+    // L1-only AICore-owned startup reports. Appended to preserve every legacy
+    // field offset in the device descriptor; null keeps the L2/L3 protocol.
+    uint64_t l1_aicore_reports_addr_;
 };
 
 // =============================================================================
@@ -243,6 +250,12 @@ public:
     int get_aicpu_thread_num() const { return dev.aicpu_thread_num; }
     void set_aicpu_thread_num(int n) { dev.aicpu_thread_num = n; }
     Handshake *get_workers() { return dev.workers; }
+    L1AicoreReport *get_l1_aicore_reports() const {
+        return reinterpret_cast<L1AicoreReport *>(static_cast<uintptr_t>(dev.l1_aicore_reports_addr_));
+    }
+    void set_l1_aicore_reports(L1AicoreReport *reports) {
+        dev.l1_aicore_reports_addr_ = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reports));
+    }
     int32_t get_aicpu_allowed_cpu_count() const { return dev.aicpu_allowed_cpu_count; }
     void set_aicpu_allowed_cpu_count(int32_t n) { dev.aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return dev.aicpu_launch_count; }

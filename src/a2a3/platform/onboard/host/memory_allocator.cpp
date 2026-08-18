@@ -62,17 +62,24 @@ int MemoryAllocator::free(void *ptr) {
     return 0;
 }
 
-int MemoryAllocator::finalize() {
+int MemoryAllocator::finalize(bool preserve_failures) {
     std::scoped_lock<std::mutex> lk(mu_);
     int last_error = 0;
-    for (const auto &kv : ptr_size_map_) {
-        int rc = rtFree(kv.first);
+    for (auto it = ptr_size_map_.begin(); it != ptr_size_map_.end();) {
+        int rc = rtFree(it->first);
         if (rc != 0) {
             LOG_ERROR("rtFree failed during Finalize: %d", rc);
             last_error = rc;
+            if (preserve_failures) {
+                ++it;
+            } else {
+                committed_bytes_ -= it->second;
+                it = ptr_size_map_.erase(it);
+            }
+            continue;
         }
+        committed_bytes_ -= it->second;
+        it = ptr_size_map_.erase(it);
     }
-    ptr_size_map_.clear();
-    committed_bytes_ = 0;
     return last_error;
 }
