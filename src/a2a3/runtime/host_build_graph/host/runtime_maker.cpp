@@ -61,6 +61,7 @@
 #include "../../../../common/runtime_status/error_log.h"
 #include "../../../../common/task_interface/call_config.h"
 #include "../../../../common/task_interface/hbg_static_execution_slot.h"
+#include "../../../../common/task_interface/orchestration_requirements.h"
 #include "../../../../common/worker/hbg_l1_host_build.h"
 #include "../../../../common/worker/pto_runtime_c_api.h"
 #include "callable.h"
@@ -358,6 +359,8 @@ typedef void (*OrchestrationBindFunc)(PTO2Runtime *);
 struct HostOrchEntryPoints {
     OrchestrationEntryFunc entry{nullptr};
     OrchestrationBindFunc bind{nullptr};
+    uint64_t requirements_v1{0};
+    bool requirements_v1_available{false};
 };
 
 static void destroy_host_orch_entry_points(void *value) { delete reinterpret_cast<HostOrchEntryPoints *>(value); }
@@ -657,6 +660,15 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
         }
         eps->entry = reinterpret_cast<OrchestrationEntryFunc>(entry);
         eps->bind = reinterpret_cast<OrchestrationBindFunc>(bind_sym);
+        // Optional for historical L2 artifacts, mandatory for borrowed HBG
+        // L1.  A separate scalar-returning symbol extends metadata without
+        // changing PTO2OrchestrationConfig's existing return ABI.
+        void *requirements_sym = dlsym(handle, simpler::orchestration::REQUIREMENTS_V1_SYMBOL);
+        if (requirements_sym != nullptr) {
+            auto requirements_fn = reinterpret_cast<simpler::orchestration::RequirementsV1Function>(requirements_sym);
+            eps->requirements_v1 = requirements_fn();
+            eps->requirements_v1_available = true;
+        }
         out->host_dlopen_handle = handle;
         out->host_orch_func_ptr = eps;
         out->destroy_host_orch_func_ptr = destroy_host_orch_entry_points;
@@ -1097,6 +1109,18 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     L2TaskArgs orch_l2;
     orch_l2.create_from_chip_args(*orch_args);
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    const auto requirements_status = simpler::orchestration::validate_hbg_l1_requirements(
+        entry_points->requirements_v1_available, entry_points->requirements_v1
+    );
+    if (requirements_status != simpler::orchestration::HbgL1RequirementsStatus::Ok) {
+        LOG_ERROR(
+            "build_l1_hbg_graph_plan_impl: orchestration requirements are unsupported for borrowed L1 "
+            "(status=%u, available=%d, flags=%#lx)",
+            static_cast<unsigned>(requirements_status), entry_points->requirements_v1_available ? 1 : 0,
+            static_cast<unsigned long>(entry_points->requirements_v1)
+        );
+        return -1;
+    }
     auto runtime_bind_guard = RAIIScopeGuard([entry_points]() {
         framework_bind_runtime(nullptr);
         if (entry_points->bind != nullptr) entry_points->bind(nullptr);

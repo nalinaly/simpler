@@ -466,6 +466,8 @@ add_task_interface_test(test_l1_tensor_validation types/test_l1_tensor_validatio
 set_tests_properties(test_l1_tensor_validation PROPERTIES LABELS "no_hardware")
 add_task_interface_test(test_l1_callable_validation types/test_l1_callable_validation.cpp)
 set_tests_properties(test_l1_callable_validation PROPERTIES LABELS "no_hardware")
+add_task_interface_test(test_orchestration_requirements types/test_orchestration_requirements.cpp)
+set_tests_properties(test_orchestration_requirements PROPERTIES LABELS "no_hardware")
 
 # Variable-length HBG graph-package ABI and host serializer. This is the
 # capture-independent H1/H2 foundation: it deep-copies pristine source bytes,
