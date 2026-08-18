@@ -27,6 +27,7 @@
 #include "common/kernel_args.h"
 #include "hbg_aicpu_invocation.h"
 #include "hbg_callable_registry.h"
+#include "hbg_context_generation.h"
 #include "hbg_execution_slot_registry.h"
 #include "hbg_restore.h"
 #include "pto2_dispatch_payload.h"
@@ -145,6 +146,17 @@ struct AicpuExecutor {
 static AicpuExecutor g_aicpu_executor;
 static simpler::hbg::HbgExecutionSlotRegistry g_hbg_execution_slot_registry;
 static simpler::hbg::HbgCallableRegistry g_hbg_callable_registry;
+static std::atomic<uint64_t> g_hbg_context_generation{0};
+
+extern "C" __attribute__((visibility("hidden"))) int simpler_aicpu_begin_l1_context(uint64_t context_generation) {
+    const auto status = simpler::hbg::begin_hbg_context_generation(
+        &g_hbg_context_generation, &g_hbg_execution_slot_registry, &g_hbg_callable_registry, context_generation
+    );
+    return status == simpler::hbg::HbgContextGenerationStatus::Began ||
+                   status == simpler::hbg::HbgContextGenerationStatus::AlreadyCurrent ?
+               0 :
+               -1;
+}
 
 static int hbg_restore_copy(
     void *, simpler::hbg::HbgLaunchRegionKind, void *destination, const void *source, size_t size
@@ -720,7 +732,11 @@ extern "C" int32_t aicpu_execute(Runtime *runtime) {
     return 0;
 }
 
-extern "C" int32_t aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation) {
+// Internal half of the platform trampoline. Keep it local to this runtime DSO
+// for the same reason as simpler_aicpu_execute_l1_hbg_platform: sequential TRB
+// and HBG contexts share one AICPU scheduler dynamic-link namespace.
+extern "C" __attribute__((visibility("hidden"))) int32_t
+aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation) {
     if (runtime == nullptr || invocation == nullptr) {
         LOG_ERROR("%s", "aicpu_execute_l1_hbg: invalid argument");
         return -1;

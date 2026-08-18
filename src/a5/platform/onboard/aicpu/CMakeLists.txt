@@ -104,6 +104,19 @@ target_link_directories(aicpu_kernel
 # Output name
 set_target_properties(aicpu_kernel PROPERTIES OUTPUT_NAME aicpu_kernel)
 
+# CANN keeps runtime-specific inner AICPU DSOs in one process-wide ELF
+# namespace. host_build_graph does not load a device orchestration DSO, so its
+# only public surface is the set of entry points resolved by rtsFuncGetByName.
+# Localize every implementation symbol to prevent another runtime with the
+# same C++ type/function names from interposing this DSO's internal calls.
+if(SIMPLER_RUNTIME_NAME STREQUAL "host_build_graph")
+    set(HBG_AICPU_EXPORT_MAP
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform/onboard/aicpu/hbg_aicpu_exports.map"
+    )
+    target_link_options(aicpu_kernel PRIVATE "-Wl,--version-script=${HBG_AICPU_EXPORT_MAP}")
+    set_property(TARGET aicpu_kernel APPEND PROPERTY LINK_DEPENDS "${HBG_AICPU_EXPORT_MAP}")
+endif()
+
 # See src/a2a3/platform/onboard/aicpu/CMakeLists.txt for design rationale.
 # Direction 1: stable single dispatcher + runtime AICPU kernel uploaded at runtime.
 set(AICPU_DISPATCHER_SOURCES

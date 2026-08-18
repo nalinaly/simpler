@@ -1,0 +1,10 @@
+{
+    global:
+        simpler_aicpu_exec;
+        simpler_aicpu_init;
+        simpler_aicpu_l1_hbg_register_execution_slot;
+        simpler_aicpu_l1_hbg_register_callable;
+        simpler_aicpu_l1_hbg_exec;
+    local:
+        *;
+};

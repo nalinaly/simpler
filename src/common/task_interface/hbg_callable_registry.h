@@ -34,7 +34,9 @@ inline constexpr uint32_t HBG_CALLABLE_REGISTRATION_SIZE = 56;
  * `callable_id` is context-global, while every callable owns an independent
  * func-id namespace.  The function-binding hash therefore authenticates one
  * callable-local 1024-entry function table rather than a context-global table.
- * The registry is append-only for the lifetime of the loaded AICPU binary.
+ * The registry is append-only within one borrowed-L1 context generation. A
+ * later externally-quiesced context resets the complete resident registry from
+ * its ordered init task before publishing any new callable.
  */
 struct alignas(8) HbgCallableRegistration {
     uint32_t magic{HBG_CALLABLE_REGISTRATION_MAGIC};
@@ -146,6 +148,15 @@ struct alignas(8) HbgCallableRegistryEntry {
 struct alignas(8) HbgCallableRegistry {
     HbgCallableRegistryEntry entries[MAX_REGISTERED_CALLABLE_IDS]{};
 };
+
+inline void reset_hbg_callable_registry(HbgCallableRegistry *registry) noexcept {
+    if (registry == nullptr) return;
+    for (HbgCallableRegistryEntry &entry : registry->entries) {
+        entry.phase.store(HbgCallableRegistryPhase::Publishing, std::memory_order_release);
+        entry.registration = HbgCallableRegistration{};
+        entry.phase.store(HbgCallableRegistryPhase::Empty, std::memory_order_release);
+    }
+}
 
 inline HbgCallableRegistryStatus
 publish_hbg_callable_registration(HbgCallableRegistry *registry, const HbgCallableRegistration *registration) noexcept {

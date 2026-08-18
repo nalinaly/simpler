@@ -25,6 +25,13 @@ _NEWLY_REQUIRED_PIPELINE_SYMBOLS = {
     "set_task_accepted_state_ctx",
     "supports_concurrent_native_prepare_ctx",
 }
+_HBG_AICPU_CANN_ENTRY_SYMBOLS = {
+    "simpler_aicpu_exec",
+    "simpler_aicpu_init",
+    "simpler_aicpu_l1_hbg_exec",
+    "simpler_aicpu_l1_hbg_register_callable",
+    "simpler_aicpu_l1_hbg_register_execution_slot",
+}
 
 _SIM_CASES = [
     pytest.param(arch, "sim", runtime, id=f"{arch}-sim-{runtime}")
@@ -69,3 +76,19 @@ def test_host_runtime_exports_required_pipeline_symbols(arch: str, variant: str,
     symbols = _defined_external_symbols(runtime_path)
 
     assert _NEWLY_REQUIRED_PIPELINE_SYMBOLS <= symbols, sorted(_NEWLY_REQUIRED_PIPELINE_SYMBOLS - symbols)
+
+
+@pytest.mark.parametrize(
+    "arch",
+    [
+        pytest.param("a2a3", marks=[pytest.mark.requires_hardware, pytest.mark.platforms(["a2a3"])]),
+        pytest.param("a5", marks=[pytest.mark.requires_hardware, pytest.mark.platforms(["a5"])]),
+    ],
+)
+def test_hbg_onboard_aicpu_exports_only_cann_entries(arch: str):
+    """HBG internals must not interpose another runtime in CANN's global namespace."""
+    runtime_dir = _PROJECT_ROOT / "build" / "lib" / arch / "onboard" / "host_build_graph"
+    runtime_libraries = tuple(runtime_dir.glob("libaicpu_kernel.*"))
+    assert len(runtime_libraries) == 1, runtime_dir
+
+    assert _defined_external_symbols(runtime_libraries[0]) == _HBG_AICPU_CANN_ENTRY_SYMBOLS

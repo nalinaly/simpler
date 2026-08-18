@@ -23,9 +23,10 @@ namespace simpler::hbg {
  * Publication state for the HBG execution-slot registration resident in the
  * AICPU runtime DSO.
  *
- * The registry deliberately has no reset operation.  Its lifetime is the
- * loaded AICPU binary lifetime: close must unload that binary before releasing
- * any device window referenced by the immutable registration.
+ * A registration is immutable within one borrowed-L1 context generation.
+ * CANN may keep the inner AICPU DSO resident after the host unloads its ACL
+ * binary handle, so the next externally-quiesced context explicitly resets
+ * this registry from its ordered init task before publishing a new trust root.
  */
 enum class HbgExecutionSlotRegistryPhase : uint32_t {
     Empty = 0,
@@ -58,6 +59,16 @@ struct alignas(8) HbgExecutionSlotRegistry {
     std::atomic<HbgExecutionSlotRegistryPhase> phase{HbgExecutionSlotRegistryPhase::Empty};
     HbgExecutionSlotRegistration registration{};
 };
+
+inline void reset_hbg_execution_slot_registry(HbgExecutionSlotRegistry *registry) noexcept {
+    if (registry == nullptr) return;
+    // Publishing is a fail-closed transient for an accidental concurrent
+    // reader. The borrowed-L1 contract additionally requires the previous
+    // context to be externally quiescent before its host owner closes it.
+    registry->phase.store(HbgExecutionSlotRegistryPhase::Publishing, std::memory_order_release);
+    registry->registration = HbgExecutionSlotRegistration{};
+    registry->phase.store(HbgExecutionSlotRegistryPhase::Empty, std::memory_order_release);
+}
 
 inline HbgExecutionSlotRegistryStatus publish_hbg_execution_slot_registration(
     HbgExecutionSlotRegistry *registry, const HbgExecutionSlotRegistration *registration, int32_t expected_device_id

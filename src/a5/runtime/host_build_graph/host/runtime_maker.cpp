@@ -1300,16 +1300,13 @@ extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
     return nullptr;
 }
 
-// HBG L1 uses a registration ABI independent from TMARB's fixed callable
-// registration. Keep capability explicitly disabled—not merely dependent on
-// the common weak default—until onboard proof covers large variable HostArgs +
-// placeholder patching, event-only hidden-stream capture/replay, repeated
-// restore of a consumed image, and no-reset AICPU/AICore error teardown. The
-// Python L1 facade also intentionally rejects HBG until that gate is removed.
-extern "C" int l1_runtime_supported_impl(void) { return 0; }
+// HBG L1 owns a frozen mutable execution slot and gives every launch/captured
+// node an independent runtime-owned HostArgs snapshot containing the pristine
+// graph image. The AICPU leader restores that image before scheduler release,
+// so repeated ACLGraph replay never consumes or aliases the canonical package.
+extern "C" int l1_runtime_supported_impl(void) { return 1; }
 
-// The symbol set is nevertheless exact and build-checked so bring-up can test
-// the protocol without inventing a second ABI.
+// Registration remains independent from TMARB's fixed callable ABI.
 extern "C" const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
     static const char *const kExtra[] = {
         "simpler_aicpu_l1_hbg_register_execution_slot",

@@ -140,7 +140,17 @@ struct InitArgs {
     // prevent the AICPU from releasing the already-launched hidden AICore
     // kernel. Zero for TRB and all legacy L2/L3 modes.
     uint64_t hbg_l1_prelaunch_control_addr{0};
+    // Host-boot-monotonic borrowed-L1 context generation. Under the v1
+    // single-context contract, runtime-specific state uses it to distinguish
+    // a repeated config publication from the start of the next quiesced
+    // context. Zero for legacy L2/L3 modes.
+    uint64_t l1_context_generation{0};
 };
+
+static_assert(
+    offsetof(InitArgs, l1_context_generation) % alignof(uint64_t) == 0,
+    "InitArgs::l1_context_generation must remain naturally aligned"
+);
 
 /**
  * RegisterCallableArgs - device orchestration SO registration payload

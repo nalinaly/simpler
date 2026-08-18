@@ -14,17 +14,25 @@
 
 #include <gtest/gtest.h>
 
+#include "hbg_context_generation.h"
 #include "hbg_execution_slot_registry.h"
 
 namespace {
 
 using simpler::hbg::acquire_hbg_execution_slot_registration;
+using simpler::hbg::begin_hbg_context_generation;
 using simpler::hbg::hbg_minimum_launch_blob_size;
+using simpler::hbg::HbgCallableRegistration;
+using simpler::hbg::HbgCallableRegistry;
+using simpler::hbg::HbgCallableRegistryStatus;
+using simpler::hbg::HbgContextGenerationStatus;
 using simpler::hbg::HbgExecutionSlotRegistration;
 using simpler::hbg::HbgExecutionSlotRegistry;
 using simpler::hbg::HbgExecutionSlotRegistryPhase;
 using simpler::hbg::HbgExecutionSlotRegistryStatus;
+using simpler::hbg::publish_hbg_callable_registration;
 using simpler::hbg::publish_hbg_execution_slot_registration;
+using simpler::hbg::reset_hbg_execution_slot_registry;
 using simpler::hbg::seal_hbg_execution_slot_registration;
 
 HbgExecutionSlotRegistration make_registration(uint64_t generation = 7) {
@@ -138,6 +146,92 @@ TEST(HbgExecutionSlotRegistry, RejectsNullArgumentsAndAnEmptyAcquire) {
         acquire_hbg_execution_slot_registration(&registry, 1, nullptr), HbgExecutionSlotRegistryStatus::NullArgument
     );
     EXPECT_EQ(acquire_hbg_execution_slot_registration(&registry, 1, &output), HbgExecutionSlotRegistryStatus::NotReady);
+}
+
+TEST(HbgExecutionSlotRegistry, ResetStartsANewExternallyQuiescedContext) {
+    HbgExecutionSlotRegistry registry;
+    const HbgExecutionSlotRegistration first = make_registration(7);
+    ASSERT_EQ(publish_hbg_execution_slot_registration(&registry, &first, 1), HbgExecutionSlotRegistryStatus::Published);
+
+    reset_hbg_execution_slot_registry(&registry);
+    HbgExecutionSlotRegistration output{};
+    EXPECT_EQ(acquire_hbg_execution_slot_registration(&registry, 1, &output), HbgExecutionSlotRegistryStatus::NotReady);
+
+    const HbgExecutionSlotRegistration second = make_registration(8);
+    EXPECT_EQ(
+        publish_hbg_execution_slot_registration(&registry, &second, 1), HbgExecutionSlotRegistryStatus::Published
+    );
+}
+
+TEST(HbgContextGeneration, NewGenerationResetsAndSameGenerationIsIdempotent) {
+    std::atomic<uint64_t> generation{0};
+    HbgExecutionSlotRegistry slot_registry;
+    HbgCallableRegistry callable_registry;
+
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, &callable_registry, 7),
+        HbgContextGenerationStatus::Began
+    );
+    EXPECT_EQ(generation.load(std::memory_order_acquire), 7u);
+
+    const HbgExecutionSlotRegistration slot = make_registration(7);
+    ASSERT_EQ(
+        publish_hbg_execution_slot_registration(&slot_registry, &slot, 1), HbgExecutionSlotRegistryStatus::Published
+    );
+    HbgCallableRegistration callable;
+    callable.callable_id = 0;
+    callable.callable_hash = 11;
+    callable.function_binding_hash = 12;
+    ASSERT_EQ(simpler::hbg::seal_hbg_callable_registration(&callable), simpler::hbg::HbgCallableStatus::Ok);
+    ASSERT_EQ(publish_hbg_callable_registration(&callable_registry, &callable), HbgCallableRegistryStatus::Published);
+
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, &callable_registry, 7),
+        HbgContextGenerationStatus::AlreadyCurrent
+    );
+    HbgExecutionSlotRegistration acquired{};
+    EXPECT_EQ(
+        acquire_hbg_execution_slot_registration(&slot_registry, 1, &acquired), HbgExecutionSlotRegistryStatus::Acquired
+    );
+
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, &callable_registry, 6),
+        HbgContextGenerationStatus::StaleGeneration
+    );
+    EXPECT_EQ(
+        acquire_hbg_execution_slot_registration(&slot_registry, 1, &acquired), HbgExecutionSlotRegistryStatus::Acquired
+    );
+
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, &callable_registry, 8),
+        HbgContextGenerationStatus::Began
+    );
+    EXPECT_EQ(
+        acquire_hbg_execution_slot_registration(&slot_registry, 1, &acquired), HbgExecutionSlotRegistryStatus::NotReady
+    );
+}
+
+TEST(HbgContextGeneration, RejectsInvalidArgumentsWithoutChangingGeneration) {
+    std::atomic<uint64_t> generation{9};
+    HbgExecutionSlotRegistry slot_registry;
+    HbgCallableRegistry callable_registry;
+
+    EXPECT_EQ(
+        begin_hbg_context_generation(nullptr, &slot_registry, &callable_registry, 10),
+        HbgContextGenerationStatus::NullArgument
+    );
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, nullptr, &callable_registry, 10),
+        HbgContextGenerationStatus::NullArgument
+    );
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, nullptr, 10), HbgContextGenerationStatus::NullArgument
+    );
+    EXPECT_EQ(
+        begin_hbg_context_generation(&generation, &slot_registry, &callable_registry, 0),
+        HbgContextGenerationStatus::InvalidGeneration
+    );
+    EXPECT_EQ(generation.load(std::memory_order_acquire), 9u);
 }
 
 }  // namespace

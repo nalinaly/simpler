@@ -25,6 +25,7 @@ using simpler::hbg::HbgCallableRegistryPhase;
 using simpler::hbg::HbgCallableRegistryStatus;
 using simpler::hbg::HbgCallableStatus;
 using simpler::hbg::publish_hbg_callable_registration;
+using simpler::hbg::reset_hbg_callable_registry;
 using simpler::hbg::seal_hbg_callable_registration;
 
 HbgCallableRegistration make_registration(int32_t callable_id = 3) {
@@ -119,6 +120,21 @@ TEST(HbgCallableRegistry, RejectsNullArgumentsAndOutOfRangeAcquires) {
         acquire_hbg_callable_registration(&registry, MAX_REGISTERED_CALLABLE_IDS, &output),
         HbgCallableRegistryStatus::InvalidCallableId
     );
+}
+
+TEST(HbgCallableRegistry, ResetAllowsCallableIdsToBelongToANewContext) {
+    HbgCallableRegistry registry;
+    const HbgCallableRegistration first = make_registration(0);
+    ASSERT_EQ(publish_hbg_callable_registration(&registry, &first), HbgCallableRegistryStatus::Published);
+
+    reset_hbg_callable_registry(&registry);
+    HbgCallableRegistration output{};
+    EXPECT_EQ(acquire_hbg_callable_registration(&registry, 0, &output), HbgCallableRegistryStatus::NotReady);
+
+    HbgCallableRegistration second = first;
+    ++second.callable_hash;
+    ASSERT_EQ(seal_hbg_callable_registration(&second), HbgCallableStatus::Ok);
+    EXPECT_EQ(publish_hbg_callable_registration(&registry, &second), HbgCallableRegistryStatus::Published);
 }
 
 }  // namespace

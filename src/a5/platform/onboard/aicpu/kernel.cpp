@@ -48,6 +48,7 @@ extern "C" __attribute__((weak)) int
 aicpu_execute_l1(Runtime *runtime, const void *unaligned_orch_args, int32_t invocation_callable_id);
 extern "C" __attribute__((weak)) int
 aicpu_execute_l1_hbg(Runtime *runtime, const simpler::hbg::HbgAicpuInvocationView *invocation);
+extern "C" __attribute__((weak)) int simpler_aicpu_begin_l1_context(uint64_t context_generation);
 
 static void PublishHbgPrelaunchCancel(const simpler::hbg::HbgAicpuInvocationView *invocation) {
     const auto *slot = invocation == nullptr ? nullptr : &invocation->slot;
@@ -202,7 +203,12 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_exec(void
     return ExecuteAicpuKernel(&prefix.kernel_args, L1AicpuInvocationOrchArgsBytes(arg), prefix.callable_id, nullptr);
 }
 
-extern "C" __attribute__((visibility("default"))) int simpler_aicpu_execute_l1_hbg_platform(
+// Internal HBG trampoline. AICPU scheduler keeps inner runtime DSOs in one
+// process-global namespace; exporting this helper lets a previously loaded TRB
+// DSO preempt the HBG definition and route the HBG entry through TRB's null
+// weak executor. CANN launches simpler_aicpu_l1_hbg_exec, not this bridge, so
+// bind it to the DSO that contains it.
+extern "C" __attribute__((visibility("hidden"))) int simpler_aicpu_execute_l1_hbg_platform(
     const KernelArgs *kernel_args, const simpler::hbg::HbgAicpuInvocationView *invocation
 ) {
     if (kernel_args == nullptr || invocation == nullptr) {
@@ -233,6 +239,20 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
     }
 
     InitArgs *init_args = reinterpret_cast<InitArgs *>(arg);
+    if (init_args->l1_context_generation != 0) {
+        if (simpler_aicpu_begin_l1_context == nullptr) {
+            if (init_args->hbg_l1_prelaunch_control_addr != 0) {
+                LOG_ERROR("%s", "HBG L1 runtime is missing its context-generation hook");
+                return -1;
+            }
+        } else if (simpler_aicpu_begin_l1_context(init_args->l1_context_generation) != 0) {
+            LOG_ERROR(
+                "Failed to begin borrowed-L1 context generation %llu",
+                static_cast<unsigned long long>(init_args->l1_context_generation)
+            );
+            return -1;
+        }
+    }
     set_log_level(static_cast<int>(init_args->log_level));
     set_orch_device_id(static_cast<int>(init_args->device_id));
     set_scheduler_timeout_ms(static_cast<int>(init_args->scheduler_timeout_ms));

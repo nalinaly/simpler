@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <limits>
 #include <new>
@@ -54,6 +55,36 @@ uint64_t next_process_epoch() {
         }
     }
     throw std::overflow_error("process epoch space is exhausted");
+}
+
+uint64_t next_l1_context_generation() {
+    // CANN may retain an inner runtime DSO after its ACL binary handle is
+    // released. CLOCK_MONOTONIC reduces cross-process generation aliasing;
+    // the atomic provides strict uniqueness only inside the supported
+    // single-host-process L1 v1 contract. This value is not a device lease.
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 || now.tv_nsec < 0) {
+        throw std::runtime_error("failed to read the monotonic clock for an L1 context generation");
+    }
+    constexpr uint64_t NANOS_PER_SECOND = 1000000000ULL;
+    const uint64_t seconds = static_cast<uint64_t>(now.tv_sec);
+    const uint64_t nanoseconds = static_cast<uint64_t>(now.tv_nsec);
+    if (seconds > (std::numeric_limits<uint64_t>::max() - nanoseconds) / NANOS_PER_SECOND) {
+        throw std::overflow_error("monotonic clock does not fit the L1 context generation space");
+    }
+    const uint64_t clock_generation = seconds * NANOS_PER_SECOND + nanoseconds;
+
+    static std::atomic<uint64_t> last_generation{0};
+    uint64_t current = last_generation.load(std::memory_order_relaxed);
+    for (;;) {
+        if (current == std::numeric_limits<uint64_t>::max()) {
+            throw std::overflow_error("L1 context generation space is exhausted");
+        }
+        const uint64_t candidate = clock_generation > current ? clock_generation : current + 1;
+        if (last_generation.compare_exchange_weak(current, candidate, std::memory_order_relaxed)) {
+            return candidate;
+        }
+    }
 }
 
 std::string format_native_run_identity(const ChipWorkerNativeRun &run) {
@@ -408,7 +439,7 @@ void ChipWorker::init_impl(
             throw std::runtime_error("selected host runtime does not support borrowed L1 execution");
         }
         if (borrowed_l1) {
-            const uint64_t context_generation = next_process_epoch();
+            const uint64_t context_generation = next_l1_context_generation();
             init_rc = simpler_l1_init_fn_(
                 device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(),
                 aicore_bytes.size(), dispatcher_ptr, dispatcher_bytes.size(), config, context_generation

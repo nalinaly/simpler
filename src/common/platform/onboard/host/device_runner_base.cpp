@@ -557,6 +557,7 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
             if (control == nullptr) return poison(PTO_RUNTIME_ERR_INVALID_STATE);
             init_args.hbg_l1_prelaunch_control_addr = reinterpret_cast<uint64_t>(control);
         }
+        init_args.l1_context_generation = l1_context_generation_;
         rc = load_aicpu_op_.LaunchWithHostArgs(
             caller_stream, &init_args, sizeof(init_args), 1, host::KernelNames::InitName
         );

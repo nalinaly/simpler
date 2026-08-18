@@ -348,9 +348,11 @@ class RuntimeBuilder:
 
         def _compile_target(target: str) -> Path:
             include_dirs, source_dirs = self._resolve_target_dirs(config_dir, build_config, target)
-            cmake_defines = None
+            # The platform CMake project is shared by every runtime variant.
+            # Pass the selected runtime explicitly so target-local link policy
+            # never has to infer the variant from source-directory spelling.
+            defines: dict[str, str] = {"SIMPLER_RUNTIME_NAME": name}
             if target == "host":
-                defines: dict[str, str] = {}
                 if build_pto_isa_commit:
                     defines["SIMPLER_PTO_ISA_BUILD_COMMIT"] = build_pto_isa_commit
                 # Pin-resolved checkout path for host CMake include dirs (#1403).
@@ -367,7 +369,7 @@ class RuntimeBuilder:
                 for opt_in_define in ("SIMPLER_ENABLE_PTO_URMA_WORKSPACE",):
                     if os.environ.get(opt_in_define, "").upper() in {"1", "ON", "TRUE", "YES"}:
                         defines[opt_in_define] = "ON"
-                cmake_defines = defines or None
+            cmake_defines = defines
             # compile() adds a {target}/ subdirectory inside build_dir
             cache_dir = self._CACHE_DIR / arch / variant / name
             cache_dir.mkdir(parents=True, exist_ok=True)

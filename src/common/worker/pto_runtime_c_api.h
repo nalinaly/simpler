@@ -259,11 +259,11 @@ int simpler_init(
 /* ===========================================================================
  * Borrowed-device L1 single-operator lifecycle
  *
- * These symbols are exported by every host-runtime variant. Device-
- * orchestration tensormap_and_ringbuffer onboard runtimes report support;
- * simulator and host_build_graph variants return unsupported without changing
- * state. The L1 and historical L2/L3 initialization paths are mutually
- * exclusive for a DeviceContextHandle.
+ * These symbols are exported by every host-runtime variant. Onboard
+ * tensormap_and_ringbuffer and host_build_graph runtimes report support;
+ * simulator variants return unsupported without changing state. The L1 and
+ * historical L2/L3 initialization paths are mutually exclusive for a
+ * DeviceContextHandle.
  * =========================================================================== */
 
 /** Return nonzero when this runtime/context can use the L1 ABI. */
@@ -276,9 +276,11 @@ int simpler_l1_supported(DeviceContextHandle ctx);
  * call does not take ACL/device-reset ownership and does not synchronize a
  * stream or device. It creates only context-owned persistent handles used by
  * asynchronous preparation and launch. `config` is context-static and launch
- * never mutates it. `context_generation` is minted by the process-lifetime
- * ChipWorker owner, is never zero or reused, and is not exposed through the
- * Python convenience API.
+ * never mutates it. `context_generation` is minted by the ChipWorker owner, is
+ * nonzero and unique for sequential contexts in that host process, and is not
+ * exposed through the Python convenience API. It is an HBG resident-registry
+ * identity under the v1 externally-quiesced single-context contract, not a
+ * cross-process device lease.
  */
 int simpler_l1_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,

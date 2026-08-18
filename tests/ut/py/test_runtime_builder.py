@@ -280,6 +280,26 @@ class TestRuntimeBuilderGetBinaries:
         assert targets == ["aicore", "aicpu", "host"]
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
+    def test_passes_runtime_name_to_every_cmake_target(
+        self, MockCompiler, tmp_path, default_test_platform, test_arch
+    ):
+        """Every shared platform CMake project receives the selected runtime name."""
+        from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
+
+        self._make_runtime(tmp_path, test_arch)
+
+        mock_instance = MockCompiler.get_instance.return_value
+        mock_instance.compile.side_effect = lambda target, *a, **kw: (Path(kw["output_dir"]) / f"lib{target}.so")
+
+        builder = RuntimeBuilder(platform=default_test_platform)
+        builder.get_binaries("test_rt", build=True)
+
+        assert all(
+            call.kwargs["cmake_defines"]["SIMPLER_RUNTIME_NAME"] == "test_rt"
+            for call in mock_instance.compile.call_args_list
+        )
+
+    @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_resolves_paths_relative_to_config(self, MockCompiler, tmp_path, default_test_platform, test_arch):
         """Include/source dirs are resolved relative to the build_config.py directory."""
         from simpler_setup.runtime_builder import RuntimeBuilder  # noqa: PLC0415
@@ -362,8 +382,11 @@ class TestRuntimeBuilderGetBinaries:
         assert host_call.kwargs["cmake_defines"] == {
             "PTO_ISA_ROOT": "/tmp/pto-isa",
             "SIMPLER_PTO_ISA_BUILD_COMMIT": pin,
+            "SIMPLER_RUNTIME_NAME": "test_rt",
         }
-        assert all(call.kwargs["cmake_defines"] is None for call in non_host_calls)
+        assert all(
+            call.kwargs["cmake_defines"] == {"SIMPLER_RUNTIME_NAME": "test_rt"} for call in non_host_calls
+        )
 
     @patch("simpler_setup.runtime_builder.RuntimeCompiler")
     def test_a5_default_build_writes_pto_isa_metadata(self, MockCompiler, tmp_path, monkeypatch):
