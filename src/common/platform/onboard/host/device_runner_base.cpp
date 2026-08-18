@@ -53,6 +53,7 @@
 #include "host_log.h"
 #include "hbg_argument_snapshot.h"
 #include "hbg_callable_function_binding.h"
+#include "hbg_l1_fault_injection.h"
 #include "hbg_l1_host_build.h"
 #include "l1_aicpu_args.h"
 #include "l1_callable_validation.h"
@@ -116,6 +117,54 @@ pthread_key_t g_run_selection_key;
 pthread_once_t g_run_selection_once = PTHREAD_ONCE_INIT;
 int g_run_selection_key_error = 0;
 thread_local DeviceRunnerBase *g_l1_prepare_upload_runner = nullptr;
+
+bool parse_hbg_l1_test_fault(const char *value, simpler::hbg::HbgL1FaultStage *out) noexcept {
+    if (out == nullptr) return false;
+    *out = simpler::hbg::HbgL1FaultStage::None;
+    if (value == nullptr || value[0] == '\0' || std::strcmp(value, "none") == 0) return true;
+    struct NamedStage {
+        const char *name;
+        simpler::hbg::HbgL1FaultStage stage;
+    };
+    constexpr NamedStage stages[]{
+        {"restore_copy", simpler::hbg::HbgL1FaultStage::RestoreCopy},
+        {"restore_publish", simpler::hbg::HbgL1FaultStage::RestorePublish},
+        {"after_scheduler_init", simpler::hbg::HbgL1FaultStage::AfterSchedulerInit},
+        {"before_classify", simpler::hbg::HbgL1FaultStage::BeforeClassify},
+        {"before_dispatch", simpler::hbg::HbgL1FaultStage::BeforeDispatch},
+        {"shutdown", simpler::hbg::HbgL1FaultStage::Shutdown},
+        {"runtime_destroy", simpler::hbg::HbgL1FaultStage::RuntimeDestroy},
+    };
+    for (const auto &candidate : stages) {
+        if (std::strcmp(value, candidate.name) == 0) {
+            *out = candidate.stage;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool inject_hbg_l1_test_fault(std::vector<uint8_t> *blob) noexcept {
+    if (blob == nullptr || blob->size() < sizeof(simpler::hbg::HbgLaunchBlobHeader)) return false;
+    const char *requested = std::getenv("SIMPLER_INTERNAL_HBG_L1_TEST_FAULT");
+    simpler::hbg::HbgL1FaultStage stage{};
+    if (!parse_hbg_l1_test_fault(requested, &stage)) {
+        LOG_ERROR("Unknown SIMPLER_INTERNAL_HBG_L1_TEST_FAULT value: %s", requested);
+        return false;
+    }
+    if (stage == simpler::hbg::HbgL1FaultStage::None) return true;
+
+    auto *header = reinterpret_cast<simpler::hbg::HbgLaunchBlobHeader *>(blob->data());
+    if (header->region_count == 0 || header->header_size > blob->size()) return false;
+    auto *regions = reinterpret_cast<simpler::hbg::HbgLaunchRegion *>(blob->data() + sizeof(*header));
+    regions[0].reserved = simpler::hbg::hbg_l1_encode_fault_marker(stage);
+    header->flags |= simpler::hbg::HBG_LAUNCH_TEST_FAULT_INJECTION;
+    header->plan_hash = simpler::hbg::hbg_plan_hash(
+        header->identity, regions, header->region_count, blob->data() + header->header_size, header->inline_payload_size
+    );
+    LOG_WARN("Injecting internal HBG L1 test fault stage=%u", static_cast<unsigned>(stage));
+    return true;
+}
 
 uint64_t upload_l1_callable_transaction(const void *callable) {
     if (g_l1_prepare_upload_runner == nullptr || callable == nullptr) return 0;
@@ -925,6 +974,10 @@ int DeviceRunnerBase::launch_l1_callable(
             return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
         }
         auto blob_status = hbg_plan->serialize(&hbg_launch_blob);
+        if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok && !inject_hbg_l1_test_fault(&hbg_launch_blob)) {
+            LOG_ERROR("HBG L1 test fault request is invalid");
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        }
         if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok) {
             blob_status = simpler::hbg::make_hbg_launch_placeholder(
                 hbg_launch_blob.data(), hbg_launch_blob.size(), &hbg_placeholder,

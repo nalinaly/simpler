@@ -18,6 +18,7 @@
 
 #include "arg_direction.h"
 #include "callable_protocol.h"
+#include "hbg_l1_fault_injection.h"
 #include "host_args_launch.h"
 #include "utils/fnv1a_64.h"
 
@@ -37,6 +38,9 @@ enum class HbgLaunchRegionKind : uint32_t {
 
 enum HbgLaunchBlobFlags : uint32_t {
     HBG_LAUNCH_DESTINATION_BOUND = 1U << 0,
+    // Private test contract. The request itself is stored in the first
+    // region's reserved word and therefore covered by plan_hash.
+    HBG_LAUNCH_TEST_FAULT_INJECTION = 1U << 31,
 };
 
 enum HbgLaunchRegionFlags : uint32_t {
@@ -296,9 +300,11 @@ inline HbgLaunchBlobStatus validate_hbg_launch_blob(
         header->inline_payload_size != static_cast<uint64_t>(header->total_size - header->header_size)) {
         return HbgLaunchBlobStatus::InvalidHeader;
     }
-    if ((header->flags & ~HBG_LAUNCH_DESTINATION_BOUND) != 0 || (header->flags & HBG_LAUNCH_DESTINATION_BOUND) == 0) {
+    constexpr uint32_t allowed_flags = HBG_LAUNCH_DESTINATION_BOUND | HBG_LAUNCH_TEST_FAULT_INJECTION;
+    if ((header->flags & ~allowed_flags) != 0 || (header->flags & HBG_LAUNCH_DESTINATION_BOUND) == 0) {
         return HbgLaunchBlobStatus::InvalidFlags;
     }
+    const bool has_test_fault = (header->flags & HBG_LAUNCH_TEST_FAULT_INJECTION) != 0;
     if (header->plan_generation == 0 || header->binding.slot_generation == 0) {
         return HbgLaunchBlobStatus::InvalidGeneration;
     }
@@ -352,7 +358,12 @@ inline HbgLaunchBlobStatus validate_hbg_launch_blob(
         if ((region.flags & ~(HBG_REGION_REQUIRED | HBG_REGION_IMMUTABLE_SOURCE)) != 0 ||
             (region.flags & (HBG_REGION_REQUIRED | HBG_REGION_IMMUTABLE_SOURCE)) !=
                 (HBG_REGION_REQUIRED | HBG_REGION_IMMUTABLE_SOURCE) ||
-            region.reserved != 0 || region.size == 0 || region.source_offset % HBG_LAUNCH_BLOB_ALIGNMENT != 0) {
+            region.size == 0 || region.source_offset % HBG_LAUNCH_BLOB_ALIGNMENT != 0) {
+            return HbgLaunchBlobStatus::InvalidRegion;
+        }
+        if ((!has_test_fault && region.reserved != 0) ||
+            (has_test_fault &&
+             (i == 0 ? hbg_l1_decode_fault_marker(region.reserved) == HbgL1FaultStage::None : region.reserved != 0))) {
             return HbgLaunchBlobStatus::InvalidRegion;
         }
 
@@ -404,6 +415,13 @@ inline HbgLaunchBlobStatus validate_hbg_launch_blob(
         return HbgLaunchBlobStatus::HashMismatch;
     }
     return HbgLaunchBlobStatus::Ok;
+}
+
+inline HbgL1FaultStage hbg_l1_fault_stage(const HbgLaunchBlobHeader *header) noexcept {
+    if (header == nullptr || header->region_count == 0 || (header->flags & HBG_LAUNCH_TEST_FAULT_INJECTION) == 0) {
+        return HbgL1FaultStage::None;
+    }
+    return hbg_l1_decode_fault_marker(hbg_launch_regions(header)[0].reserved);
 }
 
 /**

@@ -29,7 +29,12 @@ namespace {
 using simpler::hbg::build_hbg_graph_plan;
 using simpler::hbg::build_hbg_launch_blob;
 using simpler::hbg::hbg_inline_payload;
+using simpler::hbg::hbg_l1_decode_fault_marker;
+using simpler::hbg::hbg_l1_encode_fault_marker;
+using simpler::hbg::hbg_l1_fault_stage;
 using simpler::hbg::hbg_launch_regions;
+using simpler::hbg::HBG_LAUNCH_TEST_FAULT_INJECTION;
+using simpler::hbg::hbg_plan_hash;
 using simpler::hbg::HBG_REGION_IMMUTABLE_SOURCE;
 using simpler::hbg::HBG_REGION_REQUIRED;
 using simpler::hbg::HbgExecutionBinding;
@@ -38,6 +43,7 @@ using simpler::hbg::HbgExecutionSlotStatus;
 using simpler::hbg::HbgGraphPlan;
 using simpler::hbg::HbgHostRegionInput;
 using simpler::hbg::HbgInvocationIdentity;
+using simpler::hbg::HbgL1FaultStage;
 using simpler::hbg::HbgLaunchBlobAddressMode;
 using simpler::hbg::HbgLaunchBlobHeader;
 using simpler::hbg::HbgLaunchBlobStatus;
@@ -231,6 +237,16 @@ std::vector<uint8_t> make_blob(Sources *sources = nullptr) {
     return blob;
 }
 
+void set_fault_marker(std::vector<uint8_t> &blob, HbgL1FaultStage stage, size_t region_index = 0) {
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    auto *regions = const_cast<HbgLaunchRegion *>(hbg_launch_regions(header));
+    header->flags |= HBG_LAUNCH_TEST_FAULT_INJECTION;
+    regions[region_index].reserved = hbg_l1_encode_fault_marker(stage);
+    header->plan_hash = hbg_plan_hash(
+        header->identity, regions, header->region_count, hbg_inline_payload(header), header->inline_payload_size
+    );
+}
+
 TEST(HbgLaunchBlob, SerializesAnIndependentCanonicalSnapshot) {
     Sources sources;
     std::vector<uint8_t> blob = make_blob(&sources);
@@ -255,6 +271,63 @@ TEST(HbgLaunchBlob, SerializesAnIndependentCanonicalSnapshot) {
     const uint8_t snapshotted_first_byte = payload[regions[0].source_offset];
     sources.sm[0] ^= 0xff;
     EXPECT_EQ(payload[regions[0].source_offset], snapshotted_first_byte);
+}
+
+TEST(HbgLaunchBlob, TestFaultMarkerIsTaskLocalHashedAndStrictlyValidated) {
+    std::vector<uint8_t> blob = make_blob();
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    EXPECT_EQ(hbg_l1_fault_stage(header), HbgL1FaultStage::None);
+
+    set_fault_marker(blob, HbgL1FaultStage::RestoreCopy);
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::Ok
+    );
+    EXPECT_EQ(hbg_l1_fault_stage(header), HbgL1FaultStage::RestoreCopy);
+    EXPECT_EQ(
+        hbg_l1_decode_fault_marker(hbg_l1_encode_fault_marker(HbgL1FaultStage::RuntimeDestroy)),
+        HbgL1FaultStage::RuntimeDestroy
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    header->flags |= HBG_LAUNCH_TEST_FAULT_INJECTION;
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidRegion
+    );
+
+    blob = make_blob();
+    set_fault_marker(blob, HbgL1FaultStage::RestorePublish, 1);
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidRegion
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    auto *regions = const_cast<HbgLaunchRegion *>(hbg_launch_regions(header));
+    regions[0].reserved = hbg_l1_encode_fault_marker(HbgL1FaultStage::BeforeDispatch);
+    header->plan_hash = hbg_plan_hash(
+        header->identity, regions, header->region_count, hbg_inline_payload(header), header->inline_payload_size
+    );
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidRegion
+    );
+
+    blob = make_blob();
+    header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
+    auto *bad_regions = const_cast<HbgLaunchRegion *>(hbg_launch_regions(header));
+    header->flags |= HBG_LAUNCH_TEST_FAULT_INJECTION;
+    bad_regions[0].reserved = static_cast<uint64_t>(simpler::hbg::HBG_L1_FAULT_MARKER_MAGIC) << 32U;
+    header->plan_hash = hbg_plan_hash(
+        header->identity, bad_regions, header->region_count, hbg_inline_payload(header), header->inline_payload_size
+    );
+    EXPECT_EQ(
+        validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
+        HbgLaunchBlobStatus::InvalidRegion
+    );
 }
 
 TEST(HbgGraphPlan, OwnsCanonicalBytesAndProducesFreshWritableTaskSnapshots) {

@@ -116,4 +116,19 @@ inline HbgAicpuInvocationStatus make_hbg_aicpu_invocation_view(
     return HbgAicpuInvocationStatus::Ok;
 }
 
+inline HbgL1FaultStage hbg_aicpu_fault_stage(const HbgAicpuInvocationView *invocation) noexcept {
+    if (invocation == nullptr || invocation->blob == nullptr || invocation->header.region_count == 0 ||
+        invocation->header.header_size < sizeof(HbgLaunchBlobHeader) + sizeof(HbgLaunchRegion) ||
+        invocation->blob_size < sizeof(HbgLaunchBlobHeader) + sizeof(HbgLaunchRegion) ||
+        (invocation->header.flags & HBG_LAUNCH_TEST_FAULT_INJECTION) == 0) {
+        return HbgL1FaultStage::None;
+    }
+    HbgLaunchRegion first_region{};
+    std::memcpy(
+        &first_region, static_cast<const uint8_t *>(invocation->blob) + sizeof(HbgLaunchBlobHeader),
+        sizeof(first_region)
+    );
+    return hbg_l1_decode_fault_marker(first_region.reserved);
+}
+
 }  // namespace simpler::hbg

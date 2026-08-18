@@ -121,6 +121,9 @@ struct AicpuExecutor {
     std::atomic<int32_t> run_error_{0};
     std::atomic<bool> runtime_init_ready_{false};
     std::atomic<int32_t> hbg_restore_error_{0};
+    std::atomic<uint32_t> hbg_fault_stage_{static_cast<uint32_t>(simpler::hbg::HbgL1FaultStage::None)};
+    std::atomic<bool> hbg_fault_injected_{false};
+    std::atomic<int32_t> hbg_unexpected_teardown_error_{0};
 
     // Per-Worker arena backing the PTO2Runtime + sm_handle + orch/sched/mailbox
     // sub-regions (created in runtime_create_from_sm, released in runtime_destroy).
@@ -158,15 +161,30 @@ extern "C" __attribute__((visibility("hidden"))) int simpler_aicpu_begin_l1_cont
                -1;
 }
 
+struct HbgRestoreFaultContext {
+    simpler::hbg::HbgL1FaultStage stage{simpler::hbg::HbgL1FaultStage::None};
+};
+
 static int hbg_restore_copy(
-    void *, simpler::hbg::HbgLaunchRegionKind, void *destination, const void *source, size_t size
+    void *context, simpler::hbg::HbgLaunchRegionKind kind, void *destination, const void *source, size_t size
 ) noexcept {
+    const auto *fault = static_cast<const HbgRestoreFaultContext *>(context);
+    if (fault != nullptr && fault->stage == simpler::hbg::HbgL1FaultStage::RestoreCopy &&
+        kind == simpler::hbg::HbgLaunchRegionKind::RuntimeArenaImage) {
+        return simpler::hbg::hbg_l1_fault_error(fault->stage);
+    }
     std::memcpy(destination, source, size);
     return 0;
 }
 
-static int
-hbg_restore_publish(void *, simpler::hbg::HbgLaunchRegionKind, const void *destination, size_t size) noexcept {
+static int hbg_restore_publish(
+    void *context, simpler::hbg::HbgLaunchRegionKind kind, const void *destination, size_t size
+) noexcept {
+    const auto *fault = static_cast<const HbgRestoreFaultContext *>(context);
+    if (fault != nullptr && fault->stage == simpler::hbg::HbgL1FaultStage::RestorePublish &&
+        kind == simpler::hbg::HbgLaunchRegionKind::RuntimeArenaImage) {
+        return simpler::hbg::hbg_l1_fault_error(fault->stage);
+    }
     cache_flush_range(destination, size);
     return 0;
 }
@@ -246,6 +264,9 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 
         completion_gate_.reset();
         run_error_.store(0, std::memory_order_relaxed);
+        hbg_fault_stage_.store(static_cast<uint32_t>(simpler::hbg::HbgL1FaultStage::None), std::memory_order_relaxed);
+        hbg_fault_injected_.store(false, std::memory_order_relaxed);
+        hbg_unexpected_teardown_error_.store(0, std::memory_order_relaxed);
         init_done_.store(false, std::memory_order_relaxed);
         init_failed_.store(false, std::memory_order_relaxed);
         hs_arrived_.store(0, std::memory_order_relaxed);
@@ -301,6 +322,8 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
         );
         return -1;
     }
+    auto requested_fault = simpler::hbg::HbgL1FaultStage::None;
+    bool deferred_lifecycle_fault = false;
     int32_t run_rc = 0;
     if (const int32_t shared_error = run_error_.load(std::memory_order_acquire); shared_error != 0) {
         run_rc = shared_error;
@@ -343,8 +366,11 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
 
         if (boot_ok && is_hbg_l1) {
             cache_invalidate_range(hbg_invocation->blob, static_cast<size_t>(hbg_invocation->blob_size));
+            requested_fault = simpler::hbg::hbg_aicpu_fault_stage(hbg_invocation);
+            hbg_fault_stage_.store(static_cast<uint32_t>(requested_fault), std::memory_order_release);
             simpler::hbg::HbgRestoreCommit commit{};
-            const simpler::hbg::HbgRestoreOps restore_ops{nullptr, hbg_restore_copy, hbg_restore_publish};
+            HbgRestoreFaultContext restore_context{requested_fault};
+            const simpler::hbg::HbgRestoreOps restore_ops{&restore_context, hbg_restore_copy, hbg_restore_publish};
             const auto restore = simpler::hbg::restore_hbg_launch_blob(
                 hbg_invocation->blob, static_cast<size_t>(hbg_invocation->blob_size), hbg_invocation->slot,
                 hbg_invocation->header.identity, restore_ops, &commit
@@ -356,10 +382,22 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
                     "Thread %d: HBG task package restore failed status=%u region=%u callback=%d", thread_idx,
                     static_cast<unsigned>(restore.status), restore.region_index, restore.callback_error
                 );
+                const int32_t injected_error = simpler::hbg::hbg_l1_fault_error(requested_fault);
+                if (injected_error != 0 && restore.callback_error == injected_error) {
+                    hbg_fault_injected_.store(true, std::memory_order_release);
+                    run_rc = injected_error;
+                } else {
+                    run_rc = -1;
+                }
                 rt = nullptr;
-                run_rc = -1;
                 boot_ok = false;
             }
+        }
+
+        if (boot_ok && requested_fault == simpler::hbg::HbgL1FaultStage::AfterSchedulerInit) {
+            run_rc = simpler::hbg::hbg_l1_fault_error(requested_fault);
+            hbg_fault_injected_.store(true, std::memory_order_release);
+            boot_ok = false;
         }
 
         if (boot_ok) {
@@ -425,6 +463,11 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
             LOG_INFO("Thread %d: host-orch boot complete (%d tasks)", thread_idx, host_total_tasks);
         }
 
+        if (boot_ok && requested_fault == simpler::hbg::HbgL1FaultStage::BeforeClassify) {
+            run_rc = simpler::hbg::hbg_l1_fault_error(requested_fault);
+            hbg_fault_injected_.store(true, std::memory_order_release);
+        }
+
         // Publish "leader setup done" (SM attached, task count latched, queues
         // allocated). Every thread then classifies its slice below before any of
         // them may dispatch — the leader holds runtime_init_ready_ until then.
@@ -440,6 +483,9 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
     // leader used to run alone while the others idle-waited.
     while (!classify_ready_.load(std::memory_order_acquire)) {
         SPIN_WAIT_HINT();
+    }
+    if (hbg_invocation != nullptr && thread_idx != aicpu_thread_num_ - 1) {
+        requested_fault = static_cast<simpler::hbg::HbgL1FaultStage>(hbg_fault_stage_.load(std::memory_order_acquire));
     }
     if (hbg_invocation != nullptr && thread_idx != aicpu_thread_num_ - 1) {
         cache_invalidate_range(
@@ -470,8 +516,15 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
         }
     }
 
+    if (run_rc == 0 && requested_fault == simpler::hbg::HbgL1FaultStage::BeforeDispatch) {
+        run_rc = simpler::hbg::hbg_l1_fault_error(requested_fault);
+        hbg_fault_injected_.store(true, std::memory_order_release);
+    }
+
     // Every AICPU thread schedules its assigned cores.
-    if (!sched_ctx_.is_completed()) {
+    deferred_lifecycle_fault = requested_fault == simpler::hbg::HbgL1FaultStage::Shutdown ||
+                               requested_fault == simpler::hbg::HbgL1FaultStage::RuntimeDestroy;
+    if (run_rc == 0 && !deferred_lifecycle_fault && !sched_ctx_.is_completed()) {
         if (rt == nullptr) {
             LOG_ERROR("Thread %d: rt is null after orchestrator error, skipping dispatch", thread_idx);
         } else {
@@ -494,8 +547,18 @@ run_epilogue:
     // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
     // platform_deinit_aicore_regs is idempotent.
     int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
+    if (shutdown_rc != 0) {
+        int32_t expected = 0;
+        (void)hbg_unexpected_teardown_error_.compare_exchange_strong(
+            expected, shutdown_rc, std::memory_order_acq_rel, std::memory_order_acquire
+        );
+    }
     if (shutdown_rc != 0 && run_rc == 0) {
         run_rc = shutdown_rc;
+    }
+    if (shutdown_rc == 0 && run_rc == 0 && requested_fault == simpler::hbg::HbgL1FaultStage::Shutdown) {
+        run_rc = simpler::hbg::hbg_l1_fault_error(requested_fault);
+        hbg_fault_injected_.store(true, std::memory_order_release);
     }
     latch_run_error(run_rc);
 
@@ -517,6 +580,12 @@ void AicpuExecutor::arrive_and_finalize_run() {
             runtime_destroy(rt, runtime_arena_);
             rt = nullptr;
         }
+        const auto fault_stage =
+            static_cast<simpler::hbg::HbgL1FaultStage>(hbg_fault_stage_.load(std::memory_order_acquire));
+        if (fault_stage == simpler::hbg::HbgL1FaultStage::RuntimeDestroy) {
+            hbg_fault_injected_.store(true, std::memory_order_release);
+            latch_run_error(simpler::hbg::hbg_l1_fault_error(fault_stage));
+        }
     });
 }
 
@@ -533,6 +602,9 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     run_error_.store(0, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
     hbg_restore_error_.store(0, std::memory_order_release);
+    hbg_fault_stage_.store(static_cast<uint32_t>(simpler::hbg::HbgL1FaultStage::None), std::memory_order_release);
+    hbg_fault_injected_.store(false, std::memory_order_release);
+    hbg_unexpected_teardown_error_.store(0, std::memory_order_release);
 
     aicpu_thread_num_ = 0;
 
@@ -608,6 +680,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: null argument");
         return reject_hbg_l1_before_generation(slot);
     }
+    cache_invalidate_range(arg, sizeof(simpler::hbg::HbgLaunchBlobHeader) + sizeof(simpler::hbg::HbgLaunchRegion));
     if (slot.device_kernel_args_size != sizeof(KernelArgs) || slot.outer_runtime_size != sizeof(Runtime)) {
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: registered runtime ABI size mismatch");
         return reject_hbg_l1_before_generation(slot);
@@ -687,6 +760,12 @@ execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
     g_aicpu_executor.completion_gate_.wait_for_finalization();
     const int32_t shared_error = g_aicpu_executor.run_error_.load(std::memory_order_acquire);
     if (shared_error != 0) rc = shared_error;
+    const auto requested_fault =
+        static_cast<simpler::hbg::HbgL1FaultStage>(g_aicpu_executor.hbg_fault_stage_.load(std::memory_order_acquire));
+    const bool controlled_fault = g_aicpu_executor.hbg_fault_injected_.load(std::memory_order_acquire) &&
+                                  shared_error == simpler::hbg::hbg_l1_fault_error(requested_fault);
+    const int32_t unexpected_teardown_error =
+        g_aicpu_executor.hbg_unexpected_teardown_error_.load(std::memory_order_acquire);
 
     const bool runtime_state_readable =
         init_rc == 0 &&
@@ -697,6 +776,8 @@ execute_runtime_generation(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
         g_aicpu_executor.deinit(runtime);
     }
     if (runtime_rc != 0) return runtime_rc;
+    if (unexpected_teardown_error != 0) return unexpected_teardown_error;
+    if (controlled_fault) return 0;
     return rc;
 }
 
