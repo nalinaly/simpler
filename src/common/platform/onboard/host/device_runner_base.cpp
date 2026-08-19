@@ -513,6 +513,10 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (rc != 0) return poison(rc);
     rc = ensure_aicore_binary_registered();
     if (rc != 0) return poison(rc);
+    if (callable_it->second.host_dlopen_handle != nullptr) {
+        rc = ensure_l1_aicore_acl_function_registered();
+        if (rc != 0) return poison(rc);
+    }
     rc = prepare_l1_hbg_execution_slot_registration(api);
     if (rc != 0) return poison(rc);
 
@@ -812,6 +816,7 @@ int DeviceRunnerBase::launch_l1_callable(
     L1AicpuInvocationArgs trb_invocation{};
     std::unique_ptr<const simpler::hbg::HbgGraphPlan> hbg_plan;
     std::vector<uint8_t> hbg_launch_blob;
+    std::vector<uint8_t> hbg_direct_package;
     simpler::host_args::HostArgsPlaceholder hbg_placeholder{};
     if (is_hbg) {
         if (l1_hbg_execution_slot_registration_ == nullptr || !l1_hbg_execution_slot_registration_enqueued_) {
@@ -876,30 +881,74 @@ int DeviceRunnerBase::launch_l1_callable(
             LOG_ERROR("HBG L1 graph builder returned a mismatched invocation identity");
             return PTO_RUNTIME_ERR_INVALID_STATE;
         }
-        const auto slot_size_status = simpler::hbg::validate_hbg_launch_blob_size_for_slot(
-            *l1_hbg_execution_slot_registration_, hbg_plan->serialized_size()
-        );
-        if (slot_size_status != simpler::hbg::HbgExecutionSlotStatus::Ok) {
-            LOG_ERROR("HBG L1 graph package exceeds the frozen slot capacity");
-            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+        const bool use_direct_package = hbg_plan->has_direct_launch_package() && !enable_chip_swimlane_ &&
+                                        !enable_dump_args_ && !enable_pmu_ && !enable_scope_stats_ &&
+                                        std::getenv("SIMPLER_INTERNAL_HBG_L1_TEST_FAULT") == nullptr;
+        if (std::getenv("SIMPLER_INTERNAL_HBG_L1_REQUIRE_DIRECT_AIV") != nullptr && !use_direct_package) {
+            LOG_ERROR("HBG L1 direct-AIV path was required but the graph or active diagnostics are not eligible");
+            return PTO_RUNTIME_ERR_UNSUPPORTED;
         }
-        auto blob_status = hbg_plan->serialize(&hbg_launch_blob);
-        if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok && !inject_hbg_l1_test_fault(&hbg_launch_blob)) {
-            LOG_ERROR("HBG L1 test fault request is invalid");
-            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
-        }
-        if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok) {
-            blob_status = simpler::hbg::make_hbg_launch_placeholder(
-                hbg_launch_blob.data(), hbg_launch_blob.size(), &hbg_placeholder,
-                &l1_hbg_execution_slot_registration_->binding, &plan_identity
+        if (use_direct_package) {
+            const auto direct_status = hbg_plan->serialize_direct_launch_package(&hbg_direct_package);
+            if (direct_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+                LOG_ERROR(
+                    "HBG L1 direct-AIV package serialization failed: status=%u", static_cast<unsigned>(direct_status)
+                );
+                return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
+        } else {
+            const auto slot_size_status = simpler::hbg::validate_hbg_launch_blob_size_for_slot(
+                *l1_hbg_execution_slot_registration_, hbg_plan->serialized_size()
             );
-        }
-        if (blob_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
-            LOG_ERROR("HBG L1 launch serialization failed: status=%u", static_cast<unsigned>(blob_status));
-            return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            if (slot_size_status != simpler::hbg::HbgExecutionSlotStatus::Ok) {
+                LOG_ERROR("HBG L1 graph package exceeds the frozen slot capacity");
+                return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+            }
+            auto blob_status = hbg_plan->serialize(&hbg_launch_blob);
+            if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok && !inject_hbg_l1_test_fault(&hbg_launch_blob)) {
+                LOG_ERROR("HBG L1 test fault request is invalid");
+                return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+            }
+            if (blob_status == simpler::hbg::HbgLaunchBlobStatus::Ok) {
+                blob_status = simpler::hbg::make_hbg_launch_placeholder(
+                    hbg_launch_blob.data(), hbg_launch_blob.size(), &hbg_placeholder,
+                    &l1_hbg_execution_slot_registration_->binding, &plan_identity
+                );
+            }
+            if (blob_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+                LOG_ERROR("HBG L1 launch serialization failed: status=%u", static_cast<unsigned>(blob_status));
+                return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
         }
     } else {
         trb_invocation = MakeL1AicpuInvocationArgs(l1_kernel_args_.args, callable_id, args);
+    }
+
+    if (!hbg_direct_package.empty()) {
+        if (!l1_prepare_tail_consumed_) {
+            rc = aclrtStreamWaitEvent(
+                reinterpret_cast<aclrtStream>(caller_stream),
+                reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::PrepareTail))
+            );
+            if (rc != ACL_SUCCESS) return poison(rc);
+        }
+        rc = launch_prepared_hbg_direct_aiv(caller_stream, hbg_direct_package);
+        if (rc != 0) return poison(rc);
+        rc = aclrtRecordEvent(
+            reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::SerialTail)),
+            reinterpret_cast<aclrtStream>(caller_stream)
+        );
+        if (rc != ACL_SUCCESS) return poison(rc);
+
+        if (!callable_it->second.l1_metadata_bound) {
+            *callable_it->second.l1_metadata = args;
+            callable_it->second.l1_metadata_bound = true;
+        }
+        l1_prepare_tail_consumed_ = true;
+        l1_serial_tail_recorded_ = true;
+        l1_last_caller_stream_ = caller_stream;
+        rc = l1_execution_state_.seal();
+        return rc == 0 ? 0 : poison(rc);
     }
 
     struct LaunchContext {
@@ -2528,6 +2577,40 @@ int DeviceRunnerBase::launch_aicore_kernel(rtStream_t stream, KernelArgs *k_args
     return launch_prepared_aicore_kernel(stream, k_args);
 }
 
+int DeviceRunnerBase::ensure_l1_aicore_acl_function_registered() {
+    if (l1_aicore_acl_func_handle_ != nullptr) return 0;
+    if (aicore_kernel_binary_.empty()) {
+        LOG_ERROR("HBG direct-AIV ACL registration requires a non-empty AICore binary");
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+
+    if (l1_aicore_acl_bin_handle_ == nullptr) {
+        aclrtBinHandle bin_handle = nullptr;
+        const aclError rc =
+            aclrtBinaryLoadFromData(aicore_kernel_binary_.data(), aicore_kernel_binary_.size(), nullptr, &bin_handle);
+        if (rc != ACL_SUCCESS || bin_handle == nullptr) {
+            LOG_ERROR("aclrtBinaryLoadFromData for HBG direct-AIV failed: %d", rc);
+            ACL_LOG_ERROR_DETAIL(rc);
+            return rc != ACL_SUCCESS ? static_cast<int>(rc) : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        }
+        // Adopt immediately. Even a later function-lookup failure must not
+        // unload a binary which CANN may already have published internally.
+        l1_aicore_acl_bin_handle_ = bin_handle;
+    }
+
+    aclrtFuncHandle func_handle = nullptr;
+    const aclError rc = aclrtBinaryGetFunction(
+        reinterpret_cast<aclrtBinHandle>(l1_aicore_acl_bin_handle_), "hbg_l1_direct_aiv_kernel_1", &func_handle
+    );
+    if (rc != ACL_SUCCESS || func_handle == nullptr) {
+        LOG_ERROR("aclrtBinaryGetFunction for HBG direct-AIV failed: %d", rc);
+        ACL_LOG_ERROR_DETAIL(rc);
+        return rc != ACL_SUCCESS ? static_cast<int>(rc) : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+    l1_aicore_acl_func_handle_ = func_handle;
+    return 0;
+}
+
 int DeviceRunnerBase::launch_prepared_aicore_kernel(
     rtStream_t stream, KernelArgs *k_args, Runtime *trusted_l1_runtime_override
 ) {
@@ -2561,6 +2644,42 @@ int DeviceRunnerBase::launch_prepared_aicore_kernel(
         return rc;
     }
 
+    return rc;
+}
+
+int DeviceRunnerBase::launch_prepared_hbg_direct_aiv(rtStream_t stream, const std::vector<uint8_t> &direct_package) {
+    if (l1_aicore_acl_func_handle_ == nullptr || stream == nullptr ||
+        !simpler::hbg::validate_hbg_l1_direct_package(direct_package.data(), direct_package.size()) ||
+        direct_package.size() > static_cast<size_t>(std::numeric_limits<uint32_t>::max()) -
+                                    simpler::hbg::HBG_L1_DIRECT_AIV_LAUNCH_PREFIX_BYTES) {
+        LOG_ERROR("HBG direct-AIV launch requires a prepared handle, stream, and valid package");
+        return PTO_RUNTIME_ERR_NOT_READY;
+    }
+
+    std::vector<uint8_t> launch_args;
+    try {
+        launch_args.assign(simpler::hbg::HBG_L1_DIRECT_AIV_LAUNCH_PREFIX_BYTES + direct_package.size(), 0);
+    } catch (...) {
+        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    }
+    std::memcpy(
+        launch_args.data() + simpler::hbg::HBG_L1_DIRECT_AIV_LAUNCH_PREFIX_BYTES, direct_package.data(),
+        direct_package.size()
+    );
+
+    aclrtPlaceHolderInfo placeholder{};
+    placeholder.addrOffset = simpler::hbg::HBG_L1_DIRECT_AIV_PACKAGE_POINTER_OFFSET;
+    placeholder.dataOffset = simpler::hbg::HBG_L1_DIRECT_AIV_LAUNCH_PREFIX_BYTES;
+    simpler::hbg::HbgL1DirectAivPackageHeader header{};
+    std::memcpy(&header, direct_package.data(), sizeof(header));
+    const int rc = aclrtLaunchKernelWithHostArgs(
+        reinterpret_cast<aclrtFuncHandle>(l1_aicore_acl_func_handle_), header.lane_count,
+        reinterpret_cast<aclrtStream>(stream), nullptr, launch_args.data(), launch_args.size(), &placeholder, 1
+    );
+    if (rc != ACL_SUCCESS) {
+        LOG_ERROR("HBG direct-AIV aclrtLaunchKernelWithHostArgs failed: %d", rc);
+        ACL_LOG_ERROR_DETAIL(rc);
+    }
     return rc;
 }
 

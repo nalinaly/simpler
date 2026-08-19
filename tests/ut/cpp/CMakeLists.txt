@@ -1016,6 +1016,10 @@ add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_l1_runtime_arena_sizing a2a3/test_hbg_l1_runtime_arena_sizing.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_l1_direct_aiv_package a2a3/test_hbg_l1_direct_aiv_package.cpp)
+target_include_directories(test_hbg_l1_direct_aiv_package PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/runtime/host_build_graph/host
+)
 target_sources(test_hbg_l1_runtime_arena_sizing PRIVATE
     ${HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
     ${HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp

@@ -77,6 +77,7 @@
 #include "common/unified_log.h"
 #include "host_log.h"
 #include "host/raii_scope_guard.h"
+#include "hbg_l1_direct_aiv_package.h"
 #include "utils/device_arena.h"
 #include "prepare_callable_common.h"
 
@@ -750,9 +751,11 @@ int32_t build_l1_host_orchestration_image(
     Runtime *runtime, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
-    void *host_orch_func_ptr, const ChipTaskArgs &orch_args, std::vector<uint8_t> *out_sm_image
+    void *host_orch_func_ptr, const ChipTaskArgs &orch_args, const uint64_t *callable_function_table,
+    size_t callable_function_count, std::vector<uint8_t> *out_sm_image, std::vector<uint8_t> *out_direct_package
 ) {
-    if (runtime == nullptr || rt == nullptr || host_orch_func_ptr == nullptr || out_sm_image == nullptr) {
+    if (runtime == nullptr || rt == nullptr || host_orch_func_ptr == nullptr || callable_function_table == nullptr ||
+        out_sm_image == nullptr || out_direct_package == nullptr) {
         return -1;
     }
     dep_gen_host_graph_begin_capture();
@@ -823,6 +826,75 @@ int32_t build_l1_host_orchestration_image(
     if (total_tasks < 0 || static_cast<uint64_t>(total_tasks) > eff_task_window_sizes[0]) {
         LOG_ERROR("host-orch L1: total_tasks %d is outside the task window", total_tasks);
         return -1;
+    }
+
+    const uint32_t aiv_lane_count =
+        static_cast<uint32_t>(block_dim) * static_cast<uint32_t>(PLATFORM_AIV_CORES_PER_BLOCKDIM);
+    const uint64_t direct_scratch_bytes =
+        static_cast<uint64_t>(aiv_lane_count) * simpler::hbg::HBG_L1_DIRECT_AIV_LANE_SCRATCH_BYTES;
+    const uint64_t device_arena_base = reinterpret_cast<uint64_t>(device_arena);
+    uint64_t direct_scratch_base = 0;
+    if (direct_scratch_bytes <= layout.arena_size &&
+        device_arena_base <= std::numeric_limits<uint64_t>::max() - layout.arena_size) {
+        direct_scratch_base = (device_arena_base + layout.arena_size - direct_scratch_bytes) & ~UINT64_C(63);
+        if (direct_scratch_base < device_arena_base) direct_scratch_base = 0;
+    }
+    const auto direct_status = direct_scratch_base == 0 ?
+                                   simpler::hbg::HbgL1DirectAivBuildStatus::NotEligible :
+                                   simpler::hbg::try_build_hbg_l1_direct_aiv_package(
+                                       host_sm_handle.header->ring, total_tasks, callable_function_table,
+                                       callable_function_count, aiv_lane_count, direct_scratch_base, out_direct_package
+                                   );
+    if (direct_status != simpler::hbg::HbgL1DirectAivBuildStatus::Ok &&
+        direct_status != simpler::hbg::HbgL1DirectAivBuildStatus::NotEligible) {
+        LOG_ERROR("host-orch L1: direct-AIV package build failed: status=%u", static_cast<unsigned>(direct_status));
+        return -1;
+    }
+    if (direct_status == simpler::hbg::HbgL1DirectAivBuildStatus::Ok) {
+        LOG_DEBUG("host-orch L1: selected direct-AIV package for %d tasks on %u lanes", total_tasks, aiv_lane_count);
+    } else if (std::getenv("SIMPLER_INTERNAL_HBG_L1_REQUIRE_DIRECT_AIV") != nullptr && total_tasks > 0) {
+        const auto &task = host_sm_handle.header->ring.get_task_by_task_id(0);
+        const auto &payload = host_sm_handle.header->ring.get_payload_by_task_id(0);
+        const auto &slot = host_sm_handle.header->ring.get_slot_state_by_task_id(0);
+        LOG_ERROR(
+            "host-orch L1: direct-AIV rejected task0: id=%u kind=%u mask=%u attrs=%u blocks=%d required=%d "
+            "fanin=%d predicate=%u dump_mask=%llu dump_flags=%llu tensors=%d scalars=%d kernels=[%d,%d,%d] "
+            "callable_count=%zu",
+            task.task_id.raw, static_cast<unsigned>(slot.task_kind), static_cast<unsigned>(slot.active_mask.raw()),
+            static_cast<unsigned>(slot.task_attrs.raw()), static_cast<int>(slot.logical_block_num),
+            static_cast<int>(slot.total_required_subtasks), payload.fanin_count,
+            static_cast<unsigned>(payload.predicate.op),
+            static_cast<unsigned long long>(payload.dump_metadata.dump_arg_mask),
+            static_cast<unsigned long long>(payload.dump_metadata.dump_arg_flags), payload.tensor_count,
+            payload.scalar_count, task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)],
+            task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)],
+            task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)], callable_function_count
+        );
+        const int32_t expected_kernel = task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)];
+        for (int32_t task_index = 0; task_index < total_tasks; ++task_index) {
+            const auto &candidate_task = host_sm_handle.header->ring.get_task_by_task_id(task_index);
+            const auto &candidate_payload = host_sm_handle.header->ring.get_payload_by_task_id(task_index);
+            const auto &candidate_slot = host_sm_handle.header->ring.get_slot_state_by_task_id(task_index);
+            if (!simpler::hbg::hbg_l1_direct_task_eligible(
+                    candidate_task, candidate_payload, candidate_slot, task_index, expected_kernel,
+                    payload.tensor_count, payload.scalar_count, slot.logical_block_num
+                )) {
+                LOG_ERROR(
+                    "host-orch L1: first direct-AIV mismatch at task%d: id=%u kind=%u mask=%u attrs=%u "
+                    "blocks=%d required=%d fanin=%d predicate=%u tensors=%d scalars=%d kernels=[%d,%d,%d]",
+                    task_index, candidate_task.task_id.raw, static_cast<unsigned>(candidate_slot.task_kind),
+                    static_cast<unsigned>(candidate_slot.active_mask.raw()),
+                    static_cast<unsigned>(candidate_slot.task_attrs.raw()),
+                    static_cast<int>(candidate_slot.logical_block_num),
+                    static_cast<int>(candidate_slot.total_required_subtasks), candidate_payload.fanin_count,
+                    static_cast<unsigned>(candidate_payload.predicate.op), candidate_payload.tensor_count,
+                    candidate_payload.scalar_count, candidate_task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)],
+                    candidate_task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV0)],
+                    candidate_task.kernel_id[static_cast<int>(PTO2SubtaskSlot::AIV1)]
+                );
+                break;
+            }
+        }
     }
 
     const int64_t sm_delta = static_cast<int64_t>(reinterpret_cast<uint64_t>(device_sm)) -
@@ -1439,6 +1511,7 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     runtime_wire_arena_pointers(host_arena, layout, rt);
 
     std::vector<uint8_t> host_sm_image;
+    std::vector<uint8_t> direct_launch_package;
     ChipTaskArgs orch_l2;
     orch_l2.create_from_chip_args(*orch_args);
     const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
@@ -1461,7 +1534,8 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     const int32_t host_total_tasks = build_l1_host_orchestration_image(
         runtime, tensor_access, rt, host_arena, layout, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
         reinterpret_cast<void *>(binding->runtime_arena_base), reinterpret_cast<void *>(binding->gm_heap_base),
-        heap_sizes, task_window_sizes, host_orch_func_ptr, orch_l2, &host_sm_image
+        heap_sizes, task_window_sizes, host_orch_func_ptr, orch_l2, callable_function_table, callable_function_count,
+        &host_sm_image, &direct_launch_package
     );
     if (host_total_tasks < 0) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: host orchestration failed");
@@ -1493,7 +1567,9 @@ extern "C" int build_l1_hbg_graph_plan_impl(
          0},
         {simpler::hbg::HbgLaunchRegionKind::RuntimeArenaImage, region_flags, host_arena.base(), layout.arena_size, 0},
     };
-    const auto status = simpler::hbg::build_hbg_graph_plan(*binding, plan_identity, plan_generation, inputs, out);
+    const auto status = simpler::hbg::build_hbg_graph_plan(
+        *binding, plan_identity, plan_generation, inputs, direct_launch_package, out
+    );
     if (status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: graph plan build failed: status=%u", static_cast<unsigned>(status));
         return -1;

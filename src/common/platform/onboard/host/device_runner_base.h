@@ -736,6 +736,12 @@ public:
         rtStream_t stream, KernelArgs *k_args, Runtime *trusted_l1_runtime_override = nullptr
     );
 
+    /** Launch an A2/A3 HBG direct-AIV package through the prepared executor handle. */
+    int launch_prepared_hbg_direct_aiv(rtStream_t stream, const std::vector<uint8_t> &direct_package);
+
+    /** Prepare the public ACL function handle required by WithHostArgs. */
+    int ensure_l1_aicore_acl_function_registered();
+
     /**
      * Enablement setters for the four shared diagnostics sub-features.
      * Applied from the per-run CallConfig by `apply_call_config()` before prepare;
@@ -1192,6 +1198,11 @@ protected:
     // `nullptr` in `finalize()`; CANN releases the device-side state
     // implicitly when the device context tears down.
     void *aicore_bin_handle_{nullptr};
+    // Public ACL handles for the HBG direct-AIV HostArgs launch. They are
+    // intentionally never passed to aclrtBinaryUnLoad: captured graph nodes
+    // may retain the function after this context's Python owner disappears.
+    void *l1_aicore_acl_bin_handle_{nullptr};
+    void *l1_aicore_acl_func_handle_{nullptr};
     // Dispatcher SO bytes — populated once via `set_dispatcher_binary()`
     // during simpler_init. Consumed exclusively by
     // `BootstrapDispatcher` on the first run and released by

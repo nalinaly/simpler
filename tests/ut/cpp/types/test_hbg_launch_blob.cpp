@@ -208,6 +208,32 @@ std::vector<HbgHostRegionInput> make_inputs(const Sources &sources) {
     };
 }
 
+std::vector<uint8_t> make_direct_aiv_package() {
+    constexpr uint32_t kLogicalTaskCount = 50;
+    constexpr uint32_t kA3AivLaneCount = 48;
+    constexpr uint32_t kTensorCount = 1;
+    uint32_t record_stride = 0;
+    EXPECT_TRUE(simpler::hbg::hbg_l1_direct_record_stride(kTensorCount, 0, &record_stride));
+
+    const size_t package_size = simpler::hbg::HBG_L1_DIRECT_AIV_HEADER_BYTES + record_stride;
+    std::vector<uint8_t> package(package_size, 0);
+    simpler::hbg::HbgL1DirectAivPackageHeader header;
+    header.total_size = static_cast<uint32_t>(package_size);
+    header.task_count = 1;
+    header.logical_block_num = kLogicalTaskCount;
+    header.work_count = kLogicalTaskCount;
+    header.tensor_count = kTensorCount;
+    header.task_record_stride = record_stride;
+    header.lane_count = kA3AivLaneCount;
+    header.immutable_size = header.total_size;
+    header.function_bin_addr = 0x300040;
+    header.lane_scratch_device_addr = 0x400000;
+    std::memcpy(package.data(), &header, sizeof(header));
+    std::fill(package.begin() + simpler::hbg::HBG_L1_DIRECT_AIV_HEADER_BYTES, package.end(), 0x5a);
+    EXPECT_TRUE(simpler::hbg::validate_hbg_l1_direct_package(package.data(), package.size()));
+    return package;
+}
+
 std::vector<uint8_t> make_restore_blob(
     const Sources &sources, const HbgExecutionBinding &binding, const HbgInvocationIdentity &identity,
     uint64_t plan_generation
@@ -404,6 +430,40 @@ TEST(HbgGraphPlan, OwnsCanonicalBytesAndProducesFreshWritableTaskSnapshots) {
 
     std::vector<uint8_t> third;
     ASSERT_EQ(plan->serialize(&third), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(third, second);
+}
+
+TEST(HbgGraphPlan, OwnsDirectAivPackageAndProducesFreshWritableTaskSnapshots) {
+    Sources sources;
+    const HbgExecutionBinding binding = make_binding(sources);
+    const HbgInvocationIdentity identity = make_identity();
+    std::vector<uint8_t> direct_package = make_direct_aiv_package();
+    const std::vector<uint8_t> expected = direct_package;
+    std::unique_ptr<const HbgGraphPlan> plan;
+
+    ASSERT_EQ(
+        build_hbg_graph_plan(binding, identity, 20, make_inputs(sources), direct_package, &plan),
+        HbgLaunchBlobStatus::Ok
+    );
+    ASSERT_NE(plan, nullptr);
+    EXPECT_TRUE(plan->has_direct_launch_package());
+    EXPECT_EQ(plan->direct_launch_package_size(), expected.size());
+
+    // The caller's staging vector is not an owner after plan construction.
+    std::fill(direct_package.begin(), direct_package.end(), 0xee);
+    std::vector<uint8_t> first;
+    std::vector<uint8_t> second;
+    ASSERT_EQ(plan->serialize_direct_launch_package(&first), HbgLaunchBlobStatus::Ok);
+    ASSERT_EQ(plan->serialize_direct_launch_package(&second), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(first, expected);
+    EXPECT_EQ(second, expected);
+
+    // CANN may patch/mutate one launch snapshot; that must not reach the plan
+    // or a later eager/captured node's independent snapshot.
+    first.back() ^= 0xff;
+    EXPECT_NE(first, second);
+    std::vector<uint8_t> third;
+    ASSERT_EQ(plan->serialize_direct_launch_package(&third), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(third, second);
 }
 
