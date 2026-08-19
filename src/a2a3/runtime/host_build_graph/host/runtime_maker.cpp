@@ -747,12 +747,28 @@ int32_t run_host_orchestration(
     return total_tasks;
 }
 
+uint64_t hbg_l1_direct_scratch_device_addr(Runtime *runtime, uint64_t arena_base, uint64_t arena_size) noexcept {
+    if (runtime == nullptr || arena_base == 0) return 0;
+    const int32_t block_dim = runtime->get_worker_count() / PLATFORM_CORES_PER_BLOCKDIM;
+    if (block_dim < 1) return 0;
+    const uint64_t lane_count =
+        static_cast<uint64_t>(block_dim) * static_cast<uint64_t>(PLATFORM_AIV_CORES_PER_BLOCKDIM);
+    if (lane_count > std::numeric_limits<uint64_t>::max() / simpler::hbg::HBG_L1_DIRECT_AIV_LANE_SCRATCH_BYTES) {
+        return 0;
+    }
+    const uint64_t scratch_bytes = lane_count * simpler::hbg::HBG_L1_DIRECT_AIV_LANE_SCRATCH_BYTES;
+    if (scratch_bytes > arena_size || arena_base > std::numeric_limits<uint64_t>::max() - arena_size) return 0;
+    const uint64_t scratch_base = (arena_base + arena_size - scratch_bytes) & ~UINT64_C(63);
+    return scratch_base >= arena_base ? scratch_base : 0;
+}
+
 int32_t build_l1_host_orchestration_image(
     Runtime *runtime, HostTensorAccessor &tensor_access, PTO2Runtime *rt, DeviceArena &host_arena,
     const PTO2RuntimeArenaLayout &layout, void *device_sm, uint64_t sm_size, void *device_arena, void *gm_heap,
     const uint64_t eff_heap_sizes[PTO2_MAX_RING_DEPTH], const uint64_t eff_task_window_sizes[PTO2_MAX_RING_DEPTH],
     void *host_orch_func_ptr, const ChipTaskArgs &orch_args, const uint64_t *callable_function_table,
-    size_t callable_function_count, std::vector<uint8_t> *out_sm_image, std::vector<uint8_t> *out_direct_package
+    size_t callable_function_count, uint64_t direct_scratch_device_addr, std::vector<uint8_t> *out_sm_image,
+    std::vector<uint8_t> *out_direct_package
 ) {
     if (runtime == nullptr || rt == nullptr || host_orch_func_ptr == nullptr || callable_function_table == nullptr ||
         out_sm_image == nullptr || out_direct_package == nullptr) {
@@ -830,21 +846,13 @@ int32_t build_l1_host_orchestration_image(
 
     const uint32_t aiv_lane_count =
         static_cast<uint32_t>(block_dim) * static_cast<uint32_t>(PLATFORM_AIV_CORES_PER_BLOCKDIM);
-    const uint64_t direct_scratch_bytes =
-        static_cast<uint64_t>(aiv_lane_count) * simpler::hbg::HBG_L1_DIRECT_AIV_LANE_SCRATCH_BYTES;
-    const uint64_t device_arena_base = reinterpret_cast<uint64_t>(device_arena);
-    uint64_t direct_scratch_base = 0;
-    if (direct_scratch_bytes <= layout.arena_size &&
-        device_arena_base <= std::numeric_limits<uint64_t>::max() - layout.arena_size) {
-        direct_scratch_base = (device_arena_base + layout.arena_size - direct_scratch_bytes) & ~UINT64_C(63);
-        if (direct_scratch_base < device_arena_base) direct_scratch_base = 0;
-    }
-    const auto direct_status = direct_scratch_base == 0 ?
-                                   simpler::hbg::HbgL1DirectAivBuildStatus::NotEligible :
-                                   simpler::hbg::try_build_hbg_l1_direct_aiv_package(
-                                       host_sm_handle.header->ring, total_tasks, callable_function_table,
-                                       callable_function_count, aiv_lane_count, direct_scratch_base, out_direct_package
-                                   );
+    const auto direct_status =
+        direct_scratch_device_addr == 0 ?
+            simpler::hbg::HbgL1DirectAivBuildStatus::NotEligible :
+            simpler::hbg::try_build_hbg_l1_direct_aiv_package(
+                host_sm_handle.header->ring, total_tasks, callable_function_table, callable_function_count,
+                aiv_lane_count, direct_scratch_device_addr, out_direct_package
+            );
     if (direct_status != simpler::hbg::HbgL1DirectAivBuildStatus::Ok &&
         direct_status != simpler::hbg::HbgL1DirectAivBuildStatus::NotEligible) {
         LOG_ERROR("host-orch L1: direct-AIV package build failed: status=%u", static_cast<unsigned>(direct_status));
@@ -1531,11 +1539,13 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         framework_bind_runtime(nullptr);
         if (entry_points->bind != nullptr) entry_points->bind(nullptr);
     });
+    const uint64_t direct_scratch_device_addr =
+        hbg_l1_direct_scratch_device_addr(runtime, binding->runtime_arena_base, layout.arena_size);
     const int32_t host_total_tasks = build_l1_host_orchestration_image(
         runtime, tensor_access, rt, host_arena, layout, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
         reinterpret_cast<void *>(binding->runtime_arena_base), reinterpret_cast<void *>(binding->gm_heap_base),
         heap_sizes, task_window_sizes, host_orch_func_ptr, orch_l2, callable_function_table, callable_function_count,
-        &host_sm_image, &direct_launch_package
+        direct_scratch_device_addr, &host_sm_image, &direct_launch_package
     );
     if (host_total_tasks < 0) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: host orchestration failed");
@@ -1574,6 +1584,98 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         LOG_ERROR("build_l1_hbg_graph_plan_impl: graph plan build failed: status=%u", static_cast<unsigned>(status));
         return -1;
     }
+    return 0;
+}
+
+extern "C" int rebind_l1_hbg_direct_aiv_package_impl(
+    Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
+    const simpler::hbg::HbgExecutionBinding *binding, const uint64_t *callable_function_table,
+    size_t callable_function_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
+    const std::vector<uint8_t> *expected_package, std::vector<uint8_t> *out
+) {
+    if (runtime == nullptr || api == nullptr || orch_args == nullptr || host_orch_func_ptr == nullptr ||
+        binding == nullptr || callable_function_table == nullptr || expected_package == nullptr || out == nullptr ||
+        !runtime->has_l1_static_execution_slot() ||
+        !simpler::hbg::validate_hbg_l1_direct_package(expected_package->data(), expected_package->size())) {
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (binding->gm_heap_base != reinterpret_cast<uint64_t>(runtime->get_gm_heap_ptr()) ||
+        binding->shared_memory_base != reinterpret_cast<uint64_t>(runtime->get_gm_sm_ptr()) ||
+        binding->runtime_arena_base != reinterpret_cast<uint64_t>(runtime->get_prebuilt_arena_base()) ||
+        binding->gm_heap_capacity != runtime->get_l1_gm_heap_capacity() ||
+        binding->shared_memory_capacity != runtime->get_l1_shared_memory_capacity() ||
+        binding->runtime_arena_capacity != runtime->get_l1_runtime_arena_capacity() ||
+        binding->runtime_offset != runtime->get_prebuilt_runtime_offset()) {
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    }
+
+    simpler::hbg::HbgL1DirectAivPackageHeader expected_header{};
+    std::memcpy(&expected_header, expected_package->data(), sizeof(expected_header));
+    uint64_t compact_task_window = 4;
+    while (compact_task_window < expected_header.task_count) {
+        if (compact_task_window > static_cast<uint64_t>(INT32_MAX) / 2) {
+            return PTO_RUNTIME_ERR_UNSUPPORTED;
+        }
+        compact_task_window *= 2;
+    }
+
+    uint64_t configured_task_windows[PTO2_MAX_RING_DEPTH];
+    uint64_t heap_sizes[PTO2_MAX_RING_DEPTH];
+    if (!resolve_ring_config(ring_task_window, ring_heap, configured_task_windows, heap_sizes) ||
+        expected_header.task_count > configured_task_windows[0]) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    uint64_t compact_task_windows[PTO2_MAX_RING_DEPTH];
+    for (int ring = 0; ring < PTO2_MAX_RING_DEPTH; ++ring)
+        compact_task_windows[ring] = compact_task_window;
+
+    DeviceArena host_arena;
+    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(compact_task_window);
+    const PTO2RuntimeArenaLayout layout =
+        runtime_reserve_layout(host_arena, compact_task_windows, heap_sizes, arena_sizing);
+    const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(compact_task_windows);
+    if (sm_size > binding->shared_memory_capacity || layout.arena_size > binding->runtime_arena_capacity ||
+        host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+
+    PTO2Runtime *rt = runtime_init_data_from_layout(
+        host_arena, layout, PTO2_MODE_EXECUTE, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
+        reinterpret_cast<void *>(binding->gm_heap_base), heap_sizes
+    );
+    if (rt == nullptr) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    runtime_wire_arena_pointers(host_arena, layout, rt);
+
+    const auto *entry_points = reinterpret_cast<const HostOrchEntryPoints *>(host_orch_func_ptr);
+    const auto requirements_status = simpler::orchestration::validate_hbg_l1_requirements(
+        entry_points->requirements_v1_available, entry_points->requirements_v1
+    );
+    if (requirements_status != simpler::orchestration::HbgL1RequirementsStatus::Ok) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    auto runtime_bind_guard = RAIIScopeGuard([entry_points]() {
+        framework_bind_runtime(nullptr);
+        if (entry_points->bind != nullptr) entry_points->bind(nullptr);
+    });
+
+    HostTensorAccessor tensor_access(api, false);
+    ChipTaskArgs orch_l2;
+    orch_l2.create_from_chip_args(*orch_args);
+    std::vector<uint8_t> compact_sm_image;
+    std::vector<uint8_t> candidate;
+    const int32_t host_total_tasks = build_l1_host_orchestration_image(
+        runtime, tensor_access, rt, host_arena, layout, reinterpret_cast<void *>(binding->shared_memory_base), sm_size,
+        reinterpret_cast<void *>(binding->runtime_arena_base), reinterpret_cast<void *>(binding->gm_heap_base),
+        heap_sizes, compact_task_windows, host_orch_func_ptr, orch_l2, callable_function_table, callable_function_count,
+        expected_header.lane_scratch_device_addr, &compact_sm_image, &candidate
+    );
+    if (host_total_tasks != static_cast<int32_t>(expected_header.task_count) ||
+        !simpler::hbg::hbg_l1_direct_package_structures_equal(
+            expected_package->data(), expected_package->size(), candidate.data(), candidate.size()
+        )) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    *out = std::move(candidate);
     return 0;
 }
 

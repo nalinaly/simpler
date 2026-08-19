@@ -20,6 +20,8 @@
 
 namespace {
 
+using simpler::hbg::HBG_L1_DIRECT_AIV_HEADER_BYTES;
+using simpler::hbg::hbg_l1_direct_package_structures_equal;
 using simpler::hbg::HbgL1DirectAivBuildStatus;
 using simpler::hbg::HbgL1DirectAivPackageHeader;
 using simpler::hbg::try_build_hbg_l1_direct_aiv_package;
@@ -156,6 +158,20 @@ TEST_F(HbgL1DirectAivPackageTest, RejectsInvalidPlatformResourcesWithoutReplacin
         HbgL1DirectAivBuildStatus::InvalidGraph
     );
     EXPECT_EQ(package, sentinel);
+}
+
+TEST_F(HbgL1DirectAivPackageTest, StructuralComparisonIgnoresTaskArgumentRecords) {
+    std::vector<uint8_t> first;
+    ASSERT_EQ(build(&first), HbgL1DirectAivBuildStatus::Ok);
+    std::vector<uint8_t> rebound = first;
+    rebound[HBG_L1_DIRECT_AIV_HEADER_BYTES] ^= 0x5a;
+    EXPECT_TRUE(hbg_l1_direct_package_structures_equal(first.data(), first.size(), rebound.data(), rebound.size()));
+
+    HbgL1DirectAivPackageHeader header{};
+    std::memcpy(&header, rebound.data(), sizeof(header));
+    ++header.logical_block_num;
+    std::memcpy(rebound.data(), &header, sizeof(header));
+    EXPECT_FALSE(hbg_l1_direct_package_structures_equal(first.data(), first.size(), rebound.data(), rebound.size()));
 }
 
 }  // namespace

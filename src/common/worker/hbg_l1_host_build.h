@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "common/host_api.h"
 #include "hbg_graph_plan.h"
@@ -48,4 +49,12 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     const uint64_t *callable_function_table, size_t callable_function_count, uint64_t plan_generation,
     const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool,
     std::unique_ptr<const simpler::hbg::HbgGraphPlan> *out
+);
+
+/** Rebuild only direct-AIV task arguments against a cached structural plan. */
+extern "C" int rebind_l1_hbg_direct_aiv_package_impl(
+    Runtime *runtime, const HostApi *api, const ChipStorageTaskArgs *orch_args, void *host_orch_func_ptr,
+    const simpler::hbg::HbgExecutionBinding *binding, const uint64_t *callable_function_table,
+    size_t callable_function_count, const uint64_t *ring_task_window, const uint64_t *ring_heap,
+    const std::vector<uint8_t> *expected_package, std::vector<uint8_t> *out
 );

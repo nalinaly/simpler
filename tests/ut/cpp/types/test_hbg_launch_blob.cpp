@@ -579,6 +579,48 @@ TEST(HbgGraphPlanCache, SuccessfulReplacementEvictsThePriorArgumentIdentity) {
     EXPECT_EQ(cache.lookup(second_args, second_identity.argument_snapshot_hash)->plan_generation(), 45u);
 }
 
+TEST(HbgGraphPlanCache, DirectPackageArgumentsCanRebindWithoutReplacingTheStructuralPlan) {
+    Sources sources;
+    const ChipStorageTaskArgs first_args = make_cached_plan_args();
+    HbgInvocationIdentity identity = make_identity();
+    identity.argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(first_args);
+    identity.tensor_count = static_cast<uint32_t>(first_args.tensor_count());
+    identity.scalar_count = static_cast<uint32_t>(first_args.scalar_count());
+    std::unique_ptr<const HbgGraphPlan> plan;
+    const std::vector<uint8_t> first_package = make_direct_aiv_package();
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), identity, 46, make_inputs(sources), first_package, &plan),
+        HbgLaunchBlobStatus::Ok
+    );
+
+    HbgGraphPlanCache cache;
+    ASSERT_EQ(cache.replace(first_args, identity.argument_snapshot_hash, std::move(plan)), HbgLaunchBlobStatus::Ok);
+    const HbgGraphPlan *const structural_plan = cache.plan();
+    ASSERT_NE(structural_plan, nullptr);
+
+    ChipStorageTaskArgs rebound_args = first_args;
+    rebound_args.tensor(0).buffer.addr += 0x10000;
+    rebound_args.scalar(0) += 7;
+    const uint64_t rebound_hash = simpler::hbg::hbg_argument_snapshot_hash(rebound_args);
+    ASSERT_NE(rebound_hash, identity.argument_snapshot_hash);
+    ASSERT_TRUE(cache.can_rebind_direct(rebound_args));
+    EXPECT_EQ(cache.lookup(rebound_args, rebound_hash), nullptr);
+    EXPECT_EQ(cache.lookup_direct_package(rebound_args, rebound_hash), nullptr);
+
+    std::vector<uint8_t> rebound_package = first_package;
+    rebound_package.back() ^= 0x5a;
+    ASSERT_EQ(cache.replace_direct_arguments(rebound_args, rebound_hash, rebound_package), HbgLaunchBlobStatus::Ok);
+    EXPECT_EQ(cache.plan(), structural_plan);
+    ASSERT_NE(cache.lookup_direct_package(rebound_args, rebound_hash), nullptr);
+    EXPECT_EQ(*cache.lookup_direct_package(rebound_args, rebound_hash), rebound_package);
+    EXPECT_TRUE(cache.can_rebind_direct(first_args));
+    // Only the latest task-owned package is cached.  Returning to the plan's
+    // original arguments must be treated as a package rebind, even though the
+    // immutable structural plan itself is still an exact match.
+    ASSERT_NE(cache.lookup(first_args, identity.argument_snapshot_hash), nullptr);
+    EXPECT_EQ(cache.lookup_direct_package(first_args, identity.argument_snapshot_hash), nullptr);
+}
+
 TEST(HbgGraphPlan, FailedBuildDoesNotReplaceAnExistingOwner) {
     Sources sources;
     std::unique_ptr<const HbgGraphPlan> plan;

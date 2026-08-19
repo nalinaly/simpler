@@ -19,6 +19,8 @@
 namespace {
 
 using simpler::hbg::hbg_argument_snapshot_hash;
+using simpler::hbg::hbg_argument_structure_hash;
+using simpler::hbg::hbg_argument_structures_equal;
 
 ChipTensor make_tensor(uint64_t address) {
     ChipTensor tensor{};
@@ -126,6 +128,29 @@ TEST(HbgArgumentSnapshot, CountsArePartOfTheSnapshotAndInvalidCountsFailClosed) 
     args = make_args();
     args.scalar_count_ = CHIP_MAX_SCALAR_ARGS + 1;
     EXPECT_EQ(hbg_argument_snapshot_hash(args), 0u);
+}
+
+TEST(HbgArgumentSnapshot, StructureIgnoresAddressesAndScalarValuesButRetainsTensorMetadata) {
+    const ChipStorageTaskArgs baseline = make_args();
+    const uint64_t expected = hbg_argument_structure_hash(baseline);
+    ASSERT_NE(expected, 0u);
+
+    ChipStorageTaskArgs changed_values = baseline;
+    changed_values.tensor(0).buffer.addr += 0x4000;
+    changed_values.tensor(1).buffer.addr += 0x8000;
+    changed_values.scalar(0) ^= UINT64_C(0xffff0000ffff0000);
+    EXPECT_EQ(hbg_argument_structure_hash(changed_values), expected);
+    EXPECT_TRUE(hbg_argument_structures_equal(baseline, changed_values));
+
+    ChipStorageTaskArgs changed_metadata = changed_values;
+    ++changed_metadata.tensor(0).strides[0];
+    EXPECT_NE(hbg_argument_structure_hash(changed_metadata), expected);
+    EXPECT_FALSE(hbg_argument_structures_equal(baseline, changed_metadata));
+
+    changed_metadata = changed_values;
+    --changed_metadata.scalar_count_;
+    EXPECT_NE(hbg_argument_structure_hash(changed_metadata), expected);
+    EXPECT_FALSE(hbg_argument_structures_equal(baseline, changed_metadata));
 }
 
 }  // namespace

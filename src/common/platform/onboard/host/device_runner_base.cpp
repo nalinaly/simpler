@@ -102,6 +102,16 @@ extern "C" __attribute__((weak)) int build_l1_hbg_graph_plan_impl(
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
+extern "C" __attribute__((weak)) int rebind_l1_hbg_direct_aiv_package_impl(
+    Runtime * /*runtime*/, const HostApi * /*api*/, const ChipStorageTaskArgs * /*orch_args*/,
+    void * /*host_orch_func_ptr*/, const simpler::hbg::HbgExecutionBinding * /*binding*/,
+    const uint64_t * /*callable_function_table*/, size_t /*callable_function_count*/,
+    const uint64_t * /*ring_task_window*/, const uint64_t * /*ring_heap*/,
+    const std::vector<uint8_t> * /*expected_package*/, std::vector<uint8_t> * /*out*/
+) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
 namespace {
 
 bool parse_hbg_l1_test_fault(const char *value, simpler::hbg::HbgL1FaultStage *out) noexcept {
@@ -857,7 +867,45 @@ int DeviceRunnerBase::launch_l1_callable(
             return PTO_RUNTIME_ERR_INVALID_STATE;
         }
 
+        const bool direct_launch_allowed = !enable_chip_swimlane_ && !enable_dump_args_ && !enable_pmu_ &&
+                                           !enable_scope_stats_ &&
+                                           std::getenv("SIMPLER_INTERNAL_HBG_L1_TEST_FAULT") == nullptr;
+        bool plan_matches_current_arguments = false;
         hbg_plan = plan_cache->lookup(args, argument_snapshot_hash);
+        plan_matches_current_arguments = hbg_plan != nullptr;
+        // The structural plan and the task-owned direct package have separate
+        // identities.  The plan may match its original arguments while the
+        // mutable package cache currently holds a later call (A -> B -> A), so
+        // resolve/rebind the package independently of the exact plan lookup.
+        if (direct_launch_allowed && plan_cache->can_rebind_direct(args)) {
+            hbg_direct_package = plan_cache->lookup_direct_package(args, argument_snapshot_hash);
+            if (hbg_direct_package == nullptr) {
+                std::vector<uint8_t> rebound_package;
+                const std::vector<uint8_t> &expected_package = plan_cache->direct_launch_package();
+                rc = rebind_l1_hbg_direct_aiv_package_impl(
+                    l1_runtime_.get(), api, &args, callable_it->second.host_orch_func_ptr,
+                    &l1_hbg_execution_slot_registration_->binding, callable_function_table.data(),
+                    callable_function_table.size(), l1_config_.runtime_env.ring_task_window,
+                    l1_config_.runtime_env.ring_heap, &expected_package, &rebound_package
+                );
+                if (rc == 0) {
+                    const auto rebind_status =
+                        plan_cache->replace_direct_arguments(args, argument_snapshot_hash, std::move(rebound_package));
+                    if (rebind_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+                        LOG_ERROR(
+                            "HBG L1 direct-AIV argument rebind commit failed: status=%u",
+                            static_cast<unsigned>(rebind_status)
+                        );
+                        return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+                    }
+                    hbg_direct_package = plan_cache->lookup_direct_package(args, argument_snapshot_hash);
+                    if (hbg_direct_package == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+                } else {
+                    LOG_DEBUG("HBG L1 direct-AIV compact rebind missed; rebuilding the structural plan: %d", rc);
+                }
+            }
+            if (hbg_direct_package != nullptr && hbg_plan == nullptr) hbg_plan = plan_cache->plan();
+        }
         if (hbg_plan == nullptr) {
             if (l1_hbg_next_plan_generation_ == 0) {
                 LOG_ERROR("HBG L1 plan generation exhausted");
@@ -885,33 +933,36 @@ int DeviceRunnerBase::launch_l1_callable(
             }
             hbg_plan = plan_cache->lookup(args, argument_snapshot_hash);
             if (hbg_plan == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+            plan_matches_current_arguments = true;
         }
         const simpler::hbg::HbgInvocationIdentity &plan_identity = hbg_plan->identity();
         if (plan_identity.callable_id != callable_id || plan_identity.callable_hash != identity.callable_hash ||
-            plan_identity.argument_snapshot_hash != identity.argument_snapshot_hash ||
             plan_identity.function_binding_hash != identity.function_binding_hash ||
             plan_identity.tensor_count != identity.tensor_count ||
-            plan_identity.scalar_count != identity.scalar_count || plan_identity.host_total_tasks < 0) {
+            plan_identity.scalar_count != identity.scalar_count || plan_identity.host_total_tasks < 0 ||
+            (plan_matches_current_arguments &&
+             plan_identity.argument_snapshot_hash != identity.argument_snapshot_hash) ||
+            (!plan_matches_current_arguments && hbg_direct_package == nullptr)) {
             LOG_ERROR("HBG L1 graph builder returned a mismatched invocation identity");
             return PTO_RUNTIME_ERR_INVALID_STATE;
         }
-        const bool use_direct_package = hbg_plan->has_direct_launch_package() && !enable_chip_swimlane_ &&
-                                        !enable_dump_args_ && !enable_pmu_ && !enable_scope_stats_ &&
-                                        std::getenv("SIMPLER_INTERNAL_HBG_L1_TEST_FAULT") == nullptr;
+        const bool use_direct_package =
+            hbg_direct_package != nullptr || (hbg_plan->has_direct_launch_package() && direct_launch_allowed);
         if (std::getenv("SIMPLER_INTERNAL_HBG_L1_REQUIRE_DIRECT_AIV") != nullptr && !use_direct_package) {
             LOG_ERROR("HBG L1 direct-AIV path was required but the graph or active diagnostics are not eligible");
             return PTO_RUNTIME_ERR_UNSUPPORTED;
         }
+        if (use_direct_package && hbg_direct_package == nullptr) {
+            hbg_direct_package = plan_cache->lookup_direct_package(args, argument_snapshot_hash);
+            if (hbg_direct_package == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
         if (use_direct_package) {
-            const std::vector<uint8_t> &cached_direct_package = plan_cache->direct_launch_package();
-            if (cached_direct_package.empty() || !simpler::hbg::validate_hbg_l1_direct_package(
-                                                     cached_direct_package.data(), cached_direct_package.size()
-                                                 )) {
+            if (!simpler::hbg::validate_hbg_l1_direct_package(hbg_direct_package->data(), hbg_direct_package->size())) {
                 LOG_ERROR("HBG L1 direct-AIV cache entry is invalid");
                 return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
             }
-            hbg_direct_package = &cached_direct_package;
         } else {
+            if (!plan_matches_current_arguments) return PTO_RUNTIME_ERR_INVALID_STATE;
             const auto slot_size_status = simpler::hbg::validate_hbg_launch_blob_size_for_slot(
                 *l1_hbg_execution_slot_registration_, hbg_plan->serialized_size()
             );

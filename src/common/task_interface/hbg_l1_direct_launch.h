@@ -136,4 +136,26 @@ inline bool validate_hbg_l1_direct_package(const void *package, size_t package_s
     return hbg_l1_direct_package_layout_valid(header, package_size);
 }
 
+/** Compare only the immutable launch topology, not per-task tensor/scalar records. */
+inline bool hbg_l1_direct_package_structures_equal(
+    const void *lhs_package, size_t lhs_size, const void *rhs_package, size_t rhs_size
+) noexcept {
+    if (!validate_hbg_l1_direct_package(lhs_package, lhs_size) ||
+        !validate_hbg_l1_direct_package(rhs_package, rhs_size)) {
+        return false;
+    }
+    HbgL1DirectAivPackageHeader lhs{};
+    HbgL1DirectAivPackageHeader rhs{};
+    std::memcpy(&lhs, lhs_package, sizeof(lhs));
+    std::memcpy(&rhs, rhs_package, sizeof(rhs));
+    return lhs.total_size == rhs.total_size && lhs.task_count == rhs.task_count &&
+           lhs.logical_block_num == rhs.logical_block_num && lhs.work_count == rhs.work_count &&
+           lhs.tensor_count == rhs.tensor_count && lhs.scalar_count == rhs.scalar_count &&
+           lhs.task_record_stride == rhs.task_record_stride && lhs.task_records_offset == rhs.task_records_offset &&
+           lhs.lane_count == rhs.lane_count && lhs.lane_scratch_stride == rhs.lane_scratch_stride &&
+           lhs.lane_scratch_offset == rhs.lane_scratch_offset && lhs.immutable_size == rhs.immutable_size &&
+           lhs.function_bin_addr == rhs.function_bin_addr &&
+           lhs.lane_scratch_device_addr == rhs.lane_scratch_device_addr;
+}
+
 }  // namespace simpler::hbg
