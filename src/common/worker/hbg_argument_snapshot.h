@@ -18,6 +18,11 @@
 
 namespace simpler::hbg {
 
+inline bool hbg_argument_snapshot_counts_valid(const ChipStorageTaskArgs &args) noexcept {
+    return args.tensor_count_ >= 0 && args.tensor_count_ <= CHIP_MAX_TENSOR_ARGS && args.scalar_count_ >= 0 &&
+           args.scalar_count_ <= CHIP_MAX_SCALAR_ARGS;
+}
+
 template <typename T>
 inline uint64_t hbg_hash_value(uint64_t hash, const T &value) noexcept {
     return common::utils::fnv1a_64_append(hash, &value, sizeof(value));
@@ -32,8 +37,7 @@ inline uint64_t hbg_hash_value(uint64_t hash, const T &value) noexcept {
  * appended with a fixed-width representation and in call order.
  */
 inline uint64_t hbg_argument_snapshot_hash(const ChipStorageTaskArgs &args) noexcept {
-    if (args.tensor_count_ < 0 || args.tensor_count_ > CHIP_MAX_TENSOR_ARGS || args.scalar_count_ < 0 ||
-        args.scalar_count_ > CHIP_MAX_SCALAR_ARGS) {
+    if (!hbg_argument_snapshot_counts_valid(args)) {
         return 0;
     }
 
@@ -68,6 +72,34 @@ inline uint64_t hbg_argument_snapshot_hash(const ChipStorageTaskArgs &args) noex
         hash = hbg_hash_value(hash, args.scalar(index));
     }
     return hash;
+}
+
+/** Compare every semantic field represented by hbg_argument_snapshot_hash(). */
+inline bool hbg_argument_snapshots_equal(const ChipStorageTaskArgs &lhs, const ChipStorageTaskArgs &rhs) noexcept {
+    if (!hbg_argument_snapshot_counts_valid(lhs) || !hbg_argument_snapshot_counts_valid(rhs) ||
+        lhs.tensor_count_ != rhs.tensor_count_ || lhs.scalar_count_ != rhs.scalar_count_) {
+        return false;
+    }
+
+    for (int32_t index = 0; index < lhs.tensor_count_; ++index) {
+        const ChipTensor &left = lhs.tensor(index);
+        const ChipTensor &right = rhs.tensor(index);
+        if (left.ndims == 0 || left.ndims > MAX_TENSOR_DIMS || right.ndims == 0 || right.ndims > MAX_TENSOR_DIMS ||
+            left.buffer.addr != right.buffer.addr || left.buffer.size != right.buffer.size ||
+            left.owner_task_id.raw != right.owner_task_id.raw || left.start_offset != right.start_offset ||
+            left.version != right.version || left.ndims != right.ndims || left.dtype != right.dtype ||
+            left.manual_dep != right.manual_dep || left.is_contiguous != right.is_contiguous ||
+            left.address_space != right.address_space || left.extent_elem_cache != right.extent_elem_cache) {
+            return false;
+        }
+        for (uint32_t dim = 0; dim < left.ndims; ++dim) {
+            if (left.shapes[dim] != right.shapes[dim] || left.strides[dim] != right.strides[dim]) return false;
+        }
+    }
+    for (int32_t index = 0; index < lhs.scalar_count_; ++index) {
+        if (lhs.scalar(index) != rhs.scalar(index)) return false;
+    }
+    return true;
 }
 
 }  // namespace simpler::hbg

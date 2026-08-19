@@ -22,6 +22,7 @@
 #include "hbg_launch_blob.h"
 #include "hbg_launch_blob_builder.h"
 #include "hbg_graph_plan.h"
+#include "hbg_graph_plan_cache.h"
 #include "hbg_restore.h"
 
 namespace {
@@ -41,6 +42,7 @@ using simpler::hbg::HbgExecutionBinding;
 using simpler::hbg::HbgExecutionSlotRegistration;
 using simpler::hbg::HbgExecutionSlotStatus;
 using simpler::hbg::HbgGraphPlan;
+using simpler::hbg::HbgGraphPlanCache;
 using simpler::hbg::HbgHostRegionInput;
 using simpler::hbg::HbgInvocationIdentity;
 using simpler::hbg::HbgL1FaultStage;
@@ -232,6 +234,23 @@ std::vector<uint8_t> make_direct_aiv_package() {
     std::fill(package.begin() + simpler::hbg::HBG_L1_DIRECT_AIV_HEADER_BYTES, package.end(), 0x5a);
     EXPECT_TRUE(simpler::hbg::validate_hbg_l1_direct_package(package.data(), package.size()));
     return package;
+}
+
+ChipStorageTaskArgs make_cached_plan_args() {
+    ChipStorageTaskArgs args{};
+    ChipTensor tensor{};
+    tensor.buffer = PTOBufferHandle{0x710000, 32 * sizeof(float)};
+    tensor.owner_task_id = PTO2TaskId::invalid();
+    tensor.ndims = 1;
+    tensor.dtype = DataType::FLOAT32;
+    tensor.is_contiguous = true;
+    tensor.address_space = AddressSpace::DEVICE;
+    tensor.shapes[0] = 32;
+    tensor.extent_elem_cache = 32;
+    tensor.strides[0] = 1;
+    args.add_tensor(tensor);
+    args.add_scalar(0x1122334455667788ULL);
+    return args;
 }
 
 std::vector<uint8_t> make_restore_blob(
@@ -465,6 +484,99 @@ TEST(HbgGraphPlan, OwnsDirectAivPackageAndProducesFreshWritableTaskSnapshots) {
     std::vector<uint8_t> third;
     ASSERT_EQ(plan->serialize_direct_launch_package(&third), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(third, second);
+}
+
+TEST(HbgGraphPlanCache, ReusesOnlyAnExactSemanticArgumentSnapshot) {
+    Sources sources;
+    ChipStorageTaskArgs args = make_cached_plan_args();
+    HbgInvocationIdentity identity = make_identity();
+    identity.argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(args);
+    identity.tensor_count = static_cast<uint32_t>(args.tensor_count());
+    identity.scalar_count = static_cast<uint32_t>(args.scalar_count());
+    std::unique_ptr<const HbgGraphPlan> plan;
+    const std::vector<uint8_t> direct_package = make_direct_aiv_package();
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), identity, 41, make_inputs(sources), direct_package, &plan),
+        HbgLaunchBlobStatus::Ok
+    );
+
+    HbgGraphPlanCache cache;
+    ASSERT_EQ(cache.replace(args, identity.argument_snapshot_hash, std::move(plan)), HbgLaunchBlobStatus::Ok);
+    ASSERT_NE(cache.lookup(args, identity.argument_snapshot_hash), nullptr);
+    EXPECT_EQ(cache.lookup(args, identity.argument_snapshot_hash)->plan_generation(), 41u);
+    EXPECT_EQ(cache.direct_launch_package(), direct_package);
+
+    ChipStorageTaskArgs same_semantics = args;
+    std::memset(same_semantics.tensor(0)._pad_cl2, 0xee, sizeof(same_semantics.tensor(0)._pad_cl2));
+    same_semantics.tensor(0).shapes[4] = 17;
+    same_semantics.tensor(0).strides[4] = 29;
+    ASSERT_EQ(simpler::hbg::hbg_argument_snapshot_hash(same_semantics), identity.argument_snapshot_hash);
+    EXPECT_NE(cache.lookup(same_semantics, identity.argument_snapshot_hash), nullptr);
+
+    ChipStorageTaskArgs changed = args;
+    ++changed.tensor(0).buffer.addr;
+    EXPECT_EQ(cache.lookup(changed, identity.argument_snapshot_hash), nullptr);
+
+    changed = args;
+    ++changed.scalar(0);
+    EXPECT_EQ(cache.lookup(changed, identity.argument_snapshot_hash), nullptr);
+}
+
+TEST(HbgGraphPlanCache, FailedReplacementPreservesThePriorPlan) {
+    Sources sources;
+    const ChipStorageTaskArgs args = make_cached_plan_args();
+    HbgInvocationIdentity identity = make_identity();
+    identity.argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(args);
+    identity.tensor_count = static_cast<uint32_t>(args.tensor_count());
+    identity.scalar_count = static_cast<uint32_t>(args.scalar_count());
+    std::unique_ptr<const HbgGraphPlan> plan;
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), identity, 43, make_inputs(sources), &plan), HbgLaunchBlobStatus::Ok
+    );
+
+    HbgGraphPlanCache cache;
+    ASSERT_EQ(cache.replace(args, identity.argument_snapshot_hash, std::move(plan)), HbgLaunchBlobStatus::Ok);
+    const HbgGraphPlan *const original = cache.lookup(args, identity.argument_snapshot_hash);
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(cache.replace(args, identity.argument_snapshot_hash, nullptr), HbgLaunchBlobStatus::NullArgument);
+    EXPECT_EQ(cache.lookup(args, identity.argument_snapshot_hash), original);
+}
+
+TEST(HbgGraphPlanCache, SuccessfulReplacementEvictsThePriorArgumentIdentity) {
+    Sources sources;
+    const ChipStorageTaskArgs first_args = make_cached_plan_args();
+    HbgInvocationIdentity first_identity = make_identity();
+    first_identity.argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(first_args);
+    first_identity.tensor_count = static_cast<uint32_t>(first_args.tensor_count());
+    first_identity.scalar_count = static_cast<uint32_t>(first_args.scalar_count());
+    std::unique_ptr<const HbgGraphPlan> first_plan;
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), first_identity, 44, make_inputs(sources), &first_plan),
+        HbgLaunchBlobStatus::Ok
+    );
+
+    HbgGraphPlanCache cache;
+    ASSERT_EQ(
+        cache.replace(first_args, first_identity.argument_snapshot_hash, std::move(first_plan)), HbgLaunchBlobStatus::Ok
+    );
+
+    ChipStorageTaskArgs second_args = first_args;
+    ++second_args.tensor(0).buffer.addr;
+    HbgInvocationIdentity second_identity = first_identity;
+    second_identity.argument_snapshot_hash = simpler::hbg::hbg_argument_snapshot_hash(second_args);
+    std::unique_ptr<const HbgGraphPlan> second_plan;
+    ASSERT_EQ(
+        build_hbg_graph_plan(make_binding(sources), second_identity, 45, make_inputs(sources), &second_plan),
+        HbgLaunchBlobStatus::Ok
+    );
+    ASSERT_EQ(
+        cache.replace(second_args, second_identity.argument_snapshot_hash, std::move(second_plan)),
+        HbgLaunchBlobStatus::Ok
+    );
+
+    EXPECT_EQ(cache.lookup(first_args, first_identity.argument_snapshot_hash), nullptr);
+    ASSERT_NE(cache.lookup(second_args, second_identity.argument_snapshot_hash), nullptr);
+    EXPECT_EQ(cache.lookup(second_args, second_identity.argument_snapshot_hash)->plan_generation(), 45u);
 }
 
 TEST(HbgGraphPlan, FailedBuildDoesNotReplaceAnExistingOwner) {

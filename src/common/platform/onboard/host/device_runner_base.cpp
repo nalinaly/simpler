@@ -814,21 +814,16 @@ int DeviceRunnerBase::launch_l1_callable(
         launch_state_bytes = sizeof(*device_prelaunch_control) + handshake_bytes;
     }
     L1AicpuInvocationArgs trb_invocation{};
-    std::unique_ptr<const simpler::hbg::HbgGraphPlan> hbg_plan;
+    const simpler::hbg::HbgGraphPlan *hbg_plan = nullptr;
     std::vector<uint8_t> hbg_launch_blob;
-    std::vector<uint8_t> hbg_direct_package;
+    const std::vector<uint8_t> *hbg_direct_package = nullptr;
     simpler::host_args::HostArgsPlaceholder hbg_placeholder{};
     if (is_hbg) {
         if (l1_hbg_execution_slot_registration_ == nullptr || !l1_hbg_execution_slot_registration_enqueued_) {
             return PTO_RUNTIME_ERR_NOT_READY;
         }
-        if (l1_hbg_next_plan_generation_ == 0) {
-            LOG_ERROR("HBG L1 plan generation exhausted");
-            return PTO_RUNTIME_ERR_INVALID_STATE;
-        }
-        const uint64_t plan_generation = l1_hbg_next_plan_generation_;
-        l1_hbg_next_plan_generation_ =
-            plan_generation == std::numeric_limits<uint64_t>::max() ? 0 : plan_generation + 1;
+        simpler::hbg::HbgGraphPlanCache *const plan_cache = callable_it->second.hbg_l1_plan_cache.get();
+        if (plan_cache == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
 
         std::array<uint64_t, simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT> callable_function_table{};
         uint64_t function_binding_hash = 0;
@@ -862,15 +857,34 @@ int DeviceRunnerBase::launch_l1_callable(
             return PTO_RUNTIME_ERR_INVALID_STATE;
         }
 
-        rc = build_l1_hbg_graph_plan_impl(
-            l1_runtime_.get(), api, &args, callable_it->second.host_orch_func_ptr,
-            &l1_hbg_execution_slot_registration_->binding, &identity, callable_function_table.data(),
-            callable_function_table.size(), plan_generation, l1_config_.runtime_env.ring_task_window,
-            l1_config_.runtime_env.ring_heap, l1_config_.runtime_env.ring_dep_pool, &hbg_plan
-        );
-        if (rc != 0 || hbg_plan == nullptr) {
-            LOG_ERROR("HBG L1 graph build failed for callable_id=%d: %d", callable_id, rc);
-            return rc != 0 ? rc : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+        hbg_plan = plan_cache->lookup(args, argument_snapshot_hash);
+        if (hbg_plan == nullptr) {
+            if (l1_hbg_next_plan_generation_ == 0) {
+                LOG_ERROR("HBG L1 plan generation exhausted");
+                return PTO_RUNTIME_ERR_INVALID_STATE;
+            }
+            const uint64_t plan_generation = l1_hbg_next_plan_generation_;
+            l1_hbg_next_plan_generation_ =
+                plan_generation == std::numeric_limits<uint64_t>::max() ? 0 : plan_generation + 1;
+
+            std::unique_ptr<const simpler::hbg::HbgGraphPlan> candidate;
+            rc = build_l1_hbg_graph_plan_impl(
+                l1_runtime_.get(), api, &args, callable_it->second.host_orch_func_ptr,
+                &l1_hbg_execution_slot_registration_->binding, &identity, callable_function_table.data(),
+                callable_function_table.size(), plan_generation, l1_config_.runtime_env.ring_task_window,
+                l1_config_.runtime_env.ring_heap, l1_config_.runtime_env.ring_dep_pool, &candidate
+            );
+            if (rc != 0 || candidate == nullptr) {
+                LOG_ERROR("HBG L1 graph build failed for callable_id=%d: %d", callable_id, rc);
+                return rc != 0 ? rc : PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
+            const auto cache_status = plan_cache->replace(args, argument_snapshot_hash, std::move(candidate));
+            if (cache_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
+                LOG_ERROR("HBG L1 graph cache update failed: status=%u", static_cast<unsigned>(cache_status));
+                return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+            }
+            hbg_plan = plan_cache->lookup(args, argument_snapshot_hash);
+            if (hbg_plan == nullptr) return PTO_RUNTIME_ERR_INVALID_STATE;
         }
         const simpler::hbg::HbgInvocationIdentity &plan_identity = hbg_plan->identity();
         if (plan_identity.callable_id != callable_id || plan_identity.callable_hash != identity.callable_hash ||
@@ -889,13 +903,14 @@ int DeviceRunnerBase::launch_l1_callable(
             return PTO_RUNTIME_ERR_UNSUPPORTED;
         }
         if (use_direct_package) {
-            const auto direct_status = hbg_plan->serialize_direct_launch_package(&hbg_direct_package);
-            if (direct_status != simpler::hbg::HbgLaunchBlobStatus::Ok) {
-                LOG_ERROR(
-                    "HBG L1 direct-AIV package serialization failed: status=%u", static_cast<unsigned>(direct_status)
-                );
+            const std::vector<uint8_t> &cached_direct_package = plan_cache->direct_launch_package();
+            if (cached_direct_package.empty() || !simpler::hbg::validate_hbg_l1_direct_package(
+                                                     cached_direct_package.data(), cached_direct_package.size()
+                                                 )) {
+                LOG_ERROR("HBG L1 direct-AIV cache entry is invalid");
                 return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
             }
+            hbg_direct_package = &cached_direct_package;
         } else {
             const auto slot_size_status = simpler::hbg::validate_hbg_launch_blob_size_for_slot(
                 *l1_hbg_execution_slot_registration_, hbg_plan->serialized_size()
@@ -924,7 +939,7 @@ int DeviceRunnerBase::launch_l1_callable(
         trb_invocation = MakeL1AicpuInvocationArgs(l1_kernel_args_.args, callable_id, args);
     }
 
-    if (!hbg_direct_package.empty()) {
+    if (hbg_direct_package != nullptr) {
         if (!l1_prepare_tail_consumed_) {
             rc = aclrtStreamWaitEvent(
                 reinterpret_cast<aclrtStream>(caller_stream),
@@ -932,7 +947,7 @@ int DeviceRunnerBase::launch_l1_callable(
             );
             if (rc != ACL_SUCCESS) return poison(rc);
         }
-        rc = launch_prepared_hbg_direct_aiv(caller_stream, hbg_direct_package);
+        rc = launch_prepared_hbg_direct_aiv(caller_stream, *hbg_direct_package);
         if (rc != 0) return poison(rc);
         rc = aclrtRecordEvent(
             reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::SerialTail)),
@@ -2102,6 +2117,7 @@ int DeviceRunnerBase::record_host_orch_callable(
     state.hbg_function_binding_hash = function_binding_hash;
     if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
         state.l1_metadata = std::make_unique<ChipStorageTaskArgs>();
+        state.hbg_l1_plan_cache = std::make_unique<simpler::hbg::HbgGraphPlanCache>();
     }
     callables_.emplace(callable_id, std::move(state));
     ++host_dlopen_total_;

@@ -72,6 +72,7 @@
 #include "host/args_dump_collector.h"
 #include "hbg_context_registry.h"
 #include "hbg_execution_slot.h"
+#include "hbg_graph_plan_cache.h"
 #include "l1_aicore_report.h"
 #include "l1_execution_state.h"
 #include "prepare_callable_common.h"
@@ -1075,6 +1076,7 @@ protected:
         void *host_orch_func_ptr{nullptr};
         void (*destroy_host_orch_func_ptr)(void *){nullptr};
         uint64_t hbg_function_binding_hash{0};
+        std::unique_ptr<simpler::hbg::HbgGraphPlanCache> hbg_l1_plan_cache;
     };
     std::unordered_map<int32_t, CallableState> callables_;
     // Opaque provider handle from dma_workspace_provision(), owned for the
