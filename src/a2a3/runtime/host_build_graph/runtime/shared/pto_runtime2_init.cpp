@@ -102,18 +102,26 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
 void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
 PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena) {
+    return reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+}
+
+PTO2SchedulerLayout PTO2SchedulerState::reserve_layout(DeviceArena &arena, uint64_t ready_queue_capacity) {
+    always_assert(
+        ready_queue_capacity > 0 && (ready_queue_capacity & (ready_queue_capacity - 1)) == 0 &&
+        ready_queue_capacity <= PTO2_READY_QUEUE_SIZE
+    );
     PTO2SchedulerLayout layout{};
-    layout.ready_queue_capacity = PTO2_READY_QUEUE_SIZE;
+    layout.ready_queue_capacity = ready_queue_capacity;
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_queue_slots[i] = ready_queue_reserve_layout(arena, ready_queue_capacity);
     }
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+        layout.off_ready_sync_queue_slots[i] = ready_queue_reserve_layout(arena, ready_queue_capacity);
     }
-    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
-    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, PTO2_READY_QUEUE_SIZE);
+    layout.off_dummy_ready_queue_slots = ready_queue_reserve_layout(arena, ready_queue_capacity);
+    layout.off_graph_ready_queue_slots = ready_queue_reserve_layout(arena, ready_queue_capacity);
+    layout.off_graph_prepare_queue_slots = ready_queue_reserve_layout(arena, ready_queue_capacity);
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         layout.off_early_dispatch_queue_slots[i] = ready_queue_reserve_layout(arena, PTO2_EARLY_DISPATCH_QUEUE_SIZE);
     }
@@ -225,6 +233,12 @@ void PTO2SchedulerState::destroy() {
 // =============================================================================
 
 PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(DeviceArena &arena, int32_t task_window_size) {
+    return reserve_layout(arena, task_window_size, PTO2_TENSORMAP_NUM_BUCKETS, PTO2_TENSORMAP_POOL_SIZE);
+}
+
+PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(
+    DeviceArena &arena, int32_t task_window_size, int32_t tensor_map_num_buckets, int32_t tensor_map_pool_size
+) {
     PTO2OrchestratorLayout layout{};
     // scope_tasks holds every task in the open scope, so its cap is the real
     // in-flight budget = the (runtime) task window. Using the compile-time
@@ -245,7 +259,8 @@ PTO2OrchestratorLayout PTO2OrchestratorState::reserve_layout(DeviceArena &arena,
         arena.reserve(static_cast<size_t>(layout.scope_tasks_cap) * sizeof(uintptr_t), alignof(PTO2TaskSlotState *));
     layout.off_scope_begins =
         arena.reserve(static_cast<size_t>(layout.scope_stack_capacity) * sizeof(int32_t), alignof(int32_t));
-    layout.tensor_map = PTO2TensorMap::reserve_layout_default(arena, task_window_size);
+    layout.tensor_map =
+        PTO2TensorMap::reserve_layout(arena, tensor_map_num_buckets, tensor_map_pool_size, task_window_size);
     return layout;
 }
 
@@ -330,6 +345,13 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
 ) {
+    return runtime_reserve_layout(arena, task_window_sizes, heap_sizes, pto2_default_runtime_arena_sizing());
+}
+
+PTO2RuntimeArenaLayout runtime_reserve_layout(
+    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
+    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const PTO2RuntimeArenaSizing &sizing
+) {
     PTO2RuntimeArenaLayout layout{};
 
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
@@ -338,8 +360,10 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     }
 
     layout.off_sm_handle = arena.reserve(sizeof(PTO2SharedMemoryHandle), alignof(PTO2SharedMemoryHandle));
-    layout.orch = PTO2OrchestratorState::reserve_layout(arena, static_cast<int32_t>(task_window_sizes[0]));
-    layout.sched = PTO2SchedulerState::reserve_layout(arena);
+    layout.orch = PTO2OrchestratorState::reserve_layout(
+        arena, static_cast<int32_t>(task_window_sizes[0]), sizing.tensor_map_num_buckets, sizing.tensor_map_pool_size
+    );
+    layout.sched = PTO2SchedulerState::reserve_layout(arena, sizing.ready_queue_capacity);
     layout.off_runtime = arena.reserve(sizeof(PTO2Runtime), PTO2_ALIGN_SIZE);
     layout.off_mailbox = arena.reserve(sizeof(AICoreCompletionMailbox), alignof(AICoreCompletionMailbox));
 

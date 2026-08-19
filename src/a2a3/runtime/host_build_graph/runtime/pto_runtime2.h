@@ -128,6 +128,53 @@ struct PTO2RuntimeArenaLayout {
     size_t arena_size{0};
 };
 
+/**
+ * Capacities of the arena-owned host-build scratch and scheduler queues.
+ *
+ * L2 keeps the historical defaults below.  Borrowed-resource L1 serializes
+ * the pristine arena into aclrtLaunchKernelWithHostArgs on every invocation,
+ * so blindly inheriting those maxima turns a tiny operator into an ~11 MiB
+ * tiling payload.  L1 therefore requests an explicit compact sizing profile;
+ * putting the choice in the layout value (rather than a process-global hook)
+ * makes prepare and per-callable graph construction deterministic and keeps
+ * L2/L3 isolated.
+ */
+struct PTO2RuntimeArenaSizing {
+    uint64_t ready_queue_capacity{PTO2_READY_QUEUE_SIZE};
+    int32_t tensor_map_num_buckets{PTO2_TENSORMAP_NUM_BUCKETS};
+    int32_t tensor_map_pool_size{PTO2_TENSORMAP_POOL_SIZE};
+};
+
+inline constexpr PTO2RuntimeArenaSizing pto2_default_runtime_arena_sizing() noexcept { return {}; }
+
+/**
+ * Derive a correctness-bounded L1 profile from the frozen task window.
+ *
+ * TensorMap inserts at most CORE_MAX_TENSOR_ARGS producer entries per live
+ * top-level task.  Ready queues bound peak concurrent occupancy rather than
+ * total graph nodes; 64 is the existing early-dispatch queue envelope and a
+ * practical minimum for a small L1 operator.  A wider requested task window
+ * raises that envelope with it.  Queue overflow remains fail-closed with a
+ * named runtime error, so an unusually broad nested graph can request a larger
+ * window instead of paying the maximum snapshot cost on every ordinary call.
+ * Both values remain capped at the historical L2 maxima.
+ */
+inline constexpr PTO2RuntimeArenaSizing pto2_hbg_l1_runtime_arena_sizing(uint64_t task_window_size) noexcept {
+    uint64_t ready_capacity = task_window_size > 64 ? task_window_size : 64;
+    if (ready_capacity > PTO2_READY_QUEUE_SIZE) ready_capacity = PTO2_READY_QUEUE_SIZE;
+
+    uint64_t tensor_entries = task_window_size * static_cast<uint64_t>(CORE_MAX_TENSOR_ARGS);
+    if (tensor_entries < 256) tensor_entries = 256;
+    if (tensor_entries > PTO2_TENSORMAP_POOL_SIZE) tensor_entries = PTO2_TENSORMAP_POOL_SIZE;
+
+    uint64_t tensor_buckets = tensor_entries / 4;
+    if (tensor_buckets < 64) tensor_buckets = 64;
+    if (tensor_buckets > PTO2_TENSORMAP_NUM_BUCKETS) tensor_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
+    return PTO2RuntimeArenaSizing{
+        ready_capacity, static_cast<int32_t>(tensor_buckets), static_cast<int32_t>(tensor_entries)
+    };
+}
+
 using PTO2PrebuiltInvocationState = simpler::hbg::HbgPrebuiltInvocationState;
 constexpr size_t PTO2_PREBUILT_FUNC_ID_COUNT = simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT;
 
@@ -218,6 +265,10 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_
 PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+);
+PTO2RuntimeArenaLayout runtime_reserve_layout(
+    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
+    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const PTO2RuntimeArenaSizing &sizing
 );
 
 /**

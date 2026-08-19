@@ -1308,7 +1308,9 @@ extern "C" int prepare_l1_runtime_impl(
     }
 
     DeviceArena sizing_arena;
-    const PTO2RuntimeArenaLayout arena_layout = runtime_reserve_layout(sizing_arena, task_window_sizes, heap_sizes);
+    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
+    const PTO2RuntimeArenaLayout arena_layout =
+        runtime_reserve_layout(sizing_arena, task_window_sizes, heap_sizes, arena_sizing);
     simpler::hbg::HbgStaticExecutionSlotLayout slot_layout{};
     slot_layout.gm_heap_capacity = total_heap_size;
     slot_layout.shared_memory_capacity = PTO2SharedMemoryHandle::calculate_size_per_ring(task_window_sizes);
@@ -1415,7 +1417,9 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     }
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(task_window_sizes);
     DeviceArena host_arena;
-    const PTO2RuntimeArenaLayout layout = runtime_reserve_layout(host_arena, task_window_sizes, heap_sizes);
+    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
+    const PTO2RuntimeArenaLayout layout =
+        runtime_reserve_layout(host_arena, task_window_sizes, heap_sizes, arena_sizing);
     if (sm_size != binding->shared_memory_capacity || layout.arena_size != binding->runtime_arena_capacity ||
         layout.off_runtime != binding->runtime_offset || host_arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
         LOG_ERROR("build_l1_hbg_graph_plan_impl: host layout no longer matches the frozen slot");

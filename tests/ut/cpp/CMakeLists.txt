@@ -1015,6 +1015,11 @@ add_a2a3_hbg_runtime_test(test_hbg_task_allocator a2a3/test_task_allocator.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensormap a2a3/test_hbg_tensormap.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_dep_gen_host_graph a2a3/test_dep_gen_host_graph.cpp)
 add_a2a3_hbg_runtime_test(test_hbg_tensor_access a2a3/test_hbg_tensor_access.cpp)
+add_a2a3_hbg_runtime_test(test_hbg_l1_runtime_arena_sizing a2a3/test_hbg_l1_runtime_arena_sizing.cpp)
+target_sources(test_hbg_l1_runtime_arena_sizing PRIVATE
+    ${HBG_RUNTIME_DIR}/shared/pto_tensormap.cpp
+    ${HBG_RUNTIME_DIR}/shared/pto_runtime2_init.cpp
+)
 
 # The func_id -> CoreCallable dispatch table holds exactly the active callable's
 # mappings. An entry that outlives the ChipCallable buffer it points into is
