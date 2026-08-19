@@ -21,7 +21,7 @@
 #include "task_args.h"
 
 inline constexpr uint32_t L1_AICPU_INVOCATION_ABI_VERSION = 1;
-inline constexpr uint32_t L1_AICPU_REGISTER_ABI_VERSION = 1;
+inline constexpr uint32_t L1_AICPU_REGISTER_ABI_VERSION = 2;
 
 /** One callable-local func_id -> device-entry-address binding. */
 struct L1CallableKernelAddr {
@@ -46,6 +46,7 @@ struct L1RegisterCallableArgs {
     uint32_t struct_size{0};
     int32_t callable_id{-1};
     uint32_t kernel_count{0};
+    uint64_t callable_hash{0};
     uint64_t dev_orch_so_addr{0};
     uint64_t dev_orch_so_size{0};
     char device_orch_func_name[INIT_ARGS_MAX_ORCH_SYMBOL_NAME]{};
@@ -61,7 +62,7 @@ static_assert(
 
 inline bool IsValidL1RegisterCallable(const L1RegisterCallableArgs &args) {
     return args.abi_version == L1_AICPU_REGISTER_ABI_VERSION && args.struct_size == sizeof(args) &&
-           args.callable_id >= 0 && args.kernel_count <= L1_MAX_KERNELS_PER_CALLABLE;
+           args.callable_id >= 0 && args.callable_hash != 0 && args.kernel_count <= L1_MAX_KERNELS_PER_CALLABLE;
 }
 
 /**

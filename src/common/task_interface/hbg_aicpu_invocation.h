@@ -16,7 +16,6 @@
 #include <cstring>
 #include <type_traits>
 
-#include "hbg_callable_registry.h"
 #include "hbg_execution_slot.h"
 
 namespace simpler::hbg {
@@ -25,17 +24,17 @@ namespace simpler::hbg {
  * Per-AICPU-thread view of one runtime-owned HBG task package.
  *
  * The variable-length blob remains owned by CANN. Fixed headers and both
- * prepare-time trust roots are copied into aligned local storage before typed
- * access. Only the HBG boot leader performs full payload validation and
- * restore; other AICPU threads carry the same immutable view through the
- * platform affinity gate.
+ * The slot trust root is copied into aligned local storage before typed access.
+ * Callable identity and its callable-local function table are self-contained
+ * in the authenticated launch blob. Only the HBG boot leader performs full
+ * payload validation and restore; other AICPU threads carry the same immutable
+ * view through the platform affinity gate.
  */
 struct alignas(8) HbgAicpuInvocationView {
     const void *blob{nullptr};
     uint64_t blob_size{0};
     HbgLaunchBlobHeader header{};
     HbgExecutionSlotRegistration slot{};
-    HbgCallableRegistration callable{};
 };
 
 static_assert(
@@ -47,12 +46,10 @@ enum class HbgAicpuInvocationStatus : uint32_t {
     Ok = 0,
     NullArgument,
     SlotRejected,
-    CallableRejected,
     InvalidHeader,
     InvalidPackageSize,
     InvalidPatchedAddress,
     BindingMismatch,
-    CallableMismatch,
 };
 
 /**
@@ -64,15 +61,11 @@ enum class HbgAicpuInvocationStatus : uint32_t {
  * descriptor table, immutable payload, plan hash, and every restore span.
  */
 inline HbgAicpuInvocationStatus make_hbg_aicpu_invocation_view(
-    const void *blob, const HbgExecutionSlotRegistration &slot, const HbgCallableRegistration &callable,
-    HbgAicpuInvocationView *out
+    const void *blob, const HbgExecutionSlotRegistration &slot, HbgAicpuInvocationView *out
 ) noexcept {
     if (blob == nullptr || out == nullptr) return HbgAicpuInvocationStatus::NullArgument;
     if (validate_hbg_execution_slot_registration(&slot) != HbgExecutionSlotStatus::Ok) {
         return HbgAicpuInvocationStatus::SlotRejected;
-    }
-    if (validate_hbg_callable_registration(&callable) != HbgCallableStatus::Ok) {
-        return HbgAicpuInvocationStatus::CallableRejected;
     }
 
     HbgLaunchBlobHeader header{};
@@ -98,20 +91,11 @@ inline HbgAicpuInvocationStatus make_hbg_aicpu_invocation_view(
         !hbg_execution_binding_matches(header.binding, slot.binding)) {
         return HbgAicpuInvocationStatus::BindingMismatch;
     }
-    if (header.identity.callable_id != callable.callable_id ||
-        header.identity.callable_hash != callable.callable_hash ||
-        header.identity.function_binding_hash != callable.function_binding_hash ||
-        header.identity.tensor_count != callable.tensor_count ||
-        header.identity.scalar_count != callable.scalar_count) {
-        return HbgAicpuInvocationStatus::CallableMismatch;
-    }
-
     HbgAicpuInvocationView candidate{};
     candidate.blob = blob;
     candidate.blob_size = header.total_size;
     candidate.header = header;
     candidate.slot = slot;
-    candidate.callable = callable;
     *out = candidate;
     return HbgAicpuInvocationStatus::Ok;
 }

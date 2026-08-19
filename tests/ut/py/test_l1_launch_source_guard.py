@@ -13,6 +13,7 @@ from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEVICE_RUNNER_SOURCE = _PROJECT_ROOT / "src/common/platform/onboard/host/device_runner_base.cpp"
+_AICPU_LOADER_SOURCE = _PROJECT_ROOT / "src/common/aicpu_loader/host/load_aicpu_op.cpp"
 
 _FORBIDDEN_LAUNCH_APIS = (
     # Host-blocking completion is owned by the caller, never by PyPTO L1.
@@ -94,3 +95,19 @@ def test_l1_aicpu_and_aicore_callbacks_only_use_their_borrowed_stream_argument()
     assert "reinterpret_cast<rtStream_t>(stream)" in aicore_callback
     assert "launch_prepared_aicore_kernel" in aicore_callback
     assert "ensure_aicore_binary_registered" not in aicore_callback
+
+
+def test_l1_close_pins_binary_without_any_unload_call() -> None:
+    runner_body = _extract_function(
+        _DEVICE_RUNNER_SOURCE.read_text(encoding="utf-8"),
+        "int DeviceRunnerBase::finalize_l1_borrowed()",
+    )
+    pinned_body = _extract_function(
+        _AICPU_LOADER_SOURCE.read_text(encoding="utf-8"),
+        "int LoadAicpuOp::FinalizeL1Pinned()",
+    )
+
+    assert "load_aicpu_op_.FinalizeL1Pinned()" in runner_body
+    assert "load_aicpu_op_.Finalize()" not in runner_body
+    assert "aclrtBinaryUnLoad(" not in pinned_body
+    assert "rtsBinaryUnload(" not in pinned_body

@@ -1623,11 +1623,11 @@ extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
 // so repeated ACLGraph replay never consumes or aliases the canonical package.
 extern "C" int l1_runtime_supported_impl(void) { return 1; }
 
-// Registration remains independent from TMARB's fixed callable ABI.
+// The execution slot remains context-owned. Each launch blob carries its own
+// authenticated callable identity and callable-local function binding.
 extern "C" const char *const *runtime_l1_extra_aicpu_symbols(size_t *count) {
     static const char *const kExtra[] = {
         "simpler_aicpu_l1_hbg_register_execution_slot",
-        "simpler_aicpu_l1_hbg_register_callable",
         "simpler_aicpu_l1_hbg_exec",
     };
     if (count != nullptr) {

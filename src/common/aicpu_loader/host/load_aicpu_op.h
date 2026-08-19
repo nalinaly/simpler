@@ -181,6 +181,16 @@ public:
     int Finalize();
 
     /**
+     * @brief Retire borrowed-L1 host ownership without unloading the binary.
+     *
+     * Captured graph nodes may retain function handles after every Python
+     * object has disappeared. CANN exposes no contract that BinaryUnLoad keeps
+     * those handles alive, so L1 pins the binary until process exit. Only the
+     * externally-quiesced async bootstrap buffers are reclaimed here.
+     */
+    int FinalizeL1Pinned();
+
+    /**
      * @brief Forget runtime handles without calling rtsBinaryUnload.
      *
      * Used after a force reset, or when the device is already unusable and

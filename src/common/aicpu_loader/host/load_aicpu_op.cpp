@@ -346,6 +346,42 @@ int LoadAicpuOp::Finalize() {
     return first_error;
 }
 
+int LoadAicpuOp::FinalizeL1Pinned() {
+    int first_error = 0;
+    auto free_async_bootstrap = [&first_error](void *&ptr, const char *name) {
+        if (ptr == nullptr) return;
+        const aclError rc = aclrtFree(ptr);
+        if (rc == ACL_SUCCESS) {
+            ptr = nullptr;
+            return;
+        }
+        LOG_WARN("aclrtFree failed for retained L1 bootstrap %s buffer %p: %d", name, ptr, rc);
+        if (first_error == 0) first_error = static_cast<int>(rc);
+    };
+    free_async_bootstrap(async_bootstrap_args_, "args");
+    free_async_bootstrap(async_bootstrap_inner_, "inner SO");
+    free_async_bootstrap(async_bootstrap_dispatcher_, "dispatcher SO");
+    if (async_bootstrap_args_ != nullptr || async_bootstrap_inner_ != nullptr ||
+        async_bootstrap_dispatcher_ != nullptr) {
+        return first_error != 0 ? first_error : -1;
+    }
+
+    // Drop only the host-side ownership record. The CANN binary and every
+    // graph-visible function handle remain process-pinned; no BinaryUnLoad API
+    // is called by this path or by the destructor after the handle is cleared.
+    binary_handle_ = nullptr;
+    binary_load_mode_ = BinaryLoadMode::None;
+    func_handles_.clear();
+    inner_fp_ = 0;
+    inner_so_basename_.clear();
+    kernel_symbols_.clear();
+    if (!json_file_path_.empty()) {
+        std::remove(json_file_path_.c_str());
+        json_file_path_.clear();
+    }
+    return 0;
+}
+
 void LoadAicpuOp::AbandonAfterDeviceFailure() {
     binary_handle_ = nullptr;
     func_handles_.clear();

@@ -599,10 +599,16 @@ TEST(HbgLaunchBlob, RejectsTruncationHeaderAndGenerationCorruption) {
 
     blob = make_blob();
     header = reinterpret_cast<HbgLaunchBlobHeader *>(blob.data());
-    header->identity.callable_id = MAX_REGISTERED_CALLABLE_IDS;
+    // Callable identity and the function table are in-band, so the trace id is
+    // independent of any resident-table capacity.
+    header->identity.callable_id = 64;
+    header->plan_hash = hbg_plan_hash(
+        header->identity, hbg_launch_regions(header), header->region_count, hbg_inline_payload(header),
+        header->inline_payload_size
+    );
     EXPECT_EQ(
         validate_hbg_launch_blob(blob.data(), blob.size(), HbgLaunchBlobAddressMode::HostUnpatched),
-        HbgLaunchBlobStatus::InvalidIdentity
+        HbgLaunchBlobStatus::Ok
     );
 }
 

@@ -127,6 +127,7 @@ TEST(L1RegisterCallableArgs, VersionedCallableLocalKernelSnapshot) {
     args.struct_size = sizeof(args);
     args.callable_id = 3;
     args.kernel_count = 2;
+    args.callable_hash = 0x1234;
     args.kernel_addrs[0].func_id = 0;
     args.kernel_addrs[0].device_addr = 0x1000;
     args.kernel_addrs[1].func_id = 7;
@@ -142,6 +143,7 @@ TEST(L1RegisterCallableArgs, RejectsHeaderAndCapacityMismatch) {
     L1RegisterCallableArgs args{};
     args.struct_size = sizeof(args);
     args.callable_id = 0;
+    args.callable_hash = 1;
     ASSERT_TRUE(IsValidL1RegisterCallable(args));
 
     args.struct_size -= 1;
@@ -151,6 +153,9 @@ TEST(L1RegisterCallableArgs, RejectsHeaderAndCapacityMismatch) {
     EXPECT_FALSE(IsValidL1RegisterCallable(args));
     args.kernel_count = 0;
     args.callable_id = -1;
+    EXPECT_FALSE(IsValidL1RegisterCallable(args));
+    args.callable_id = 0;
+    args.callable_hash = 0;
     EXPECT_FALSE(IsValidL1RegisterCallable(args));
 }
 

@@ -114,6 +114,13 @@ public:
 
     int initialize(int requested_device_id, const L1RuntimeOps &ops);
     int mark_ready_enqueued();
+    /**
+     * Compatibility hook for callers that invoke the seal operation.
+     *
+     * JIT specialization may append an immutable callable after another
+     * callable has warmed. The method validates the phase and leaves callable
+     * admission in ReadyEnqueued.
+     */
     int seal();
     int begin_close();
     void poison(int runtime_error);

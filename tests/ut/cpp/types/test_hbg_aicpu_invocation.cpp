@@ -27,7 +27,6 @@ struct FixtureData {
     std::vector<uint8_t> arena = std::vector<uint8_t>(128, 0x22);
     std::vector<uint8_t> blob;
     HbgExecutionSlotRegistration slot{};
-    HbgCallableRegistration callable{};
 
     FixtureData() {
         HbgExecutionBinding binding{};
@@ -69,26 +68,16 @@ struct FixtureData {
         slot.device_kernel_args_size = 256;
         slot.binary_generation = 23;
         EXPECT_EQ(seal_hbg_execution_slot_registration(&slot, 1), HbgExecutionSlotStatus::Ok);
-
-        callable.callable_id = identity.callable_id;
-        callable.tensor_count = identity.tensor_count;
-        callable.scalar_count = identity.scalar_count;
-        callable.callable_hash = identity.callable_hash;
-        callable.function_binding_hash = identity.function_binding_hash;
-        EXPECT_EQ(seal_hbg_callable_registration(&callable), HbgCallableStatus::Ok);
     }
 };
 
 TEST(HbgAicpuInvocation, AcquiresOnlyTheMatchingFixedPrefix) {
     FixtureData data;
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     EXPECT_EQ(view.blob, data.blob.data());
     EXPECT_EQ(view.header.identity.callable_id, 3);
     EXPECT_EQ(view.slot.registration_hash, data.slot.registration_hash);
-    EXPECT_EQ(view.callable.registration_hash, data.callable.registration_hash);
 }
 
 TEST(HbgAicpuInvocation, ExtractsTheTaskOwnedFaultMarkerWithoutTypedUnalignedAccess) {
@@ -102,9 +91,7 @@ TEST(HbgAicpuInvocation, ExtractsTheTaskOwnedFaultMarkerWithoutTypedUnalignedAcc
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     EXPECT_EQ(hbg_aicpu_fault_stage(&view), HbgL1FaultStage::BeforeDispatch);
 
     regions[0].reserved = 0;
@@ -122,9 +109,7 @@ TEST(HbgAicpuInvocation, AuthenticatesTheFaultMarkerAgainstTheCompletePackage) {
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::SchedulerInit);
@@ -146,9 +131,7 @@ TEST(HbgAicpuInvocation, AuthenticatesSchedulerAssignmentFaultBeforeExecutorInit
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::SchedulerAssign);
@@ -165,9 +148,7 @@ TEST(HbgAicpuInvocation, AuthenticatesSchedulerDispatchFaultForTheRestoredGenera
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::SchedulerDispatch);
@@ -184,9 +165,7 @@ TEST(HbgAicpuInvocation, AuthenticatesPlatformBridgeFaultBeforeGenerationEntry) 
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::PlatformBridge);
@@ -203,9 +182,7 @@ TEST(HbgAicpuInvocation, AuthenticatesAffinityInputFaultBeforeTheGateBarrier) {
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::AffinityInputs);
@@ -222,9 +199,7 @@ TEST(HbgAicpuInvocation, AuthenticatesKernelArgsRuntimeFaultBeforePlatformEntry)
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::KernelArgsRuntime);
@@ -241,9 +216,7 @@ TEST(HbgAicpuInvocation, AuthenticatesPhysicalCoreMappingFaultDuringHandshake) {
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::PhysicalCoreMapping);
@@ -260,9 +233,7 @@ TEST(HbgAicpuInvocation, AuthenticatesPhysicalCoreIdFaultDuringHandshake) {
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::PhysicalCoreId);
@@ -279,34 +250,37 @@ TEST(HbgAicpuInvocation, AuthenticatesSlotFallbackControlFaultBeforeGeneration) 
     );
 
     HbgAicpuInvocationView view{};
-    ASSERT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &view), HbgAicpuInvocationStatus::Ok
-    );
+    ASSERT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &view), HbgAicpuInvocationStatus::Ok);
     HbgL1FaultStage stage = HbgL1FaultStage::None;
     EXPECT_EQ(authenticate_hbg_aicpu_fault_stage(&view, &stage), HbgLaunchBlobStatus::Ok);
     EXPECT_EQ(stage, HbgL1FaultStage::SlotFallbackControl);
 }
 
-TEST(HbgAicpuInvocation, IdentityOrCapacityMismatchDoesNotPublishOutput) {
+TEST(HbgAicpuInvocation, AcceptsSelfContainedCallableIdentityBeyondTheLegacySlotCount) {
+    FixtureData data;
+    auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(data.blob.data());
+    header->identity.callable_id = 65;
+    header->plan_hash = hbg_plan_hash(
+        header->identity, hbg_launch_regions(header), header->region_count, hbg_inline_payload(header),
+        header->inline_payload_size
+    );
+
+    HbgAicpuInvocationView output{};
+    EXPECT_EQ(make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &output), HbgAicpuInvocationStatus::Ok);
+    EXPECT_EQ(output.header.identity.callable_id, 65);
+}
+
+TEST(HbgAicpuInvocation, CapacityMismatchDoesNotPublishOutput) {
     FixtureData data;
     HbgAicpuInvocationView output{};
     output.blob = reinterpret_cast<void *>(0x5555);
     const HbgAicpuInvocationView before = output;
 
-    HbgCallableRegistration other = data.callable;
-    ++other.function_binding_hash;
-    ASSERT_EQ(seal_hbg_callable_registration(&other), HbgCallableStatus::Ok);
-    EXPECT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, other, &output),
-        HbgAicpuInvocationStatus::CallableMismatch
-    );
-    EXPECT_EQ(std::memcmp(&output, &before, sizeof(output)), 0);
-
     auto *header = reinterpret_cast<HbgLaunchBlobHeader *>(data.blob.data());
     ++header->total_size;
     ++header->inline_payload_size;
     EXPECT_EQ(
-        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, data.callable, &output),
+        make_hbg_aicpu_invocation_view(data.blob.data(), data.slot, &output),
         HbgAicpuInvocationStatus::InvalidPackageSize
     );
     EXPECT_EQ(std::memcmp(&output, &before, sizeof(output)), 0);

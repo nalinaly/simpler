@@ -21,16 +21,12 @@ namespace {
 
 using simpler::hbg::acquire_hbg_execution_slot_registration;
 using simpler::hbg::hbg_minimum_launch_blob_size;
-using simpler::hbg::HbgCallableRegistration;
-using simpler::hbg::HbgCallableRegistry;
-using simpler::hbg::HbgCallableRegistryStatus;
 using simpler::hbg::HbgContextRegistry;
 using simpler::hbg::HbgExecutionSlotRegistration;
 using simpler::hbg::HbgExecutionSlotRegistry;
 using simpler::hbg::HbgExecutionSlotRegistryPhase;
 using simpler::hbg::HbgExecutionSlotRegistryStatus;
 using simpler::hbg::initialize_hbg_context_registry;
-using simpler::hbg::publish_hbg_callable_registration;
 using simpler::hbg::publish_hbg_execution_slot_registration;
 using simpler::hbg::reset_hbg_execution_slot_registry;
 using simpler::hbg::seal_hbg_execution_slot_registration;
@@ -177,15 +173,6 @@ TEST(HbgContextRegistry, SeparateContextOwnersKeepIndependentRegistrations) {
         publish_hbg_execution_slot_registration(&first_context.execution_slot, &slot, 1),
         HbgExecutionSlotRegistryStatus::Published
     );
-    HbgCallableRegistration callable;
-    callable.callable_id = 0;
-    callable.callable_hash = 11;
-    callable.function_binding_hash = 12;
-    ASSERT_EQ(simpler::hbg::seal_hbg_callable_registration(&callable), simpler::hbg::HbgCallableStatus::Ok);
-    ASSERT_EQ(
-        publish_hbg_callable_registration(&first_context.callables, &callable), HbgCallableRegistryStatus::Published
-    );
-
     HbgExecutionSlotRegistration acquired{};
     EXPECT_EQ(
         acquire_hbg_execution_slot_registration(&first_context.execution_slot, 1, &acquired),
@@ -194,11 +181,6 @@ TEST(HbgContextRegistry, SeparateContextOwnersKeepIndependentRegistrations) {
     EXPECT_EQ(
         acquire_hbg_execution_slot_registration(&second_context.execution_slot, 1, &acquired),
         HbgExecutionSlotRegistryStatus::NotReady
-    );
-    HbgCallableRegistration acquired_callable{};
-    EXPECT_EQ(
-        simpler::hbg::acquire_hbg_callable_registration(&second_context.callables, 0, &acquired_callable),
-        HbgCallableRegistryStatus::NotReady
     );
 }
 

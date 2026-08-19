@@ -107,6 +107,15 @@ def test_l1_registry_is_append_only_and_separate_from_l2(monkeypatch: pytest.Mon
     worker.finalize()
 
 
+def test_l1_registry_accepts_ids_beyond_legacy_l2_capacity(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker, _ = _worker(monkeypatch)
+    callable_obj = _callable()
+
+    assert worker.l1_make_prepare_queue_call(64, callable_obj) == ("prepare", 64)
+    assert worker.l1_make_launch_queue_call(64, ChipStorageTaskArgs()) == ("launch", 64)
+    worker.finalize()
+
+
 def test_l1_finalize_failure_preserves_retry_owners(monkeypatch: pytest.MonkeyPatch) -> None:
     worker, impl = _worker(monkeypatch)
     callable_obj = _callable()

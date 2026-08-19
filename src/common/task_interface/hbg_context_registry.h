@@ -14,14 +14,13 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "hbg_callable_registry.h"
 #include "hbg_execution_slot_registry.h"
 
 namespace simpler::hbg {
 
 inline constexpr uint32_t HBG_CONTEXT_REGISTRY_MAGIC = 0x52474248U;  // "HBGR"
 inline constexpr uint16_t HBG_CONTEXT_REGISTRY_ABI_MAJOR = 1;
-inline constexpr uint16_t HBG_CONTEXT_REGISTRY_ABI_MINOR = 0;
+inline constexpr uint16_t HBG_CONTEXT_REGISTRY_ABI_MINOR = 1;
 
 /**
  * One borrowed-L1 context's complete HBG device registry.
@@ -41,7 +40,6 @@ struct alignas(64) HbgContextRegistry {
     uint32_t reserved{0};
     uint64_t context_generation{0};
     HbgExecutionSlotRegistry execution_slot{};
-    HbgCallableRegistry callables{};
 };
 
 static_assert(alignof(HbgContextRegistry) == 64, "HBG context registry must remain cache-line aligned");
@@ -50,11 +48,6 @@ static_assert(
     offsetof(HbgContextRegistry, execution_slot) % alignof(HbgExecutionSlotRegistry) == 0,
     "HBG execution-slot registry alignment changed"
 );
-static_assert(
-    offsetof(HbgContextRegistry, callables) % alignof(HbgCallableRegistry) == 0,
-    "HBG callable registry alignment changed"
-);
-
 inline bool valid_hbg_context_registry_header(const HbgContextRegistry *registry) noexcept {
     return registry != nullptr && registry->magic == HBG_CONTEXT_REGISTRY_MAGIC &&
            registry->abi_major == HBG_CONTEXT_REGISTRY_ABI_MAJOR &&
@@ -71,7 +64,6 @@ inline bool initialize_hbg_context_registry(HbgContextRegistry *registry, uint64
     registry->reserved = 0;
     registry->context_generation = context_generation;
     reset_hbg_execution_slot_registry(&registry->execution_slot);
-    reset_hbg_callable_registry(&registry->callables);
     return true;
 }
 

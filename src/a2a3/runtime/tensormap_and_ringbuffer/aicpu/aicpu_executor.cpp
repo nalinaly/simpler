@@ -99,13 +99,8 @@ static int32_t read_runtime_status(Runtime *runtime) {
 
 static PTO2Runtime *rt{nullptr};
 
-// Per-callable_id orchestration SO table. The executor dispatches
-// `orch_so_table_[active_callable_id_]` (created on first sighting of
-// that callable_id, kept warm across runs).
-// MAX_REGISTERED_CALLABLE_IDS is the protocol hard cap on callable_id values
-// (mailbox uint32 callable_id, register() returns small ints) and is shared
-// with the host bounds check in DeviceRunner::register_callable —
-// see src/common/task_interface/callable_protocol.h.
+// L2/L3 owns the fixed callable table. Borrowed L1 owns a distinct append-only
+// registry whose published code handles remain stable for captured nodes.
 
 struct OrchSoEntry {
     bool in_use{false};
@@ -117,6 +112,13 @@ struct OrchSoEntry {
     bool l1_registered{false};
     uint32_t l1_kernel_count{0};
     L1CallableKernelAddr *l1_kernel_addrs{nullptr};
+};
+
+struct L1OrchSoNode {
+    int32_t callable_id{-1};
+    uint64_t callable_hash{0};
+    OrchSoEntry entry{};
+    L1OrchSoNode *next{nullptr};
 };
 
 struct AicpuExecutor {
@@ -167,6 +169,7 @@ struct AicpuExecutor {
     // race is not possible; if multiple orch threads are ever introduced,
     // guard the in_use=false→true transition with a mutex.
     OrchSoEntry orch_so_table_[MAX_REGISTERED_CALLABLE_IDS];
+    L1OrchSoNode *l1_orch_so_head_{nullptr};
 
     // ===== Scheduler context (owns all dispatch/completion/drain state) =====
     SchedulerContext sched_ctx_;
@@ -181,6 +184,11 @@ struct AicpuExecutor {
         int32_t callable_id, uint64_t dev_orch_so_addr, uint64_t dev_orch_so_size, const char *entry_symbol,
         const char *config_symbol, int32_t thread_idx
     );
+    int32_t load_orch_so_entry(
+        OrchSoEntry &entry, int32_t callable_id, uint64_t dev_orch_so_addr, uint64_t dev_orch_so_size,
+        const char *entry_symbol, const char *config_symbol, int32_t thread_idx
+    );
+    L1OrchSoNode *find_l1_orch_so(int32_t callable_id);
     int32_t run(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id);
     void arrive_and_finalize_run(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id);
     void deinit(Runtime *runtime);
@@ -196,6 +204,8 @@ struct AicpuExecutor {
             std::free(e.l1_kernel_addrs);
             e = OrchSoEntry{};
         }
+        // L1 node mappings and heap storage have process lifetime; no DSO
+        // teardown path can invalidate a graph-visible handle.
     }
 };
 
@@ -351,6 +361,13 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     return 0;
 }
 
+L1OrchSoNode *AicpuExecutor::find_l1_orch_so(int32_t callable_id) {
+    for (L1OrchSoNode *node = l1_orch_so_head_; node != nullptr; node = node->next) {
+        if (node->callable_id == callable_id) return node;
+    }
+    return nullptr;
+}
+
 int32_t AicpuExecutor::load_orch_so(
     int32_t callable_id, uint64_t dev_orch_so_addr, uint64_t dev_orch_so_size, const char *entry_symbol_in,
     const char *config_symbol_in, int32_t thread_idx
@@ -359,9 +376,16 @@ int32_t AicpuExecutor::load_orch_so(
         LOG_ERROR("Thread %d: invalid callable_id %d (limit=%d)", thread_idx, callable_id, MAX_REGISTERED_CALLABLE_IDS);
         return -1;
     }
+    return load_orch_so_entry(
+        orch_so_table_[callable_id], callable_id, dev_orch_so_addr, dev_orch_so_size, entry_symbol_in, config_symbol_in,
+        thread_idx
+    );
+}
 
-    OrchSoEntry &entry = orch_so_table_[callable_id];
-
+int32_t AicpuExecutor::load_orch_so_entry(
+    OrchSoEntry &entry, int32_t callable_id, uint64_t dev_orch_so_addr, uint64_t dev_orch_so_size,
+    const char *entry_symbol_in, const char *config_symbol_in, int32_t thread_idx
+) {
     // Registration always (re)loads: the slot may have been reused after an
     // unregister, so dlclose any stale handle before dlopen'ing the new SO.
     // No AicpuPhase::SoLoad stamp here: that phase times the dlopen within a
@@ -555,16 +579,23 @@ int32_t AicpuExecutor::run(Runtime *runtime, const void *invocation_args, int32_
             // successful registration, which is a caller/scheduling bug.
             const int32_t callable_id =
                 invocation_args != nullptr ? invocation_callable_id : runtime->get_active_callable_id();
-            if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
+            OrchSoEntry *selected_entry_ptr = nullptr;
+            if (invocation_args != nullptr) {
+                L1OrchSoNode *node = find_l1_orch_so(callable_id);
+                selected_entry_ptr = node != nullptr ? &node->entry : nullptr;
+            } else if (callable_id >= 0 && callable_id < MAX_REGISTERED_CALLABLE_IDS) {
+                selected_entry_ptr = &orch_so_table_[callable_id];
+            }
+            if (selected_entry_ptr == nullptr) {
                 LOG_ERROR(
-                    "Thread %d: invalid callable_id %d (limit=%d)", thread_idx, callable_id, MAX_REGISTERED_CALLABLE_IDS
+                    "Thread %d: callable_id=%d is outside its registry or not registered", thread_idx, callable_id
                 );
                 run_rc = -1;
                 latch_run_error(run_rc);
                 runtime_init_ready_.store(true, std::memory_order_release);
                 goto run_epilogue;
             }
-            if (orch_so_table_[callable_id].handle == nullptr || orch_so_table_[callable_id].func == nullptr) {
+            if (selected_entry_ptr->handle == nullptr || selected_entry_ptr->func == nullptr) {
                 LOG_ERROR(
                     "Thread %d: callable_id=%d not registered (no orch SO loaded); register before run", thread_idx,
                     callable_id
@@ -574,7 +605,7 @@ int32_t AicpuExecutor::run(Runtime *runtime, const void *invocation_args, int32_
                 runtime_init_ready_.store(true, std::memory_order_release);
                 goto run_epilogue;
             }
-            OrchSoEntry &selected_entry = orch_so_table_[callable_id];
+            OrchSoEntry &selected_entry = *selected_entry_ptr;
             if (invocation_args != nullptr) {
                 if (!selected_entry.l1_registered) {
                     LOG_ERROR("Thread %d: callable_id=%d has no L1 address snapshot", thread_idx, callable_id);
@@ -604,7 +635,7 @@ int32_t AicpuExecutor::run(Runtime *runtime, const void *invocation_args, int32_
             uint64_t sm_size = 0;
             {
                 AicpuPhaseScope config_validate(AicpuPhase::ConfigValidate);
-                OrchSoEntry &entry = orch_so_table_[callable_id];
+                OrchSoEntry &entry = selected_entry;
                 p_func = &entry.func;
                 p_bind = &entry.bind;
                 DeviceOrchestrationConfigFunc *p_config_func = &entry.config_func;
@@ -997,11 +1028,15 @@ void AicpuExecutor::arrive_and_finalize_run(
             const int32_t callable_id =
                 invocation_args != nullptr ? invocation_callable_id : runtime->get_active_callable_id();
             framework_bind_runtime(nullptr);
-            if (callable_id >= 0 && callable_id < MAX_REGISTERED_CALLABLE_IDS) {
-                DeviceOrchestrationBindRuntimeFunc bind = orch_so_table_[callable_id].bind;
-                if (bind != nullptr) {
-                    bind(nullptr);
-                }
+            DeviceOrchestrationBindRuntimeFunc bind = nullptr;
+            if (invocation_args != nullptr) {
+                L1OrchSoNode *node = find_l1_orch_so(callable_id);
+                bind = node != nullptr ? node->entry.bind : nullptr;
+            } else if (callable_id >= 0 && callable_id < MAX_REGISTERED_CALLABLE_IDS) {
+                bind = orch_so_table_[callable_id].bind;
+            }
+            if (bind != nullptr) {
+                bind(nullptr);
             }
             runtime_destroy(rt, runtime_arena_);
             rt = nullptr;
@@ -1086,7 +1121,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_register_
     // alignment. Copy before accessing typed fields.
     L1RegisterCallableArgs args{};
     std::memcpy(&args, arg, sizeof(args));
-    if (!IsValidL1RegisterCallable(args) || args.callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
+    if (!IsValidL1RegisterCallable(args)) {
         LOG_ERROR(
             "simpler_aicpu_l1_register_callable: invalid ABI/id version=%u size=%u id=%d count=%u", args.abi_version,
             args.struct_size, args.callable_id, args.kernel_count
@@ -1106,28 +1141,54 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_register_
         }
         seen[binding.func_id] = true;
     }
+    L1OrchSoNode *existing = g_aicpu_executor.find_l1_orch_so(args.callable_id);
+    if (existing != nullptr) {
+        bool identical = existing->callable_hash == args.callable_hash &&
+                         existing->entry.l1_kernel_count == args.kernel_count && existing->entry.l1_registered;
+        for (uint32_t i = 0; identical && i < args.kernel_count; ++i) {
+            identical = existing->entry.l1_kernel_addrs[i].func_id == args.kernel_addrs[i].func_id &&
+                        existing->entry.l1_kernel_addrs[i].device_addr == args.kernel_addrs[i].device_addr;
+        }
+        if (!identical) {
+            LOG_ERROR("simpler_aicpu_l1_register_callable: immutable callable_id=%d conflict", args.callable_id);
+            return -1;
+        }
+        return 0;
+    }
+
+    auto *node = static_cast<L1OrchSoNode *>(std::calloc(1, sizeof(L1OrchSoNode)));
+    if (node == nullptr) {
+        LOG_ERROR("%s", "simpler_aicpu_l1_register_callable: registry node allocation failed");
+        return -1;
+    }
+    node->callable_id = args.callable_id;
+    node->callable_hash = args.callable_hash;
+
     L1CallableKernelAddr *kernel_snapshot = nullptr;
     if (args.kernel_count != 0) {
         kernel_snapshot =
             static_cast<L1CallableKernelAddr *>(std::malloc(args.kernel_count * sizeof(L1CallableKernelAddr)));
         if (kernel_snapshot == nullptr) {
             LOG_ERROR("%s", "simpler_aicpu_l1_register_callable: address snapshot allocation failed");
+            std::free(node);
             return -1;
         }
         std::memcpy(kernel_snapshot, args.kernel_addrs, args.kernel_count * sizeof(args.kernel_addrs[0]));
     }
-    int32_t rc = g_aicpu_executor.load_orch_so(
-        args.callable_id, args.dev_orch_so_addr, args.dev_orch_so_size, args.device_orch_func_name,
+    int32_t rc = g_aicpu_executor.load_orch_so_entry(
+        node->entry, args.callable_id, args.dev_orch_so_addr, args.dev_orch_so_size, args.device_orch_func_name,
         args.device_orch_config_name, /*thread_idx=*/0
     );
     if (rc != 0) {
         std::free(kernel_snapshot);
+        std::free(node);
         return rc;
     }
-    OrchSoEntry &entry = g_aicpu_executor.orch_so_table_[args.callable_id];
-    entry.l1_kernel_count = args.kernel_count;
-    entry.l1_kernel_addrs = kernel_snapshot;
-    entry.l1_registered = true;
+    node->entry.l1_kernel_count = args.kernel_count;
+    node->entry.l1_kernel_addrs = kernel_snapshot;
+    node->entry.l1_registered = true;
+    node->next = g_aicpu_executor.l1_orch_so_head_;
+    g_aicpu_executor.l1_orch_so_head_ = node;
     LOG_INFO(
         "simpler_aicpu_l1_register_callable: completed for callable_id=%d kernels=%u", args.callable_id,
         args.kernel_count
@@ -1228,8 +1289,7 @@ static int32_t aicpu_execute_impl(Runtime *runtime, const void *invocation_args,
 extern "C" int32_t aicpu_execute(Runtime *runtime) { return aicpu_execute_impl(runtime, nullptr, -1); }
 
 extern "C" int32_t aicpu_execute_l1(Runtime *runtime, const void *invocation_args, int32_t invocation_callable_id) {
-    if (invocation_args == nullptr || invocation_callable_id < 0 ||
-        invocation_callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
+    if (invocation_args == nullptr || invocation_callable_id < 0) {
         LOG_ERROR("aicpu_execute_l1: invalid invocation args or callable id %d", invocation_callable_id);
         return -1;
     }

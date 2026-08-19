@@ -149,7 +149,9 @@ TEST(L1ExecutionState, CreatesOnlyOneHiddenStreamAndFourPersistentEvents) {
     ASSERT_EQ(state.mark_ready_enqueued(), 0);
     EXPECT_EQ(state.phase(), L1ContextPhase::ReadyEnqueued);
     ASSERT_EQ(state.seal(), 0);
-    EXPECT_EQ(state.phase(), L1ContextPhase::Sealed);
+    EXPECT_EQ(state.phase(), L1ContextPhase::ReadyEnqueued)
+        << "launch completion must not prevent a later append-only callable prepare";
+    EXPECT_EQ(state.mark_ready_enqueued(), 0);
 
     ASSERT_EQ(state.close(), 0);
     EXPECT_EQ(state.phase(), L1ContextPhase::Closed);

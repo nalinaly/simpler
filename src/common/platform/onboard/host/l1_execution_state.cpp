@@ -145,7 +145,9 @@ int L1ExecutionState::seal() {
         phase_ != L1ContextPhase::Sealed) {
         return PTO_RUNTIME_ERR_INVALID_STATE;
     }
-    phase_ = L1ContextPhase::Sealed;
+    // ReadyEnqueued preserves append-only callable admission. Sealed remains
+    // an accepted compatibility input state.
+    phase_ = L1ContextPhase::ReadyEnqueued;
     return 0;
 }
 

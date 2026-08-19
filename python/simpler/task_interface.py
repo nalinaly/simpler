@@ -1379,7 +1379,8 @@ class ChipWorker:
         AICore stream, synchronization events, persistent runtime state and
         internal workspace.
 
-        Only the onboard ``tensormap_and_ringbuffer`` runtime supports L1.
+        The onboard ``tensormap_and_ringbuffer`` and ``host_build_graph``
+        runtimes support L1.
         Callables are prepared through the dedicated ``l1_*`` methods below;
         the L2 ``register_callable`` registry is intentionally not reused.
         """
@@ -1419,8 +1420,11 @@ class ChipWorker:
     @staticmethod
     def _check_l1_callable_id(callable_id: int) -> int:
         callable_id = int(callable_id)
-        if callable_id < 0 or callable_id >= MAX_REGISTERED_CALLABLE_IDS:
-            raise ValueError(f"L1 callable_id must be in [0, {MAX_REGISTERED_CALLABLE_IDS}), got {callable_id}")
+        # L2/L3 uses the fixed MAX_REGISTERED_CALLABLE_IDS table. L1 uses an
+        # append-only TRB registry or a self-contained HBG package, so its id
+        # bound is the signed int32 wire type.
+        if callable_id < 0 or callable_id > 2**31 - 1:
+            raise ValueError(f"L1 callable_id must be in [0, {2**31 - 1}], got {callable_id}")
         return callable_id
 
     def _remember_l1_callable(self, callable_id: int, callable: ChipCallable) -> int:

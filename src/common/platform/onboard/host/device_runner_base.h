@@ -70,7 +70,6 @@
 #include "host/runtime_timeout_config.h"
 #include "host/scope_stats_collector.h"
 #include "host/args_dump_collector.h"
-#include "hbg_callable_registry.h"
 #include "hbg_context_registry.h"
 #include "hbg_execution_slot.h"
 #include "l1_aicore_report.h"
@@ -399,7 +398,9 @@ public:
      * kernel func_id ↔ dev_addr table). The orchestration SO is the leading
      * slice of ChipCallable::storage_ inside the retained chip buffer.
      *
-     * @param callable_id   Caller-stable id, must be in [0, MAX_REGISTERED_CALLABLE_IDS).
+     * @param callable_id   Caller-stable non-negative id. Borrowed L1 keeps
+     *                      entries append-only; L2/L3 retains its
+     *                      MAX_REGISTERED_CALLABLE_IDS bound.
      * @param chip_buffer_hash  FNV-1a hash of the retained ChipCallable buffer.
      * @param chip_dev      Device GM address of the retained ChipCallable header.
      * @param orch_so_data  Host pointer to orchestration SO bytes (owned by caller).
@@ -1068,8 +1069,6 @@ protected:
         void *host_orch_func_ptr{nullptr};
         void (*destroy_host_orch_func_ptr)(void *){nullptr};
         uint64_t hbg_function_binding_hash{0};
-        std::unique_ptr<const simpler::hbg::HbgCallableRegistration> l1_hbg_callable_registration;
-        bool l1_hbg_callable_registration_enqueued{false};
     };
     std::unordered_map<int32_t, CallableState> callables_;
     // Opaque provider handle from dma_workspace_provision(), owned for the
@@ -1133,10 +1132,9 @@ protected:
     // prepare allocation. HBG copies it into its destination-bound slot
     // registration; TRB carries it only as dormant context identity.
     uint64_t l1_context_generation_{0};
-    // Device-memory owner for the HBG slot/callable registries. Unlike the
-    // former AICPU DSO statics, this address and all state behind it belong to
-    // exactly one DeviceRunner context and are released only after successful
-    // explicit close.
+    // Device-memory owner for the HBG execution-slot registry. This address
+    // and all state behind it belong to exactly one DeviceRunner context and
+    // are released only after successful explicit close.
     simpler::hbg::HbgContextRegistry *l1_hbg_context_registry_{nullptr};
     // Host trust-root owner for HBG. It is allocated only when the runtime's
     // strong binding query reports support, remains immutable after seal, and
@@ -1156,8 +1154,6 @@ protected:
     int prepare_l1_callable_locked(int32_t callable_id, rtStream_t caller_stream, const HostApi *api);
     int prepare_l1_hbg_execution_slot_registration(const HostApi *api);
     int enqueue_l1_hbg_execution_slot_registration(rtStream_t caller_stream);
-    int prepare_l1_hbg_callable_registration(int32_t callable_id);
-    int enqueue_l1_hbg_callable_registration(int32_t callable_id, rtStream_t caller_stream);
 
     // `device_id_` is written once by simpler_init and is immutable while
     // native prepare, execution, and collector threads attach to the runner.

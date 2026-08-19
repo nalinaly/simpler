@@ -323,15 +323,10 @@ int DeviceRunnerBase::prepare_l1_callable_from_blob(
     const HostApi *api
 ) {
     std::lock_guard<std::mutex> lock(l1_operation_mutex_);
-    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS || callable == nullptr || callable_size == 0 ||
-        caller_stream == nullptr || api == nullptr) {
+    if (callable_id < 0 || callable == nullptr || callable_size == 0 || caller_stream == nullptr || api == nullptr) {
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
     if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
-    const L1ContextPhase phase = l1_execution_state_.phase();
-    if (phase == L1ContextPhase::Sealed && callables_.count(callable_id) == 0) {
-        return PTO_RUNTIME_ERR_INVALID_STATE;
-    }
     int rc = validate_borrowed_device(device_id_);
     if (rc != 0) return rc;
     if (!simpler::l1::valid_callable_blob(callable, callable_size)) {
@@ -397,7 +392,6 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
     if (!accepts_l1_dispatch()) return PTO_RUNTIME_ERR_INVALID_STATE;
-    const L1ContextPhase phase = l1_execution_state_.phase();
     int rc = validate_borrowed_device(device_id_);
     if (rc != 0) return rc;
 
@@ -415,8 +409,6 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (l1_prepared_callable_ids_.count(callable_id) != 0) {
         return 0;
     }
-    if (phase == L1ContextPhase::Sealed) return PTO_RUNTIME_ERR_INVALID_STATE;
-
     if (callable_it->second.kernel_addrs.size() > L1_MAX_KERNELS_PER_CALLABLE) {
         LOG_ERROR(
             "L1 callable_id=%d has %zu kernels, exceeding the L1 registration capacity %u", callable_id,
@@ -523,8 +515,6 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (rc != 0) return poison(rc);
     rc = prepare_l1_hbg_execution_slot_registration(api);
     if (rc != 0) return poison(rc);
-    rc = prepare_l1_hbg_callable_registration(callable_id);
-    if (rc != 0) return poison(rc);
 
     if (!l1_prepared_callable_ids_.empty()) {
         rc = aclrtStreamWaitEvent(
@@ -559,14 +549,13 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
 
     rc = enqueue_l1_hbg_execution_slot_registration(caller_stream);
     if (rc != 0) return poison(rc);
-    rc = enqueue_l1_hbg_callable_registration(callable_id, caller_stream);
-    if (rc != 0) return poison(rc);
 
     if (callable_it->second.host_dlopen_handle == nullptr) {
         L1RegisterCallableArgs register_args{};
         register_args.struct_size = sizeof(register_args);
         register_args.callable_id = callable_id;
         register_args.kernel_count = static_cast<uint32_t>(callable_it->second.kernel_addrs.size());
+        register_args.callable_hash = callable_it->second.chip_buffer_hash;
         register_args.dev_orch_so_addr = callable_it->second.dev_orch_so_addr;
         register_args.dev_orch_so_size = callable_it->second.dev_orch_so_size;
         std::snprintf(
@@ -718,47 +707,6 @@ int DeviceRunnerBase::enqueue_l1_hbg_execution_slot_registration(rtStream_t call
     return 0;
 }
 
-int DeviceRunnerBase::prepare_l1_hbg_callable_registration(int32_t callable_id) {
-    auto callable_it = callables_.find(callable_id);
-    if (callable_it == callables_.end()) return PTO_RUNTIME_ERR_NOT_READY;
-    CallableState &state = callable_it->second;
-    if (state.host_dlopen_handle == nullptr) return 0;
-    if (l1_hbg_execution_slot_registration_ == nullptr || state.l1_hbg_callable_registration == nullptr) {
-        LOG_ERROR("HBG L1 callable registration is incomplete for callable_id=%d", callable_id);
-        return PTO_RUNTIME_ERR_NOT_READY;
-    }
-    const auto status = simpler::hbg::validate_hbg_callable_registration(state.l1_hbg_callable_registration.get());
-    if (status != simpler::hbg::HbgCallableStatus::Ok ||
-        state.l1_hbg_callable_registration->callable_id != callable_id ||
-        state.l1_hbg_callable_registration->function_binding_hash != state.hbg_function_binding_hash) {
-        LOG_ERROR(
-            "HBG L1 callable registration is invalid for callable_id=%d status=%u", callable_id,
-            static_cast<unsigned>(status)
-        );
-        return PTO_RUNTIME_ERR_INVALID_STATE;
-    }
-    return 0;
-}
-
-int DeviceRunnerBase::enqueue_l1_hbg_callable_registration(int32_t callable_id, rtStream_t caller_stream) {
-    auto callable_it = callables_.find(callable_id);
-    if (callable_it == callables_.end()) return PTO_RUNTIME_ERR_NOT_READY;
-    CallableState &state = callable_it->second;
-    if (state.host_dlopen_handle == nullptr || state.l1_hbg_callable_registration_enqueued) return 0;
-    if (caller_stream == nullptr || !l1_hbg_execution_slot_registration_enqueued_ ||
-        state.l1_hbg_callable_registration == nullptr) {
-        return PTO_RUNTIME_ERR_NOT_READY;
-    }
-
-    simpler::hbg::HbgCallableRegistration launch_args = *state.l1_hbg_callable_registration;
-    const int rc = load_aicpu_op_.LaunchWithHostArgs(
-        caller_stream, &launch_args, sizeof(launch_args), 1, host::KernelNames::L1HbgRegisterCallableName
-    );
-    if (rc != 0) return rc;
-    state.l1_hbg_callable_registration_enqueued = true;
-    return 0;
-}
-
 int DeviceRunnerBase::launch_l1_callable(
     int32_t callable_id, const ChipStorageTaskArgs &args, rtStream_t caller_stream, const HostApi *api
 ) {
@@ -866,9 +814,7 @@ int DeviceRunnerBase::launch_l1_callable(
     std::vector<uint8_t> hbg_launch_blob;
     simpler::host_args::HostArgsPlaceholder hbg_placeholder{};
     if (is_hbg) {
-        if (l1_hbg_execution_slot_registration_ == nullptr || !l1_hbg_execution_slot_registration_enqueued_ ||
-            callable_it->second.l1_hbg_callable_registration == nullptr ||
-            !callable_it->second.l1_hbg_callable_registration_enqueued) {
+        if (l1_hbg_execution_slot_registration_ == nullptr || !l1_hbg_execution_slot_registration_enqueued_) {
             return PTO_RUNTIME_ERR_NOT_READY;
         }
         if (l1_hbg_next_plan_generation_ == 0) {
@@ -1103,17 +1049,15 @@ int DeviceRunnerBase::finalize_l1_borrowed() {
 
     // The caller is responsible for quiescing every eager/graph use before
     // close. Teardown deliberately has no implicit stream/device synchronize.
-    rc = load_aicpu_op_.Finalize();
+    rc = load_aicpu_op_.FinalizeL1Pinned();
     capture(rc);
     if (rc == 0) {
         l1_aicpu_binary_loaded_ = false;
         l1_hbg_execution_slot_registration_enqueued_ = false;
-    } else if (l1_hbg_execution_slot_registration_enqueued_) {
-        // The resident HBG registry contains addresses into the allocations
-        // below. If its owning DSO could not be unloaded, retain every
-        // referenced resource and the immutable host trust root for an
-        // explicit close retry. The context is already Closing, so no further
-        // prepare or launch can race this retained state.
+    } else {
+        // A bootstrap input is still owned. Retain every downstream allocation
+        // for a retry instead of partially dismantling the closed admission
+        // state. The CANN binary itself is never unloaded.
         return first_error;
     }
 
@@ -1989,11 +1933,14 @@ int DeviceRunnerBase::record_device_orch_callable(
     const void *orch_so_data, size_t orch_so_size, const char *func_name, const char *config_name,
     std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
 ) {
-    // The AICPU executor reserves `orch_so_table_[MAX_REGISTERED_CALLABLE_IDS]`
-    // (declared in src/common/task_interface/callable_protocol.h) and indexes
-    // it by callable_id; rejecting an out-of-range id here keeps the host and
-    // AICPU sides in sync and avoids an OOB access at run time.
-    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
+    // L2/L3 indexes the fixed AICPU orch_so_table_ and keeps its protocol cap.
+    // Borrowed L1 publishes into a dynamic append-only registry and requires a
+    // non-negative wire id.
+    if (callable_id < 0) {
+        LOG_ERROR("record_device_orch_callable: callable_id=%d must be non-negative", callable_id);
+        return -1;
+    }
+    if (execution_mode() != DeviceExecutionMode::L1Borrowed && callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
             "record_device_orch_callable: callable_id=%d out of range [0, %d)", callable_id, MAX_REGISTERED_CALLABLE_IDS
         );
@@ -2045,7 +1992,11 @@ int DeviceRunnerBase::record_host_orch_callable(
     void *host_orch_func_ptr, void (*destroy_host_orch_func_ptr)(void *),
     std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature, int32_t scalar_count
 ) {
-    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
+    if (callable_id < 0) {
+        LOG_ERROR("record_host_orch_callable: callable_id=%d must be non-negative", callable_id);
+        return -1;
+    }
+    if (execution_mode() != DeviceExecutionMode::L1Borrowed && callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
             "record_host_orch_callable: callable_id=%d out of range [0, %d)", callable_id, MAX_REGISTERED_CALLABLE_IDS
         );
@@ -2089,27 +2040,6 @@ int DeviceRunnerBase::record_host_orch_callable(
         return -1;
     }
 
-    std::unique_ptr<const simpler::hbg::HbgCallableRegistration> l1_registration;
-    if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
-        simpler::hbg::HbgCallableRegistration registration{};
-        registration.callable_id = callable_id;
-        registration.tensor_count = static_cast<uint32_t>(signature.size());
-        registration.scalar_count = static_cast<uint32_t>(scalar_count);
-        registration.callable_hash = chip_buffer_hash;
-        registration.function_binding_hash = function_binding_hash;
-        const auto registration_status = simpler::hbg::seal_hbg_callable_registration(&registration);
-        if (registration_status != simpler::hbg::HbgCallableStatus::Ok) {
-            LOG_ERROR(
-                "record_host_orch_callable: failed to seal L1 registration status=%u",
-                static_cast<unsigned>(registration_status)
-            );
-            return -1;
-        }
-        auto *owner = new (std::nothrow) simpler::hbg::HbgCallableRegistration(registration);
-        if (owner == nullptr) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
-        l1_registration.reset(owner);
-    }
-
     CallableState state;
     state.hash = chip_buffer_hash;
     state.chip_buffer_hash = chip_buffer_hash;
@@ -2121,7 +2051,6 @@ int DeviceRunnerBase::record_host_orch_callable(
     state.signature = std::move(signature);
     state.scalar_count = scalar_count;
     state.hbg_function_binding_hash = function_binding_hash;
-    state.l1_hbg_callable_registration = std::move(l1_registration);
     if (execution_mode() == DeviceExecutionMode::L1Borrowed) {
         state.l1_metadata = std::make_unique<ChipStorageTaskArgs>();
     }

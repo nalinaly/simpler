@@ -17,7 +17,6 @@
 #include <type_traits>
 
 #include "arg_direction.h"
-#include "callable_protocol.h"
 #include "hbg_l1_fault_injection.h"
 #include "host_args_launch.h"
 #include "utils/fnv1a_64.h"
@@ -217,7 +216,7 @@ inline bool hbg_valid_invocation_identity(const HbgInvocationIdentity &identity)
     return identity.callable_hash != 0 && identity.argument_snapshot_hash != 0 && identity.function_binding_hash != 0 &&
            identity.tensor_count <= static_cast<uint32_t>(CHIP_MAX_TENSOR_ARGS) &&
            identity.scalar_count <= static_cast<uint32_t>(CHIP_MAX_SCALAR_ARGS) && identity.host_total_tasks >= 0 &&
-           identity.callable_id >= 0 && identity.callable_id < MAX_REGISTERED_CALLABLE_IDS;
+           identity.callable_id >= 0;
 }
 
 inline uint64_t hbg_destination_base(const HbgExecutionBinding &binding, HbgLaunchRegionKind kind) noexcept {

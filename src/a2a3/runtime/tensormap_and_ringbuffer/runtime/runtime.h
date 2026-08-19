@@ -288,10 +288,10 @@ public:
     void *get_prebuilt_arena_base() const;
     size_t get_prebuilt_runtime_offset() const;
 
-    // Per-callable_id dispatch. callable_id must be in
-    // [0, MAX_REGISTERED_CALLABLE_IDS); the AICPU dispatches the orch SO via
-    // orch_so_table_[callable_id]. The SO itself is delivered to the AICPU at
-    // register time (RegisterCallableArgs), not through Runtime.
+    // Per-callable_id dispatch. L2/L3 indexes its fixed table and keeps the
+    // MAX_REGISTERED_CALLABLE_IDS bound. Borrowed L1 resolves the same id
+    // through its dynamic append-only registry. The orchestration SO itself is
+    // delivered at register time, not through Runtime.
     void set_active_callable_id(int32_t callable_id);
     int32_t get_active_callable_id() const;
 

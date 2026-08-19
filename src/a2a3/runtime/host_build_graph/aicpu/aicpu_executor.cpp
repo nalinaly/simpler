@@ -27,7 +27,6 @@
 #include "callable_protocol.h"
 #include "common/kernel_args.h"
 #include "hbg_aicpu_invocation.h"
-#include "hbg_callable_registry.h"
 #include "hbg_context_registry.h"
 #include "hbg_execution_slot_registry.h"
 #include "hbg_restore.h"
@@ -685,30 +684,10 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_regis
     return 0;
 }
 
+// Compatibility ABI entry. Callable identity and the function table live in
+// the authenticated launch blob, so this entry owns no resident state.
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_register_callable(void *arg) {
-    if (arg == nullptr) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_register_callable: null argument");
-        return -1;
-    }
-
-    simpler::hbg::HbgCallableRegistration registration{};
-    std::memcpy(&registration, arg, sizeof(registration));
-    auto *context_registry = current_hbg_context_registry();
-    if (context_registry == nullptr ||
-        simpler::hbg::validate_hbg_callable_registration(&registration) != simpler::hbg::HbgCallableStatus::Ok) {
-        LOG_ERROR("%s", "simpler_aicpu_l1_hbg_register_callable: context or registration mismatch");
-        return -1;
-    }
-    auto *entry = &context_registry->callables.entries[registration.callable_id];
-    cache_invalidate_range(entry, sizeof(*entry));
-    const auto status = simpler::hbg::publish_hbg_callable_registration(&context_registry->callables, &registration);
-    if (status != simpler::hbg::HbgCallableRegistryStatus::Published &&
-        status != simpler::hbg::HbgCallableRegistryStatus::AlreadyRegistered) {
-        LOG_ERROR("simpler_aicpu_l1_hbg_register_callable: rejected status=%u", static_cast<unsigned>(status));
-        return -1;
-    }
-    cache_flush_range(entry, sizeof(*entry));
-    return 0;
+    return arg == nullptr ? -1 : 0;
 }
 
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(void *arg) {
@@ -745,19 +724,8 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_l1_hbg_exec(
         LOG_ERROR("%s", "simpler_aicpu_l1_hbg_exec: invalid fixed invocation identity");
         return reject_hbg_l1_before_generation(slot);
     }
-    simpler::hbg::HbgCallableRegistration callable{};
-    auto *callable_entry = &context_registry->callables.entries[header.identity.callable_id];
-    cache_invalidate_range(callable_entry, sizeof(*callable_entry));
-    const auto callable_status = simpler::hbg::acquire_hbg_callable_registration(
-        &context_registry->callables, header.identity.callable_id, &callable
-    );
-    if (callable_status != simpler::hbg::HbgCallableRegistryStatus::Acquired) {
-        LOG_ERROR("simpler_aicpu_l1_hbg_exec: callable unavailable status=%u", static_cast<unsigned>(callable_status));
-        return reject_hbg_l1_before_generation(slot);
-    }
-
     simpler::hbg::HbgAicpuInvocationView invocation{};
-    const auto invocation_status = simpler::hbg::make_hbg_aicpu_invocation_view(arg, slot, callable, &invocation);
+    const auto invocation_status = simpler::hbg::make_hbg_aicpu_invocation_view(arg, slot, &invocation);
     if (invocation_status != simpler::hbg::HbgAicpuInvocationStatus::Ok) {
         LOG_ERROR(
             "simpler_aicpu_l1_hbg_exec: fixed invocation rejected status=%u", static_cast<unsigned>(invocation_status)
