@@ -103,6 +103,8 @@ public:
     int poll_execution(const ActiveExecution &active) override;
     int drain_execution(ActiveExecution &active) override;
     int prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) override;
+    int configure_l1_runtime_reports(Runtime &runtime, L1AicoreReport *reports) override;
+    int configure_l1_init_args(InitArgs &args) override;
     bool can_accept_run() const override { return !device_unusable_.load(std::memory_order_acquire); }
     // provision/abandon_native_run_resources keep the base no-op: preparation
     // owns no stream, so there is nothing for a prepared run to provision or

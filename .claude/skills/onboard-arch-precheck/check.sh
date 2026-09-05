@@ -58,7 +58,11 @@ detect_silicon() {
     fi
 
     local board chip npu
-    board=$(npu-smi info -t board -i 0 -c 0 2>/dev/null)
+    board=$(npu-smi info -t board -i 0 -c 0 2>&1)
+    # Newer drivers select the chip with -i alone and reject the legacy -c.
+    if [[ "$board" == *"does not support input parameter of -c"* ]]; then
+        board=$(npu-smi info -t board -i 0 2>&1)
+    fi
     chip=$(awk -F: '/Chip Name/ { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     npu=$(awk -F:  '/NPU Name/  { gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit }' <<<"$board")
     if [ -z "$chip" ] || [ -z "$npu" ]; then
@@ -102,6 +106,9 @@ detect_silicon() {
                 fi
             done
             [ -z "$soc" ] && soc="${chip}_${npu}"
+            ;;
+        Ascend950DT|Ascend950PR)
+            soc="${chip}_${npu}"
             ;;
         *)
             echo "onboard-arch-precheck: unrecognized Chip Name '$chip'. Update check.sh + docs/hardware/chip-architecture.md if a new family was added." >&2

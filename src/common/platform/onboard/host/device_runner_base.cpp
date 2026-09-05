@@ -513,7 +513,8 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     }
     // This is the sole report-address trust root consumed by both AICPU and
     // AICore. It is fixed before the persistent Runtime image is uploaded.
-    l1_runtime_->set_l1_aicore_reports(l1_aicore_reports_);
+    rc = configure_l1_runtime_reports(*l1_runtime_, l1_aicore_reports_);
+    if (rc != 0) return poison(rc);
 
     rc = l1_kernel_args_.init_runtime_args(*l1_runtime_, mem_alloc_);
     if (rc != 0) return poison(rc);
@@ -546,14 +547,8 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         for (int kind = 0; kind < DMA_WORKSPACE_KIND_COUNT; ++kind) {
             init_args.dma_workspace_addr[kind] = dma_workspace_addr_[kind];
         }
-        if (l1_hbg_execution_slot_registration_ != nullptr) {
-            auto *control = simpler::hbg::hbg_l1_launch_control(*l1_hbg_execution_slot_registration_);
-            if (control == nullptr) return poison(PTO_RUNTIME_ERR_INVALID_STATE);
-            init_args.hbg_l1_prelaunch_control_addr = reinterpret_cast<uint64_t>(control);
-            if (l1_hbg_context_registry_ == nullptr) return poison(PTO_RUNTIME_ERR_INVALID_STATE);
-            init_args.hbg_l1_context_registry_addr = reinterpret_cast<uint64_t>(l1_hbg_context_registry_);
-        }
-        init_args.l1_context_generation = l1_context_generation_;
+        rc = configure_l1_init_args(init_args);
+        if (rc != 0) return poison(rc);
         rc = load_aicpu_op_.LaunchWithHostArgs(
             caller_stream, &init_args, sizeof(init_args), 1, host::KernelNames::InitName
         );

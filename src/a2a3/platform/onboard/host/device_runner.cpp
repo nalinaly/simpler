@@ -278,6 +278,24 @@ int DeviceRunner::prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &
     return 0;
 }
 
+int DeviceRunner::configure_l1_runtime_reports(Runtime &runtime, L1AicoreReport *reports) {
+    runtime.set_l1_aicore_reports(reports);
+    return 0;
+}
+
+int DeviceRunner::configure_l1_init_args(InitArgs &args) {
+    if (l1_hbg_execution_slot_registration_ != nullptr) {
+        auto *control = simpler::hbg::hbg_l1_launch_control(*l1_hbg_execution_slot_registration_);
+        if (control == nullptr || l1_hbg_context_registry_ == nullptr) {
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        args.hbg_l1_prelaunch_control_addr = reinterpret_cast<uint64_t>(control);
+        args.hbg_l1_context_registry_addr = reinterpret_cast<uint64_t>(l1_hbg_context_registry_);
+    }
+    args.l1_context_generation = l1_context_generation_;
+    return 0;
+}
+
 int DeviceRunner::prepare_execution(
     Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
     std::unique_ptr<PreparedExecution> *prepared

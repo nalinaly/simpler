@@ -87,11 +87,13 @@ in-flight `task-submit` device locks).
 Pipeline:
 
 1. `npu-smi info -t board -i 0 -c 0` → get `Chip Name` + `NPU Name`
-   (~600 ms, no ACL init, no device binding).
+   (~600 ms, no ACL init, no device binding). If the driver explicitly rejects
+   `-c`, retry the query with `-i 0` alone.
 2. Construct CANN SoC name per family:
    - `Ascend910` + `B*` NPU → `Ascend910B3` (or B1/B2/B4)
    - `Ascend910` + numeric NPU → `Ascend910_9392` (Atlas A3 SKUs)
    - `Ascend950` + NPU → glob for `Ascend950DT_<NPU>` or `Ascend950PR_<NPU>`
+   - `Ascend950DT` / `Ascend950PR` + NPU → `<Chip Name>_<NPU>` directly
 3. Read `Short_SoC_version=` from
    `${ASCEND_HOME_PATH}/{aarch64,x86_64}-linux/data/platform_config/<SoC>.ini`.
 4. Map `Short_SoC_version` → repo arch (must stay in sync with

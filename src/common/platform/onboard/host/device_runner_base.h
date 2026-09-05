@@ -665,9 +665,14 @@ public:
      */
     virtual int drain_execution(ActiveExecution &active) = 0;
 
-    /** Populate arch-specific topology/register state for persistent L1 execution. */
-    virtual int
-    prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) = 0;
+    /** L1-capable platforms provide their topology and device ABI explicitly. */
+    virtual int prepare_l1_platform_state(Runtime &, KernelArgsHelper &, const CallConfig &) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    virtual int configure_l1_runtime_reports(Runtime &, L1AicoreReport *) {
+        return PTO_RUNTIME_ERR_UNSUPPORTED;
+    }
+    virtual int configure_l1_init_args(InitArgs &) { return PTO_RUNTIME_ERR_UNSUPPORTED; }
 
     /**
      * Cleanup all resources. Each arch's `finalize()` wraps
