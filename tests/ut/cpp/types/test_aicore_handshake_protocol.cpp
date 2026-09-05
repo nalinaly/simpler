@@ -63,21 +63,21 @@ TEST(AicoreHandshakeProtocol, RejectsOutOfRangeRegisterIndicesBeforeLookup) {
     EXPECT_FALSE(aicore_register_index_valid(0, 0));
 }
 
-TEST(L1AicoreReport, GivesEveryCoreAnExclusiveCacheLine) {
+TEST(L1AicoreReport, GivesEveryCoreTwoExclusiveCacheLines) {
     alignas(64) std::array<L1AicoreReport, 4> reports{};
 
-    EXPECT_EQ(sizeof(L1AicoreReport), 64U);
+    EXPECT_EQ(sizeof(L1AicoreReport), 128U);
     EXPECT_EQ(alignof(L1AicoreReport), 64U);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(reports.data()) % 64U, 0U);
     for (size_t i = 1; i < reports.size(); ++i) {
         const auto current = reinterpret_cast<uintptr_t>(&reports[i]);
         const auto previous = reinterpret_cast<uintptr_t>(&reports[i - 1]);
-        EXPECT_EQ(current - previous, 64U);
+        EXPECT_EQ(current - previous, sizeof(L1AicoreReport));
         EXPECT_NE(current / 64U, previous / 64U);
     }
 }
 
-TEST(L1AicoreReport, KeepsAicoreOwnedFieldsInsideTheDedicatedLine) {
+TEST(L1AicoreReport, SeparatesStartupReportFromAtomicOnlyTeardownControl) {
     L1AicoreReport report{};
     report.aicore_done = 7;
     report.physical_core_id = 19;
@@ -87,5 +87,8 @@ TEST(L1AicoreReport, KeepsAicoreOwnedFieldsInsideTheDedicatedLine) {
     EXPECT_EQ(report.physical_core_id, 19U);
     EXPECT_EQ(report.core_type, 1U);
     EXPECT_EQ(offsetof(L1AicoreReport, aicore_done), 0U);
-    EXPECT_LT(offsetof(L1AicoreReport, core_type) + sizeof(report.core_type), sizeof(report));
+    EXPECT_LT(offsetof(L1AicoreReport, core_type) + sizeof(report.core_type), 64U);
+    EXPECT_EQ(offsetof(L1AicoreReport, teardown), 64U);
+    EXPECT_EQ(sizeof(report.teardown), 64U);
+    EXPECT_EQ(offsetof(L1AicoreTeardownControl, post_close_release), 0U);
 }

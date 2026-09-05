@@ -34,6 +34,7 @@
 #include "aicpu/platform_regs.h"
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
+#include "aicore_handshake_protocol.h"
 
 static uint64_t g_platform_regs = 0;
 static uint64_t g_platform_pmu_reg_addrs = 0;
@@ -64,28 +65,50 @@ void platform_init_aicore_regs(uint64_t reg_addr) {
 
 void platform_signal_aicore_exit(uint64_t reg_addr) { write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL); }
 
+void platform_close_aicore_fast_path(uint64_t reg_addr) {
+    write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
+}
+
 uint64_t platform_aicore_exit_deadline() { return get_sys_cnt_aicpu() + inner_get_deinit_timeout_ticks(); }
 
-int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline) {
-    // Wait for AICore to acknowledge exit, until the caller's deadline. On
-    // timeout, skip register cleanup (AICore is unresponsive; host will
-    // aclrtResetDevice to clear all hardware state).
+int32_t platform_wait_aicore_exit_ack(uint64_t reg_addr, uint64_t deadline) {
     while (read_reg(reg_addr, RegId::COND) != AICORE_EXITED_VALUE) {
         if (get_sys_cnt_aicpu() > deadline) {
             return -1;
         }
     }
+    return 0;
+}
+
+int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline, volatile uint32_t *post_close_release) {
+    // Wait for AICore to acknowledge exit, until the caller's deadline. On
+    // timeout, skip register cleanup (AICore is unresponsive; host will
+    // aclrtResetDevice to clear all hardware state).
+    if (platform_wait_aicore_exit_ack(reg_addr, deadline) != 0) return -1;
 
     // Initialize task dispatch register to idle state
     write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
     // Close fast path control
     write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
+    if (post_close_release != nullptr) {
+        // Device-nGnRE writes are early-acknowledged.  Read back the same MMIO
+        // window so CLOSE is complete before the normal-memory release becomes
+        // visible to AICore.  This is the ordering required by the hardware
+        // fast-path protocol: close 0x18 before the persistent wrapper exits.
+        (void)read_reg(reg_addr, RegId::FAST_PATH_ENABLE);
+        platform_publish_aicore_post_close_release(post_close_release);
+    }
     return 0;
 }
 
-int32_t platform_deinit_aicore_regs(uint64_t reg_addr) {
+void platform_publish_aicore_post_close_release(volatile uint32_t *post_close_release) {
+    if (post_close_release == nullptr) return;
+    __atomic_store_n(post_close_release, AICORE_POST_CLOSE_RELEASE, __ATOMIC_RELEASE);
+}
+
+int32_t platform_deinit_aicore_regs(uint64_t reg_addr, volatile uint32_t *post_close_release) {
     platform_signal_aicore_exit(reg_addr);
-    return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline());
+    return platform_finish_aicore_exit(reg_addr, platform_aicore_exit_deadline(), post_close_release);
 }
 
 uint32_t platform_get_physical_cores_count() {

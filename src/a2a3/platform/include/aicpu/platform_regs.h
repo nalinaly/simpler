@@ -142,6 +142,9 @@ void platform_init_aicore_regs(uint64_t reg_addr);
 /** Send the AICore exit signal without waiting for an acknowledgement. */
 void platform_signal_aicore_exit(uint64_t reg_addr);
 
+/** Close FAST_PATH without waiting for COND.  Used by the L1 STOP protocol. */
+void platform_close_aicore_fast_path(uint64_t reg_addr);
+
 /**
  * Absolute sys-cnt value one deinit timeout from now. Share a single deadline
  * across a group of cores so the whole group costs one timeout rather than one
@@ -149,9 +152,15 @@ void platform_signal_aicore_exit(uint64_t reg_addr);
  */
 uint64_t platform_aicore_exit_deadline();
 
+/** Wait until a signalled AICore publishes its FIN-shaped exit ACK. */
+int32_t platform_wait_aicore_exit_ack(uint64_t reg_addr, uint64_t deadline);
+
 /**
  * Wait for a signalled AICore to acknowledge exit, then quiesce its register
- * block (dispatch register back to idle, fast path closed).
+ * block (dispatch register back to idle, fast path closed).  When
+ * post_close_release is non-null, publish AICORE_POST_CLOSE_RELEASE only after
+ * the FAST_PATH close write has reached the register window; the L1 AICore
+ * wrapper waits on that word before returning.
  *
  * Pairs with platform_signal_aicore_exit when stopping several cores: signal
  * them all, take one deadline from platform_aicore_exit_deadline(), then finish
@@ -161,7 +170,14 @@ uint64_t platform_aicore_exit_deadline();
  * @return 0 once the core acknowledges, -1 on timeout — an unresponsive core is
  *         left for the host's device reset to clear.
  */
-int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline);
+int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline, volatile uint32_t *post_close_release);
+
+/**
+ * Publish the GM goodbye after a group of FAST_PATH register windows has been
+ * closed.  Callers that stop several cores use this as a separate phase so no
+ * core returns while its peers are still being closed.
+ */
+void platform_publish_aicore_post_close_release(volatile uint32_t *post_close_release);
 
 /**
  * Deinitialize AICore registers before termination
@@ -171,7 +187,7 @@ int32_t platform_finish_aicore_exit(uint64_t reg_addr, uint64_t deadline);
  * @param reg_addr  Register base address of the AICore
  * @return 0 if the core acknowledged exit, non-zero on timeout
  */
-int32_t platform_deinit_aicore_regs(uint64_t reg_addr);
+int32_t platform_deinit_aicore_regs(uint64_t reg_addr, volatile uint32_t *post_close_release);
 
 /**
  * Variant-specific AICore deinit wait timeout, in ticks of get_sys_cnt_aicpu.

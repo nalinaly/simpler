@@ -569,17 +569,83 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
 
     LOG_INFO("Thread %d: Shutting down %d cores", thread_idx, core_num);
     int32_t rc = 0;
+    bool closed[RUNTIME_MAX_WORKER] = {};
+    for (int32_t i = 0; i < core_num; i++) {
+        const int32_t core_id = cores[i];
+        const uint64_t reg_addr = core_exec_states_[core_id].reg_addr;
+        if (reg_addr != 0) platform_signal_aicore_exit(reg_addr);
+    }
+    const uint64_t exit_deadline = platform_aicore_exit_deadline();
     for (int32_t i = 0; i < core_num; i++) {
         int32_t core_id = cores[i];
         uint64_t reg_addr = core_exec_states_[core_id].reg_addr;
         if (reg_addr != 0) {
             // Timeout means AICore is unresponsive. Log and continue deiniting remaining cores.
-            if (platform_deinit_aicore_regs(reg_addr) != 0) {
+            if (platform_finish_aicore_exit(reg_addr, exit_deadline, nullptr) != 0) {
                 LOG_ERROR("Thread %d: Core %d deinit timed out", thread_idx, core_id);
                 rc = -1;
+            } else {
+                closed[i] = true;
             }
         } else {
             LOG_ERROR("Thread %d: Core %d has invalid register address", thread_idx, core_id);
+        }
+    }
+    if (l1_aicore_reports_ != nullptr) {
+        for (int32_t i = 0; i < core_num; i++) {
+            if (closed[i]) {
+                platform_publish_aicore_post_close_release(&l1_aicore_reports_[cores[i]].teardown.post_close_release);
+            }
+        }
+    }
+    return rc;
+}
+
+int32_t SchedulerContext::shutdown_all() {
+#if SIMPLER_DFX
+    if (is_pmu_enabled()) {
+        int32_t cores[RUNTIME_MAX_WORKER];
+        int32_t core_num = 0;
+        for (int32_t i = 0; i < cores_total_num_; ++i) {
+            if (core_exec_states_[i].reg_addr != 0) cores[core_num++] = i;
+        }
+        if (core_num > 0) pmu_aicpu_finalize(cores, core_num);
+    }
+#endif
+
+    LOG_INFO("Global shutdown: retiring %d cores as one group", cores_total_num_);
+    for (int32_t i = 0; i < cores_total_num_; ++i) {
+        if (core_exec_states_[i].reg_addr != 0) {
+            platform_signal_aicore_exit(core_exec_states_[i].reg_addr);
+        }
+    }
+    wmb();
+
+    int32_t rc = 0;
+    const uint64_t exit_deadline = platform_aicore_exit_deadline();
+    for (int32_t i = 0; i < cores_total_num_; ++i) {
+        const uint64_t reg_addr = core_exec_states_[i].reg_addr;
+        if (reg_addr == 0) {
+            LOG_ERROR("Global shutdown: Core %d has invalid register address", i);
+            rc = -1;
+        } else if (platform_wait_aicore_exit_ack(reg_addr, exit_deadline) != 0) {
+            LOG_ERROR("Global shutdown: Core %d exit ACK timed out", i);
+            rc = -1;
+        }
+    }
+
+    for (int32_t i = 0; i < cores_total_num_; ++i) {
+        if (core_exec_states_[i].reg_addr != 0) {
+            platform_close_aicore_fast_path(core_exec_states_[i].reg_addr);
+        }
+    }
+    wmb();
+
+    if (l1_aicore_reports_ != nullptr) {
+        for (int32_t i = 0; i < cores_total_num_; ++i) {
+            if (core_exec_states_[i].reg_addr != 0) {
+                platform_publish_aicore_post_close_release(&l1_aicore_reports_[i].teardown.post_close_release);
+            }
         }
     }
     return rc;
@@ -838,16 +904,29 @@ bool SchedulerContext::assign_cores_to_threads() {
 // deinit their AICore register blocks. Idempotent.
 // =============================================================================
 void SchedulerContext::emergency_shutdown(Runtime *runtime) {
-    (void)runtime;  // exit is now delivered via each core's register block, not GM
     LOG_WARN("Emergency shutdown: sending exit signal to all initialized cores");
+    (void)runtime;
     int32_t timeout_count = 0;
+    bool closed[RUNTIME_MAX_WORKER] = {};
     for (int32_t i = 0; i < cores_total_num_; i++) {
-        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which signals
-        // every opened core to exit. A reported core whose window could not be
-        // opened receives the GM pre-window CANCEL in handshake_partition.
         if (core_exec_states_[i].reg_addr != 0) {
-            if (platform_deinit_aicore_regs(core_exec_states_[i].reg_addr) != 0) {
+            platform_signal_aicore_exit(core_exec_states_[i].reg_addr);
+        }
+    }
+    const uint64_t exit_deadline = platform_aicore_exit_deadline();
+    for (int32_t i = 0; i < cores_total_num_; i++) {
+        if (core_exec_states_[i].reg_addr != 0) {
+            if (platform_finish_aicore_exit(core_exec_states_[i].reg_addr, exit_deadline, nullptr) != 0) {
                 timeout_count++;
+            } else {
+                closed[i] = true;
+            }
+        }
+    }
+    if (l1_aicore_reports_ != nullptr) {
+        for (int32_t i = 0; i < cores_total_num_; i++) {
+            if (closed[i]) {
+                platform_publish_aicore_post_close_release(&l1_aicore_reports_[i].teardown.post_close_release);
             }
         }
     }

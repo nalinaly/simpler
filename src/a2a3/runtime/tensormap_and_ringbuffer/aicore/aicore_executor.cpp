@@ -26,6 +26,23 @@
  */
 typedef void (*UnifiedKernelFunc)(__gm__ int64_t *);
 
+// L1 borrows the physical cores from the caller's graph.  Publishing EXITED is
+// only an acknowledgement that this wrapper observed STOP; it is not permission
+// to return.  AICPU closes the fast-path register window and then releases this
+// per-core word.  ld_dev is the A2/A3 bypass-load path used for atomic control
+// observation, and the final DSB keeps wrapper retirement after that hand-off.
+__aicore__ __attribute__((always_inline)) static void wait_for_post_close_release(__gm__ L1AicoreReport *report) {
+    while (true) {
+        const uint32_t release =
+            static_cast<uint32_t>(ld_dev(reinterpret_cast<__gm__ uint32_t *>(&report->teardown.post_close_release), 0));
+        if (release == AICORE_POST_CLOSE_RELEASE) {
+            dsb(DSB_DDR);
+            return;
+        }
+        SPIN_WAIT_HINT();
+    }
+}
+
 /**
  * Execute task from PTO2DispatchPayload.
  *
@@ -146,8 +163,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
     while (true) {
         reg_val = static_cast<uint32_t>(read_reg(RegId::DATA_MAIN_BASE));
         if (reg_val == AICORE_EXIT_SIGNAL) {
-            // Signal exit acknowledgment to AICPU
             write_reg(RegId::COND, AICORE_EXITED_VALUE);
+            if (my_l1_report != nullptr) wait_for_post_close_release(my_l1_report);
             break;
         }
 
@@ -237,6 +254,7 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
                 }
                 if (exiting) {
                     write_reg(RegId::COND, AICORE_EXITED_VALUE);
+                    if (my_l1_report != nullptr) wait_for_post_close_release(my_l1_report);
                     break;
                 }
             }

@@ -26,6 +26,16 @@ else()
     message(FATAL_ERROR "MUST set CUSTOM_INCLUDE_DIRS to build with `Task` implementation")
 endif()
 
+# Custom compiler commands do not discover header dependencies automatically.
+# Rebuild both core variants when shared runtime layouts or platform headers change.
+set(AICORE_HEADER_DEPENDENCIES "")
+foreach(INC_DIR ${CMAKE_CUSTOM_INCLUDE_DIRS})
+    file(GLOB_RECURSE DIR_HEADERS CONFIGURE_DEPENDS
+        "${INC_DIR}/*.h" "${INC_DIR}/*.hpp" "${INC_DIR}/*.inc")
+    list(APPEND AICORE_HEADER_DEPENDENCIES ${DIR_HEADERS})
+endforeach()
+list(REMOVE_DUPLICATES AICORE_HEADER_DEPENDENCIES)
+
 # Build complete source list: kernel.cpp + CUSTOM_SOURCE_DIRS
 set(ALL_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/kernel.cpp")
 if(DEFINED CUSTOM_SOURCE_DIRS)
@@ -79,7 +89,7 @@ foreach(SRC_FILE ${ALL_SOURCES})
         OUTPUT ${OBJ_AIC}
         COMMAND ${BISHENG_CC} ${AICORE_FLAGS} ${CMAKE_CUSTOM_INCLUDE_DIR_FLAGS} --cce-aicore-arch=dav-c310-cube
                 -o ${OBJ_AIC} ${SRC_FILE}
-        DEPENDS ${SRC_FILE}
+        DEPENDS ${SRC_FILE} ${AICORE_HEADER_DEPENDENCIES}
         COMMENT "Compiling ${SRC_NAME} for AIC"
     )
 
@@ -88,7 +98,7 @@ foreach(SRC_FILE ${ALL_SOURCES})
         OUTPUT ${OBJ_AIV}
         COMMAND ${BISHENG_CC} ${AICORE_FLAGS} ${CMAKE_CUSTOM_INCLUDE_DIR_FLAGS} --cce-aicore-arch=dav-c310-vec
                 -o ${OBJ_AIV} ${SRC_FILE}
-        DEPENDS ${SRC_FILE}
+        DEPENDS ${SRC_FILE} ${AICORE_HEADER_DEPENDENCIES}
         COMMENT "Compiling ${SRC_NAME} for AIV"
     )
 endforeach()
