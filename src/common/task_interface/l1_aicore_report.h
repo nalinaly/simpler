@@ -24,22 +24,35 @@
  * {aicpu_ready, task} with AICore-owned report fields: `dc civac` could write
  * an AICPU-dirty stale line back over a fresh AICore report.
  *
- * This dedicated line has exactly one writer (AICore) and one reader (AICPU).
- * L1 allocates one line per launched block during prepare, clears the array on
- * the caller stream for every invocation/replay, and retains the address until
- * explicit context close. L2/L3 pass nullptr and preserve their historical
- * in-Runtime Handshake protocol.
+ * Startup fields have exactly one writer (AICore) and one reader (AICPU).
+ * Teardown control occupies a second, atomic-only cache line: AICPU publishes
+ * it with a release atomic store and AICore observes it through the A2/A3
+ * bypass-load path.  It must not share a line with ordinary scalar fields,
+ * otherwise a later DCCI writeback could overwrite the control update.
+ * L1 allocates one two-line report per launched block during prepare, clears
+ * the array on the caller stream for every invocation/replay, and retains the
+ * address until explicit context close. L2/L3 pass nullptr and preserve their
+ * historical in-Runtime Handshake protocol.
  */
+struct alignas(64) L1AicoreTeardownControl {
+    uint32_t post_close_release;
+    uint8_t reserved[60];
+};
+
 struct alignas(64) L1AicoreReport {
     volatile uint32_t aicore_done;
     volatile uint32_t physical_core_id;
     volatile uint32_t core_type;
     uint32_t reserved0;
     uint8_t reserved[48];
+    L1AicoreTeardownControl teardown;
 };
 
-static_assert(sizeof(L1AicoreReport) == 64, "one L1 AICore report must occupy exactly one cache line");
+static_assert(sizeof(L1AicoreTeardownControl) == 64, "L1 teardown control must occupy one cache line");
+static_assert(alignof(L1AicoreTeardownControl) == 64, "L1 teardown control must be cache-line aligned");
+static_assert(sizeof(L1AicoreReport) == 128, "one L1 AICore report must occupy exactly two cache lines");
 static_assert(alignof(L1AicoreReport) == 64, "L1 AICore reports must be cache-line aligned");
 static_assert(std::is_standard_layout_v<L1AicoreReport>, "L1 AICore report must be standard-layout");
 static_assert(std::is_trivially_copyable_v<L1AicoreReport>, "L1 AICore report must be byte-copyable");
 static_assert(offsetof(L1AicoreReport, aicore_done) == 0, "L1 AICore ready word must lead the cache line");
+static_assert(offsetof(L1AicoreReport, teardown) == 64, "L1 teardown control must start a fresh cache line");

@@ -154,6 +154,10 @@ public:
     // Orchestrator threads (core_trackers_[thread_idx].core_num() == 0) are a no-op.
     int32_t shutdown(int32_t thread_idx);
 
+    // L1 teardown is a card-wide two-phase protocol: all wrappers acknowledge
+    // STOP, all fast-path windows close, then all wrappers are released.
+    int32_t shutdown_all();
+
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
     //  - latches submitted task count from PTO2 shared memory

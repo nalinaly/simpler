@@ -118,6 +118,8 @@ struct AicpuExecutor {
     // ===== Task queue state (managed by scheduler ready queues) =====
 
     simpler::ThreadCompletionGate completion_gate_;
+    simpler::ThreadCompletionGate shutdown_gate_;
+    std::atomic<int32_t> shutdown_rc_{0};
     std::atomic<int32_t> run_error_{0};
     std::atomic<bool> runtime_init_ready_{false};
     std::atomic<int32_t> hbg_restore_error_{0};
@@ -268,6 +270,8 @@ int32_t AicpuExecutor::init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requ
         aicpu_thread_num_ = nthreads;
 
         completion_gate_.reset();
+        shutdown_gate_.reset();
+        shutdown_rc_.store(0, std::memory_order_relaxed);
         run_error_.store(0, std::memory_order_relaxed);
         hbg_fault_stage_.store(static_cast<uint32_t>(simpler::hbg::HbgL1FaultStage::None), std::memory_order_relaxed);
         hbg_fault_injected_.store(false, std::memory_order_relaxed);
@@ -569,9 +573,19 @@ int32_t AicpuExecutor::run(Runtime *runtime, const simpler::hbg::HbgAicpuInvocat
     }
 
 run_epilogue:
-    // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
-    // platform_deinit_aicore_regs is idempotent.
-    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
+    // A borrowed L1 generation must not let one AICPU participant return while
+    // a peer still owns a core.  The last arriver performs one card-wide
+    // STOP/ACK/CLOSE/release sequence; every participant waits for it.
+    int32_t shutdown_rc = 0;
+    if (runtime->get_l1_aicore_reports() != nullptr) {
+        shutdown_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
+            shutdown_rc_.store(sched_ctx_.shutdown_all(), std::memory_order_release);
+        });
+        shutdown_gate_.wait_for_finalization();
+        shutdown_rc = shutdown_rc_.load(std::memory_order_acquire);
+    } else {
+        shutdown_rc = sched_ctx_.shutdown(thread_idx);
+    }
     if (shutdown_rc != 0) {
         int32_t expected = 0;
         (void)hbg_unexpected_teardown_error_.compare_exchange_strong(
@@ -628,6 +642,8 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     sched_ctx_.deinit();
 
     completion_gate_.reset();
+    shutdown_gate_.reset();
+    shutdown_rc_.store(0, std::memory_order_release);
     run_error_.store(0, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
     hbg_restore_error_.store(0, std::memory_order_release);

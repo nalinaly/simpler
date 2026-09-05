@@ -109,6 +109,10 @@ public:
     // Orchestrator threads (core_trackers_[thread_idx].core_num() == 0) are a no-op.
     int32_t shutdown(int32_t thread_idx);
 
+    // Leader-only normal teardown after every AICPU participant has stopped
+    // scheduling. Retires the whole card as one STOP/CLOSE/GM-release group.
+    int32_t shutdown_all();
+
     // Run all post-orchestration scheduler bookkeeping:
     //  - publishes core assignments to the perf collector (SIMPLER_DFX)
     //  - latches submitted task count from PTO2 shared memory

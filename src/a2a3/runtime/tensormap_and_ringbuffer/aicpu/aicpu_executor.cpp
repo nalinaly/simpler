@@ -145,6 +145,8 @@ struct AicpuExecutor {
     // ===== Task queue state (managed by scheduler ready queues) =====
 
     simpler::ThreadCompletionGate completion_gate_;
+    simpler::ThreadCompletionGate shutdown_gate_;
+    std::atomic<int32_t> shutdown_rc_{0};
     std::atomic<int32_t> run_error_{0};
     std::atomic<bool> runtime_init_ready_{false};
 
@@ -276,6 +278,8 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 
         hs_arrived_.store(0, std::memory_order_relaxed);
         completion_gate_.reset();
+        shutdown_gate_.reset();
+        shutdown_rc_.store(0, std::memory_order_relaxed);
         run_error_.store(0, std::memory_order_relaxed);
         if (sched_ctx_.pre_handshake_init(runtime, aicpu_thread_num_, sched_thread_num_, get_platform_regs()) != 0) {
             init_failed_.store(true, std::memory_order_release);
@@ -993,12 +997,19 @@ int32_t AicpuExecutor::run(Runtime *runtime, const void *invocation_args, int32_
     }
 
 run_epilogue:
-    // Always shutdown AICore — even if sched_ctx_.completed_ was already true.
-    // platform_deinit_aicore_regs is idempotent; orchestrator threads have
-    // core_trackers_[thread_idx].core_num() == 0 so they skip the loop harmlessly.
-    // A fatal run is the exception — shutdown() returns immediately there,
-    // because emergency_shutdown() has already quiesced every core.
-    int32_t shutdown_rc = sched_ctx_.shutdown(thread_idx);
+    int32_t shutdown_rc = 0;
+    if (runtime->get_l1_aicore_reports() != nullptr) {
+        // No participant may return its AICPU task while another still owns a
+        // core.  The last arriver performs one card-wide STOP/CLOSE/goodbye;
+        // every participant waits until that sequence is fully published.
+        shutdown_gate_.arrive_and_finalize_if_last(aicpu_thread_num_, [&] {
+            shutdown_rc_.store(sched_ctx_.shutdown_all(), std::memory_order_release);
+        });
+        shutdown_gate_.wait_for_finalization();
+        shutdown_rc = shutdown_rc_.load(std::memory_order_acquire);
+    } else {
+        shutdown_rc = sched_ctx_.shutdown(thread_idx);
+    }
     if (shutdown_rc != 0 && run_rc == 0) {
         run_rc = shutdown_rc;
     }
@@ -1055,6 +1066,8 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     sched_ctx_.deinit();
 
     completion_gate_.reset();
+    shutdown_gate_.reset();
+    shutdown_rc_.store(0, std::memory_order_release);
     run_error_.store(0, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
 

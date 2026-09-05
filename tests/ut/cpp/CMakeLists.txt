@@ -515,6 +515,13 @@ add_task_interface_test(test_chip_max_tensor_args types/test_chip_max_tensor_arg
 add_task_interface_test(test_call_config types/test_call_config.cpp)
 add_task_interface_test(test_aicore_handshake_protocol types/test_aicore_handshake_protocol.cpp)
 set_tests_properties(test_aicore_handshake_protocol PROPERTIES LABELS "no_hardware")
+add_a2a3_test(test_a2a3_platform_regs_teardown a2a3/test_platform_regs_teardown.cpp)
+target_sources(test_a2a3_platform_regs_teardown PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/shared/aicpu/platform_regs.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/a2a3/platform/sim/aicpu/inner_platform_regs.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu/device_time.cpp
+)
+set_tests_properties(test_a2a3_platform_regs_teardown PROPERTIES LABELS "no_hardware")
 add_a2a3_test(test_l1_aicpu_args types/test_l1_aicpu_args.cpp)
 set_tests_properties(test_l1_aicpu_args PROPERTIES LABELS "no_hardware")
 add_task_interface_test(test_l1_tensor_validation types/test_l1_tensor_validation.cpp)

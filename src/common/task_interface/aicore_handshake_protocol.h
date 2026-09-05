@@ -19,6 +19,11 @@
 inline constexpr uint32_t AICORE_PRE_WINDOW_WAIT = 0;
 inline constexpr uint32_t AICORE_PRE_WINDOW_LEGACY_PROCEED = 1;
 inline constexpr uint32_t AICORE_PRE_WINDOW_CANCEL = 2;
+// L1 post-exit release.  AICore publishes EXITED through COND, then remains
+// inside the persistent wrapper until AICPU has closed FAST_PATH and publishes
+// this value through the dedicated GM teardown line.  FAST_PATH must be closed before
+// the wrapper returns to STARS.
+inline constexpr uint32_t AICORE_POST_CLOSE_RELEASE = 3;
 // A host-side byte memset can publish this value without allocating a pinned
 // scalar source. It closes the branch where hidden AICore was enqueued but the
 // caller-stream custom-AICPU launch failed synchronously.
