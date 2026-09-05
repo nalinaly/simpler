@@ -938,6 +938,9 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
         // through P alone.
         if (rt_ != nullptr && rt_->aicore_mailbox != nullptr &&
             (sched_->async_wait_list.count > 0 || rt_->aicore_mailbox->has_pending())) {
+            // clang-tidy parses the explicit bool template argument as a
+            // chained comparison even though the compiler sees a template-id.
+            // NOLINTNEXTLINE(bugprone-chained-comparison)
             AsyncPollResult poll_result = sched_->async_wait_list.poll_and_complete<false>(
                 rt_->aicore_mailbox, sched_
 #if SIMPLER_SCHED_PROFILING
@@ -1053,7 +1056,9 @@ int32_t SchedulerContext::run_resolution_thread(Runtime *runtime, int32_t thread
 // Main scheduler dispatch loop
 // =============================================================================
 
-int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_idx) {
+int32_t SchedulerContext::resolve_and_dispatch(
+    Runtime *runtime, int32_t thread_idx, simpler::hbg::HbgL1FaultStage requested_fault
+) {
     always_assert(sched_ != nullptr);
     CoreTracker &tracker = core_trackers_[thread_idx];
 
@@ -1071,6 +1076,7 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     // completed count so the caller still sees the negative error rc while the
     // shared end-of-loop flush below runs.
     int32_t timeout_rc = 0;
+    int32_t dispatch_fault_rc = 0;
     int32_t idle_iterations = 0;
     int32_t last_progress_count = 0;
 #if SIMPLER_DFX
@@ -1360,6 +1366,25 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
         uint64_t dispatch_t0 = (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) ? get_sys_cnt_aicpu() : 0;
 #endif
         dispatch_ready_tasks(thread_idx, tracker, pmu_active, made_progress, try_pushed);
+        if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerDispatch && try_pushed) {
+            const int32_t injected_error = simpler::hbg::hbg_l1_fault_error(requested_fault);
+            int32_t expected = PTO2_ERROR_NONE;
+            if (header->sched_error_code.compare_exchange_strong(
+                    expected, injected_error, std::memory_order_acq_rel, std::memory_order_acquire
+                )) {
+                header->sched_error_thread.store(thread_idx, std::memory_order_release);
+            } else {
+                dispatch_fault_rc = expected;
+            }
+            if (thread_idx >= 0 && thread_idx < 32) {
+                header->sched_error_bitmap.fetch_or(1U << static_cast<uint32_t>(thread_idx), std::memory_order_acq_rel);
+            }
+            if (!completed_.exchange(true, std::memory_order_acq_rel)) {
+                emergency_shutdown(runtime);
+            }
+            if (dispatch_fault_rc == 0) dispatch_fault_rc = injected_error;
+            break;
+        }
 #if SIMPLER_DFX
         // Emit Dispatch IMMEDIATELY after dispatch_ready_tasks so its span
         // covers the actual publish work — not the trailing second-poll /
@@ -1558,5 +1583,6 @@ int32_t SchedulerContext::resolve_and_dispatch(Runtime *runtime, int32_t thread_
     }
 #endif
 
+    if (dispatch_fault_rc != 0) return dispatch_fault_rc;
     return timeout_rc != 0 ? timeout_rc : cur_thread_completed;
 }

@@ -39,6 +39,9 @@
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
+#include "aicore_handshake_protocol.h"
+#include "l1_aicore_report.h"
+#include "hbg_l1_launch_control.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -94,7 +97,7 @@ constexpr int RUNTIME_DEFAULT_READY_QUEUE_SHARDS = PLATFORM_MAX_AICPU_THREADS - 
  * - physical_core_id: Written by AICore (with aicore_done), read by AICPU
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;  // Legacy layout field; unused by the current handshake
+    volatile uint32_t aicpu_ready;  // Pre-window control: WAIT/legacy PROCEED/error-only CANCEL
     volatile uint32_t aicore_done;  // AICore ready signal: 0=not ready, core_id+1=ready
     volatile uint64_t task;         // PTO2DispatchPayload* published before register window-open
     volatile CoreType core_type;    // Core type: CoreType::AIC or CoreType::AIV (reported by AICore with aicore_done)
@@ -140,6 +143,11 @@ struct Task {
  */
 class Runtime {
 public:
+    // A separate cache line lets an AICPU task reject a malformed HBG launch
+    // before per-core handshakes exist without leaving the hidden AICore
+    // kernel waiting for register windows forever.
+    simpler::hbg::HbgL1LaunchControl l1_launch_control;
+
     // Handshake buffers for AICPU-AICore communication
     Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
     int worker_count;                       // Number of active workers
@@ -173,6 +181,9 @@ public:
     // the boot thread reads this instead of counting SM ring heads.
     int32_t host_total_tasks;
 
+    // L1-only AICore-owned startup reports. Null preserves the L2 protocol.
+    uint64_t l1_aicore_reports_addr_;
+
 private:
     // Kernel binary tracking for cleanup
 
@@ -181,12 +192,21 @@ private:
     void *slot_states_ptr_;                  // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
 
-    // Prebuilt-arena fast path (trb only). Set by the host before rtMemcpy'ing
-    // Runtime to device; AICPU reads them in the boot path to skip
-    // runtime_create_from_sm and reuse the pooled, prebuilt arena buffer
-    // (already populated by runtime_init_data_from_layout + wire on host).
+    // Scheduler runtime-arena location. Set by the host before the outer
+    // Runtime reaches the device; AICPU attaches the arena and recovers its
+    // inner runtime at the recorded offset.
     void *prebuilt_arena_base_;
     size_t prebuilt_runtime_offset_;
+
+    // Exact capacities frozen by HBG L1 prepare. The L2 path leaves them zero.
+    // They are host-established metadata for constructing
+    // a complete execution-slot registration; task-owned graph bytes cannot
+    // update them.
+    uint64_t l1_gm_heap_capacity_;
+    uint64_t l1_shared_memory_capacity_;
+    uint64_t l1_runtime_arena_capacity_;
+    uint32_t l1_static_execution_slot_frozen_;
+    uint32_t l1_static_execution_slot_reserved_;
 
     // Orchestration metadata set by the platform host (DeviceRunner) when
     // registering a callable. host_build_graph runs the orchestrator on the
@@ -220,6 +240,12 @@ public:
     int get_aicpu_thread_num() const { return aicpu_thread_num; }
     void set_aicpu_thread_num(int n) { aicpu_thread_num = n; }
     Handshake *get_workers() { return workers; }
+    L1AicoreReport *get_l1_aicore_reports() const {
+        return reinterpret_cast<L1AicoreReport *>(static_cast<uintptr_t>(l1_aicore_reports_addr_));
+    }
+    void set_l1_aicore_reports(L1AicoreReport *reports) {
+        l1_aicore_reports_addr_ = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reports));
+    }
     int32_t get_aicpu_allowed_cpu_count() const { return aicpu_allowed_cpu_count; }
     void set_aicpu_allowed_cpu_count(int32_t n) { aicpu_allowed_cpu_count = n; }
     int32_t get_aicpu_launch_count() const { return aicpu_launch_count; }
@@ -243,15 +269,15 @@ public:
     void set_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
 
-    // Prebuilt-arena fast path (trb only). Set by host's
-    // bind_callable_to_runtime_impl; consumed by AICPU at boot to attach a
-    // DeviceArena to `prebuilt_arena_base_` and pick up the PTO2Runtime at
-    // `prebuilt_arena_base_ + prebuilt_runtime_offset_`. Both stay zero on
-    // first construction (Runtime() ctor zeros them) so a non-prebuilt boot
-    // path can still detect "no prebuilt image set" via nullptr.
+    // Runtime-arena binding consumed by AICPU at boot.
     void set_prebuilt_arena(void *arena_base, size_t runtime_off);
     void *get_prebuilt_arena_base() const;
     size_t get_prebuilt_runtime_offset() const;
+    void set_l1_static_execution_slot_capacities(uint64_t gm_heap, uint64_t shared_memory, uint64_t runtime_arena);
+    bool has_l1_static_execution_slot() const;
+    uint64_t get_l1_gm_heap_capacity() const;
+    uint64_t get_l1_shared_memory_capacity() const;
+    uint64_t get_l1_runtime_arena_capacity() const;
 
     // Orchestration metadata written by the platform host (DeviceRunner) at
     // callable registration. Shared ABI with tensormap_and_ringbuffer; the

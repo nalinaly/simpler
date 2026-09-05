@@ -20,7 +20,7 @@
 
 namespace {
 
-using FunctionTable = std::array<uint64_t, PTO2_PREBUILT_FUNC_ID_COUNT>;
+using FunctionTable = std::array<uint64_t, HBG_PREBUILT_FUNC_ID_COUNT>;
 using simpler::hbg::hbg_function_binding_hash;
 using simpler::hbg::hbg_prebuilt_invocation_matches;
 
@@ -30,7 +30,7 @@ TEST(HbgPrebuiltInvocationTest, InvalidInputDoesNotMutateExistingSnapshot) {
     functions[0] = 0x12340000ULL;
 
     ASSERT_TRUE(runtime_set_prebuilt_invocation_state(&runtime, functions.data(), functions.size(), 7));
-    const PTO2PrebuiltInvocationState before = runtime.prebuilt_invocation;
+    const HbgPrebuiltInvocationState before = runtime.prebuilt_invocation;
 
     EXPECT_FALSE(runtime_set_prebuilt_invocation_state(nullptr, functions.data(), functions.size(), 7));
     EXPECT_FALSE(runtime_set_prebuilt_invocation_state(&runtime, nullptr, functions.size(), 7));
@@ -57,7 +57,7 @@ TEST(HbgPrebuiltInvocationTest, SnapshotOwnsFullCallableLocalFunctionTableAndTas
     EXPECT_EQ(runtime.prebuilt_invocation.host_total_tasks, 37);
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[0], 0x10000000ULL);
     EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[17], 0x17000000ULL);
-    EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[PTO2_PREBUILT_FUNC_ID_COUNT - 1], 0xffff0000ULL);
+    EXPECT_EQ(runtime.prebuilt_invocation.func_id_to_addr[HBG_PREBUILT_FUNC_ID_COUNT - 1], 0xffff0000ULL);
 
     first[0] = 0;
     first[17] = 0;

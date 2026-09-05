@@ -345,12 +345,12 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
 ) {
-    return runtime_reserve_layout(arena, task_window_sizes, heap_sizes, pto2_default_runtime_arena_sizing());
+    return runtime_reserve_layout(arena, task_window_sizes, heap_sizes, default_runtime_arena_sizing());
 }
 
 PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const PTO2RuntimeArenaSizing &sizing
+    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const RuntimeArenaSizing &sizing
 ) {
     PTO2RuntimeArenaLayout layout{};
 

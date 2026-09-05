@@ -11,6 +11,37 @@ bug ([issue #822](https://github.com/hw-native-sys/simpler/issues/822)).
 This doc records all three so the failure lore from #822 doesn't have
 to be re-derived if anyone reaches for Path B again.
 
+## Borrowed-stream HBG L1 on A5
+
+A5 onboard `host_build_graph` implements the borrowed L1 lifecycle. A2/A3
+continues to support both HBG and TRB; A5 TRB remains an owned L2 runtime.
+L1 uses the asynchronous dispatcher bootstrap and mode-0 ACL function handles.
+PyTorch retains ownership of the device, caller stream, and external tensors.
+
+During prepare, A5 queries device-side `OCCUPY` once to derive the effective
+AICPU affinity and launch count. A caller-stream event orders the SO bootstrap
+before this query on the owned auxiliary stream. The host waits for this
+prepare-time query; invocation and replay perform no topology query or internal
+stream synchronization. Prepare and the first eager call belong outside capture.
+A query failure never enters the owned-device reset/recovery path.
+
+Each HBG launch owns an immutable HostArgs graph image, callable-local function
+table, and authenticated execution-slot binding. The AICPU leader restores the
+pristine graph before scheduler publication. A separate AICore report array and
+prelaunch cancellation control retain the borrowed-stream failure protocol.
+A5 keeps its 36 AIC / 72 AIV limit, PMU implementation, and SIMT metadata anchor.
+Its HBG L1 uses the scheduler path; the direct-AIV specialization remains A2/A3
+only and is selected through an internal platform capability.
+
+Basic hardware acceptance on Ascend950PR / CANN 9.2 weekly includes PyPTO
+`test_l1_eager_warmup_and_aclgraph_replay` with `--platform=a5 -k host_build_graph`:
+one eager call, PyTorch producer/consumer ordering, and three replays with changed
+inputs. The public JIT test additionally appends a second callable after eager
+warmup and replays both callables in one graph. Inductor and Helion also each
+execute twice while rejecting their L2
+transport and synchronization entry points. These checks cover basic execution,
+not concurrent graph replay, distributed execution, DFX, or a full regression.
+
 ## Comparison
 
 | Method | Where the SO lands | Sudo? | Multi-runtime per process? | Iterative dev? | Status |

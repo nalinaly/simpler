@@ -34,6 +34,7 @@
 
 #pragma once
 
+#include "hbg_prebuilt_invocation.h"
 #include "utils/device_arena.h"
 #include "pto_runtime2_types.h"
 #include "graph_cache.h"
@@ -91,7 +92,6 @@ struct PTO2RuntimeOps {
     );
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const CoreTaskArgs &args);
     TaskOutputTensors (*submit_dummy_task)(PTO2Runtime *rt, const CoreTaskArgs &args);
-
     // This-run core geometry from runtime_finalize_after_wire: MIX clusters
     // (one AIC each) and standalone AIV cores.
     int32_t (*available_cluster_count)(PTO2Runtime *rt);
@@ -129,7 +129,57 @@ struct PTO2RuntimeArenaLayout {
 };
 
 /**
- * PTO Runtime2 context
+ * Capacities of the arena-owned host-build scratch and scheduler queues.
+ *
+ * L2 keeps the historical defaults below.  Borrowed-resource L1 serializes
+ * the pristine arena into aclrtLaunchKernelWithHostArgs on every invocation,
+ * so blindly inheriting those maxima turns a tiny operator into an ~11 MiB
+ * tiling payload.  L1 therefore requests an explicit compact sizing profile;
+ * putting the choice in the layout value (rather than a process-global hook)
+ * makes prepare and per-callable graph construction deterministic and keeps
+ * L2/L3 isolated.
+ */
+struct RuntimeArenaSizing {
+    uint64_t ready_queue_capacity{PTO2_READY_QUEUE_SIZE};
+    int32_t tensor_map_num_buckets{PTO2_TENSORMAP_NUM_BUCKETS};
+    int32_t tensor_map_pool_size{PTO2_TENSORMAP_POOL_SIZE};
+};
+
+inline constexpr RuntimeArenaSizing default_runtime_arena_sizing() noexcept { return {}; }
+
+/**
+ * Derive a correctness-bounded L1 profile from the frozen task window.
+ *
+ * TensorMap inserts at most CORE_MAX_TENSOR_ARGS producer entries per live
+ * top-level task.  Ready queues bound peak concurrent occupancy rather than
+ * total graph nodes; 64 is the existing early-dispatch queue envelope and a
+ * practical minimum for a small L1 operator.  A wider requested task window
+ * raises that envelope with it.  Queue overflow remains fail-closed with a
+ * named runtime error, so an unusually broad nested graph can request a larger
+ * window instead of paying the maximum snapshot cost on every ordinary call.
+ * Both values remain capped at the historical L2 maxima.
+ */
+inline constexpr RuntimeArenaSizing hbg_l1_runtime_arena_sizing(uint64_t task_window_size) noexcept {
+    uint64_t ready_capacity = task_window_size > 64 ? task_window_size : 64;
+    if (ready_capacity > PTO2_READY_QUEUE_SIZE) ready_capacity = PTO2_READY_QUEUE_SIZE;
+
+    uint64_t tensor_entries = task_window_size * static_cast<uint64_t>(CORE_MAX_TENSOR_ARGS);
+    if (tensor_entries < 256) tensor_entries = 256;
+    if (tensor_entries > PTO2_TENSORMAP_POOL_SIZE) tensor_entries = PTO2_TENSORMAP_POOL_SIZE;
+
+    uint64_t tensor_buckets = tensor_entries / 4;
+    if (tensor_buckets < 64) tensor_buckets = 64;
+    if (tensor_buckets > PTO2_TENSORMAP_NUM_BUCKETS) tensor_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
+    return RuntimeArenaSizing{
+        ready_capacity, static_cast<int32_t>(tensor_buckets), static_cast<int32_t>(tensor_entries)
+    };
+}
+
+using HbgPrebuiltInvocationState = simpler::hbg::HbgPrebuiltInvocationState;
+constexpr size_t HBG_PREBUILT_FUNC_ID_COUNT = simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT;
+
+/**
+ * Host-build graph runtime context
  *
  * Contains all state for orchestration and scheduling.
  * In simulated mode, runs in single process with shared address space.
@@ -166,6 +216,11 @@ struct PTO2Runtime {
     // .so's partial PTO2Runtime definition neither sees nor needs it.
     HostTensorAccessor *tensor_access;
 
+    // Immutable invocation semantics restored from the task-owned graph plan
+    // on every eager execution / ACLGraph replay.  Scheduler dispatch must use
+    // this callable-local table rather than outer Runtime::func_id_to_addr_.
+    HbgPrebuiltInvocationState prebuilt_invocation;
+
     // Prebuilt-arena fast path metadata. Carries every offset
     // wire_arena_pointers needs at AICPU boot so the AICPU can reconstruct
     // all arena-internal pointer fields without re-running init_data. The
@@ -176,6 +231,24 @@ struct PTO2Runtime {
     // aicpu_executor.cpp.
     PTO2RuntimeArenaLayout prebuilt_layout;
 };
+
+/** Validate the task-owned invocation metadata before scheduler publication. */
+inline bool runtime_has_valid_prebuilt_invocation_state(const PTO2Runtime *rt) {
+    return rt != nullptr && simpler::hbg::hbg_has_valid_prebuilt_invocation_state(&rt->prebuilt_invocation);
+}
+
+/**
+ * Deep-copy one complete callable-local function table into the pristine
+ * arena. Invalid input is rejected before mutation; a successful replacement
+ * clears every stale entry because the exact fixed-size table is copied.
+ */
+inline bool runtime_set_prebuilt_invocation_state(
+    PTO2Runtime *rt, const uint64_t *func_id_to_addr, size_t func_id_count, int32_t host_total_tasks
+) {
+    return rt != nullptr && simpler::hbg::hbg_set_prebuilt_invocation_state(
+                                &rt->prebuilt_invocation, func_id_to_addr, func_id_count, host_total_tasks
+                            );
+}
 
 // =============================================================================
 // Runtime Lifecycle API
@@ -192,6 +265,10 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(DeviceArena &arena, uint64_t task_
 PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
     const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH]
+);
+PTO2RuntimeArenaLayout runtime_reserve_layout(
+    DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
+    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const RuntimeArenaSizing &sizing
 );
 
 /**

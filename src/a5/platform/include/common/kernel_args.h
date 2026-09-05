@@ -135,6 +135,19 @@ struct InitArgs {
     // Per-engine async-DMA workspace dev addrs -> set_dma_workspace_addr(kind, .);
     // indexed by DmaWorkspaceKind; 0 = that engine unavailable.
     uint64_t dma_workspace_addr[DMA_WORKSPACE_KIND_COUNT]{};
+    // Prepare-time HBG L1 trust root.  It deliberately does not ride on the
+    // mutable per-run KernelArgs: an invalid KernelArgs::runtime_args must not
+    // prevent the AICPU from releasing the already-launched hidden AICore
+    // kernel. Zero for TRB and all legacy L2/L3 modes.
+    uint64_t hbg_l1_prelaunch_control_addr{0};
+    // DeviceRunner-owned HbgContextRegistry. The resident AICPU DSO retains
+    // only this address; slot/callable/generation state lives in the context.
+    uint64_t hbg_l1_context_registry_addr{0};
+    // Host-boot-monotonic borrowed-L1 context generation. Under the v1
+    // single-context contract, runtime-specific state uses it to distinguish
+    // a repeated config publication from the start of the next quiesced
+    // context. Zero for legacy L2/L3 modes.
+    uint64_t l1_context_generation{0};
 };
 
 struct AicpuTopologyQueryResult {

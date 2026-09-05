@@ -121,6 +121,7 @@ struct PTO2OrchestratorState {
     int64_t tasks_submitted;
     int64_t buffers_allocated;
     int64_t bytes_allocated;
+
 #endif
 
     bool in_manual_scope() const { return scope_stack_top >= manual_begin_depth; }
@@ -132,6 +133,9 @@ struct PTO2OrchestratorState {
     // the nested tensor_map layout. Returned layout is consumed by
     // init_from_layout.
     static PTO2OrchestratorLayout reserve_layout(DeviceArena &arena, int32_t task_window_size);
+    static PTO2OrchestratorLayout reserve_layout(
+        DeviceArena &arena, int32_t task_window_size, int32_t tensor_map_num_buckets, int32_t tensor_map_pool_size
+    );
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // sm_dev_base is the SM device address (only stored, never dereferenced);

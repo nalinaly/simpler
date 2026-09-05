@@ -108,6 +108,12 @@ public:
      */
     void set_dep_gen_enabled(bool enable) override { enable_dep_gen_ = enable; }
 
+    int prepare_l1_platform_state(
+        Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config, rtStream_t caller_stream
+    ) override;
+    int configure_l1_runtime_reports(Runtime &runtime, L1AicoreReport *reports) override;
+    int configure_l1_init_args(InitArgs &args) override;
+
     /**
      * Cleanup all resources
      *
@@ -277,8 +283,8 @@ private:
     // dep_gen enablement is a5-specific (a2a3 carries its own copy).
     bool enable_dep_gen_{false};
 
-    int query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out);
-    int query_aicpu_topology(pto::a5::AicpuTopology &out);
+    int query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out, rtStream_t query_stream);
+    int query_aicpu_topology(pto::a5::AicpuTopology &out, rtStream_t query_stream);
     void clear_aicpu_topology_cache();
     // Device-side occupancy and the merged Host topology are immutable during
     // one DeviceRunner attach/reset lifetime. Cache successful probes only;

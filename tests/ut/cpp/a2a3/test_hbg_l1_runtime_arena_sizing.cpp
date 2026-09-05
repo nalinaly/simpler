@@ -14,24 +14,24 @@
 #include "pto_runtime2.h"
 
 TEST(HbgL1RuntimeArenaSizing, KeepsHistoricalDefaultForL2) {
-    const PTO2RuntimeArenaSizing sizing = pto2_default_runtime_arena_sizing();
+    const RuntimeArenaSizing sizing = default_runtime_arena_sizing();
     EXPECT_EQ(sizing.ready_queue_capacity, PTO2_READY_QUEUE_SIZE);
     EXPECT_EQ(sizing.tensor_map_num_buckets, PTO2_TENSORMAP_NUM_BUCKETS);
     EXPECT_EQ(sizing.tensor_map_pool_size, PTO2_TENSORMAP_POOL_SIZE);
 }
 
 TEST(HbgL1RuntimeArenaSizing, DerivesBoundedCompactCapacities) {
-    const PTO2RuntimeArenaSizing small = pto2_hbg_l1_runtime_arena_sizing(16);
+    const RuntimeArenaSizing small = hbg_l1_runtime_arena_sizing(16);
     EXPECT_EQ(small.ready_queue_capacity, 64);
     EXPECT_EQ(small.tensor_map_num_buckets, 128);
     EXPECT_EQ(small.tensor_map_pool_size, 16 * CORE_MAX_TENSOR_ARGS);
 
-    const PTO2RuntimeArenaSizing medium = pto2_hbg_l1_runtime_arena_sizing(64);
+    const RuntimeArenaSizing medium = hbg_l1_runtime_arena_sizing(64);
     EXPECT_EQ(medium.ready_queue_capacity, 64);
     EXPECT_EQ(medium.tensor_map_num_buckets, 512);
     EXPECT_EQ(medium.tensor_map_pool_size, 64 * CORE_MAX_TENSOR_ARGS);
 
-    const PTO2RuntimeArenaSizing large = pto2_hbg_l1_runtime_arena_sizing(PTO2_TASK_WINDOW_SIZE);
+    const RuntimeArenaSizing large = hbg_l1_runtime_arena_sizing(PTO2_TASK_WINDOW_SIZE);
     EXPECT_EQ(large.ready_queue_capacity, PTO2_READY_QUEUE_SIZE);
     EXPECT_EQ(large.tensor_map_num_buckets, PTO2_TENSORMAP_NUM_BUCKETS);
     EXPECT_EQ(large.tensor_map_pool_size, PTO2_TENSORMAP_POOL_SIZE);
@@ -45,9 +45,8 @@ TEST(HbgL1RuntimeArenaSizing, ShrinksOnlyExplicitL1Layout) {
     const PTO2RuntimeArenaLayout default_layout = runtime_reserve_layout(default_arena, task_windows, heap_sizes);
 
     DeviceArena compact_arena;
-    const PTO2RuntimeArenaLayout compact_layout = runtime_reserve_layout(
-        compact_arena, task_windows, heap_sizes, pto2_hbg_l1_runtime_arena_sizing(task_windows[0])
-    );
+    const PTO2RuntimeArenaLayout compact_layout =
+        runtime_reserve_layout(compact_arena, task_windows, heap_sizes, hbg_l1_runtime_arena_sizing(task_windows[0]));
 
     EXPECT_EQ(default_layout.sched.ready_queue_capacity, PTO2_READY_QUEUE_SIZE);
     EXPECT_EQ(default_layout.orch.tensor_map.pool_size, PTO2_TENSORMAP_POOL_SIZE);

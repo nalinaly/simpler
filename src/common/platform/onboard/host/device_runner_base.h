@@ -666,12 +666,11 @@ public:
     virtual int drain_execution(ActiveExecution &active) = 0;
 
     /** L1-capable platforms provide their topology and device ABI explicitly. */
-    virtual int prepare_l1_platform_state(Runtime &, KernelArgsHelper &, const CallConfig &) {
+    virtual int prepare_l1_platform_state(Runtime &, KernelArgsHelper &, const CallConfig &, rtStream_t) {
         return PTO_RUNTIME_ERR_UNSUPPORTED;
     }
-    virtual int configure_l1_runtime_reports(Runtime &, L1AicoreReport *) {
-        return PTO_RUNTIME_ERR_UNSUPPORTED;
-    }
+    virtual bool supports_l1_direct_aiv() const { return false; }
+    virtual int configure_l1_runtime_reports(Runtime &, L1AicoreReport *) { return PTO_RUNTIME_ERR_UNSUPPORTED; }
     virtual int configure_l1_init_args(InitArgs &) { return PTO_RUNTIME_ERR_UNSUPPORTED; }
 
     /**

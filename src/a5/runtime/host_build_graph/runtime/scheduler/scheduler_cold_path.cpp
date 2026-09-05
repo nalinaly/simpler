@@ -19,6 +19,7 @@
 #include "aicpu/platform_regs.h"
 #include "aicpu/pmu_collector_aicpu.h"
 #include "aicpu/args_dump_aicpu.h"
+#include "aicpu/cache_maintenance.h"
 #include "common/memory_barrier.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
@@ -30,6 +31,14 @@
 // =============================================================================
 // Cold-path helpers for the main dispatch loop (noinline to reduce hot-loop icache)
 // =============================================================================
+
+static void publish_pre_window_cancel(Handshake *handshake) {
+    // This runs only after the AICPU has observed the current AICore report.
+    // The report's CACHELINE_OUT therefore cannot race later and overwrite the
+    // error-only CANCEL publication in the same 64-byte line.
+    handshake->aicpu_ready = AICORE_PRE_WINDOW_CANCEL;
+    cache_flush_range(handshake, sizeof(*handshake));
+}
 
 static void latch_scheduler_error(PTO2SharedMemoryHeader *header, int32_t thread_idx, int32_t error_code) {
     if (header == nullptr || error_code == PTO2_ERROR_NONE) {
@@ -588,7 +597,9 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
 // built serially in post_handshake_init (core-index order) once every slice has
 // landed, so the shared aic_count_/aiv_count_ are written by one thread only.
 // =============================================================================
-void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32_t nthreads) {
+void SchedulerContext::handshake_partition(
+    Runtime *runtime, int32_t tidx, int32_t nthreads, simpler::hbg::HbgL1FaultStage requested_fault
+) {
     Handshake *all_handshakes = reinterpret_cast<Handshake *>(runtime->workers);
     const int32_t total = cores_total_num_;
     const int32_t lo = static_cast<int32_t>((static_cast<int64_t>(tidx) * total) / nthreads);
@@ -613,7 +624,7 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
     // read (not the nGnRE MMIO reg window), so sweeping is not forced serial the
     // way RegId::COND polling is.
     //
-    // Servicing a core = validate its physical_core_id, then open its register
+    // Servicing a core = validate its physical_core_id and register mapping, then open its register
     // window (platform_init_aicore_regs: FAST_PATH + DATA_MAIN_BASE=IDLE). That
     // IDLE write is *also* the signal the core polls for to leave its
     // post-report wait — so opening the window IS the acknowledgement. There is
@@ -643,23 +654,65 @@ void SchedulerContext::handshake_partition(Runtime *runtime, int32_t tidx, int32
         for (int32_t i = lo; i < hi; i++) {
             if (core_serviced[i]) continue;
             Handshake *hank = &all_handshakes[i];
-            if (hank->aicore_done == 0) {
+            L1AicoreReport *l1_report = l1_aicore_reports_ == nullptr ? nullptr : &l1_aicore_reports_[i];
+            if (l1_report != nullptr) cache_invalidate_range(l1_report, sizeof(*l1_report));
+            const uint32_t aicore_done = l1_report == nullptr ? hank->aicore_done : l1_report->aicore_done;
+            if (aicore_done == 0) {
                 SPIN_WAIT_HINT();
                 continue;
             }
-            uint32_t physical_core_id = hank->physical_core_id;
-            if (physical_core_id >= max_physical_cores_count) {
-                LOG_ERROR(
-                    "Core %d reported invalid physical_core_id=%u (platform max=%u)", i, physical_core_id,
-                    max_physical_cores_count
-                );
+            const uint32_t physical_core_id =
+                l1_report == nullptr ? hank->physical_core_id : l1_report->physical_core_id;
+            const CoreType core_type =
+                l1_report == nullptr ? hank->core_type : static_cast<CoreType>(l1_report->core_type);
+            const uint64_t reported_reg_addr = physical_core_id < max_physical_cores_count ? regs[physical_core_id] : 0;
+            const bool naturally_invalid =
+                aicore_register_mapping_invalid(physical_core_id, max_physical_cores_count, reported_reg_addr);
+            const uint32_t core_type_bit = core_type == CoreType::AIC ? 1U : (core_type == CoreType::AIV ? 2U : 0U);
+            const bool requests_physical_fault =
+                requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping ||
+                requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId;
+            bool inject_physical_fault = false;
+            if (requests_physical_fault && !naturally_invalid && core_type_bit != 0) {
+                const uint32_t previous =
+                    handshake_physical_fault_injected_types_.fetch_or(core_type_bit, std::memory_order_acq_rel);
+                inject_physical_fault = (previous & core_type_bit) == 0;
+            }
+            const bool inject_core_id =
+                inject_physical_fault && requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId;
+            const bool inject_mapping =
+                inject_physical_fault && requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping;
+            const uint32_t effective_core_id = inject_core_id ? max_physical_cores_count : physical_core_id;
+            const uint64_t reg_addr =
+                inject_mapping ? 0 : (effective_core_id < max_physical_cores_count ? regs[effective_core_id] : 0);
+            if (aicore_register_mapping_invalid(effective_core_id, max_physical_cores_count, reg_addr)) {
+                if (inject_physical_fault) {
+                    if (inject_core_id) {
+                        LOG_WARN(
+                            "Injecting out-of-range physical core id for worker=%d reported=%u effective=%u", i,
+                            physical_core_id, effective_core_id
+                        );
+                    } else {
+                        LOG_WARN(
+                            "Injecting physical-core mapping rejection for worker=%d physical_core_id=%u", i,
+                            physical_core_id
+                        );
+                    }
+                } else {
+                    LOG_ERROR(
+                        "Core %d reported unusable physical_core_id=%u (platform max=%u, reg_addr=0x%" PRIx64 ")", i,
+                        physical_core_id, max_physical_cores_count, reported_reg_addr
+                    );
+                    handshake_unexpected_failure_.store(true, std::memory_order_release);
+                }
+                publish_pre_window_cancel(hank);
                 handshake_failed_.store(true, std::memory_order_release);
                 core_serviced[i] = true;
                 remaining--;
                 continue;
             }
             __builtin_prefetch(&core_exec_states_[i], 1, 3);
-            ready[n_ready++] = {i, physical_core_id, regs[physical_core_id], hank->core_type};
+            ready[n_ready++] = {i, effective_core_id, reg_addr, core_type};
             core_serviced[i] = true;
             remaining--;
         }
@@ -789,10 +842,9 @@ void SchedulerContext::emergency_shutdown(Runtime *runtime) {
     LOG_WARN("Emergency shutdown: sending exit signal to all initialized cores");
     int32_t timeout_count = 0;
     for (int32_t i = 0; i < cores_total_num_; i++) {
-        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which both
-        // releases a core still polling for its window to open and signals it to
-        // exit. Cores never opened (reg_addr==0) are reaped by the host device
-        // reset that follows a handshake failure.
+        // platform_deinit_aicore_regs writes DATA_MAIN_BASE=EXIT, which signals
+        // every opened core to exit. A reported core whose window could not be
+        // opened receives the GM pre-window CANCEL in handshake_partition.
         if (core_exec_states_[i].reg_addr != 0) {
             if (platform_deinit_aicore_regs(core_exec_states_[i].reg_addr) != 0) {
                 timeout_count++;
@@ -816,6 +868,7 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
     // Wire thread configuration that handshake/assign need to read.
     aicpu_thread_num_ = aicpu_thread_num;
     regs_ = regs_base;
+    l1_aicore_reports_ = runtime->get_l1_aicore_reports();
 
 #if SIMPLER_DFX
     // chip_swimlane_aicpu_init promotes g_chip_swimlane_level from the shared-memory
@@ -856,15 +909,23 @@ int32_t SchedulerContext::pre_handshake_init(Runtime *runtime, int32_t aicpu_thr
     }
     aic_count_ = 0;
     aiv_count_ = 0;
+    handshake_physical_fault_injected_types_.store(0, std::memory_order_release);
+    handshake_unexpected_failure_.store(false, std::memory_order_release);
     handshake_failed_.store(false, std::memory_order_release);
 
     LOG_INFO("Handshaking with %d cores", cores_total_num_);
     return 0;
 }
 
-int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
+int32_t SchedulerContext::post_handshake_init(Runtime *runtime, simpler::hbg::HbgL1FaultStage requested_fault) {
     if (handshake_failed_.load(std::memory_order_acquire)) {
         emergency_shutdown(runtime);
+        if ((requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreMapping ||
+             requested_fault == simpler::hbg::HbgL1FaultStage::PhysicalCoreId) &&
+            (handshake_physical_fault_injected_types_.load(std::memory_order_acquire) & 0x3U) == 0x3U &&
+            !handshake_unexpected_failure_.load(std::memory_order_acquire)) {
+            return simpler::hbg::hbg_l1_fault_error(requested_fault);
+        }
         return -1;
     }
 
@@ -890,7 +951,13 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     aiv_count_ = lv;
     LOG_INFO("Core discovery complete: %d AIC, %d AIV", aic_count_, aiv_count_);
 
+    if (requested_fault == simpler::hbg::HbgL1FaultStage::SchedulerAssign) {
+        emergency_shutdown(runtime);
+        return simpler::hbg::hbg_l1_fault_error(requested_fault);
+    }
+
     if (!assign_cores_to_threads()) {
+        emergency_shutdown(runtime);
         return -1;
     }
 
@@ -980,8 +1047,6 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
         }
     }
 
-    func_id_to_addr_ = runtime->func_id_to_addr_;
-
     return 0;
 }
 
@@ -1035,6 +1100,10 @@ void SchedulerContext::deinit() {
     }
 
     regs_ = 0;
+    l1_aicore_reports_ = nullptr;
+    handshake_physical_fault_injected_types_.store(0, std::memory_order_release);
+    handshake_unexpected_failure_.store(false, std::memory_order_release);
+    handshake_failed_.store(false, std::memory_order_release);
     sched_ = nullptr;
     rt_ = nullptr;
     func_id_to_addr_ = nullptr;
@@ -1043,6 +1112,11 @@ void SchedulerContext::deinit() {
 void SchedulerContext::bind_runtime(PTO2Runtime *rt) {
     rt_ = rt;
     sched_ = &rt->scheduler;
+    static_assert(
+        RUNTIME_MAX_FUNC_ID == HBG_PREBUILT_FUNC_ID_COUNT,
+        "outer Runtime and task-owned HBG function tables must have identical capacity"
+    );
+    func_id_to_addr_ = rt->prebuilt_invocation.func_id_to_addr;
 }
 
 // =============================================================================

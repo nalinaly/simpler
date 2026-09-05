@@ -1311,7 +1311,7 @@ extern "C" int bind_callable_to_runtime_impl(
     }
 
     static_assert(
-        RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
+        RUNTIME_MAX_FUNC_ID == HBG_PREBUILT_FUNC_ID_COUNT,
         "outer Runtime and task-owned HBG function tables must have identical capacity"
     );
     if (!runtime_set_prebuilt_invocation_state(rt, runtime->func_id_to_addr_, RUNTIME_MAX_FUNC_ID, host_total_tasks)) {
@@ -1388,7 +1388,7 @@ extern "C" int prepare_l1_runtime_impl(
     }
 
     DeviceArena sizing_arena;
-    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
+    const RuntimeArenaSizing arena_sizing = hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
     const PTO2RuntimeArenaLayout arena_layout =
         runtime_reserve_layout(sizing_arena, task_window_sizes, heap_sizes, arena_sizing);
     simpler::hbg::HbgStaticExecutionSlotLayout slot_layout{};
@@ -1497,7 +1497,7 @@ extern "C" int build_l1_hbg_graph_plan_impl(
     }
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(task_window_sizes);
     DeviceArena host_arena;
-    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
+    const RuntimeArenaSizing arena_sizing = hbg_l1_runtime_arena_sizing(task_window_sizes[0]);
     const PTO2RuntimeArenaLayout layout =
         runtime_reserve_layout(host_arena, task_window_sizes, heap_sizes, arena_sizing);
     if (sm_size != binding->shared_memory_capacity || layout.arena_size != binding->runtime_arena_capacity ||
@@ -1552,7 +1552,7 @@ extern "C" int build_l1_hbg_graph_plan_impl(
         return host_total_tasks;
     }
     static_assert(
-        RUNTIME_MAX_FUNC_ID == PTO2_PREBUILT_FUNC_ID_COUNT,
+        RUNTIME_MAX_FUNC_ID == HBG_PREBUILT_FUNC_ID_COUNT,
         "outer Runtime and task-owned HBG function tables must have identical capacity"
     );
     if (!runtime_set_prebuilt_invocation_state(
@@ -1630,7 +1630,7 @@ extern "C" int rebind_l1_hbg_direct_aiv_package_impl(
         compact_task_windows[ring] = compact_task_window;
 
     DeviceArena host_arena;
-    const PTO2RuntimeArenaSizing arena_sizing = pto2_hbg_l1_runtime_arena_sizing(compact_task_window);
+    const RuntimeArenaSizing arena_sizing = hbg_l1_runtime_arena_sizing(compact_task_window);
     const PTO2RuntimeArenaLayout layout =
         runtime_reserve_layout(host_arena, compact_task_windows, heap_sizes, arena_sizing);
     const uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size_per_ring(compact_task_windows);

@@ -68,7 +68,16 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
 // DeviceRunner Implementation
 // =============================================================================
 
-DeviceRunner::~DeviceRunner() { finalize(); }
+DeviceRunner::~DeviceRunner() {
+    if (requires_explicit_l1_close()) {
+        LOG_ERROR(
+            "DeviceRunner destroyed with an unclosed borrowed L1 context; preserving graph-referenced resources "
+            "and refusing owned-device reset"
+        );
+        return;
+    }
+    finalize();
+}
 
 // `setup_static_arena`, `create_thread`, `attach_current_thread`,
 // `configure_aicore_op_timeout`, `ensure_device_initialized`,
@@ -142,7 +151,7 @@ int DeviceRunner::destroy_comm_stream(void *stream) {
     return 0;
 }
 
-int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out) {
+int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &out, rtStream_t query_stream) {
     if (aicpu_device_occupancy_cached_) {
         out = aicpu_device_occupancy_;
         return 0;
@@ -164,16 +173,18 @@ int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &ou
     }
     AicpuTopologyQueryArgs args{};
     args.result_addr = reinterpret_cast<uint64_t>(device_result);
-    rc = launch_aicpu_payload(stream_aicpu_, &args, sizeof(args), kAicpuTopologyQueryName, /*aicpu_num=*/1);
+    rc = execution_mode() == DeviceExecutionMode::L1Borrowed ?
+             load_aicpu_op_.LaunchWithHostArgs(query_stream, &args, sizeof(args), 1, kAicpuTopologyQueryName) :
+             launch_aicpu_payload(query_stream, &args, sizeof(args), kAicpuTopologyQueryName, /*aicpu_num=*/1);
     if (rc != 0) {
         LOG_ERROR("AICPU device occupancy query launch failed: %d", rc);
-        recover_device_or_mark_unusable(rc);
+        if (execution_mode() != DeviceExecutionMode::L1Borrowed) recover_device_or_mark_unusable(rc);
         return rc;
     }
-    rc = aclrtSynchronizeStreamWithTimeout(stream_aicpu_, PLATFORM_STREAM_SYNC_TIMEOUT_MS);
+    rc = aclrtSynchronizeStreamWithTimeout(query_stream, PLATFORM_STREAM_SYNC_TIMEOUT_MS);
     if (rc != 0) {
         LOG_ERROR("AICPU device occupancy query sync failed: %d", rc);
-        recover_device_or_mark_unusable(rc);
+        if (execution_mode() != DeviceExecutionMode::L1Borrowed) recover_device_or_mark_unusable(rc);
         return rc;
     }
     AicpuTopologyQueryResult result{};
@@ -200,14 +211,14 @@ int DeviceRunner::query_aicpu_device_occupancy(pto::a5::AicpuDeviceOccupancy &ou
     return 0;
 }
 
-int DeviceRunner::query_aicpu_topology(pto::a5::AicpuTopology &out) {
+int DeviceRunner::query_aicpu_topology(pto::a5::AicpuTopology &out, rtStream_t query_stream) {
     if (aicpu_topology_cached_) {
         out = aicpu_topology_;
         return 0;
     }
 
     pto::a5::AicpuDeviceOccupancy occupancy;
-    int rc = query_aicpu_device_occupancy(occupancy);
+    int rc = query_aicpu_device_occupancy(occupancy, query_stream);
     if (rc != 0) return rc;
 
     pto::a5::AicpuTopology topology;
@@ -224,6 +235,64 @@ void DeviceRunner::clear_aicpu_topology_cache() {
     aicpu_device_occupancy_ = {};
     aicpu_topology_cached_ = false;
     aicpu_topology_ = {};
+}
+
+// Only runtimes implementing borrowed L1 provide this bridge. Other A5
+// runtimes keep the common unsupported capability result.
+extern "C" __attribute__((weak)) int configure_l1_runtime_reports_impl(Runtime *, L1AicoreReport *);
+
+int DeviceRunner::prepare_l1_platform_state(
+    Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config, rtStream_t caller_stream
+) {
+    int rc = prepare_launch_shape(runtime, config);
+    if (rc != 0) return rc;
+    rc = init_aicore_register_addresses(&kernel_args.args.regs, static_cast<uint64_t>(device_id_), mem_alloc_);
+    if (rc != 0) return rc;
+
+    // Device-side OCCUPY is authoritative on A5. Resolve it once during
+    // prepare on the owned auxiliary stream, after the caller-stream SO
+    // bootstrap. Dispatch and graph replay never query or synchronize here.
+    rtStream_t query_stream = reinterpret_cast<rtStream_t>(l1_execution_state_.hidden_aicore_stream());
+    auto ready_event = reinterpret_cast<aclrtEvent>(l1_execution_state_.event(L1EventKind::PrepareTail));
+    rc = aclrtRecordEvent(ready_event, reinterpret_cast<aclrtStream>(caller_stream));
+    if (rc != ACL_SUCCESS) return rc;
+    rc = aclrtStreamWaitEvent(reinterpret_cast<aclrtStream>(query_stream), ready_event);
+    if (rc != ACL_SUCCESS) return rc;
+    pto::a5::AicpuTopology topology;
+    if (query_aicpu_topology(topology, query_stream) != 0) return PTO_RUNTIME_ERR_RUNTIME_FAILURE;
+    pto::a5::AicpuLaunchPlan plan;
+    std::string error;
+    if (!pto::a5::build_aicpu_launch_plan(topology, config.aicpu_thread_num, plan, error)) {
+        LOG_ERROR("L1 A5 AICPU launch plan failed: %s", error.c_str());
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (plan.allowed_cpus.size() > runtime.aicpu_allowed_cpus_capacity()) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    for (size_t i = 0; i < plan.allowed_cpus.size(); ++i)
+        runtime.get_aicpu_allowed_cpus()[i] = plan.allowed_cpus[i];
+    runtime.set_aicpu_allowed_cpu_count(static_cast<int32_t>(plan.allowed_cpus.size()));
+    runtime.set_aicpu_thread_num(plan.effective_active_count);
+    runtime.set_aicpu_launch_count(plan.launch_count);
+    kernel_args.args.enable_profiling_flag = SIMPLER_DFX_FLAG_NONE;
+    activate_launch_shape(runtime);
+    return 0;
+}
+
+int DeviceRunner::configure_l1_runtime_reports(Runtime &runtime, L1AicoreReport *reports) {
+    return configure_l1_runtime_reports_impl == nullptr ? PTO_RUNTIME_ERR_UNSUPPORTED :
+                                                          configure_l1_runtime_reports_impl(&runtime, reports);
+}
+
+int DeviceRunner::configure_l1_init_args(InitArgs &args) {
+    if (l1_hbg_execution_slot_registration_ != nullptr) {
+        auto *control = simpler::hbg::hbg_l1_launch_control(*l1_hbg_execution_slot_registration_);
+        if (control == nullptr || l1_hbg_context_registry_ == nullptr) {
+            return PTO_RUNTIME_ERR_INVALID_STATE;
+        }
+        args.hbg_l1_prelaunch_control_addr = reinterpret_cast<uint64_t>(control);
+        args.hbg_l1_context_registry_addr = reinterpret_cast<uint64_t>(l1_hbg_context_registry_);
+    }
+    args.l1_context_generation = l1_context_generation_;
+    return 0;
 }
 
 int DeviceRunner::prepare_execution(
@@ -303,7 +372,7 @@ int DeviceRunner::prepare_execution(
     {
         pto::a5::AicpuTopology topology;
         runtime.set_aicpu_allowed_cpu_count(0);
-        if (query_aicpu_topology(topology) != 0) {
+        if (query_aicpu_topology(topology, stream_aicpu_) != 0) {
             LOG_ERROR("AICPU topology probe failed; affinity gate will not launch");
             return -1;
         }

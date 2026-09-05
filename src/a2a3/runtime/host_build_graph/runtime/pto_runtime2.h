@@ -139,13 +139,13 @@ struct PTO2RuntimeArenaLayout {
  * makes prepare and per-callable graph construction deterministic and keeps
  * L2/L3 isolated.
  */
-struct PTO2RuntimeArenaSizing {
+struct RuntimeArenaSizing {
     uint64_t ready_queue_capacity{PTO2_READY_QUEUE_SIZE};
     int32_t tensor_map_num_buckets{PTO2_TENSORMAP_NUM_BUCKETS};
     int32_t tensor_map_pool_size{PTO2_TENSORMAP_POOL_SIZE};
 };
 
-inline constexpr PTO2RuntimeArenaSizing pto2_default_runtime_arena_sizing() noexcept { return {}; }
+inline constexpr RuntimeArenaSizing default_runtime_arena_sizing() noexcept { return {}; }
 
 /**
  * Derive a correctness-bounded L1 profile from the frozen task window.
@@ -159,7 +159,7 @@ inline constexpr PTO2RuntimeArenaSizing pto2_default_runtime_arena_sizing() noex
  * window instead of paying the maximum snapshot cost on every ordinary call.
  * Both values remain capped at the historical L2 maxima.
  */
-inline constexpr PTO2RuntimeArenaSizing pto2_hbg_l1_runtime_arena_sizing(uint64_t task_window_size) noexcept {
+inline constexpr RuntimeArenaSizing hbg_l1_runtime_arena_sizing(uint64_t task_window_size) noexcept {
     uint64_t ready_capacity = task_window_size > 64 ? task_window_size : 64;
     if (ready_capacity > PTO2_READY_QUEUE_SIZE) ready_capacity = PTO2_READY_QUEUE_SIZE;
 
@@ -170,16 +170,16 @@ inline constexpr PTO2RuntimeArenaSizing pto2_hbg_l1_runtime_arena_sizing(uint64_
     uint64_t tensor_buckets = tensor_entries / 4;
     if (tensor_buckets < 64) tensor_buckets = 64;
     if (tensor_buckets > PTO2_TENSORMAP_NUM_BUCKETS) tensor_buckets = PTO2_TENSORMAP_NUM_BUCKETS;
-    return PTO2RuntimeArenaSizing{
+    return RuntimeArenaSizing{
         ready_capacity, static_cast<int32_t>(tensor_buckets), static_cast<int32_t>(tensor_entries)
     };
 }
 
-using PTO2PrebuiltInvocationState = simpler::hbg::HbgPrebuiltInvocationState;
-constexpr size_t PTO2_PREBUILT_FUNC_ID_COUNT = simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT;
+using HbgPrebuiltInvocationState = simpler::hbg::HbgPrebuiltInvocationState;
+constexpr size_t HBG_PREBUILT_FUNC_ID_COUNT = simpler::hbg::HBG_PREBUILT_FUNC_ID_COUNT;
 
 /**
- * PTO Runtime2 context
+ * Host-build graph runtime context
  *
  * Contains all state for orchestration and scheduling.
  * In simulated mode, runs in single process with shared address space.
@@ -219,7 +219,7 @@ struct PTO2Runtime {
     // Immutable invocation semantics restored from the task-owned graph plan
     // on every eager execution / ACLGraph replay.  Scheduler dispatch must use
     // this callable-local table rather than outer Runtime::func_id_to_addr_.
-    PTO2PrebuiltInvocationState prebuilt_invocation;
+    HbgPrebuiltInvocationState prebuilt_invocation;
 
     // Prebuilt-arena fast path metadata. Carries every offset
     // wire_arena_pointers needs at AICPU boot so the AICPU can reconstruct
@@ -268,7 +268,7 @@ PTO2RuntimeArenaLayout runtime_reserve_layout(
 );
 PTO2RuntimeArenaLayout runtime_reserve_layout(
     DeviceArena &arena, const uint64_t task_window_sizes[PTO2_MAX_RING_DEPTH],
-    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const PTO2RuntimeArenaSizing &sizing
+    const uint64_t heap_sizes[PTO2_MAX_RING_DEPTH], const RuntimeArenaSizing &sizing
 );
 
 /**

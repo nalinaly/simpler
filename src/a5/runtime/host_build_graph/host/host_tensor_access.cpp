@@ -40,6 +40,7 @@ struct HostTensorAccessor::Impl {
     std::vector<void *> mappings;
     // Bytes covered by `mappings`, i.e. excluding regions serving a fallback view.
     uint64_t mapped_bytes;
+    bool writes_allowed;
 };
 
 // The region serving the whole of [dev_addr, dev_addr + bytes), or nullptr.
@@ -60,8 +61,8 @@ find_region(const std::vector<HostTensorRegion> &regions, uint64_t dev_addr, uin
     return nullptr;
 }
 
-HostTensorAccessor::HostTensorAccessor(const HostApi *api) :
-    impl_(new Impl{api, {}, {}, 0}) {}
+HostTensorAccessor::HostTensorAccessor(const HostApi *api, bool writes_allowed) :
+    impl_(new Impl{api, {}, {}, 0, writes_allowed}) {}
 
 HostTensorAccessor::~HostTensorAccessor() {
     close();
@@ -103,6 +104,7 @@ bool HostTensorAccessor::read(uint64_t dev_addr, void *dst, uint64_t bytes) cons
 }
 
 bool HostTensorAccessor::write(uint64_t dev_addr, const void *src, uint64_t bytes) const {
+    if (!impl_->writes_allowed) return false;
     uint64_t offset = 0;
     const HostTensorRegion *region = find_region(impl_->regions, dev_addr, bytes, &offset);
     if (region == nullptr) {

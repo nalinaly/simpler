@@ -227,7 +227,9 @@ void DeviceRunner::set_dep_gen_enabled(bool enable) {
     dep_gen_host_graph_set_enabled(enable);
 }
 
-int DeviceRunner::prepare_l1_platform_state(Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config) {
+int DeviceRunner::prepare_l1_platform_state(
+    Runtime &runtime, KernelArgsHelper &kernel_args, const CallConfig &config, [[maybe_unused]] rtStream_t caller_stream
+) {
     int rc = prepare_launch_shape(runtime, config);
     if (rc != 0) return rc;
 

@@ -482,7 +482,7 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
         } catch (...) {
             return poison(PTO_RUNTIME_ERR_RUNTIME_FAILURE);
         }
-        rc = prepare_l1_platform_state(*l1_runtime_, l1_kernel_args_, l1_config_);
+        rc = prepare_l1_platform_state(*l1_runtime_, l1_kernel_args_, l1_config_, caller_stream);
         if (rc != 0) return poison(rc);
         rc = prepare_l1_runtime_impl(
             l1_runtime_.get(), api, l1_config_.runtime_env.ring_task_window, l1_config_.runtime_env.ring_heap,
@@ -524,7 +524,7 @@ int DeviceRunnerBase::prepare_l1_callable_locked(int32_t callable_id, rtStream_t
     if (rc != 0) return poison(rc);
     rc = ensure_aicore_binary_registered();
     if (rc != 0) return poison(rc);
-    if (callable_it->second.host_dlopen_handle != nullptr) {
+    if (callable_it->second.host_dlopen_handle != nullptr && supports_l1_direct_aiv()) {
         rc = ensure_l1_aicore_acl_function_registered();
         if (rc != 0) return poison(rc);
     }

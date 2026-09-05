@@ -1152,6 +1152,7 @@ struct PTO2SchedulerState {
     // Capacities are baked into the returned layout; init_data_from_layout uses
     // the same values.
     static PTO2SchedulerLayout reserve_layout(DeviceArena &arena);
+    static PTO2SchedulerLayout reserve_layout(DeviceArena &arena, uint64_t ready_queue_capacity);
 
     // Phase 3a: write everything *except* arena-internal pointer fields.
     // `sm_dev_base` is the device address of the SM (only stored, never

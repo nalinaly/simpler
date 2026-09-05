@@ -26,7 +26,11 @@
 // =============================================================================
 
 Runtime::Runtime() {
-    // Initialize handshake buffers
+    // NOTE: host_api is initialized in InitRuntime() (host-only code)
+    // because the CApi functions don't exist when compiled for device.
+
+    // Initialize the pre-generation control line and handshake buffers.
+    memset(&l1_launch_control, 0, sizeof(l1_launch_control));
     memset(workers, 0, sizeof(workers));
     worker_count = 0;
     aicpu_thread_num = 1;
@@ -35,6 +39,7 @@ Runtime::Runtime() {
     aicpu_allowed_cpu_count = 0;
     aicpu_launch_count = 0;
     host_total_tasks = 0;
+    l1_aicore_reports_addr_ = 0;
 
     // Initialize shared-memory / orchestration argument plumbing
     gm_sm_ptr_ = nullptr;
@@ -43,6 +48,11 @@ Runtime::Runtime() {
     orch_args_storage_.clear();
     prebuilt_arena_base_ = nullptr;
     prebuilt_runtime_offset_ = 0;
+    l1_gm_heap_capacity_ = 0;
+    l1_shared_memory_capacity_ = 0;
+    l1_runtime_arena_capacity_ = 0;
+    l1_static_execution_slot_frozen_ = 0;
+    l1_static_execution_slot_reserved_ = 0;
 
     active_callable_id_ = -1;
     dev_orch_so_addr_ = 0;
@@ -74,6 +84,20 @@ void Runtime::set_prebuilt_arena(void *arena_base, size_t runtime_off) {
 }
 void *Runtime::get_prebuilt_arena_base() const { return prebuilt_arena_base_; }
 size_t Runtime::get_prebuilt_runtime_offset() const { return prebuilt_runtime_offset_; }
+
+void Runtime::set_l1_static_execution_slot_capacities(
+    uint64_t gm_heap, uint64_t shared_memory, uint64_t runtime_arena
+) {
+    l1_gm_heap_capacity_ = gm_heap;
+    l1_shared_memory_capacity_ = shared_memory;
+    l1_runtime_arena_capacity_ = runtime_arena;
+    l1_static_execution_slot_frozen_ = 1;
+}
+
+bool Runtime::has_l1_static_execution_slot() const { return l1_static_execution_slot_frozen_ == 1; }
+uint64_t Runtime::get_l1_gm_heap_capacity() const { return l1_gm_heap_capacity_; }
+uint64_t Runtime::get_l1_shared_memory_capacity() const { return l1_shared_memory_capacity_; }
+uint64_t Runtime::get_l1_runtime_arena_capacity() const { return l1_runtime_arena_capacity_; }
 
 // Orchestration metadata written by the platform host (DeviceRunner) at
 // callable registration. host_build_graph runs the orchestrator on the host so
