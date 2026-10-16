@@ -84,6 +84,8 @@
 
 #include <stdint.h>
 
+#include "arg_direction.h"
+
 #include "aicore_completion_mailbox_types.h"
 #include "common/dma_workspace.h"
 #include "tensormap_and_ringbuffer/task_id.h"
@@ -101,11 +103,11 @@ static constexpr int32_t EXT_PARAMS_COUNT = 2;
 
 /**
  * Args[] suffix indices for context pointers.
- * Derived from MAX_TENSOR_ARGS(32) + MAX_SCALAR_ARGS(16).
+ * 由 CORE 参数容量推导；所有调用方须使用同一 ABI 重新编译。
  * Users should not depend on these values; use the Get* functions below.
  */
-static constexpr int32_t SPMD_LOCAL_CONTEXT_INDEX = 48;
-static constexpr int32_t SPMD_GLOBAL_CONTEXT_INDEX = 49;
+static constexpr int32_t SPMD_LOCAL_CONTEXT_INDEX = CORE_MAX_TENSOR_ARGS + CORE_MAX_SCALAR_ARGS;
+static constexpr int32_t SPMD_GLOBAL_CONTEXT_INDEX = SPMD_LOCAL_CONTEXT_INDEX + 1;
 static constexpr int32_t PAYLOAD_LOCAL_CONTEXT_INDEX = SPMD_LOCAL_CONTEXT_INDEX;
 static constexpr int32_t PAYLOAD_GLOBAL_CONTEXT_INDEX = SPMD_GLOBAL_CONTEXT_INDEX;
 

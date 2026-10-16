@@ -26,7 +26,9 @@ enum class ArgDirection : int32_t {
     INOUT = 3,
 };
 
-inline constexpr int CORE_MAX_TENSOR_ARGS = 32;
+// 整层融合 InCore 任务可能超过 128 个 Tensor；容量属于软件 ABI，
+// Host、AICPU、AICore 以及 callable 必须使用同一套头文件重新编译。
+inline constexpr int CORE_MAX_TENSOR_ARGS = 256;
 // Chip-level entry-tensor cap. Sizes ChipCallable::signature_[] and
 // ChipStorageTaskArgs::tensors_[], both of which cross the host->device wire
 // as fixed POD — raising this is an additive ABI change (existing callers

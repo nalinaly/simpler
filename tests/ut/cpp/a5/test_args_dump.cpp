@@ -260,3 +260,22 @@ TEST_F(ArgsDumpTest, ArenaBackpressureChecksBeforePayloadOverwrite) {
 
     set_platform_dump_base(0);
 }
+
+// 多字掩码经过 task_id 元数据池后，高编号 Tensor 和尾部标量仍可选择。
+TEST_F(ArgsDumpTest, ExpandedMaskPoolPreservesHighArguments) {
+    ArgsDumpArgMask mask;
+    ArgsDumpArgMask flags;
+    for (int index : {63, 64, 128, 132, 255, 256, 271})
+        mask.set(index);
+    flags.set(271);
+    const uint64_t task_id = (uint64_t{19} << 32) | 333;
+    set_dump_args_task_mask(task_id, mask, flags);
+    ArgsDumpArgMask got_mask, got_flags;
+    get_dump_args_task_masks(task_id, &got_mask, &got_flags);
+    EXPECT_EQ(got_mask, mask);
+    EXPECT_EQ(got_flags, flags);
+    EXPECT_TRUE(has_dump_arg_flag(got_mask, 132));
+    EXPECT_TRUE(has_dump_arg_flag(got_flags, 271));
+    EXPECT_FALSE(has_dump_arg_flag(got_flags, 270));
+    EXPECT_FALSE(has_dump_arg_flag(got_flags, 272));
+}

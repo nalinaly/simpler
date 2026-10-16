@@ -370,9 +370,9 @@ struct TaskPayload {
     // / scalars offsets only. Resolved at submit; evaluated by the scheduler at
     // dispatch.
     alignas(64) DispatchPredicate predicate;
-    // === Cache lines 10-73 (4096B) — tensors (alignas(64) forces alignment) ===
+    // === 从 cache line 10 开始：CORE_MAX_TENSOR_ARGS 个 128 B Tensor 描述符 ===
     simpler::tmr::Tensor tensors[MAX_TENSOR_ARGS];
-    // === Cache lines 74-75 (128B) — scalars ===
+    // === Tensor 区之后：16 个标量，共 128 B ===
     uint64_t scalars[MAX_SCALAR_ARGS];
 
     // Layout verification (size checks that don't need offsetof).

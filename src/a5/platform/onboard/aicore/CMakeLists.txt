@@ -55,6 +55,18 @@ foreach(INC_DIR ${CMAKE_CUSTOM_INCLUDE_DIRS})
     list(APPEND CMAKE_CUSTOM_INCLUDE_DIR_FLAGS "-I${INC_DIR}")
 endforeach()
 
+# 参数容量和派发偏移属于 Host/AICPU/AICore 共同 ABI。自定义 CCE 编译
+# 不会自动生成头文件依赖；显式跟踪这些头文件，避免增量构建保留旧偏移。
+set(DISPATCH_WIRE_HEADERS "")
+foreach(INC_DIR ${CMAKE_CUSTOM_INCLUDE_DIRS})
+    foreach(WIRE_HEADER IN ITEMS arg_direction.h intrinsic.h dispatch_payload.h scheduler/scheduler_graph.h)
+        if(EXISTS "${INC_DIR}/${WIRE_HEADER}")
+            list(APPEND DISPATCH_WIRE_HEADERS "${INC_DIR}/${WIRE_HEADER}")
+        endif()
+    endforeach()
+endforeach()
+list(REMOVE_DUPLICATES DISPATCH_WIRE_HEADERS)
+
 # Compiler flags
 set(AICORE_FLAGS
     "-c -O3 -g -x cce -Wall -std=c++17 \
@@ -74,9 +86,9 @@ set(ALL_AIV_OBJECTS "")
 
 foreach(SRC_FILE ${ALL_SOURCES})
     get_filename_component(SRC_NAME ${SRC_FILE} NAME_WE)
-    set(SOURCE_WIRE_HEADERS "")
+    set(SOURCE_WIRE_HEADERS ${DISPATCH_WIRE_HEADERS})
     if(SRC_FILE MATCHES "/tensormap_and_ringbuffer/aicore/aicore_executor\\.cpp$")
-        set(SOURCE_WIRE_HEADERS
+        list(APPEND SOURCE_WIRE_HEADERS
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface/tmr_kernel_context.h"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface/tmr_kernel_control.h"
         )
@@ -150,6 +162,7 @@ foreach(SRC_FILE ${ALL_SOURCES})
             "${CMAKE_CURRENT_BINARY_DIR}/kernel_aiv.o"
         )
         set(TMR_KERNEL_WIRE_HEADERS
+            ${DISPATCH_WIRE_HEADERS}
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface/tmr_kernel_context.h"
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/task_interface/tmr_kernel_control.h"
         )

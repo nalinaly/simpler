@@ -337,7 +337,7 @@ struct RecordedInGraphTask {
 // from the previous body into the next recording -- silently, as a Definition that body
 // never had. Adding a field changes this size, so the build stops here instead.
 static_assert(
-    sizeof(RecordedInGraphTask) == 104, "RecordedInGraphTask gained or lost a field: extend reset() to match, then "
+    sizeof(RecordedInGraphTask) == 168, "RecordedInGraphTask gained or lost a field: extend reset() to match, then "
                                         "update this size"
 );
 
@@ -401,8 +401,8 @@ struct GraphRecording {
     // Every recorded task's tensor arguments, packed end to end in one region this
     // recording bumps through, and the reason a task holds an offset rather than its own
     // buffer: a body's tensors then occupy the bytes they need instead of a page per task
-    // (a per-task buffer at the cap is 32 x 128 B = exactly one page, so dsv4's 1679 tasks
-    // touched 1679 pages to hold ~210 KB). Allocated once per thread at the cap and never
+    // （按 256 个 Tensor 预留时每任务 32 KiB；紧凑排列只使用实际参数对应的页面）。
+    // Allocated once per thread at the cap and never
     // grown, which is what keeps a task's borrowed element addresses valid for the rest of
     // the recording. `new[]` default-initializes a trivially-default-constructible Tensor,
     // so the region costs no page until a body writes one; each element a task uses is

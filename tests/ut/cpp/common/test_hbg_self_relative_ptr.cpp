@@ -127,7 +127,7 @@ TEST(HbgSelfRelativePtr, KeepsTheSharedMemoryAbiSizes) {
     EXPECT_EQ(sizeof(TaskDescriptor), 64u);
     EXPECT_EQ(sizeof(SelfRelativePtr<simpler::hbg::Tensor>), 4u);
     EXPECT_EQ(offsetof(TaskDescriptor, packed_buffer_base), 24u);
-    EXPECT_EQ(sizeof(ChipTaskStorage), 320u);
+    EXPECT_EQ(sizeof(ChipTaskStorage), 384u);
     EXPECT_EQ(offsetof(ChipTaskStorage, slot), sizeof(TaskDescriptor));
     EXPECT_EQ(offsetof(ChipTaskStorage, payload), offsetof(ChipTaskStorage, slot) + sizeof(ChipTaskSlotState));
 }

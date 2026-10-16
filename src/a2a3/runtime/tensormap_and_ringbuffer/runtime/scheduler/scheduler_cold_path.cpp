@@ -1334,8 +1334,8 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime, simpler::tmr::Ca
     // The two context-pointer args are also per-(core, buf_idx) constants — they
     // target this buffer's own local_context / global_context — so prefill them
     // here too and drop them from the per-dispatch build_payload writes. This keeps
-    // the per-dispatch write footprint on the CL0 control block only (args[48]/[49]
-    // live on a later line).
+    // the per-dispatch write footprint on the CL0 control block only
+    // (args[SPMD_LOCAL_CONTEXT_INDEX]/args[SPMD_GLOBAL_CONTEXT_INDEX] live on a later line).
     for (int32_t core_id = 0; core_id < RUNTIME_MAX_WORKER; core_id++) {
         for (int32_t buf = 0; buf < 2; buf++) {
             DispatchPayload &dp = payload_per_core_[core_id][buf];

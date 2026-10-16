@@ -16,13 +16,39 @@
 
 #include "arg_direction.h"
 
-using ArgsDumpArgMask = uint64_t;
+// 按实际参数槽编号选择 dump：Tensor 在前，标量紧随实际 Tensor 数量。
+// 使用定长 POD 多字掩码，保证跨 Host/AICPU memcpy 时不携带指针，
+// 并避免参数编号 >= 64 时移位溢出或静默丢失选择信息。
+constexpr uint32_t ARGS_DUMP_ARG_MASK_BITS = CORE_MAX_TENSOR_ARGS + CORE_MAX_SCALAR_ARGS;
+constexpr uint32_t ARGS_DUMP_ARG_MASK_WORDS = (ARGS_DUMP_ARG_MASK_BITS + 63) / 64;
 
-// Bitmask stored with each task when orchestration selects specific
-// tensor/scalar arguments for dump. Bit N corresponds to the payload argument
-// index: tensors first, then scalars.
-constexpr ArgsDumpArgMask ARGS_DUMP_ARG_MASK_NONE = 0;
-constexpr uint32_t ARGS_DUMP_ARG_MASK_BITS = 64;
+struct ArgsDumpArgMask {
+    uint64_t words[ARGS_DUMP_ARG_MASK_WORDS]{};
+
+    constexpr ArgsDumpArgMask() = default;
+    // 保留低 64 位掩码的构造方式；高位参数通过 set() 指定。
+    constexpr ArgsDumpArgMask(uint64_t low_word) :
+        words{low_word} {}
+
+    constexpr void set(int32_t index) {
+        if (index >= 0 && index < static_cast<int32_t>(ARGS_DUMP_ARG_MASK_BITS)) {
+            words[index / 64] |= uint64_t{1} << (index % 64);
+        }
+    }
+    constexpr bool test(int32_t index) const {
+        return index >= 0 && index < static_cast<int32_t>(ARGS_DUMP_ARG_MASK_BITS) &&
+               (words[index / 64] & (uint64_t{1} << (index % 64))) != 0;
+    }
+    constexpr bool operator==(const ArgsDumpArgMask &other) const {
+        for (uint32_t i = 0; i < ARGS_DUMP_ARG_MASK_WORDS; ++i) {
+            if (words[i] != other.words[i]) return false;
+        }
+        return true;
+    }
+    constexpr bool operator!=(const ArgsDumpArgMask &other) const { return !(*this == other); }
+};
+
+constexpr ArgsDumpArgMask ARGS_DUMP_ARG_MASK_NONE{};
 constexpr uint8_t ARGS_DUMP_RECORD_FLAG_ARG_INDEX_AMBIGUOUS = 1u << 0;
 
 struct ArgsDumpTaskMetadata {
@@ -33,4 +59,6 @@ struct ArgsDumpTaskMetadata {
 
 static_assert(std::is_trivially_copyable_v<ArgsDumpTaskMetadata>);
 static_assert(std::is_standard_layout_v<ArgsDumpTaskMetadata>);
-static_assert(sizeof(ArgsDumpTaskMetadata) == 32);
+static_assert(std::is_trivially_copyable_v<ArgsDumpArgMask>);
+static_assert(std::is_standard_layout_v<ArgsDumpArgMask>);
+static_assert(sizeof(ArgsDumpTaskMetadata) == 2 * ARGS_DUMP_ARG_MASK_WORDS * sizeof(uint64_t) + CORE_MAX_SCALAR_ARGS);

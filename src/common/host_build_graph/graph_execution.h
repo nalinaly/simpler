@@ -279,7 +279,7 @@ static_assert(std::is_standard_layout_v<InGraphTaskDefinition>);
 // is the one part of the in-graph task section no writer reaches. Nothing reads it
 // either, but pinning the size makes a new field's padding cost visible in the diff
 // that adds it rather than silently.
-static_assert(sizeof(InGraphTaskDefinition) == 80, "an InGraphTaskDefinition field changed the wire layout");
+static_assert(sizeof(InGraphTaskDefinition) == 144, "an InGraphTaskDefinition field changed the wire layout");
 static_assert(std::is_trivially_copyable_v<GraphPredicate>);
 static_assert(std::is_standard_layout_v<GraphPredicate>);
 static_assert(std::is_trivially_copyable_v<GraphBoundarySignature>);

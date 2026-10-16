@@ -365,11 +365,13 @@ struct Arg : TaskArgsTpl<TensorRef, uint64_t, MaxT, MaxS, TensorArgType> {
     }
 
 #if SIMPLER_DFX
-    uint64_t dump_arg_mask() const { return dump_arg_selection_.dump_arg_mask(); }
-    uint64_t dump_arg_index_ambiguous_mask() const { return dump_arg_selection_.dump_arg_index_ambiguous_mask(); }
+    ArgsDumpArgMask dump_arg_mask() const { return dump_arg_selection_.dump_arg_mask(); }
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask() const {
+        return dump_arg_selection_.dump_arg_index_ambiguous_mask();
+    }
 #else
-    uint64_t dump_arg_mask() const { return 0; }
-    uint64_t dump_arg_index_ambiguous_mask() const { return 0; }
+    ArgsDumpArgMask dump_arg_mask() const { return 0; }
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask() const { return 0; }
 #endif
 
     template <typename... Args>

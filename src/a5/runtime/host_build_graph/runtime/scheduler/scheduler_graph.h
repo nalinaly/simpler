@@ -30,7 +30,7 @@
 // record sits at a fixed offset inside it. These are literals because the AICore
 // .o cannot include runtime_types.h; scheduler.h checks them against the types at
 // compile time, and the contract UT again at run time.
-inline constexpr uint32_t SCHEDULER_GRAPH_TASK_STORAGE_STRIDE = 320;
+inline constexpr uint32_t SCHEDULER_GRAPH_TASK_STORAGE_STRIDE = 384;
 inline constexpr uint32_t SCHEDULER_GRAPH_DESCRIPTOR_OFFSET = 0;
 // TaskPayload includes the early-dispatch cache line in this wire layout.
 inline constexpr uint32_t SCHEDULER_GRAPH_PAYLOAD_OFFSET = 128;
@@ -39,7 +39,7 @@ inline constexpr uint32_t SCHEDULER_GRAPH_KERNEL_IDS_OFFSET = 8;
 inline constexpr uint32_t SCHEDULER_GRAPH_FANIN_COUNT_OFFSET = 8;
 inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_OFFSET = 128;
 inline constexpr int32_t SCHEDULER_GRAPH_MAX_FANIN = 128;
-inline constexpr uint32_t SCHEDULER_CORE_CALLABLE_RESOLVED_ADDR_OFFSET = 136;
+inline constexpr uint32_t SCHEDULER_CORE_CALLABLE_RESOLVED_ADDR_OFFSET = 1032;
 inline constexpr int32_t SCHEDULER_GRAPH_INVALID_KERNEL_ID = -1;
 
 enum class SchedulerGraphResult : uint64_t {

@@ -129,7 +129,7 @@ __aicore__ static void execute_dispatch_loop(__gm__ Handshake *my_hank) {
                 // already invalidated src's lines, so tensor_count/scalar_count/
                 // scalars read coherently with the orchestrator's submit writes.
                 // args[SPMD_LOCAL_CONTEXT_INDEX]/[SPMD_GLOBAL_CONTEXT_INDEX] are
-                // still written by the AICPU (num_args <= 48 never reaches them).
+                // 由 AICPU 预填；参数最多占 CORE Tensor + scalar 容量，不覆盖尾部上下文。
                 __gm__ char *src = reinterpret_cast<__gm__ char *>(exec_payload->src_payload);
                 int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_TENSOR_COUNT_OFFSET);
                 int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(src + TASKPAYLOAD_SCALAR_COUNT_OFFSET);

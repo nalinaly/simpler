@@ -667,6 +667,10 @@ set_tests_properties(test_sim_run_completion PROPERTIES LABELS "no_hardware")
 add_task_interface_test(test_buffer types/test_buffer.cpp)
 add_task_interface_test(test_child_memory types/test_child_memory.cpp)
 add_task_interface_test(test_chip_max_tensor_args types/test_chip_max_tensor_args.cpp)
+add_task_interface_test(test_core_argument_capacity types/test_core_argument_capacity.cpp)
+target_include_directories(test_core_argument_capacity PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
+)
 add_task_interface_test(test_callable_scalar_count types/test_callable_scalar_count.cpp)
 add_task_interface_test(test_call_config types/test_call_config.cpp)
 add_task_interface_test(test_kernel_invocation_header types/test_kernel_invocation_header.cpp)

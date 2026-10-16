@@ -378,11 +378,13 @@ public:
     }
 
 #if SIMPLER_DFX
-    uint64_t dump_arg_mask() const { return dump_arg_selection_.dump_arg_mask(); }
-    uint64_t dump_arg_index_ambiguous_mask() const { return dump_arg_selection_.dump_arg_index_ambiguous_mask(); }
+    ArgsDumpArgMask dump_arg_mask() const { return dump_arg_selection_.dump_arg_mask(); }
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask() const {
+        return dump_arg_selection_.dump_arg_index_ambiguous_mask();
+    }
 #else
-    uint64_t dump_arg_mask() const { return 0; }
-    uint64_t dump_arg_index_ambiguous_mask() const { return 0; }
+    ArgsDumpArgMask dump_arg_mask() const { return 0; }
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask() const { return 0; }
 #endif
 
     template <typename... Args>
@@ -849,7 +851,8 @@ private:
 using CoreTaskArgs = Arg<MAX_TENSOR_ARGS, MAX_SCALAR_ARGS>;
 
 // Tensor and scalar capacity of a Graph boundary.
-inline constexpr int32_t GRAPH_MAX_TENSOR_ARGS = 128;
+// Graph 边界至少能容纳一个完整 CORE 任务的 Tensor，避免融合后在外层再次触顶。
+inline constexpr int32_t GRAPH_MAX_TENSOR_ARGS = CHIP_MAX_TENSOR_ARGS;
 inline constexpr int32_t GRAPH_MAX_SCALAR_ARGS = 64;
 
 /**

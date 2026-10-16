@@ -42,7 +42,7 @@
 #include "arg_direction.h"
 #include "intrinsic.h"
 
-/** Max dispatch arguments: 16 scalars + up to 32 tensor pointers + ext params */
+/** 派发参数容量：CORE Tensor + 标量 + 两个上下文指针 */
 #ifndef DISPATCH_MAX_ARGS
 #define DISPATCH_MAX_ARGS (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS + EXT_PARAMS_COUNT)
 #endif
@@ -51,7 +51,7 @@
 #define CHIP_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
 #endif
 
-// Verify hardcoded indices in intrinsic.h match the computed values.
+// 验证 runtime 与 InCore 使用同一组参数及上下文槽位。
 static_assert(
     (MAX_TENSOR_ARGS + MAX_SCALAR_ARGS) == SPMD_LOCAL_CONTEXT_INDEX, "LOCAL_CONTEXT_INDEX out of sync with intrinsic.h"
 );
@@ -70,8 +70,9 @@ constexpr uint32_t TASKPAYLOAD_TENSOR_COUNT_OFFSET = 0;
 constexpr uint32_t TASKPAYLOAD_SCALAR_COUNT_OFFSET = 4;
 // Cache line 9 (byte 576) holds the AICPU-only DispatchPredicate; tensors follow it.
 constexpr uint32_t TASKPAYLOAD_TENSORS_OFFSET = 640;
-constexpr uint32_t TASKPAYLOAD_SCALARS_OFFSET = 4736;
 constexpr uint32_t TASKPAYLOAD_TENSOR_STRIDE = 128;  // sizeof(simpler::tmr::Tensor)
+constexpr uint32_t TASKPAYLOAD_SCALARS_OFFSET =
+    TASKPAYLOAD_TENSORS_OFFSET + CORE_MAX_TENSOR_ARGS * TASKPAYLOAD_TENSOR_STRIDE;
 
 /**
  * Per-core dispatch payload: function address + args[] + SPMD context.
@@ -106,7 +107,7 @@ struct alignas(64) DispatchPayload {
      *  is never 0, so the gate flag is lossless. */
     volatile uint64_t src_payload;
 
-    // === Cache lines 1..7: kernel argument vector ===
+    // === 从 cache line 1 开始：kernel 参数数组，按 CORE 容量扩展 ===
     /** [0..num_args) = GM tensor pointers + scalar values; [SPMD_LOCAL_CONTEXT_INDEX]
      *  = &local_context, [SPMD_GLOBAL_CONTEXT_INDEX] = &global_context (both prefilled
      *  once at init). On the gated path the AICPU leaves [0..num_args) unwritten and
@@ -118,7 +119,7 @@ struct alignas(64) DispatchPayload {
      *  per dispatch, so it lives in the tail (not the CL0 control block).
      *  args[SPMD_GLOBAL_CONTEXT_INDEX] points here. */
     GlobalContext global_context;
-    // No explicit tail padding: alignas(64) rounds sizeof up to 512 (8 cache lines).
+    // alignas(64) 自动补齐尾部；这是软件派发 ABI，不受原 512 字节限制。
 
     static_assert(sizeof(args[0]) == 8);
     static_assert(
@@ -127,6 +128,9 @@ struct alignas(64) DispatchPayload {
     );
 };
 
-static_assert(sizeof(DispatchPayload) == 512, "DispatchPayload hardware ABI size drift");
+static_assert(
+    sizeof(DispatchPayload) == CHIP_ALIGN_UP(64 + sizeof(uint64_t) * DISPATCH_MAX_ARGS + sizeof(GlobalContext), 64),
+    "DispatchPayload software ABI size drift"
+);
 static_assert(offsetof(DispatchPayload, args) == 64, "args[] must start at cache line 1 (control block = CL0)");
 static_assert(offsetof(DispatchPayload, src_payload) < 64, "src_payload (gate) must live on the CL0 control block");

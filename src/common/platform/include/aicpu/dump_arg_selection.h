@@ -16,10 +16,9 @@
 #include <string.h>
 
 #include "arg_direction.h"
+#include "common/args_dump_task_metadata.h"
 
 struct DumpArgSelection {
-    static_assert(CORE_MAX_TENSOR_ARGS + CORE_MAX_SCALAR_ARGS <= 64, "dump arg mask assumes at most 64 arguments");
-
     void clear() {
         dump_arg_mask_ = 0;
         dump_arg_index_ambiguous_mask_ = 0;
@@ -27,15 +26,15 @@ struct DumpArgSelection {
         clear_scalar_dtypes(0, CORE_MAX_SCALAR_ARGS);
     }
 
-    uint64_t dump_arg_mask() const { return dump_arg_mask_; }
-    uint64_t dump_arg_index_ambiguous_mask() const { return dump_arg_index_ambiguous_mask_; }
+    ArgsDumpArgMask dump_arg_mask() const { return dump_arg_mask_; }
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask() const { return dump_arg_index_ambiguous_mask_; }
     const uint8_t *scalar_dtypes() const { return scalar_dtypes_; }
 
     void mark_index(int32_t index) {
         if (!is_valid_arg_index(index)) {
             return;
         }
-        dump_arg_mask_ |= (uint64_t{1} << index);
+        dump_arg_mask_.set(index);
     }
 
     void mark_all(int32_t tensor_count, int32_t scalar_count) {
@@ -106,7 +105,7 @@ struct DumpArgSelection {
     }
 
 private:
-    static constexpr int32_t kDumpArgBitCount = 64;
+    static constexpr int32_t kDumpArgBitCount = ARGS_DUMP_ARG_MASK_BITS;
 
     static bool is_valid_arg_index(int32_t index) { return index >= 0 && index < kDumpArgBitCount; }
 
@@ -132,7 +131,7 @@ private:
         if (!is_valid_arg_index(index)) {
             return;
         }
-        dump_arg_index_ambiguous_mask_ |= (uint64_t{1} << index);
+        dump_arg_index_ambiguous_mask_.set(index);
     }
 
     void clear_scalar_sources() { clear_scalar_sources(0, CORE_MAX_SCALAR_ARGS); }
@@ -153,8 +152,8 @@ private:
         memset(&scalar_dtypes_[start], 0, count * sizeof(uint8_t));
     }
 
-    uint64_t dump_arg_mask_{0};
-    uint64_t dump_arg_index_ambiguous_mask_{0};
+    ArgsDumpArgMask dump_arg_mask_{};
+    ArgsDumpArgMask dump_arg_index_ambiguous_mask_{};
     uintptr_t scalar_source_ptrs_[CORE_MAX_SCALAR_ARGS]{};
     uint8_t scalar_dtypes_[CORE_MAX_SCALAR_ARGS]{};
 };

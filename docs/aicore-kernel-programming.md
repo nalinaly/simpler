@@ -30,9 +30,12 @@ args layout (tensormap_and_ringbuffer):
   [0 .. tensor_count-1]                = tensor GM pointers
   [tensor_count .. +scalar_count-1]    = scalar values
   ...
-  [SPMD_LOCAL_CONTEXT_INDEX  = 48]     = (uint64_t)&LocalContext   per-dispatch
-  [SPMD_GLOBAL_CONTEXT_INDEX = 49]     = (uint64_t)&GlobalContext  per-core
+  [SPMD_LOCAL_CONTEXT_INDEX  = 272]     = (uint64_t)&LocalContext   per-dispatch
+  [SPMD_GLOBAL_CONTEXT_INDEX = 273]     = (uint64_t)&GlobalContext  per-core
 ```
+
+当前 CORE 容量为 256 个 Tensor 和 16 个标量；上下文槽位由容量常量推导。
+这次容量扩展改变了软件 ABI，Host、AICPU、AICore 和 callable 必须一起重编译。
 
 The trailing two slots are written by the scheduler before each
 dispatch and hold the **SPMD execution context** described below. They

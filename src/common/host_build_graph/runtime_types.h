@@ -403,7 +403,7 @@ struct TaskPayload {
     // reinitialization. READY records that producer release observed OWNER;
     // only cancellation clears OWNER during the current task lifetime.
     std::atomic<uint8_t> early_sync_drain_state{EARLY_SYNC_DRAIN_NONE};
-    // === Cache line 2 — dispatch predicate + dump metadata (AICPU-only) ===
+    // === Cache lines 2..3 — dispatch predicate + 扩展 dump metadata (AICPU-only) ===
     // AICore never reads either — args are materialized from line 0's counts and
     // region deltas. Resolved at submit; evaluated by the scheduler at dispatch.
     alignas(64) DispatchPredicate predicate;
@@ -539,7 +539,7 @@ struct TaskPayload {
 
 // TaskPayload layout verification (offsetof requires complete type). The counts
 // and region deltas share the first cache line, the early-dispatch atomics own the
-// second, and the AICPU-only predicate + dump metadata own the third.
+// second；AICPU-only predicate + 扩展 dump metadata 使用后续两行。
 static_assert(offsetof(TaskPayload, tensors) == 12, "region deltas must follow the three counts");
 static_assert(
     offsetof(TaskPayload, fanin) + sizeof(simpler::hbg::SelfRelativePtr<int32_t>) <= 64,
@@ -552,10 +552,10 @@ static_assert(
 );
 static_assert(offsetof(TaskPayload, predicate) == 128, "dispatch predicate owns cache line 2");
 static_assert(
-    offsetof(TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 192,
-    "dump metadata must fit the predicate's cache line"
+    offsetof(TaskPayload, dump_metadata) + sizeof(ArgsDumpTaskMetadata) <= 256,
+    "predicate and dump metadata must fit two cache lines"
 );
-static_assert(sizeof(TaskPayload) == 192, "TaskPayload is three cache lines and independent of every argument cap");
+static_assert(sizeof(TaskPayload) == 256, "TaskPayload contains four cache lines with expanded dump masks");
 // compact_live_image restacks the payload segment with one memcpy and the device
 // copy moves the whole image, so the payload has to be a POD wire struct. Deleting
 // SelfRelativePtr's copy operations does not cost it that — a deleted special member
@@ -798,7 +798,7 @@ struct alignas(64) ChipTaskStorage {
 // offsetof is defined for a standard-layout type, which is what the accessors need.
 static_assert(std::is_standard_layout_v<ChipTaskStorage>);
 static_assert(std::is_trivially_destructible_v<ChipTaskStorage>);
-static_assert(sizeof(ChipTaskStorage) == 320);
+static_assert(sizeof(ChipTaskStorage) == 384);
 static_assert(offsetof(ChipTaskStorage, slot) == sizeof(TaskDescriptor));
 static_assert(offsetof(ChipTaskStorage, payload) == offsetof(ChipTaskStorage, slot) + sizeof(ChipTaskSlotState));
 

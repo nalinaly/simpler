@@ -548,12 +548,10 @@ TEST(GraphBoundaryPool, TensorSlotsCoverPackedBytesMinimally) {
     }
 }
 
-// A Graph boundary is GraphTaskArgs-wide while the pools budget MAX_TENSOR_ARGS /
-// MAX_SCALAR_ARGS per window slot, so the widest legal boundary draws several slots'
-// worth. graph_submit_outer's preflight exists because of that gap; pin the gap itself
-// so a cap or type-size change cannot quietly close or widen it unnoticed.
-TEST(GraphBoundaryPool, WidestBoundaryExceedsOneSlotBudget) {
-    EXPECT_GT(graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS), static_cast<size_t>(MAX_TENSOR_ARGS));
+// Tensor 容量扩到 256 后，最宽 Graph 边界的紧凑 Tensor 描述符已能放入一个
+// CORE 任务槽的预算；标量池仍然更宽，需要保留独立的预检。
+TEST(GraphBoundaryPool, WidestBoundaryFitsTensorBudgetButExceedsScalarBudget) {
+    EXPECT_LE(graph_boundary_tensor_pool_slots(GRAPH_MAX_TENSOR_ARGS), static_cast<size_t>(MAX_TENSOR_ARGS));
     EXPECT_GT(
         static_cast<size_t>(
             CHIP_ALIGN_UP(static_cast<int32_t>(GRAPH_MAX_SCALAR_ARGS), ARG_POOL_ALIGN / (int32_t)sizeof(uint64_t))

@@ -312,14 +312,10 @@ bool should_dump_arg(ArgsDumpArgMask arg_mask, int32_t arg_index) {
     if (!is_dump_args_selective_mode()) {
         return true;
     }
-    if (arg_index < 0 || arg_index >= static_cast<int32_t>(ARGS_DUMP_ARG_MASK_BITS)) return false;
-    return (arg_mask & (ArgsDumpArgMask{1} << arg_index)) != 0;
+    return arg_mask.test(arg_index);
 }
 
-bool has_dump_arg_flag(ArgsDumpArgMask arg_mask, int32_t arg_index) {
-    if (arg_index < 0 || arg_index >= static_cast<int32_t>(ARGS_DUMP_ARG_MASK_BITS)) return false;
-    return (arg_mask & (ArgsDumpArgMask{1} << arg_index)) != 0;
-}
+bool has_dump_arg_flag(ArgsDumpArgMask arg_mask, int32_t arg_index) { return arg_mask.test(arg_index); }
 
 bool try_log_dump_args_layout_mismatch() {
     if (s_logged_dump_args_layout_mismatch) {
