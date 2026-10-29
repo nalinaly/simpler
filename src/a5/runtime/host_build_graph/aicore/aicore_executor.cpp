@@ -256,10 +256,12 @@ __aicore__ bool bootstrap_ready_graph(
 }
 
 // The local state owns the immutable configuration; all arguments are register-passed.
+template <bool WithProfiling>
 __aicore__ bool run_ready_dispatch_loop(
     const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, SchedulerLocalState *context,
-    __gm__ SchedulerRunControl *run_control, SchedulerWorkerStats *stats, uint64_t profiling_level
+    __gm__ SchedulerRunControl *run_control, SchedulerWorkerStats *stats, uint64_t requested_profiling_level
 ) {
+    const uint64_t profiling_level = WithProfiling ? requested_profiling_level : 0;
     const uint32_t cluster_lane = context->config.self_lane;
     const bool task_timing_enabled = scheduler_task_timing_enabled(profiling_level);
     const bool phase_timing_enabled = scheduler_phase_timing_enabled(profiling_level);
@@ -525,7 +527,7 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
                     SchedulerErrorSite::EXECUTOR_INVALID_DISPATCH_SLOT
                 );
             } else {
-                (void)run_ready_dispatch_loop(
+                (void)run_ready_dispatch_loop<WithProfiling>(
                     graph, scheduler_state_base, &scheduler_local_state, run_control, &stats, profiling_level
                 );
             }

@@ -1,0 +1,273 @@
+{
+  "schema": "csa-hotloop-summary-v1",
+  "order": "B/A/A/B",
+  "batches": [
+    {
+      "label": "idle-hotloop-after-a",
+      "arm": "candidate",
+      "result_sha256": "a9385e52ace0d61d30db93fd45b2b865a54feb489f34ad3cdfc4c1f3bda9f0d4",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "58e4a2c6c9163419cd817c87ed0287fd23469505",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "b3a74be48cfb2ee46d70f36c9810dad6b6214636d6982000d76ffc153ac2762c",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "b5dc07c92f21d4deb952bc5059e91eabcbb6ce4b260be35337b5d9de35cfa103"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "device_us": {
+        "n": 100,
+        "min": 2007.594,
+        "median": 2034.7694999999999,
+        "mean": 2043.22851,
+        "p90": 2080.9624,
+        "p99": 2175.42309,
+        "max": 2193.549
+      },
+      "host_us": {
+        "n": 100,
+        "min": 82347.359,
+        "median": 86516.1775,
+        "mean": 87966.84708,
+        "p90": 92862.0454,
+        "p99": 112474.7484800001,
+        "max": 129870.68
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "samples": 100
+    },
+    {
+      "label": "idle-hotloop-before-a",
+      "arm": "baseline",
+      "result_sha256": "338bdf8dc893f554ffdbe6ac99a3618792b2834c76164f52eaab481024a6cdcc",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "58e4a2c6c9163419cd817c87ed0287fd23469505",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "0a1675c544cf6311aca661639d853938d3178dffd59137983998507deacee9d4"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "device_us": {
+        "n": 100,
+        "min": 2030.956,
+        "median": 2067.185,
+        "mean": 2074.20302,
+        "p90": 2105.7275,
+        "p99": 2174.6861900000004,
+        "max": 2178.665
+      },
+      "host_us": {
+        "n": 100,
+        "min": 81690.975,
+        "median": 92573.5485,
+        "mean": 105934.11903,
+        "p90": 148577.24220000004,
+        "p99": 267624.71918000065,
+        "max": 386818.856
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "samples": 100
+    },
+    {
+      "label": "idle-hotloop-before-b",
+      "arm": "baseline",
+      "result_sha256": "2e6810b8f63dc301f695ab608667e85b07ed5354cb9dafa890bb33b1b89603b5",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "58e4a2c6c9163419cd817c87ed0287fd23469505",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "0a1675c544cf6311aca661639d853938d3178dffd59137983998507deacee9d4"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "device_us": {
+        "n": 100,
+        "min": 2023.146,
+        "median": 2060.2664999999997,
+        "mean": 2063.04873,
+        "p90": 2084.8503,
+        "p99": 2153.27951,
+        "max": 2162.24
+      },
+      "host_us": {
+        "n": 100,
+        "min": 75965.707,
+        "median": 79365.1475,
+        "mean": 80300.86951,
+        "p90": 84283.285,
+        "p99": 93862.46326000002,
+        "max": 95557.468
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "samples": 100
+    },
+    {
+      "label": "idle-hotloop-after-b",
+      "arm": "candidate",
+      "result_sha256": "938b7ca82444ab4e406fcfe76cbeae87d110718fb0ad0bc996642d521eb9f7c4",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "58e4a2c6c9163419cd817c87ed0287fd23469505",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "b3a74be48cfb2ee46d70f36c9810dad6b6214636d6982000d76ffc153ac2762c",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "b5dc07c92f21d4deb952bc5059e91eabcbb6ce4b260be35337b5d9de35cfa103"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "device_us": {
+        "n": 100,
+        "min": 2000.865,
+        "median": 2039.1365,
+        "mean": 2042.7946,
+        "p90": 2077.6442,
+        "p99": 2123.31218,
+        "max": 2134.814
+      },
+      "host_us": {
+        "n": 100,
+        "min": 80857.077,
+        "median": 83230.54550000001,
+        "mean": 84348.94167,
+        "p90": 87745.1331,
+        "p99": 105888.07773000002,
+        "max": 110636.883
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "samples": 100
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "device_us": {
+        "n": 200,
+        "min": 2023.146,
+        "median": 2064.5375000000004,
+        "mean": 2068.625875,
+        "p90": 2102.2698,
+        "p99": 2173.91835,
+        "max": 2178.665
+      },
+      "host_us": {
+        "n": 200,
+        "min": 75965.707,
+        "median": 84601.399,
+        "mean": 93117.49427,
+        "p90": 108970.21449999997,
+        "p99": 173131.04512999914,
+        "max": 386818.856
+      }
+    },
+    "candidate": {
+      "device_us": {
+        "n": 200,
+        "min": 2000.865,
+        "median": 2037.089,
+        "mean": 2043.011555,
+        "p90": 2078.927,
+        "p99": 2170.52463,
+        "max": 2193.549
+      },
+      "host_us": {
+        "n": 200,
+        "min": 80857.077,
+        "median": 85081.8825,
+        "mean": 86157.894375,
+        "p90": 90725.24309999999,
+        "p99": 110653.50448999999,
+        "max": 129870.68
+      }
+    }
+  },
+  "runtime_change": "调度热循环复用已有WithProfiling模板，不强制内联入口",
+  "checks": {
+    "linked_kernels": 54,
+    "strict_l4": true,
+    "executions": 2308,
+    "deps": 133,
+    "events": 46733,
+    "a5_boundary_classes": 3,
+    "a5sim_boundary_classes": 3,
+    "a5_regression_passed": 88,
+    "a5_regression_skipped": 4,
+    "a5_regression_deselected": 4,
+    "a5_evidence": "regressions/hotloop-candidate-r1/result.json",
+    "a5sim_repeated_regression_passed": 67,
+    "a5sim_repeated_regression_deselected": 29,
+    "l4_artifact": "artifacts/idle-hotloop-after-l4"
+  },
+  "decision": "保留独立模板特化；完整Device中位数2037.089us，尚未达到1500us",
+  "date": "2026-10-29",
+  "artifact_root": "reports/csa_poursoul_20261027.Osnaam",
+  "reduction_us": 27.448500000000422,
+  "reduction_percent": 1.3295229561100448,
+  "limits": [
+    "当前只有两批/臂，不是最终五批低于1500us验收",
+    "L4仍运行有记录版本，不能将其区间变化归因于无记录分支的编译特化",
+    "CLI竞争监测不证明系统级设备独占",
+    "首次仿真整批有1项有限延时overlap见证失败；单独与停止其他回归后的原顺序整批均通过，未删除失败或放宽断言",
+    "完整故障矩阵尚待最终验收"
+  ]
+}
