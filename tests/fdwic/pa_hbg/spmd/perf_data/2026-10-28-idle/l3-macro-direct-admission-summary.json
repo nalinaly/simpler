@@ -1,0 +1,2290 @@
+{
+  "schema": "csa-l3-macro-direct-admission-v1",
+  "date": "2026-10-29",
+  "decision": "候选未证明稳定收益，运行时及候选策略测试均撤回；保留原三 lane 协议与成员集合。",
+  "device_policy": {
+    "device": 0,
+    "soc": "Ascend950PR_958b",
+    "warmup": 5,
+    "measured_per_batch": 100,
+    "metric": "完整 Device，包括启动和退出；不是 kernel 窗口",
+    "isolation": "无其他 A5 CLI 重叠观察，不等于全系统独占证明"
+  },
+  "benchmarks": [
+    {
+      "label": "idle-direct-admission-before-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-direct-admission-before-a/result.json",
+      "result_sha256": "92bb8c41df79a1850904d2f63c6fc90834e6e2c4692bc55be4fb75dd7ad0f3fa",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1966.254,
+          "median": 2008.468,
+          "mean": 2013.23362,
+          "max": 2148.397,
+          "p90": 2043.3075000000001,
+          "p99": 2133.5371000000005,
+          "samples": [
+            2008.391,
+            2020.749,
+            1992.69,
+            2010.587,
+            1966.254,
+            2078.178,
+            2014.78,
+            2008.6,
+            1988.199,
+            2043.825,
+            1991.269,
+            1994.151,
+            2052.762,
+            2017.145,
+            1994.033,
+            1997.989,
+            1995.338,
+            2133.387,
+            2029.747,
+            2005.208,
+            2012.637,
+            2059.513,
+            2029.87,
+            2042.548,
+            2012.781,
+            2025.048,
+            2006.883,
+            1991.791,
+            2020.796,
+            2023.81,
+            2005.907,
+            2011.974,
+            2017.507,
+            2016.258,
+            2011.176,
+            1981.245,
+            1989.902,
+            2016.36,
+            2019.464,
+            2026.883,
+            1993.246,
+            2029.459,
+            2080.16,
+            2016.323,
+            1973.103,
+            2026.364,
+            2002.97,
+            2034.221,
+            2008.82,
+            2014.212,
+            1977.473,
+            2006.026,
+            2025.83,
+            2059.172,
+            1978.14,
+            2023.0,
+            2010.207,
+            2002.444,
+            2004.466,
+            2040.25,
+            2003.389,
+            1988.004,
+            2006.865,
+            2009.232,
+            1994.994,
+            2001.208,
+            2018.184,
+            2009.14,
+            2043.25,
+            2015.369,
+            2000.702,
+            2000.005,
+            1986.047,
+            2148.397,
+            2016.638,
+            2008.545,
+            2021.83,
+            2003.953,
+            1969.772,
+            1989.458,
+            2006.925,
+            2047.76,
+            1997.655,
+            2028.149,
+            2002.303,
+            2074.166,
+            2005.001,
+            1996.732,
+            2004.381,
+            1999.756,
+            1999.716,
+            1997.485,
+            2006.344,
+            1978.558,
+            2011.315,
+            1987.089,
+            2003.953,
+            2004.187,
+            1991.281,
+            1974.103
+          ]
+        },
+        "host_us": {
+          "min": 82896.321,
+          "median": 86895.6325,
+          "mean": 87710.04622,
+          "max": 109941.097,
+          "p90": 91263.8925,
+          "p99": 105298.84741000003
+        }
+      }
+    },
+    {
+      "label": "idle-direct-admission-after-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-direct-admission-after-a/result.json",
+      "result_sha256": "12618566a8c683daac41b973e96563af688e8c3bc2abe9587e70dc7efc62420b",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "8baa339f25d170014d463899410a5d0cb9ca866f97bdbb74a2460964881bbf6b",
+        "runtime_sha256": {
+          "libhost_runtime.so": "1855e46d239e76dc22ade72f1ee6656f72c706be7e4c149c6013590ec29d8702",
+          "libaicpu_kernel.so": "be46a5f2dcb47f016c36f0472fd09acbc66d42d65b4f3e9fbf26d322ed83920f",
+          "aicore_kernel.o": "e50b9c75f7a36f54137c10c4d00b581b6559cda1a620c246cf350050b7afaca0"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "b9ca31483229ac339737cace9d45ef05f8800329ff986240db70a3b7e287820c",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1969.417,
+          "median": 2003.344,
+          "mean": 2012.3169599999999,
+          "max": 2118.321,
+          "p90": 2052.1575,
+          "p99": 2097.5498100000004,
+          "samples": [
+            1995.461,
+            2089.711,
+            1996.641,
+            1999.477,
+            2019.889,
+            2003.456,
+            1995.698,
+            2014.521,
+            2075.542,
+            1996.267,
+            2013.464,
+            2001.526,
+            1983.829,
+            2020.46,
+            2052.151,
+            2000.657,
+            2026.558,
+            2001.329,
+            1987.332,
+            2036.125,
+            2019.433,
+            2001.237,
+            2052.216,
+            1994.216,
+            2001.455,
+            1969.417,
+            2006.894,
+            1988.765,
+            2118.321,
+            2028.213,
+            2060.199,
+            2008.008,
+            1974.375,
+            1990.722,
+            2052.073,
+            2010.22,
+            1998.146,
+            2019.674,
+            2026.338,
+            1989.465,
+            2059.109,
+            2037.11,
+            2001.33,
+            2009.023,
+            1995.351,
+            1987.747,
+            2032.926,
+            2045.808,
+            2005.834,
+            1996.216,
+            2001.514,
+            2000.661,
+            1997.212,
+            2013.025,
+            2021.239,
+            2003.295,
+            2049.661,
+            2066.783,
+            1971.093,
+            2048.076,
+            1983.894,
+            2004.681,
+            1984.97,
+            1990.223,
+            2097.34,
+            1994.858,
+            1988.394,
+            2062.824,
+            2050.817,
+            1976.699,
+            1992.329,
+            2003.393,
+            1992.856,
+            2014.412,
+            1988.348,
+            1995.637,
+            2033.994,
+            2010.853,
+            2016.036,
+            1998.316,
+            2009.052,
+            1998.607,
+            2000.304,
+            1985.469,
+            2015.482,
+            1997.123,
+            2014.082,
+            2010.983,
+            2003.22,
+            2004.908,
+            2059.685,
+            1996.763,
+            1993.723,
+            2005.128,
+            1994.754,
+            1992.639,
+            2004.45,
+            2001.973,
+            1984.367,
+            2015.616
+          ]
+        },
+        "host_us": {
+          "min": 81011.315,
+          "median": 84668.79749999999,
+          "mean": 89093.6159,
+          "max": 195588.065,
+          "p90": 97577.107,
+          "p99": 108183.77759000045
+        }
+      }
+    },
+    {
+      "label": "idle-direct-admission-before-b",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-direct-admission-before-b/result.json",
+      "result_sha256": "c17c1607f25202e8316af5ee8637c66a1fc0138ada00efbdb09c2b91d1884ad8",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1974.628,
+          "median": 2000.424,
+          "mean": 2008.90612,
+          "max": 2115.374,
+          "p90": 2055.5942999999997,
+          "p99": 2107.4807299999998,
+          "samples": [
+            2070.616,
+            1987.0,
+            2066.812,
+            2082.548,
+            2002.709,
+            2006.056,
+            2115.374,
+            2028.64,
+            1996.308,
+            1983.241,
+            2107.401,
+            1978.739,
+            1992.497,
+            2002.964,
+            1996.155,
+            2019.684,
+            2005.379,
+            1995.829,
+            2039.023,
+            1988.298,
+            2053.438,
+            2067.134,
+            2000.394,
+            1975.545,
+            2001.97,
+            2006.739,
+            2003.387,
+            2023.443,
+            2004.349,
+            2008.629,
+            1997.409,
+            1999.427,
+            2011.005,
+            1987.148,
+            2014.272,
+            2002.758,
+            1997.089,
+            2088.463,
+            1981.244,
+            2004.679,
+            2055.484,
+            2063.257,
+            2009.344,
+            1989.575,
+            2003.824,
+            2015.19,
+            2025.626,
+            1989.179,
+            2003.206,
+            1981.446,
+            1990.786,
+            2041.954,
+            1991.798,
+            1980.426,
+            2007.225,
+            2000.454,
+            2005.593,
+            1992.479,
+            2002.776,
+            1998.744,
+            1994.744,
+            1996.754,
+            1986.244,
+            2004.591,
+            1979.327,
+            1991.569,
+            1997.572,
+            1974.628,
+            1989.877,
+            1981.623,
+            1989.555,
+            2008.133,
+            2000.764,
+            1996.327,
+            1982.183,
+            2018.296,
+            1994.815,
+            1976.634,
+            2009.111,
+            1999.256,
+            1997.019,
+            2020.136,
+            2103.574,
+            1989.495,
+            2026.635,
+            2002.905,
+            1987.095,
+            1989.987,
+            1997.294,
+            2056.587,
+            2014.595,
+            2003.887,
+            1993.676,
+            1983.917,
+            2000.286,
+            1999.429,
+            2052.244,
+            1999.12,
+            1975.922,
+            1982.645
+          ]
+        },
+        "host_us": {
+          "min": 80233.172,
+          "median": 82164.006,
+          "mean": 82750.24623,
+          "max": 98380.816,
+          "p90": 84905.5926,
+          "p99": 93022.29646000003
+        }
+      }
+    }
+  ],
+  "macro": [
+    {
+      "label": "l3-a",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-a/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "898afb5659381018a238ab7e6b7b4b070db4f29eb8d0e7b98f3ab69f1d8b94cc",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1962.3319999999999,
+      "global_gap_us": 549.9010000000005,
+      "global_gap_count": 67,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 279.869,
+          "span_us": 279.869,
+          "global_gap_us": 105.97500000000002,
+          "aic_core_us": 484.15500000000003,
+          "aiv_core_us": 644.4300000000001
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 279.869,
+          "end_us": 665.126,
+          "span_us": 385.25699999999995,
+          "global_gap_us": 13.072999999999979,
+          "aic_core_us": 3152.2179999999985,
+          "aiv_core_us": 3642.2910000000006
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 665.126,
+          "end_us": 1377.9879999999998,
+          "span_us": 712.862,
+          "global_gap_us": 308.153,
+          "aic_core_us": 1662.5710000000015,
+          "aiv_core_us": 2908.6529999999993
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1377.9879999999998,
+          "end_us": 1707.5,
+          "span_us": 329.51200000000017,
+          "global_gap_us": 59.07100000000037,
+          "aic_core_us": 1948.8639999999998,
+          "aiv_core_us": 2248.524
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1707.5,
+          "end_us": 1962.3319999999999,
+          "span_us": 254.83199999999988,
+          "global_gap_us": 63.62900000000013,
+          "aic_core_us": 4499.408999999999,
+          "aiv_core_us": 4661.727000000001
+        }
+      ],
+      "t23": {
+        "span_us": 385.25699999999995,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.687999999999988,
+          "median": 6.739499999999964,
+          "mean": 7.166333984375001,
+          "max": 12.878000000000043
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 13.514999999999986,
+          "median": 16.77449999999999,
+          "mean": 16.982716666666665,
+          "max": 22.614999999999895
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 19.79499999999996,
+          "median": 23.674499999999966,
+          "mean": 24.1753125,
+          "max": 35.49299999999994
+        },
+        "last_finishing_cluster": {
+          "cluster": 27,
+          "groups": 17,
+          "head_wait_us": 4.106999999999971,
+          "kernel_envelopes_us": 117.28500000000008,
+          "between_groups_us": 263.8649999999999
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 26.243000000000166,
+        "last_projection_first_start_after_t56_us": 234.88900000000012,
+        "projection_first_start_spread_us": 208.64599999999996,
+        "last_projection_return_after_t56_us": 266.9530000000002,
+        "all_pack_done_after_t56_us": 329.51200000000017,
+        "projection_span_us": {
+          "n": 16,
+          "min": 18.70399999999995,
+          "median": 28.74549999999988,
+          "mean": 28.285125000000022,
+          "max": 35.48199999999997
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 1.7870000000000346,
+          "median": 2.9534999999999627,
+          "mean": 3.629499999999993,
+          "max": 7.570000000000164
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 60.30899999999997,
+          "median": 133.745,
+          "mean": 125.24037499999999,
+          "max": 163.09300000000007
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 137.72599999999989,
+            "pack_span_us": 2.7380000000000564
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 136.25,
+            "pack_span_us": 3.8489999999999327
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 163.09300000000007,
+            "pack_span_us": 4.718999999999824
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 161.64300000000003,
+            "pack_span_us": 2.1569999999999254
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 60.30899999999997,
+            "pack_span_us": 2.25
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 93.93099999999981,
+            "pack_span_us": 2.428000000000111
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 131.24,
+            "pack_span_us": 3.0370000000000346
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 101.97299999999996,
+            "pack_span_us": 4.514000000000124
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 153.1210000000001,
+            "pack_span_us": 7.354000000000042
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 139.644,
+            "pack_span_us": 7.570000000000164
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 79.36400000000003,
+            "pack_span_us": 2.311999999999898
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 95.58999999999992,
+            "pack_span_us": 4.558999999999969
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 121.92000000000007,
+            "pack_span_us": 2.0170000000000528
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 108.51600000000008,
+            "pack_span_us": 3.910999999999831
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 157.4889999999998,
+            "pack_span_us": 1.7870000000000346
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 162.03700000000003,
+            "pack_span_us": 2.869999999999891
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 24.817000000000007,
+          "median": 35.59699999999998,
+          "mean": 37.30899999999999,
+          "max": 61.55899999999997
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 1,
+        "groups": 2,
+        "head_wait_us": 7.414999999999964,
+        "kernel_envelopes_us": 161.81799999999998,
+        "between_groups_us": 20.983999999999924
+      }
+    },
+    {
+      "label": "l3-b",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-b/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "f0f7125596349daa7f0ba70682c009519195ce9d3ec0ee5d04138cbbd2ddce25",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1932.1169999999997,
+      "global_gap_us": 528.7669999999996,
+      "global_gap_count": 69,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 252.047,
+          "span_us": 252.047,
+          "global_gap_us": 102.26199999999992,
+          "aic_core_us": 477.5330000000002,
+          "aiv_core_us": 627.1550000000002
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 252.047,
+          "end_us": 640.952,
+          "span_us": 388.905,
+          "global_gap_us": 8.818000000000097,
+          "aic_core_us": 3121.639,
+          "aiv_core_us": 3644.8920000000003
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 640.952,
+          "end_us": 1352.479,
+          "span_us": 711.5270000000002,
+          "global_gap_us": 296.2959999999997,
+          "aic_core_us": 1678.4070000000017,
+          "aiv_core_us": 2907.711000000005
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1352.479,
+          "end_us": 1681.443,
+          "span_us": 328.96399999999994,
+          "global_gap_us": 61.22499999999968,
+          "aic_core_us": 1962.6959999999985,
+          "aiv_core_us": 2269.5559999999996
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1681.443,
+          "end_us": 1932.1169999999997,
+          "span_us": 250.67399999999975,
+          "global_gap_us": 60.16600000000017,
+          "aic_core_us": 4466.308999999999,
+          "aiv_core_us": 4614.603000000001
+        }
+      ],
+      "t23": {
+        "span_us": 388.905,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.7169999999999845,
+          "median": 6.850000000000023,
+          "mean": 7.170705078125001,
+          "max": 12.939999999999998
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 13.355999999999995,
+          "median": 16.98950000000002,
+          "mean": 17.073575,
+          "max": 22.53000000000003
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.251999999999953,
+          "median": 23.89149999999995,
+          "mean": 24.268402083333335,
+          "max": 34.646000000000015
+        },
+        "last_finishing_cluster": {
+          "cluster": 19,
+          "groups": 17,
+          "head_wait_us": 1.9530000000000314,
+          "kernel_envelopes_us": 121.67300000000012,
+          "between_groups_us": 265.2789999999998
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 30.2349999999999,
+        "last_projection_first_start_after_t56_us": 228.96899999999982,
+        "projection_first_start_spread_us": 198.73399999999992,
+        "last_projection_return_after_t56_us": 261.4169999999999,
+        "all_pack_done_after_t56_us": 328.96399999999994,
+        "projection_span_us": {
+          "n": 16,
+          "min": 18.322000000000116,
+          "median": 27.178499999999985,
+          "mean": 26.220687499999997,
+          "max": 32.89899999999989
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 2.908999999999878,
+          "median": 3.976500000000101,
+          "mean": 4.086749999999995,
+          "max": 5.815000000000055
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 63.89899999999989,
+          "median": 129.33300000000008,
+          "mean": 125.91875,
+          "max": 176.94899999999984
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 103.80299999999988,
+            "pack_span_us": 4.336999999999989
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 115.67600000000016,
+            "pack_span_us": 3.308999999999969
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 99.69499999999994,
+            "pack_span_us": 4.778999999999996
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 84.75,
+            "pack_span_us": 3.9020000000000437
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 88.42000000000007,
+            "pack_span_us": 5.5659999999998035
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 63.89899999999989,
+            "pack_span_us": 3.6480000000001382
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 158.414,
+            "pack_span_us": 3.1380000000001473
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 154.28100000000018,
+            "pack_span_us": 3.0019999999999527
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 130.90100000000007,
+            "pack_span_us": 4.498000000000047
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 171.212,
+            "pack_span_us": 2.908999999999878
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 134.3309999999999,
+            "pack_span_us": 4.051000000000158
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 127.7650000000001,
+            "pack_span_us": 3.535999999999831
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 96.37799999999993,
+            "pack_span_us": 3.3900000000001
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 139.40800000000013,
+            "pack_span_us": 5.218999999999824
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 168.81799999999998,
+            "pack_span_us": 4.288999999999987
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 176.94899999999984,
+            "pack_span_us": 5.815000000000055
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 24.708000000000084,
+          "median": 33.96199999999999,
+          "mean": 35.654125,
+          "max": 62.68599999999992
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 6,
+        "groups": 2,
+        "head_wait_us": 7.476000000000113,
+        "kernel_envelopes_us": 161.2929999999999,
+        "between_groups_us": 19.18600000000015
+      }
+    },
+    {
+      "label": "l3-c",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-c/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "7b9d2b4ea515324b435042cc88d6c1e00111ff5981c5932c43ae20d932d63b90",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1916.255,
+      "global_gap_us": 537.2510000000003,
+      "global_gap_count": 55,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 240.59500000000003,
+          "span_us": 240.59500000000003,
+          "global_gap_us": 99.29100000000005,
+          "aic_core_us": 483.337,
+          "aiv_core_us": 637.8629999999999
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 240.59500000000003,
+          "end_us": 622.292,
+          "span_us": 381.697,
+          "global_gap_us": 7.846000000000004,
+          "aic_core_us": 3107.5199999999995,
+          "aiv_core_us": 3643.7260000000006
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 622.292,
+          "end_us": 1339.6860000000001,
+          "span_us": 717.394,
+          "global_gap_us": 315.13500000000045,
+          "aic_core_us": 1659.1400000000003,
+          "aiv_core_us": 2906.951000000001
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1339.6860000000001,
+          "end_us": 1666.8690000000001,
+          "span_us": 327.183,
+          "global_gap_us": 58.774999999999636,
+          "aic_core_us": 1981.2070000000022,
+          "aiv_core_us": 2293.8930000000005
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1666.8690000000001,
+          "end_us": 1916.255,
+          "span_us": 249.3860000000002,
+          "global_gap_us": 56.20400000000018,
+          "aic_core_us": 4478.476999999999,
+          "aiv_core_us": 4630.732999999998
+        }
+      ],
+      "t23": {
+        "span_us": 381.697,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.699000000000012,
+          "median": 6.736500000000035,
+          "mean": 7.156917968749999,
+          "max": 13.721000000000004
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 14.091000000000008,
+          "median": 16.7235,
+          "mean": 16.82830625,
+          "max": 21.569999999999993
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.180999999999926,
+          "median": 23.548500000000047,
+          "mean": 24.017295833333332,
+          "max": 34.860000000000014
+        },
+        "last_finishing_cluster": {
+          "cluster": 19,
+          "groups": 16,
+          "head_wait_us": 6.383999999999958,
+          "kernel_envelopes_us": 111.4920000000003,
+          "between_groups_us": 263.82099999999974
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 28.667999999999893,
+        "last_projection_first_start_after_t56_us": 245.644,
+        "projection_first_start_spread_us": 216.9760000000001,
+        "last_projection_return_after_t56_us": 272.394,
+        "all_pack_done_after_t56_us": 327.183,
+        "projection_span_us": {
+          "n": 16,
+          "min": 17.464999999999918,
+          "median": 26.721499999999992,
+          "mean": 26.877375000000043,
+          "max": 45.40800000000013
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 1.6210000000000946,
+          "median": 2.9265000000000327,
+          "mean": 3.3731250000000585,
+          "max": 8.438000000000102
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 51.75299999999993,
+          "median": 126.78349999999989,
+          "mean": 120.43781249999994,
+          "max": 156.42100000000005
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 118.54199999999992,
+            "pack_span_us": 5.513000000000147
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 90.65999999999985,
+            "pack_span_us": 3.484000000000151
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 95.32099999999991,
+            "pack_span_us": 3.8610000000001037
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 123.74199999999996,
+            "pack_span_us": 3.7439999999999145
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 51.75299999999993,
+            "pack_span_us": 3.036000000000058
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 70.30300000000011,
+            "pack_span_us": 2.8170000000000073
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 156.42100000000005,
+            "pack_span_us": 3.328999999999951
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 152.06099999999992,
+            "pack_span_us": 2.7640000000001237
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 150.83899999999994,
+            "pack_span_us": 8.438000000000102
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 151.6959999999999,
+            "pack_span_us": 2.133000000000038
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 107.08600000000001,
+            "pack_span_us": 2.216000000000122
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 140.8889999999999,
+            "pack_span_us": 3.897000000000162
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 129.82499999999982,
+            "pack_span_us": 2.8050000000000637
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 151.23299999999995,
+            "pack_span_us": 1.9149999999999636
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 130.77199999999993,
+            "pack_span_us": 2.3969999999999345
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 105.86199999999985,
+            "pack_span_us": 1.6210000000000946
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 23.333000000000084,
+          "median": 34.819999999999936,
+          "mean": 37.47328124999999,
+          "max": 63.53800000000001
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 13,
+        "groups": 2,
+        "head_wait_us": 6.201999999999998,
+        "kernel_envelopes_us": 165.019,
+        "between_groups_us": 17.889999999999873
+      }
+    },
+    {
+      "label": "l3-direct-admission",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-direct-admission/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "64cd036c62eea6dd720d5d5175f366cd6226db1ebc77986a099dc10f2c75443a",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "fbce27395da546777f395d61b1bf15b4012f90b9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "8baa339f25d170014d463899410a5d0cb9ca866f97bdbb74a2460964881bbf6b",
+        "runtime_sha256": {
+          "libhost_runtime.so": "1855e46d239e76dc22ade72f1ee6656f72c706be7e4c149c6013590ec29d8702",
+          "libaicpu_kernel.so": "be46a5f2dcb47f016c36f0472fd09acbc66d42d65b4f3e9fbf26d322ed83920f",
+          "aicore_kernel.o": "e50b9c75f7a36f54137c10c4d00b581b6559cda1a620c246cf350050b7afaca0"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1921.0059999999999,
+      "global_gap_us": 539.089999999999,
+      "global_gap_count": 63,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 247.80399999999997,
+          "span_us": 247.80399999999997,
+          "global_gap_us": 101.87099999999992,
+          "aic_core_us": 479.57299999999987,
+          "aiv_core_us": 630.3729999999999
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 247.80399999999997,
+          "end_us": 629.914,
+          "span_us": 382.11000000000007,
+          "global_gap_us": 9.293000000000006,
+          "aic_core_us": 3071.2740000000003,
+          "aiv_core_us": 3542.8009999999995
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 629.914,
+          "end_us": 1336.805,
+          "span_us": 706.8910000000001,
+          "global_gap_us": 305.2190000000003,
+          "aic_core_us": 1643.3029999999987,
+          "aiv_core_us": 2879.268999999999
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1336.805,
+          "end_us": 1668.8419999999999,
+          "span_us": 332.0369999999998,
+          "global_gap_us": 63.39799999999923,
+          "aic_core_us": 1952.9140000000014,
+          "aiv_core_us": 2299.498000000003
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1668.8419999999999,
+          "end_us": 1921.0059999999999,
+          "span_us": 252.164,
+          "global_gap_us": 59.308999999999514,
+          "aic_core_us": 4494.835999999999,
+          "aiv_core_us": 4651.575999999999
+        }
+      ],
+      "t23": {
+        "span_us": 382.11000000000007,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.646000000000072,
+          "median": 6.5190000000000055,
+          "mean": 6.993660156249997,
+          "max": 13.310000000000002
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 14.134000000000015,
+          "median": 16.76600000000002,
+          "mean": 16.84753541666667,
+          "max": 22.10899999999998
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.125999999999976,
+          "median": 23.392999999999972,
+          "mean": 23.86564375,
+          "max": 34.27699999999999
+        },
+        "last_finishing_cluster": {
+          "cluster": 27,
+          "groups": 17,
+          "head_wait_us": 1.8660000000000423,
+          "kernel_envelopes_us": 121.4769999999998,
+          "between_groups_us": 258.7670000000002
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 33.68199999999979,
+        "last_projection_first_start_after_t56_us": 236.4469999999999,
+        "projection_first_start_spread_us": 202.7650000000001,
+        "last_projection_return_after_t56_us": 269.11199999999985,
+        "all_pack_done_after_t56_us": 332.0369999999998,
+        "projection_span_us": {
+          "n": 16,
+          "min": 19.147000000000162,
+          "median": 28.053499999999985,
+          "mean": 29.56087500000001,
+          "max": 40.259000000000015
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 2.0149999999998727,
+          "median": 3.6970000000001164,
+          "mean": 3.8834375000000136,
+          "max": 5.801000000000158
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 58.82300000000009,
+          "median": 125.77200000000005,
+          "mean": 119.39550000000001,
+          "max": 169.0
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 82.1110000000001,
+            "pack_span_us": 5.09699999999998
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 150.683,
+            "pack_span_us": 3.55600000000004
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 116.3889999999999,
+            "pack_span_us": 5.801000000000158
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 150.413,
+            "pack_span_us": 3.2280000000000655
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 70.72800000000007,
+            "pack_span_us": 3.8320000000001073
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 58.82300000000009,
+            "pack_span_us": 4.101999999999862
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 133.635,
+            "pack_span_us": 3.0729999999998654
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 73.75199999999995,
+            "pack_span_us": 2.9370000000001255
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 123.00500000000011,
+            "pack_span_us": 3.491999999999962
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 141.26,
+            "pack_span_us": 3.9220000000000255
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 128.539,
+            "pack_span_us": 2.0149999999998727
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 93.78899999999999,
+            "pack_span_us": 3.002999999999929
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 113.81999999999994,
+            "pack_span_us": 3.5620000000001255
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 152.70900000000006,
+            "pack_span_us": 5.663000000000011
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 151.67200000000003,
+            "pack_span_us": 3.856999999999971
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 169.0,
+            "pack_span_us": 4.995000000000118
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 21.75,
+          "median": 36.1930000000001,
+          "mean": 38.57995833333333,
+          "max": 68.60299999999984
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 29,
+        "groups": 2,
+        "head_wait_us": 6.8810000000000855,
+        "kernel_envelopes_us": 162.27200000000016,
+        "between_groups_us": 21.78800000000001
+      }
+    }
+  ],
+  "l1_crosscheck": [
+    {
+      "source": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-macro-retained-l1",
+      "level": 1,
+      "kernel_window_us": 1886.745,
+      "global_gap_us": 522.4199999999997,
+      "t23_span_us": 371.353,
+      "t23_group_gap_us": {
+        "n": 480,
+        "min": 12.396000000000015,
+        "median": 15.576500000000038,
+        "mean": 15.730358333333335,
+        "max": 23.514999999999986
+      },
+      "t23_last_cluster": {
+        "cluster": 17,
+        "groups": 17,
+        "head_wait_us": 0.04800000000000182,
+        "kernel_envelopes_us": 127.76699999999988,
+        "between_groups_us": 243.53800000000012
+      },
+      "output_fanout_span_us": 334.91100000000006,
+      "output_first_start_spread_us": 199.663,
+      "pack_wait_us": {
+        "n": 16,
+        "min": 74.09299999999985,
+        "median": 122.98449999999991,
+        "mean": 121.93812499999996,
+        "max": 173.36799999999994
+      },
+      "output_tail_after_last_projection_us": 76.81700000000001,
+      "caveat": "Independent captures; differences are not exact instrumentation costs."
+    },
+    {
+      "source": "../reports/csa_macro_l3_20261029.W2dr2E/l3-b/evidence/L3",
+      "level": 3,
+      "kernel_window_us": 1932.1169999999997,
+      "global_gap_us": 528.7669999999996,
+      "t23_span_us": 388.905,
+      "t23_group_gap_us": {
+        "n": 480,
+        "min": 13.355999999999995,
+        "median": 16.98950000000002,
+        "mean": 17.073575,
+        "max": 22.53000000000003
+      },
+      "t23_last_cluster": {
+        "cluster": 19,
+        "groups": 17,
+        "head_wait_us": 1.9530000000000314,
+        "kernel_envelopes_us": 121.67300000000012,
+        "between_groups_us": 265.2789999999998
+      },
+      "output_fanout_span_us": 328.96399999999994,
+      "output_first_start_spread_us": 198.73399999999992,
+      "pack_wait_us": {
+        "n": 16,
+        "min": 63.89899999999989,
+        "median": 129.33300000000008,
+        "mean": 125.91875,
+        "max": 176.94899999999984
+      },
+      "output_tail_after_last_projection_us": 67.54700000000003,
+      "caveat": "Independent captures; differences are not exact instrumentation costs."
+    }
+  ],
+  "handoffs": [
+    {
+      "label": "l3-a",
+      "handoffs": [
+        {
+          "parent": 46,
+          "child": 48,
+          "global_gap_us": 35.613000000000056,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.027000000000044,
+          "resolve_us": 14.048000000000002,
+          "resolve_end_to_first_prepare_us": 11.49499999999989,
+          "first_prepare_to_kernel_us": 4.04300000000012
+        },
+        {
+          "parent": 24,
+          "child": 29,
+          "global_gap_us": 29.226000000000113,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 7.483000000000061,
+          "resolve_us": 3.048999999999978,
+          "resolve_end_to_first_prepare_us": 14.843999999999937,
+          "first_prepare_to_kernel_us": 3.8500000000001364
+        },
+        {
+          "parent": 105,
+          "child": 106,
+          "global_gap_us": 28.86200000000008,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.947000000000116,
+          "resolve_us": 4.2280000000000655,
+          "resolve_end_to_first_prepare_us": 11.715999999999894,
+          "first_prepare_to_kernel_us": 5.971000000000004
+        },
+        {
+          "parent": 23,
+          "child": 24,
+          "global_gap_us": 27.016000000000076,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.77800000000002,
+          "resolve_us": 3.884999999999991,
+          "resolve_end_to_first_prepare_us": 13.531000000000063,
+          "first_prepare_to_kernel_us": 3.8220000000000027
+        },
+        {
+          "parent": 32,
+          "child": 38,
+          "global_gap_us": 26.600999999999885,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.236999999999853,
+          "resolve_us": 7.190000000000055,
+          "resolve_end_to_first_prepare_us": 9.622000000000071,
+          "first_prepare_to_kernel_us": 3.5519999999999072
+        },
+        {
+          "parent": 31,
+          "child": 32,
+          "global_gap_us": 26.457000000000107,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.2349999999999,
+          "resolve_us": 3.897000000000162,
+          "resolve_end_to_first_prepare_us": 16.519999999999982,
+          "first_prepare_to_kernel_us": 3.8050000000000637
+        },
+        {
+          "parent": 56,
+          "child": 67,
+          "global_gap_us": 26.243000000000166,
+          "serial_decomposition": false,
+          "last_kernel_to_resolve_us": 2.615000000000009,
+          "resolve_us": 37.25200000000018,
+          "resolve_end_to_first_prepare_us": -17.66800000000012,
+          "first_prepare_to_kernel_us": 4.044000000000096
+        },
+        {
+          "parent": 71,
+          "child": 105,
+          "global_gap_us": 25.05899999999997,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.724999999999909,
+          "resolve_us": 3.7640000000001237,
+          "resolve_end_to_first_prepare_us": 15.310999999999922,
+          "first_prepare_to_kernel_us": 3.2590000000000146
+        },
+        {
+          "parent": 45,
+          "child": 46,
+          "global_gap_us": 24.972999999999956,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.129000000000133,
+          "resolve_us": 3.62299999999982,
+          "resolve_end_to_first_prepare_us": 15.432999999999993,
+          "first_prepare_to_kernel_us": 3.788000000000011
+        },
+        {
+          "parent": 41,
+          "child": 42,
+          "global_gap_us": 23.855000000000018,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.0310000000001764,
+          "resolve_us": 2.6259999999999764,
+          "resolve_end_to_first_prepare_us": 15.37299999999982,
+          "first_prepare_to_kernel_us": 3.8250000000000455
+        },
+        {
+          "parent": 42,
+          "child": 43,
+          "global_gap_us": 22.451000000000022,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.9529999999999745,
+          "resolve_us": 2.6549999999999727,
+          "resolve_end_to_first_prepare_us": 10.339999999999918,
+          "first_prepare_to_kernel_us": 3.5030000000001564
+        },
+        {
+          "parent": 40,
+          "child": 41,
+          "global_gap_us": 17.503999999999905,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.162000000000035,
+          "resolve_us": 2.6909999999998035,
+          "resolve_end_to_first_prepare_us": 4.593000000000075,
+          "first_prepare_to_kernel_us": 4.057999999999993
+        },
+        {
+          "parent": 55,
+          "child": 56,
+          "global_gap_us": 16.228000000000065,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.1679999999998927,
+          "resolve_us": 1.9800000000000182,
+          "resolve_end_to_first_prepare_us": 8.1550000000002,
+          "first_prepare_to_kernel_us": 2.9249999999999545
+        }
+      ],
+      "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready."
+    },
+    {
+      "label": "l3-b",
+      "handoffs": [
+        {
+          "parent": 46,
+          "child": 55,
+          "global_gap_us": 34.82099999999991,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 7.126999999999953,
+          "resolve_us": 13.183999999999969,
+          "resolve_end_to_first_prepare_us": 10.845000000000027,
+          "first_prepare_to_kernel_us": 3.6649999999999636
+        },
+        {
+          "parent": 56,
+          "child": 85,
+          "global_gap_us": 30.2349999999999,
+          "serial_decomposition": false,
+          "last_kernel_to_resolve_us": 2.461999999999989,
+          "resolve_us": 38.403999999999996,
+          "resolve_end_to_first_prepare_us": -14.575000000000045,
+          "first_prepare_to_kernel_us": 3.94399999999996
+        },
+        {
+          "parent": 105,
+          "child": 106,
+          "global_gap_us": 27.190000000000055,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.996000000000095,
+          "resolve_us": 3.5039999999999054,
+          "resolve_end_to_first_prepare_us": 12.808999999999742,
+          "first_prepare_to_kernel_us": 3.881000000000313
+        },
+        {
+          "parent": 32,
+          "child": 36,
+          "global_gap_us": 26.07399999999984,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.88799999999992,
+          "resolve_us": 7.278999999999996,
+          "resolve_end_to_first_prepare_us": 9.2650000000001,
+          "first_prepare_to_kernel_us": 3.6419999999998254
+        },
+        {
+          "parent": 74,
+          "child": 105,
+          "global_gap_us": 25.648999999999887,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.8209999999999127,
+          "resolve_us": 3.7660000000000764,
+          "resolve_end_to_first_prepare_us": 15.311999999999898,
+          "first_prepare_to_kernel_us": 3.75
+        },
+        {
+          "parent": 22,
+          "child": 23,
+          "global_gap_us": 25.507000000000005,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.524000000000001,
+          "resolve_us": 2.641999999999996,
+          "resolve_end_to_first_prepare_us": 14.975000000000023,
+          "first_prepare_to_kernel_us": 3.3659999999999854
+        },
+        {
+          "parent": 31,
+          "child": 32,
+          "global_gap_us": 25.45900000000006,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.8769999999999527,
+          "resolve_us": 4.147000000000162,
+          "resolve_end_to_first_prepare_us": 15.585000000000036,
+          "first_prepare_to_kernel_us": 3.849999999999909
+        },
+        {
+          "parent": 45,
+          "child": 46,
+          "global_gap_us": 25.064000000000078,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.158000000000129,
+          "resolve_us": 3.81899999999996,
+          "resolve_end_to_first_prepare_us": 14.968000000000075,
+          "first_prepare_to_kernel_us": 4.1189999999999145
+        },
+        {
+          "parent": 23,
+          "child": 24,
+          "global_gap_us": 24.08800000000008,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.805000000000064,
+          "resolve_us": 3.1359999999999673,
+          "resolve_end_to_first_prepare_us": 11.055000000000064,
+          "first_prepare_to_kernel_us": 4.0919999999999845
+        },
+        {
+          "parent": 24,
+          "child": 29,
+          "global_gap_us": 23.658000000000015,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.65300000000002,
+          "resolve_us": 2.8840000000000146,
+          "resolve_end_to_first_prepare_us": 14.447999999999979,
+          "first_prepare_to_kernel_us": 3.673000000000002
+        },
+        {
+          "parent": 41,
+          "child": 42,
+          "global_gap_us": 22.585000000000036,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.34699999999998,
+          "resolve_us": 0.4670000000000982,
+          "resolve_end_to_first_prepare_us": 16.260999999999967,
+          "first_prepare_to_kernel_us": 3.509999999999991
+        },
+        {
+          "parent": 42,
+          "child": 43,
+          "global_gap_us": 21.23799999999983,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.894999999999982,
+          "resolve_us": 2.836999999999989,
+          "resolve_end_to_first_prepare_us": 8.871999999999844,
+          "first_prepare_to_kernel_us": 3.6340000000000146
+        },
+        {
+          "parent": 50,
+          "child": 56,
+          "global_gap_us": 17.955000000000155,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.4980000000000473,
+          "resolve_us": 2.8509999999998854,
+          "resolve_end_to_first_prepare_us": 8.354000000000042,
+          "first_prepare_to_kernel_us": 3.25200000000018
+        }
+      ],
+      "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready."
+    },
+    {
+      "label": "l3-c",
+      "handoffs": [
+        {
+          "parent": 46,
+          "child": 52,
+          "global_gap_us": 33.79899999999998,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.51299999999992,
+          "resolve_us": 13.883000000000038,
+          "resolve_end_to_first_prepare_us": 10.74499999999989,
+          "first_prepare_to_kernel_us": 3.658000000000129
+        },
+        {
+          "parent": 13,
+          "child": 25,
+          "global_gap_us": 32.48199999999997,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.964999999999975,
+          "resolve_us": 0.9279999999999973,
+          "resolve_end_to_first_prepare_us": 24.047000000000025,
+          "first_prepare_to_kernel_us": 4.541999999999973
+        },
+        {
+          "parent": 56,
+          "child": 79,
+          "global_gap_us": 28.667999999999893,
+          "serial_decomposition": false,
+          "last_kernel_to_resolve_us": 2.5370000000000346,
+          "resolve_us": 37.694999999999936,
+          "resolve_end_to_first_prepare_us": -15.572999999999865,
+          "first_prepare_to_kernel_us": 4.008999999999787
+        },
+        {
+          "parent": 32,
+          "child": 36,
+          "global_gap_us": 27.39300000000003,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.01299999999992,
+          "resolve_us": 7.25,
+          "resolve_end_to_first_prepare_us": 9.922000000000025,
+          "first_prepare_to_kernel_us": 4.208000000000084
+        },
+        {
+          "parent": 23,
+          "child": 24,
+          "global_gap_us": 27.107999999999947,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.984000000000037,
+          "resolve_us": 3.5979999999999563,
+          "resolve_end_to_first_prepare_us": 11.284999999999968,
+          "first_prepare_to_kernel_us": 5.2409999999999854
+        },
+        {
+          "parent": 21,
+          "child": 23,
+          "global_gap_us": 25.482000000000028,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.045000000000016,
+          "resolve_us": 3.0819999999999936,
+          "resolve_end_to_first_prepare_us": 15.283999999999992,
+          "first_prepare_to_kernel_us": 4.071000000000026
+        },
+        {
+          "parent": 105,
+          "child": 106,
+          "global_gap_us": 25.403999999999996,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.6159999999999854,
+          "resolve_us": 3.5790000000001783,
+          "resolve_end_to_first_prepare_us": 12.385999999999967,
+          "first_prepare_to_kernel_us": 3.8229999999998654
+        },
+        {
+          "parent": 71,
+          "child": 105,
+          "global_gap_us": 24.912000000000035,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.0019999999999527,
+          "resolve_us": 3.6700000000000728,
+          "resolve_end_to_first_prepare_us": 14.492999999999938,
+          "first_prepare_to_kernel_us": 3.747000000000071
+        },
+        {
+          "parent": 31,
+          "child": 32,
+          "global_gap_us": 24.888999999999896,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.9470000000000027,
+          "resolve_us": 3.7620000000000573,
+          "resolve_end_to_first_prepare_us": 16.393999999999778,
+          "first_prepare_to_kernel_us": 2.786000000000058
+        },
+        {
+          "parent": 41,
+          "child": 42,
+          "global_gap_us": 24.454999999999927,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.1949999999999363,
+          "resolve_us": 2.4670000000000982,
+          "resolve_end_to_first_prepare_us": 15.920000000000073,
+          "first_prepare_to_kernel_us": 3.87299999999982
+        },
+        {
+          "parent": 24,
+          "child": 29,
+          "global_gap_us": 24.398000000000025,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.3730000000000473,
+          "resolve_us": 2.620999999999981,
+          "resolve_end_to_first_prepare_us": 14.287000000000035,
+          "first_prepare_to_kernel_us": 4.116999999999962
+        },
+        {
+          "parent": 45,
+          "child": 46,
+          "global_gap_us": 22.945999999999913,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.104000000000042,
+          "resolve_us": 3.7509999999999764,
+          "resolve_end_to_first_prepare_us": 13.224999999999909,
+          "first_prepare_to_kernel_us": 3.8659999999999854
+        },
+        {
+          "parent": 42,
+          "child": 43,
+          "global_gap_us": 21.220000000000027,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.157999999999902,
+          "resolve_us": 2.8810000000000855,
+          "resolve_end_to_first_prepare_us": 8.326999999999998,
+          "first_prepare_to_kernel_us": 3.854000000000042
+        },
+        {
+          "parent": 40,
+          "child": 41,
+          "global_gap_us": 17.740999999999985,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.355000000000018,
+          "resolve_us": 2.4099999999998545,
+          "resolve_end_to_first_prepare_us": 4.902000000000044,
+          "first_prepare_to_kernel_us": 4.074000000000069
+        },
+        {
+          "parent": 50,
+          "child": 56,
+          "global_gap_us": 17.473000000000184,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.1059999999999945,
+          "resolve_us": 2.977000000000089,
+          "resolve_end_to_first_prepare_us": 7.9939999999999145,
+          "first_prepare_to_kernel_us": 3.3960000000001855
+        }
+      ],
+      "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready."
+    }
+  ],
+  "admission_actor_counts": {
+    "idle-cold-error-after-l4": {
+      "mix_aic": 26,
+      "pure_aiv": 32,
+      "pure_aic": 3
+    },
+    "idle-direct-admission-after-l4": {
+      "mix_aic": 20,
+      "pure_aiv": 12,
+      "mix_aiv": 6,
+      "pure_aic": 23
+    }
+  },
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "validation": {
+    "new_cases": 576,
+    "baseline_expected_failures": 228,
+    "baseline_guard_passes": 348,
+    "candidate_cpp_targets_passed": 21,
+    "candidate_python_passed": 3574,
+    "candidate_native_l4": {
+      "executions": 2308,
+      "logical_kernel_tasks": 79,
+      "dependency_edges": 133,
+      "protocol_events": 46733,
+      "worker_count": 96,
+      "golden_rounds": 2,
+      "outputs_per_round": 7
+    },
+    "candidate_full_device_fault_matrix": "未执行；不扩大候选验收范围"
+  },
+  "archives": {
+    "production_patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-direct-admission-production.patch",
+      "sha256": "b9ca31483229ac339737cace9d45ef05f8800329ff986240db70a3b7e287820c"
+    },
+    "tests_patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-direct-admission-tests.patch",
+      "sha256": "32e55a67cfa23d14134b025729e9aada7afa9525c91c45bfca79da2221f123d4"
+    },
+    "candidate_runtime": "../reports/csa_poursoul_20261027.Osnaam/runtime-idle-direct-admission"
+  },
+  "caveats": [
+    "L3/L1 是独立插桩捕获，不把差值等同于精确插桩开销。",
+    "全员无 kernel 是计算空窗，不等于 Scalar 全部无事可做。",
+    "逻辑 task 跨度包含块间调度，不能当作纯计算下界。",
+    "Dummy 14/27 的传递依赖在离线复核中折叠，未修改运行时图或共享分析工具。",
+    "pack 等待与其他分支重叠，不能把各分支等待相加为可省 Device 时间。",
+    "A/B/A 仅为候选筛选，不是 1.5ms 目标的五批最终验收。"
+  ]
+}

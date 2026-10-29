@@ -4,6 +4,10 @@
 最终按[实施计划](csa-sub2ms-optimization-plan.md)做五批与完整正确性验收；当前尚未达成。
 不改 54 个业务 kernel、七项 golden、2308 个执行身份、三 lane GM 合同或计时范围。
 
+2026-10-29 的三份 L3 与同版本 L1 将重点收敛到任务交接、Mix 连续 block 周转和输出分支展开。
+跨类型协同后继直传实验未证明稳定收益，已撤回；详见
+[L3 宏观瓶颈与直接准入实验](../../../../docs/zh-cn/investigations/2026-10-csa-l3-direct-admission.md)。
+
 ## 新基线的空窗
 
 基线是 [Ready 记录修复](csa-ready-profiling-20261028.md)后的工作树，

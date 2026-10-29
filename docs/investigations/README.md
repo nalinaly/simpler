@@ -84,6 +84,8 @@ that ...".
 
 Newest first.
 
+- [2026-10 — CSA L3 macro analysis and direct cooperative admission](../zh-cn/investigations/2026-10-csa-l3-direct-admission.md): A/B/A 2008.468 / 2003.344 / 2000.424 us; no repeatable benefit, candidate withdrawn.
+
 - [2026-10-csa-inline-hotloop](../zh-cn/investigations/2026-10-csa-inline-hotloop.md)
 
 - [2026-10-csa-early-mix-retirement](../zh-cn/investigations/2026-10-csa-early-mix-retirement.md)
