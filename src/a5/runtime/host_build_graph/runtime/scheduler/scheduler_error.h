@@ -38,7 +38,7 @@ inline __aicore__ void scheduler_publish_error(__gm__ SchedulerRunControl *run_c
     scheduler_publish_signal(run_control->scheduler_error, status);
 }
 
-inline __aicore__ void scheduler_record_error(
+static __aicore__ __attribute__((noinline)) void scheduler_record_error(
     __gm__ SchedulerRunControl *run_control, int64_t task_ref, SchedulerGraphResult status,
     const SchedulerGraphView *graph = nullptr, __gm__ const SchedulerWorkerContext *context = nullptr,
     SchedulerErrorSite error_site = SchedulerErrorSite::UNKNOWN, const SchedulerErrorIdentity *identity = nullptr

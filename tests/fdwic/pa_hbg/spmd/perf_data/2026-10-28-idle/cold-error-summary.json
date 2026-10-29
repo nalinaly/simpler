@@ -1,0 +1,250 @@
+{
+  "schema": "csa-cold-error-summary-v1",
+  "date": "2026-10-29",
+  "artifact_root": "reports/csa_poursoul_20261027.Osnaam",
+  "order": "B/A/A/B",
+  "sample_storage": "完整原始样本在各归档result.json；未剔除样本",
+  "batches": [
+    {
+      "label": "idle-cold-error-after-a",
+      "arm": "candidate",
+      "result_sha256": "2527f3b752de9008b6a4df928b7576cfb7b5f1e444905b72edfe450e141ddc2f",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "cdb0cdf082f48ff043318b16bb3596865bd1ff4c",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "7e24ad3a95354cc123fa06103f620df819e7b6af7c44b851790eb0be99678d14",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "device_us": {
+        "n": 100,
+        "min": 1966.621,
+        "median": 2004.8359999999998,
+        "mean": 2007.03936,
+        "p90": 2029.3897000000002,
+        "p99": 2085.66442,
+        "max": 2102.734
+      },
+      "host_us": {
+        "n": 100,
+        "min": 79826.874,
+        "median": 82317.68650000001,
+        "mean": 83690.99534,
+        "p90": 88513.4027,
+        "p99": 103066.44672,
+        "max": 103184.427
+      }
+    },
+    {
+      "label": "idle-cold-error-before-a",
+      "arm": "baseline",
+      "result_sha256": "6234ce32c9de734396b4edf38b20272abe257c04830ae42dc7d5c0bb6ea7554b",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "cdb0cdf082f48ff043318b16bb3596865bd1ff4c",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "b5dc07c92f21d4deb952bc5059e91eabcbb6ce4b260be35337b5d9de35cfa103"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "device_us": {
+        "n": 100,
+        "min": 1990.323,
+        "median": 2036.9265,
+        "mean": 2043.36903,
+        "p90": 2080.5636,
+        "p99": 2092.7544900000003,
+        "max": 2103.99
+      },
+      "host_us": {
+        "n": 100,
+        "min": 83647.491,
+        "median": 143189.93349999998,
+        "mean": 139789.92378,
+        "p90": 165581.31540000002,
+        "p99": 232124.98362000025,
+        "max": 275830.08
+      }
+    },
+    {
+      "label": "idle-cold-error-before-b",
+      "arm": "baseline",
+      "result_sha256": "b76046e060b0b011abb9cdd0e5a0a06defb4d14246050e42e4a38df30c956879",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "cdb0cdf082f48ff043318b16bb3596865bd1ff4c",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "b5dc07c92f21d4deb952bc5059e91eabcbb6ce4b260be35337b5d9de35cfa103"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "device_us": {
+        "n": 100,
+        "min": 1998.825,
+        "median": 2037.487,
+        "mean": 2041.61509,
+        "p90": 2065.5415000000003,
+        "p99": 2121.1122100000002,
+        "max": 2167.366
+      },
+      "host_us": {
+        "n": 100,
+        "min": 80020.855,
+        "median": 91836.706,
+        "mean": 92240.58783,
+        "p90": 101114.15500000001,
+        "p99": 206515.11528,
+        "max": 206764.821
+      }
+    },
+    {
+      "label": "idle-cold-error-after-b",
+      "arm": "candidate",
+      "result_sha256": "c2529e3c17d69473f97b8718eab5ec0f52195b098f76875f76e244beeb3c6230",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "cdb0cdf082f48ff043318b16bb3596865bd1ff4c",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "7e24ad3a95354cc123fa06103f620df819e7b6af7c44b851790eb0be99678d14",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "device_us": {
+        "n": 100,
+        "min": 1971.708,
+        "median": 2012.5430000000001,
+        "mean": 2016.6194,
+        "p90": 2059.7916999999998,
+        "p99": 2093.47506,
+        "max": 2096.451
+      },
+      "host_us": {
+        "n": 100,
+        "min": 126058.081,
+        "median": 145830.81449999998,
+        "mean": 147620.39702,
+        "p90": 157502.40850000002,
+        "p99": 279432.8281800002,
+        "max": 316742.382
+      }
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "n": 200,
+      "min": 1990.323,
+      "median": 2037.2150000000001,
+      "mean": 2042.49206,
+      "p90": 2073.5415,
+      "p99": 2114.94755,
+      "max": 2167.366
+    },
+    "candidate": {
+      "n": 200,
+      "min": 1966.621,
+      "median": 2007.0995,
+      "mean": 2011.82938,
+      "p90": 2042.5920999999998,
+      "p99": 2093.47506,
+      "max": 2102.734
+    }
+  },
+  "reduction_us": 30.11550000000011,
+  "reduction_percent": 1.4782681258482835,
+  "checks": {
+    "linked_kernel_count": 54,
+    "no_cli_overlap_observed": true,
+    "cpp_initial_targets": 6,
+    "cpp_complete_targets": 21,
+    "python_regression_passed": 3527,
+    "a5_regression_passed": 88,
+    "a5_regression_skipped": 4,
+    "a5_regression_deselected": 4,
+    "a5sim_regression_passed": 67,
+    "a5sim_regression_deselected": 29,
+    "a5_fault_matrix_passed": 50,
+    "a5sim_fault_matrix_passed": 38,
+    "a5sim_fault_matrix_deselected": 12,
+    "a5_regression_evidence": "regressions/cold-error-a5-r1/result.json",
+    "a5_fault_evidence": "regressions/cold-error-faults-r1/result.json",
+    "error_identity_native_class_passed": true,
+    "l4_artifact": "artifacts/idle-cold-error-after-l4",
+    "l4_executions": 2308,
+    "l4_deps": 133,
+    "l4_events": 46733
+  },
+  "limits": [
+    "函数尺寸来自ELF符号表，不是指令缓存缺失计数",
+    "本机直接使用设备，CLI监测不是系统级独占证明",
+    "本检查点已通过完整相关回归与故障矩阵，后续改动需在最终版本重跑；1500us目标未达到"
+  ]
+}
