@@ -1,6 +1,7 @@
-# CSA 三 lane ACK 完整只读预检查：收益不足，撤回
+# CSA 三 lane ACK 只读预检查实验
 
 日期：2026-10-28。
+原完整预检查候选已撤回；2026-10-29 保留了不同的同轮正向结果复用，见末节。
 
 ## 假设与边界
 
@@ -41,3 +42,51 @@
 
 - [全部样本、摘要与验证范围](../../../tests/fdwic/pa_hbg/spmd/perf_data/2026-10-27-csa-poursoul/sub2ms-ack-preflight-comparison.json)。
 - [中文实现记录](../../../tests/fdwic/pa_hbg/spmd/implementation-progress.md)。
+
+## 2026-10-29：复用同轮正向 poll 结果
+
+当前基线为 `f37cf6c48`，AICore 二进制 `20f84347…`。
+此候选不重新执行完整预检查，而是复用 `scheduler_ordered_poll_may_progress` 已完成的检查：
+只有确实逐条 query 过三 lane 且均可能齐备时，输出 ARRIVED 或协调 C 的 RELEASED 提示。
+Ready、pending、配置异常等提前返回路径会清空提示。
+
+同轮服务只省掉三次重复的弱 query；原子 FAA0、lane 顺序、精确序号比较、错误门禁均保留。
+提示不是许可，即使已经失效，强读仍会对旧序号等待、未来序号报错。
+一轮从 RELEASED 退役并启动下一组时，释放提示不能充当新组的到达提示。
+不更改成员集合、竞争资格、三 lane、inactive lane、记录等级或 v5 原生证明格式。
+
+新增 210 项测试覆盖正向提示后的 ACK 变化、提前返回清理、V 不取得协调 C 的释放提示、
+预检查后的错误，以及 old/current/future 的全排列和全宽 seq。
+初始 RED 是新接口缺失引起的编译失败，不表示旧业务行为不正确。
+候选 21 个 C++ 目标与 3574 项 Python 检查通过，A5/A5sim 编译通过。
+严格 CSA L4 通过 2308 个执行身份、133 条依赖和 46733 个协议事件，两轮七项 golden。
+
+同卡 B/A/A/B，每批三轮七项 golden、5 次预热与 100 个正式完整 Device 样本：
+
+| 批次 | 完整 Device 中位数 us |
+| ---- | --------------------- |
+| B1 候选 | 1990.7700 |
+| A1 基线 | 2010.6975 |
+| A2 基线 | 2005.5335 |
+| B2 候选 | 1998.0695 |
+
+每臂 200 样本，合并中位数 A=2007.1020us、B=1992.9305us，约改善 0.71%。
+两批候选均低于两批基线，但收益幅度较小，不保证每次调用或其他负载都有同样变化。
+保持 54 个业务 kernel 指纹一致，正式计时与构建、回归及设备查询分开，未观察到其他 A5 CLI 重叠。
+
+候选独立 L3 的 kernel 窗口为 1876.769us，全员计算空窗为 519.353us。
+t23 同 cluster 组间隔中位 15.9425us；Complete 记录结束至下一组首次准备为 11.919us，
+先前三份基线该段为 12.221／12.4125／12.176us。
+这是插桩捕获的相关变化，不把差值全部归给省掉的 query，也不用它替代完整 Device。
+
+完整回归通过后保留这项局部优化：A5 常规 88 项通过、4 跳过、4 deselected，
+A5 完整故障 50 项通过；A5sim 常规 67 项通过、29 deselected，
+仿真故障 38 项通过、12 项非返回 kernel 故障按既有规则仅在真机运行。
+真机回归前后生产源码与原生二进制身份一致，竞争 CLI 监测为空。
+本次四批是局部优化对照，不是低于 1.5ms 所要求的最终五批验收，目标尚未达成。
+
+[全部样本与验收摘要](../../../tests/fdwic/pa_hbg/spmd/perf_data/2026-10-28-idle/ack-hint-summary.json)
+保存 400 个正式 Device 样本、Host 分布、二进制身份、54 个 kernel 指纹、L3 分段与回归日志校验和。
+工作区 `reports/csa_poursoul_20261027.Osnaam/` 保留 `idle-ack-hint-{production,tests}.patch`、
+`runtime-idle-ack-hint/`、四批 `artifacts/idle-ack-hint-*` 和独立回归记录。
+L3 与拆分脚本沿用 `reports/csa_macro_l3_20261029.W2dr2E/`，不修改历史捕获。

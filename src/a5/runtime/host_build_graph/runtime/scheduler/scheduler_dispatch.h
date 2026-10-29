@@ -18,7 +18,8 @@
 inline __aicore__ bool scheduler_service_gm_mix(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     uint64_t profiling_level, SchedulerWakeStats *wake_stats, SchedulerReadyStats *ready_stats,
-    SchedulerCompletionStats *completion_stats, bool *progress
+    SchedulerCompletionStats *completion_stats, bool *progress,
+    SchedulerGmMixPhase ack_prefilter_phase = SchedulerGmMixPhase::IDLE
 ) {
     *progress = false;
     auto &admission = *local->admission;
@@ -31,7 +32,8 @@ inline __aicore__ bool scheduler_service_gm_mix(
     }
     if (local->is_mix_coordinator()) {
         if (group.phase == SchedulerGmMixPhase::RELEASED) {
-            const auto retired = scheduler_gm_mix_retire(graph, base, local, run);
+            const auto retired =
+                scheduler_gm_mix_retire(graph, base, local, run, ack_prefilter_phase == SchedulerGmMixPhase::RELEASED);
             if (retired == SchedulerGmMixResult::ERROR) return false;
             if (retired == SchedulerGmMixResult::TASK_LAST &&
                 !scheduler_complete_ordered_task(
@@ -67,7 +69,9 @@ inline __aicore__ bool scheduler_service_gm_mix(
     if (group.phase == SchedulerGmMixPhase::PUBLISHED && !scheduler_gm_mix_arrive(graph, base, local, run, &arrived))
         return false;
     if (group.phase == SchedulerGmMixPhase::ARRIVED &&
-        !scheduler_gm_mix_prepare_lane(graph, base, local, run, profiling_level, &prepared))
+        !scheduler_gm_mix_prepare_lane(
+            graph, base, local, run, profiling_level, &prepared, ack_prefilter_phase == SchedulerGmMixPhase::ARRIVED
+        ))
         return false;
     *progress = *progress || arrived || prepared;
     return true;
@@ -78,9 +82,11 @@ inline __aicore__ bool scheduler_service_gm_mix(
 // Stale observations may postpone work; every positive hint takes the normal
 // ownership validation path before doing that work.
 inline __aicore__ bool scheduler_ordered_poll_may_progress(
-    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, bool *ready_probe_empty = nullptr
+    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, bool *ready_probe_empty = nullptr,
+    SchedulerGmMixPhase *ack_prefilter_phase = nullptr
 ) {
     if (ready_probe_empty != nullptr) *ready_probe_empty = false;
+    if (ack_prefilter_phase != nullptr) *ack_prefilter_phase = SchedulerGmMixPhase::IDLE;
     const auto &admission = *local->admission;
     if (admission.capacity == 0 || admission.scan_cursor > admission.capacity || local->local_ready_mask != 0 ||
         !scheduler_task_ref_is_null(admission.pending_task_ref))
@@ -133,6 +139,7 @@ inline __aicore__ bool scheduler_ordered_poll_may_progress(
             auto &ack = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
             if (scheduler_gm_query(ack) < group.group_seq) return false;
         }
+        if (ack_prefilter_phase != nullptr) *ack_prefilter_phase = group.phase;
     }
     return true;
 }
@@ -151,7 +158,9 @@ inline __aicore__ bool scheduler_fill_ordered_slots(
         return false;
     }
     bool ready_probe_empty = false;
-    if (!scheduler_ordered_poll_may_progress(graph, base, local, &ready_probe_empty)) return false;
+    auto ack_prefilter_phase = SchedulerGmMixPhase::IDLE;
+    if (!scheduler_ordered_poll_may_progress(graph, base, local, &ready_probe_empty, &ack_prefilter_phase))
+        return false;
     if (scheduler_read_error(run) != 0) {
         *failed = true;
         return false;
@@ -239,7 +248,8 @@ inline __aicore__ bool scheduler_fill_ordered_slots(
         if (scheduler_task_is_mix(admission->current_flags)) {
             bool group_progress = false;
             if (!scheduler_service_gm_mix(
-                    graph, base, local, run, profiling_level, wake_stats, ready_stats, completion_stats, &group_progress
+                    graph, base, local, run, profiling_level, wake_stats, ready_stats, completion_stats,
+                    &group_progress, ack_prefilter_phase
                 )) {
                 *failed = true;
                 return progress || group_progress;

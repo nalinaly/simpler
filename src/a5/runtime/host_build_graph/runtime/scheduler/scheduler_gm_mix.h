@@ -284,7 +284,7 @@ inline __aicore__ bool scheduler_gm_mix_arrive(
 
 inline __aicore__ bool scheduler_gm_mix_check_acks(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
-    bool releases, bool *all
+    bool releases, bool *all, bool query_prefiltered = false
 ) {
     *all = false;
     auto *mailbox = scheduler_gm_mix_mailbox(base, local);
@@ -293,7 +293,9 @@ inline __aicore__ bool scheduler_gm_mix_check_acks(
     uint64_t observations[PLATFORM_CORES_PER_BLOCKDIM];
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
         auto &value = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
-        if (scheduler_gm_query(value) < seq) return true;
+        // A reused positive poll skips only duplicate weak reads. Even a stale
+        // hint still reaches every authoritative atomic check in lane order.
+        if (!query_prefiltered && scheduler_gm_query(value) < seq) return true;
         const uint64_t observed = scheduler_gm_fetch_add(value, UINT64_C(0));
         if (record) observations[lane] = observed;
         if (observed < seq) return true;
@@ -320,7 +322,7 @@ inline __aicore__ void scheduler_gm_mix_publish_release(__gm__ void *base, Sched
 
 inline __aicore__ bool scheduler_gm_mix_prepare_lane(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
-    uint64_t profiling_level, bool *progress
+    uint64_t profiling_level, bool *progress, bool query_prefiltered = false
 ) {
     if (progress == nullptr) return false;
     *progress = false;
@@ -329,7 +331,7 @@ inline __aicore__ bool scheduler_gm_mix_prepare_lane(
     auto &group = admission.gm_mix;
     if (group.phase != SchedulerGmMixPhase::ARRIVED) return true;
     bool all = false;
-    if (!scheduler_gm_mix_check_acks(graph, base, local, run, false, &all)) return false;
+    if (!scheduler_gm_mix_check_acks(graph, base, local, run, false, &all, query_prefiltered)) return false;
     if (!all) return true;
     if (group.subtask_slot == UINT8_MAX) {
         scheduler_gm_mix_publish_release(base, local);
@@ -391,7 +393,8 @@ inline __aicore__ bool scheduler_gm_mix_release_lane(
 }
 
 inline __aicore__ SchedulerGmMixResult scheduler_gm_mix_retire(
-    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run
+    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
+    bool query_prefiltered = false
 ) {
     // The completion contribution below owns the error gate. A partial
     // release observation neither retires the group nor contributes a block.
@@ -400,7 +403,8 @@ inline __aicore__ SchedulerGmMixResult scheduler_gm_mix_retire(
     auto &group = admission.gm_mix;
     if (!local->is_mix_coordinator() || group.phase != SchedulerGmMixPhase::RELEASED) return SchedulerGmMixResult::WAIT;
     bool all = false;
-    if (!scheduler_gm_mix_check_acks(graph, base, local, run, true, &all)) return SchedulerGmMixResult::ERROR;
+    if (!scheduler_gm_mix_check_acks(graph, base, local, run, true, &all, query_prefiltered))
+        return SchedulerGmMixResult::ERROR;
     if (!all) return SchedulerGmMixResult::WAIT;
     const auto finished = scheduler_contribute_ordered_block(graph, base, local, run);
     if (finished == SchedulerBlockFinishResult::ERROR) return SchedulerGmMixResult::ERROR;
