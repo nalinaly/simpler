@@ -17,7 +17,7 @@ import torch
 from simpler.task_interface import ArgDirection as D
 from simpler.task_interface import TensorTransfer
 
-from simpler_setup import SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
+from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, TensorArg, scene_test
 
 if __package__:
     from .test_spmd_contract import TestHbgSpmdContract as _SpmdContract
@@ -71,15 +71,15 @@ def _case(name, scenario, mask, **params):
 class TestHbgOrderedExecution(_SpmdContract):
     CALLABLE = {
         "orchestration": {
-            "source": "kernels/cla_orchestration.cpp",
+            "source": "kernels/sync_ordered_orchestration.cpp",
             "function_name": "aicpu_orchestration_entry",
-            "signature": [D.INOUT, D.IN, D.IN],
+            "signature": [D.INOUT, D.IN, D.IN, D.IN],
         },
         "incores": [
             {
                 "func_id": slot,
                 "name": f"ordered_record_slot_{slot}",
-                "source": f"kernels/ordered_record_slot_{slot}.cpp",
+                "source": f"kernels/sync_ordered_slot_{slot}.cpp",
                 "core_type": "aic" if slot == 0 else "aiv",
                 "signature": [D.INOUT, D.IN, D.IN],
             }
@@ -110,7 +110,7 @@ class TestHbgOrderedExecution(_SpmdContract):
                 mask,
                 blocks=65,
                 other_mask=other,
-                tail_delay=8000000 if scenario == "overlap" else 262144,
+                tail_delay=8192 if scenario == "overlap" else 262144,
             )
             for scenario in ("overlap", "edge")
             for mask, other in ((1, 1), (2, 2), (1, 2), (2, 1))
@@ -127,6 +127,8 @@ class TestHbgOrderedExecution(_SpmdContract):
             TensorArg("records", torch.zeros(records * _RECORD_WORDS, dtype=torch.int64)),
             TensorArg("plan", plan),
             TensorArg("host_plan", plan.clone(), transfer=TensorTransfer.NONE),
+            TensorArg("sync_flags", torch.zeros(len(plan), dtype=torch.int64), transfer=TensorTransfer.NONE),
+            Scalar("wait_for_peer", int(params["scenario"] == "overlap")),
         )
 
     def compute_golden(self, args, params):
@@ -140,6 +142,9 @@ class TestHbgOrderedExecution(_SpmdContract):
                         row[0] = 1
                         row[8:12] = torch.tensor([block + 1, n, slot + 1, tag])
                         total += 1
+            if params["scenario"] == "overlap":
+                rows[base + n * 3, 4] = n * mask.bit_count()
+                rows[base + n * 3, 6] = mask.bit_count()
         rows[args.plan[0, 2].item() + args.plan[0, 0].item() * 3, 7] = 2 * total
 
     def _run_and_validate(self, worker, callable_obj, case, *args, **kwargs):
@@ -164,6 +169,10 @@ class TestHbgOrderedExecution(_SpmdContract):
             guard = actual[base + n * 3]
             assert guard[0].item() == 0, f"task {tag}: missing execution context"
             assert guard[1].item() == 0, f"task {tag}: original N or block index was corrupted"
+            if params["scenario"] == "overlap":
+                assert guard[4].item() == n * mask.bit_count(), "missing or duplicate peer entry"
+                assert guard[5].item() == 0, "independent peer entry timed out"
+                assert guard[6].item() == mask.bit_count(), "missing or duplicate tail peer-wait witness"
             task_rows = [base + block * 3 + slot for block in range(n) for slot in range(3) if mask & (1 << slot)]
             active_rows.extend(task_rows)
             entered = actual[task_rows, 13]

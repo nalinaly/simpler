@@ -37,7 +37,7 @@ class TestHbgGmMixExecution(_OrderedExecution):
             {
                 "func_id": 2,
                 "name": "ordered_record_slot_2",
-                "source": "kernels/ordered_record_slot_2.cpp",
+                "source": "kernels/sync_ordered_slot_2.cpp",
                 "core_type": "aiv",
                 "signature": [D.INOUT, D.IN, D.IN],
             }
@@ -68,7 +68,7 @@ class TestHbgGmMixExecution(_OrderedExecution):
                 mask,
                 blocks=65,
                 other_mask=other,
-                tail_delay=8000000 if scenario == "overlap" else 262144,
+                tail_delay=8192 if scenario == "overlap" else 262144,
             )
             for scenario in ("overlap", "edge")
             for mask, other in _PAIRS

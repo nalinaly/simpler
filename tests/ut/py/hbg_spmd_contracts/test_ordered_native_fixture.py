@@ -71,6 +71,8 @@ def test_each_native_case_has_valid_shape_identity_events_and_dependency_project
         end += n * 3 + 1
     assert end * 16 == golden.records.numel()
     assert torch.equal(golden.plan, golden.host_plan)
+    assert torch.equal(golden.sync_flags, torch.zeros(len(plan), dtype=torch.int64))
+    assert golden.wait_for_peer == int(params["scenario"] == "overlap")
     assert golden.records.view(-1, 16)[plan[0][2] + plan[0][0] * 3, 7].item() == 2 * sum(row[0] for row in plan)
     test.compare_outputs(actual, golden, ["records"], params)
     assert test._contract_publish_count == 2
@@ -149,6 +151,17 @@ def test_nonoverlapping_independent_tasks_fail_overlap_acceptance(ordered_native
     params = {"scenario": "overlap", "mask": mask, "other_mask": other, "blocks": 3}
     test, actual, golden = _sample(ordered_native, params, overlap=False)
     with pytest.raises(AssertionError, match="independent tasks did not overlap"):
+        test.compare_outputs(actual, golden, ["records"], params)
+
+
+@pytest.mark.parametrize("mask,other", [(1, 1), (2, 2), (1, 2), (2, 1)])
+@pytest.mark.parametrize("task,field", [(0, 4), (1, 4), (0, 6), (1, 6)])
+def test_overlap_without_peer_entry_or_tail_wait_witness_is_rejected(ordered_native, mask, other, task, field):
+    params = {"scenario": "overlap", "mask": mask, "other_mask": other, "blocks": 3}
+    test, actual, golden = _sample(ordered_native, params, overlap=True)
+    n, _, base, *_ = actual.plan[task].tolist()
+    actual.records.view(-1, 16)[base + n * 3, field] = 0
+    with pytest.raises(AssertionError):
         test.compare_outputs(actual, golden, ["records"], params)
 
 
@@ -242,4 +255,4 @@ def test_matrix_is_unique_unguarded_and_reuses_existing_orchestration(ordered_na
         assert {positions * 2 - 1, positions * 2, positions * 2 + 1} <= shapes
     assert all("skip_golden" not in case and "manual" not in case and "marks" not in case for case in cases)
     source = Path(ordered_native.TestHbgOrderedExecution.CALLABLE["orchestration"]["source"])
-    assert source == Path(ordered_native.__file__).parent / "kernels/cla_orchestration.cpp"
+    assert source == Path(ordered_native.__file__).parent / "kernels/sync_ordered_orchestration.cpp"

@@ -98,6 +98,8 @@ def test_every_gm_case_checks_all_active_logical_slots_and_original_shape(gm_nat
     first = golden.plan[0]
     assert rows[first[2].item() + first[0].item() * 3, 7].item() == 2 * expected
     assert torch.equal(golden.plan, golden.host_plan)
+    assert torch.equal(golden.sync_flags, torch.zeros(len(golden.plan), dtype=torch.int64))
+    assert golden.wait_for_peer == int(params["scenario"] == "overlap")
     test.compare_outputs(actual, golden, ["records"], params)
 
 
@@ -178,6 +180,17 @@ def test_nonoverlap_cannot_pass_independent_gm_task_overlap_gate(gm_native, mask
     params = {"scenario": "overlap", "mask": mask, "other_mask": other, "blocks": 2}
     test, actual, golden = _sample(gm_native, params, overlap=False)
     with pytest.raises(AssertionError, match="independent tasks did not overlap"):
+        test.compare_outputs(actual, golden, ["records"], params)
+
+
+@pytest.mark.parametrize("mask,other", _PAIRS)
+@pytest.mark.parametrize("task,field", [(0, 4), (1, 4), (0, 6), (1, 6)])
+def test_gm_overlap_requires_peer_entry_and_tail_wait_witnesses(gm_native, mask, other, task, field):
+    params = {"scenario": "overlap", "mask": mask, "other_mask": other, "blocks": 2}
+    test, actual, golden = _sample(gm_native, params, overlap=True)
+    n, _, base, *_ = actual.plan[task].tolist()
+    actual.records.view(-1, 16)[base + n * 3, field] = 0
+    with pytest.raises(AssertionError):
         test.compare_outputs(actual, golden, ["records"], params)
 
 
