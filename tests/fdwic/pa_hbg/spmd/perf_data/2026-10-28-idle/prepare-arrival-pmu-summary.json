@@ -1,0 +1,2370 @@
+{
+  "schema": "csa-fair-competition-diagnostics-v2",
+  "date": "2026-10-29",
+  "decision": "提前准备与准入模式特化均未见完整 Device 收益，已撤回；保留公平竞争约束和基线诊断证据。",
+  "fairness_constraint": "所有原本合法核及 cluster 保留竞争资格，不预选成员或固定亲和。",
+  "prepare_arrival": {
+    "benchmarks": [
+      {
+        "label": "idle-prepare-arrival-after-a",
+        "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-prepare-arrival-after-a/result.json",
+        "result_sha256": "83b1a3219ed3d10fd0e58058e082a9617a9d3f08620d6373aa8254fa46fcaa62",
+        "identity": {
+          "runtime": "host_build_graph",
+          "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+          "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+          "torch": "2.12.0+cpu",
+          "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+          "simpler_branch": "feat/fully_distributed_within_core",
+          "tracked_diff_sha256": "714fcb371f55688528055d9def24ff30013884f44b7414dc58d1eb7548015971",
+          "runtime_sha256": {
+            "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+            "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+            "aicore_kernel.o": "6e1d97848f1a24b3196d1bb74482ff0fbdafa9bfc399526e226980ccb6c0f96f"
+          },
+          "case_sources_match_baseline": true,
+          "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+          "host_only_arguments": [
+            "hc_attn_scale"
+          ]
+        },
+        "production_diff_sha256": "5fa319c90c51b172eb6599257a5f60d99469f6bfbe760553a7df6cb708fc34b8",
+        "goldens": {
+          "rounds": 3,
+          "outputs_per_round": 7,
+          "passed": true
+        },
+        "metrics": {
+          "device_us": {
+            "min": 1986.789,
+            "median": 2024.8185,
+            "mean": 2029.62497,
+            "max": 2125.333,
+            "p90": 2060.9513,
+            "p99": 2118.9168099999997,
+            "samples": [
+              2043.91,
+              2047.826,
+              2021.611,
+              2037.316,
+              2021.518,
+              2035.933,
+              2068.166,
+              2002.186,
+              2012.662,
+              2048.252,
+              2035.237,
+              2006.539,
+              2037.967,
+              2030.35,
+              2032.083,
+              2024.699,
+              1999.135,
+              2035.755,
+              2036.428,
+              2060.76,
+              2036.226,
+              1988.24,
+              2030.414,
+              2011.455,
+              2004.674,
+              2029.945,
+              2023.868,
+              2001.895,
+              2003.068,
+              1997.666,
+              2007.407,
+              2045.972,
+              2118.852,
+              2006.31,
+              1987.799,
+              2012.357,
+              2017.473,
+              2039.74,
+              2039.478,
+              2062.673,
+              2008.003,
+              2010.721,
+              2028.687,
+              2024.938,
+              2032.017,
+              1986.789,
+              2125.333,
+              2030.946,
+              2010.416,
+              1995.05,
+              2043.594,
+              2014.406,
+              2017.615,
+              2027.056,
+              2031.756,
+              2116.249,
+              2003.766,
+              2036.947,
+              2059.538,
+              2045.937,
+              2033.682,
+              2023.409,
+              2101.851,
+              2020.804,
+              2004.255,
+              2028.675,
+              2010.96,
+              2012.697,
+              2035.788,
+              2019.446,
+              2050.687,
+              2017.728,
+              2000.129,
+              2014.998,
+              2033.534,
+              2028.889,
+              2032.968,
+              1995.957,
+              2007.591,
+              2012.975,
+              2002.878,
+              2046.112,
+              2005.629,
+              2010.875,
+              2058.621,
+              2013.195,
+              2072.56,
+              2019.566,
+              2006.621,
+              2069.04,
+              2096.607,
+              2035.339,
+              2022.26,
+              2012.557,
+              2015.428,
+              2022.597,
+              2046.695,
+              2052.995,
+              2013.471,
+              2098.819
+            ]
+          },
+          "host_us": {
+            "min": 139281.706,
+            "median": 149437.342,
+            "mean": 149268.8175,
+            "max": 181474.704,
+            "p90": 158889.6037,
+            "p99": 169353.66969000004
+          }
+        }
+      },
+      {
+        "label": "idle-prepare-arrival-before-a",
+        "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-prepare-arrival-before-a/result.json",
+        "result_sha256": "87becb3de501fcf97b790c4e0a2e6d4296df2790487923d1c982bb3574c2288d",
+        "identity": {
+          "runtime": "host_build_graph",
+          "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+          "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+          "torch": "2.12.0+cpu",
+          "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+          "simpler_branch": "feat/fully_distributed_within_core",
+          "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "runtime_sha256": {
+            "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+            "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+            "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+          },
+          "case_sources_match_baseline": true,
+          "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+          "host_only_arguments": [
+            "hc_attn_scale"
+          ]
+        },
+        "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "goldens": {
+          "rounds": 3,
+          "outputs_per_round": 7,
+          "passed": true
+        },
+        "metrics": {
+          "device_us": {
+            "min": 1975.35,
+            "median": 2005.3809999999999,
+            "mean": 2012.50308,
+            "max": 2130.14,
+            "p90": 2048.3762,
+            "p99": 2113.5228500000003,
+            "samples": [
+              1996.201,
+              1994.589,
+              2010.766,
+              2012.009,
+              1989.692,
+              2007.95,
+              1993.579,
+              1975.693,
+              2005.258,
+              2005.504,
+              2001.822,
+              2113.355,
+              2019.215,
+              2002.036,
+              1982.825,
+              2045.299,
+              2002.327,
+              2008.471,
+              1975.399,
+              1992.399,
+              2001.384,
+              2018.423,
+              2000.601,
+              2079.906,
+              2014.831,
+              2017.9,
+              1990.838,
+              1994.689,
+              1981.418,
+              2011.372,
+              1993.953,
+              1989.006,
+              2002.867,
+              1995.908,
+              1999.554,
+              2010.726,
+              1998.017,
+              2009.494,
+              2003.949,
+              1983.416,
+              2009.342,
+              2003.722,
+              2019.036,
+              2027.424,
+              1979.476,
+              1975.35,
+              2002.223,
+              2055.865,
+              2036.967,
+              2050.862,
+              2028.302,
+              1995.841,
+              2038.191,
+              2011.824,
+              2002.517,
+              2015.566,
+              2014.352,
+              2075.783,
+              1997.61,
+              1986.644,
+              1987.764,
+              2012.309,
+              2002.666,
+              2052.665,
+              2130.14,
+              2011.969,
+              2022.155,
+              1997.167,
+              1991.777,
+              1989.288,
+              1995.024,
+              2009.241,
+              2036.735,
+              1995.62,
+              1992.262,
+              2022.691,
+              2072.389,
+              1994.716,
+              2020.791,
+              2016.478,
+              2033.745,
+              2031.419,
+              2011.111,
+              2018.98,
+              2051.819,
+              1991.859,
+              2004.463,
+              2009.953,
+              2012.374,
+              1997.398,
+              2014.002,
+              1998.53,
+              2016.923,
+              2002.205,
+              2048.1,
+              2084.21,
+              1986.629,
+              2003.708,
+              1995.423,
+              2024.072
+            ]
+          },
+          "host_us": {
+            "min": 79929.26,
+            "median": 82897.65849999999,
+            "mean": 83865.97403,
+            "max": 99543.199,
+            "p90": 86761.04900000001,
+            "p99": 98973.08671
+          }
+        }
+      }
+    ],
+    "comparison_design": "B/A 初筛，不是 A/B/A 或最终验收",
+    "macro": {
+      "label": "l3-prepare-arrival",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-prepare-arrival/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "aefad928ab51cee649e4689b803e697bb89015009df810a406f74dd545d7cbcc",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "714fcb371f55688528055d9def24ff30013884f44b7414dc58d1eb7548015971",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "6e1d97848f1a24b3196d1bb74482ff0fbdafa9bfc399526e226980ccb6c0f96f"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1912.2259999999999,
+      "global_gap_us": 519.6539999999993,
+      "global_gap_count": 57,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 248.334,
+          "span_us": 248.334,
+          "global_gap_us": 103.21800000000002,
+          "aic_core_us": 485.52700000000004,
+          "aiv_core_us": 628.4180000000001
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 248.334,
+          "end_us": 631.058,
+          "span_us": 382.72400000000005,
+          "global_gap_us": 12.406000000000063,
+          "aic_core_us": 3249.4679999999994,
+          "aiv_core_us": 3505.088999999999
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 631.058,
+          "end_us": 1330.649,
+          "span_us": 699.5909999999999,
+          "global_gap_us": 288.7439999999998,
+          "aic_core_us": 1624.2220000000002,
+          "aiv_core_us": 2861.1800000000007
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1330.649,
+          "end_us": 1663.66,
+          "span_us": 333.0110000000002,
+          "global_gap_us": 57.57699999999954,
+          "aic_core_us": 1976.0710000000004,
+          "aiv_core_us": 2237.0970000000007
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1663.66,
+          "end_us": 1912.2259999999999,
+          "span_us": 248.5659999999998,
+          "global_gap_us": 57.70899999999983,
+          "aic_core_us": 4443.961000000001,
+          "aiv_core_us": 4565.375
+        }
+      ],
+      "t23": {
+        "span_us": 382.72400000000005,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.6059999999999945,
+          "median": 6.600500000000011,
+          "mean": 7.026376953124999,
+          "max": 14.906999999999982
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 14.136000000000081,
+          "median": 16.94300000000004,
+          "mean": 17.0278125,
+          "max": 21.641000000000076
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.252000000000066,
+          "median": 23.699500000000057,
+          "mean": 24.087131250000002,
+          "max": 33.749000000000024
+        },
+        "last_finishing_cluster": {
+          "cluster": 22,
+          "groups": 16,
+          "head_wait_us": 8.771999999999991,
+          "kernel_envelopes_us": 117.18200000000002,
+          "between_groups_us": 256.77000000000004
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 29.159000000000106,
+        "last_projection_first_start_after_t56_us": 239.07000000000016,
+        "projection_first_start_spread_us": 209.91100000000006,
+        "last_projection_return_after_t56_us": 272.9630000000002,
+        "all_pack_done_after_t56_us": 333.0110000000002,
+        "projection_span_us": {
+          "n": 16,
+          "min": 17.727999999999838,
+          "median": 28.511999999999944,
+          "mean": 28.50312499999997,
+          "max": 44.798
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 2.0419999999999163,
+          "median": 3.9664999999999964,
+          "mean": 4.230437500000036,
+          "max": 8.613000000000056
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 53.35400000000004,
+          "median": 114.34649999999999,
+          "mean": 109.98449999999998,
+          "max": 155.53999999999996
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 68.27500000000009,
+            "pack_span_us": 4.942000000000007
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 78.38999999999987,
+            "pack_span_us": 2.4570000000001073
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 128.95100000000002,
+            "pack_span_us": 2.786000000000058
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 127.92200000000003,
+            "pack_span_us": 3.877999999999929
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 53.35400000000004,
+            "pack_span_us": 2.0419999999999163
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 55.569999999999936,
+            "pack_span_us": 4.4780000000000655
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 106.87299999999982,
+            "pack_span_us": 5.620000000000118
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 116.34799999999996,
+            "pack_span_us": 3.4020000000000437
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 112.34500000000003,
+            "pack_span_us": 8.613000000000056
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 155.53999999999996,
+            "pack_span_us": 2.836999999999989
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 123.52400000000011,
+            "pack_span_us": 3.9529999999999745
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 105.46299999999997,
+            "pack_span_us": 3.2349999999999
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 89.69200000000001,
+            "pack_span_us": 3.980000000000018
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 130.95100000000002,
+            "pack_span_us": 4.84900000000016
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 154.8599999999999,
+            "pack_span_us": 4.977000000000089
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 151.69399999999996,
+            "pack_span_us": 5.638000000000147
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 23.27800000000002,
+          "median": 42.111999999999966,
+          "mean": 43.00593750000001,
+          "max": 68.93499999999995
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 3,
+        "groups": 2,
+        "head_wait_us": 10.670000000000073,
+        "kernel_envelopes_us": 156.6869999999999,
+        "between_groups_us": 18.79300000000012
+      }
+    },
+    "l4": {
+      "source": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-prepare-arrival-after-l4/result.json",
+        "sha256": "d83c5266aa6eeb8cb99afbe8bdc777e72be3ded6fde94e64c75794f8bbc85898"
+      },
+      "trace": {
+        "logical_tasks": 79,
+        "physical_tasks": 2308,
+        "clock_freq_hz": 1000000000,
+        "level": 4,
+        "sequence_integrity_verified": true,
+        "event_count": 46733,
+        "worker_count": 96,
+        "protocol_verified": true,
+        "device_logical_tasks": 81,
+        "executions": 2308,
+        "cooperative_tasks": 61,
+        "member_obligations": 4640,
+        "blocks": 1457,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "native_protocol",
+        "dependency_timing_guard": true,
+        "runtime": "host_build_graph",
+        "scheduler_producer": "aicore",
+        "distributed_scheduler_verified": true,
+        "require_aicore_scheduler": true,
+        "host_capture": {
+          "status": "complete",
+          "expected_records": 107,
+          "recorded_records": 107,
+          "pool_records": 117,
+          "dropped_records": 0,
+          "error": null
+        },
+        "clock_alignment_status": "bounded",
+        "cross_domain_latency_available": true
+      }
+    },
+    "kernel_fingerprints": {
+      "0": {
+        "bytes": 1920,
+        "fnv1a64": "0xc977e28d1be50594"
+      },
+      "1": {
+        "bytes": 1128,
+        "fnv1a64": "0xf83f45396c4d3032"
+      },
+      "2": {
+        "bytes": 72,
+        "fnv1a64": "0x3f88fe80a9bf096c"
+      },
+      "3": {
+        "bytes": 1840,
+        "fnv1a64": "0x713a851fd3ed9dd0"
+      },
+      "4": {
+        "bytes": 15032,
+        "fnv1a64": "0xc3e5873059fb872f"
+      },
+      "5": {
+        "bytes": 4424,
+        "fnv1a64": "0x8fc13602c18d8f13"
+      },
+      "6": {
+        "bytes": 2344,
+        "fnv1a64": "0x7ea4762c5e6d84e9"
+      },
+      "7": {
+        "bytes": 808,
+        "fnv1a64": "0x7f6de147a6fd7378"
+      },
+      "8": {
+        "bytes": 3656,
+        "fnv1a64": "0xe59fe3e9663e02f2"
+      },
+      "9": {
+        "bytes": 1000,
+        "fnv1a64": "0x3e92654216022e75"
+      },
+      "10": {
+        "bytes": 3640,
+        "fnv1a64": "0xa96ec483e1bb62f9"
+      },
+      "11": {
+        "bytes": 2376,
+        "fnv1a64": "0x7090c56f065b018"
+      },
+      "12": {
+        "bytes": 1888,
+        "fnv1a64": "0x17efec28f48e8039"
+      },
+      "13": {
+        "bytes": 2144,
+        "fnv1a64": "0xc3a318b74c637b9"
+      },
+      "14": {
+        "bytes": 2808,
+        "fnv1a64": "0x688eaf5422bfd252"
+      },
+      "15": {
+        "bytes": 2360,
+        "fnv1a64": "0xf9853d126dd53222"
+      },
+      "16": {
+        "bytes": 5192,
+        "fnv1a64": "0xee9b9093436cc113"
+      },
+      "17": {
+        "bytes": 1000,
+        "fnv1a64": "0xe94fae7d734b3fe9"
+      },
+      "18": {
+        "bytes": 3640,
+        "fnv1a64": "0x9f1424af88badf90"
+      },
+      "19": {
+        "bytes": 8520,
+        "fnv1a64": "0x1c5d8d88903ae24c"
+      },
+      "20": {
+        "bytes": 1032,
+        "fnv1a64": "0x8a5ec693f4c81d2d"
+      },
+      "21": {
+        "bytes": 1576,
+        "fnv1a64": "0xe6a60dc6d3dcc112"
+      },
+      "22": {
+        "bytes": 5424,
+        "fnv1a64": "0x472888f1d4dbaffa"
+      },
+      "23": {
+        "bytes": 9800,
+        "fnv1a64": "0x96155ff50aadec63"
+      },
+      "24": {
+        "bytes": 2808,
+        "fnv1a64": "0x5ddfc25df83b61e3"
+      },
+      "25": {
+        "bytes": 2360,
+        "fnv1a64": "0xaa2a3696386ca08a"
+      },
+      "26": {
+        "bytes": 3120,
+        "fnv1a64": "0x261c83f31bd30649"
+      },
+      "27": {
+        "bytes": 216,
+        "fnv1a64": "0xd9a84bc6042bb32e"
+      },
+      "28": {
+        "bytes": 248,
+        "fnv1a64": "0xe26e7d86da12bdce"
+      },
+      "29": {
+        "bytes": 6216,
+        "fnv1a64": "0x3a792d77ee54adc5"
+      },
+      "30": {
+        "bytes": 632,
+        "fnv1a64": "0xa99256f3b929702c"
+      },
+      "31": {
+        "bytes": 1120,
+        "fnv1a64": "0x8e1f1be0eecd3541"
+      },
+      "32": {
+        "bytes": 1176,
+        "fnv1a64": "0x721f39c10d83cc62"
+      },
+      "33": {
+        "bytes": 3168,
+        "fnv1a64": "0x49b13cc7a1e5cd5f"
+      },
+      "34": {
+        "bytes": 432,
+        "fnv1a64": "0x3d245de369b463d7"
+      },
+      "35": {
+        "bytes": 11592,
+        "fnv1a64": "0xda575b8623314273"
+      },
+      "36": {
+        "bytes": 3152,
+        "fnv1a64": "0x369b29e348c0f42d"
+      },
+      "37": {
+        "bytes": 9112,
+        "fnv1a64": "0xd40fe754923d5067"
+      },
+      "38": {
+        "bytes": 23088,
+        "fnv1a64": "0x247b5c4694ecc84d"
+      },
+      "39": {
+        "bytes": 2376,
+        "fnv1a64": "0xe36928ce5ee2c201"
+      },
+      "40": {
+        "bytes": 168,
+        "fnv1a64": "0xda20b85891ebc4e2"
+      },
+      "41": {
+        "bytes": 11096,
+        "fnv1a64": "0xd14502d1b8abc68c"
+      },
+      "42": {
+        "bytes": 4440,
+        "fnv1a64": "0x58da2d2aab8e09e6"
+      },
+      "43": {
+        "bytes": 4440,
+        "fnv1a64": "0x910bd520980ab464"
+      },
+      "44": {
+        "bytes": 2920,
+        "fnv1a64": "0xd24b39ec768f5630"
+      },
+      "45": {
+        "bytes": 7752,
+        "fnv1a64": "0x78846156e79e09fd"
+      },
+      "46": {
+        "bytes": 272,
+        "fnv1a64": "0xd54f2790ffab00c0"
+      },
+      "47": {
+        "bytes": 1000,
+        "fnv1a64": "0x4471da668742d644"
+      },
+      "48": {
+        "bytes": 3640,
+        "fnv1a64": "0xc1d6a13a9aae3331"
+      },
+      "49": {
+        "bytes": 320,
+        "fnv1a64": "0xb36ae26b3acca8a"
+      },
+      "50": {
+        "bytes": 1000,
+        "fnv1a64": "0xa5771367b18447a"
+      },
+      "51": {
+        "bytes": 3640,
+        "fnv1a64": "0xcac7e3e043c38e73"
+      },
+      "52": {
+        "bytes": 7752,
+        "fnv1a64": "0x3bb0f957aed7265d"
+      },
+      "53": {
+        "bytes": 4184,
+        "fnv1a64": "0xfd40003cedadb656"
+      }
+    },
+    "validation": {
+      "new_cases": 216,
+      "baseline_expected_failures": 216,
+      "candidate_cpp_targets_passed": 21,
+      "candidate_python_passed": 3574,
+      "candidate_full_device_fault_matrix": "未运行；性能初筛未通过后撤回",
+      "restored_cpp_targets_passed": 21,
+      "restored_a5sim_rebuilt": true
+    },
+    "archives": {
+      "production_patch": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-prepare-arrival-production.patch",
+        "sha256": "5fa319c90c51b172eb6599257a5f60d99469f6bfbe760553a7df6cb708fc34b8"
+      },
+      "tests_patch": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-prepare-arrival-tests.patch",
+        "sha256": "8724ebd16130dfdef96837d60e2a8d4472234abeb3cac7e70626d29cbe003759"
+      },
+      "runtime": "../reports/csa_poursoul_20261027.Osnaam/runtime-idle-prepare-arrival"
+    }
+  },
+  "baseline_pmu": {
+    "result": {
+      "path": "../reports/csa_pmu_20261029.1uXaXD/PipeUtilization/result.json",
+      "sha256": "5bb6bcd082f0b63179f12c4ccce5e9e617a627c02df2fe07b13297b5fd8b01f1"
+    },
+    "identity": {
+      "runtime": "host_build_graph",
+      "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+      "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+      "torch": "2.12.0+cpu",
+      "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+      "simpler_branch": "feat/fully_distributed_within_core",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "runtime_sha256": {
+        "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+        "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+        "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+      },
+      "case_sources_match_baseline": true,
+      "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+      "host_only_arguments": [
+        "hc_attn_scale"
+      ]
+    },
+    "golden_checks": 56,
+    "overlap_observations": 0,
+    "capture_group": "PipeUtilization",
+    "capture_mode": "task-based",
+    "selectors": {
+      "aic": [
+        "0x501",
+        "0x301",
+        "0x1",
+        "0x701",
+        "0x202",
+        "0x203",
+        "0x34",
+        "0x35",
+        "0x714"
+      ],
+      "aiv": [
+        "0x501",
+        "0x301",
+        "0x1",
+        "0x701",
+        "0x202",
+        "0x203",
+        "0x34",
+        "0x35",
+        "0x714"
+      ]
+    },
+    "raw": {
+      "path": "../reports/csa_pmu_20261029.1uXaXD/PipeUtilization/profile/PROF_000001_20261029121248947_03442767HDFGBELO/device_0/data/ffts_profile.data.0.slice_0",
+      "sha256": "112bd967dea0701c0968c39733f2720b2d6e33dae7480a8be7ded93941b073e8"
+    },
+    "database": {
+      "path": "../reports/csa_pmu_20261029.1uXaXD/PipeUtilization/profile/PROF_000001_20261029121248947_03442767HDFGBELO/device_0/sqlite/metric_summary.db",
+      "sha256": "d4e927d50211729e1ba857db41550d0613adb1b5f34a88450cf3df0619cb3d81"
+    },
+    "decoder": "CANN 9.1.0 SDK profiling_bean.stars.pmu_bean_v6.PmuBeanV6",
+    "decoder_sha256": "e15ae9f91f1cff21e4da65d6e2186760a26da79448f6e1a922f8591ad952e615",
+    "raw_records": [
+      {
+        "hardware_task_id": 8,
+        "core_type": "aic",
+        "total_cycles": 129073279,
+        "pmu_counts": [
+          0,
+          2546905,
+          107394531,
+          3396036,
+          15972251,
+          64,
+          10179811,
+          242921,
+          349244,
+          16197056
+        ],
+        "icache_requests": 10179811,
+        "icache_misses": 242921,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 8,
+        "core_type": "aiv",
+        "total_cycles": 258036621,
+        "pmu_counts": [
+          9729824,
+          0,
+          226873792,
+          0,
+          4566765,
+          2185785,
+          20651449,
+          552843,
+          0,
+          33552431
+        ],
+        "icache_requests": 20651449,
+        "icache_misses": 552843,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 13,
+        "core_type": "aic",
+        "total_cycles": 109223199,
+        "pmu_counts": [
+          0,
+          2546905,
+          87741495,
+          3395179,
+          15975209,
+          64,
+          9781233,
+          240901,
+          350267,
+          15433092
+        ],
+        "icache_requests": 9781233,
+        "icache_misses": 240901,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 13,
+        "core_type": "aiv",
+        "total_cycles": 218397561,
+        "pmu_counts": [
+          9737016,
+          0,
+          187574268,
+          0,
+          4633234,
+          2148203,
+          19859936,
+          548860,
+          0,
+          32030593
+        ],
+        "icache_requests": 19859936,
+        "icache_misses": 548860,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 18,
+        "core_type": "aic",
+        "total_cycles": 110781815,
+        "pmu_counts": [
+          0,
+          2546905,
+          89325192,
+          3397804,
+          15954899,
+          64,
+          9780532,
+          241916,
+          347675,
+          15431669
+        ],
+        "icache_requests": 9780532,
+        "icache_misses": 241916,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 18,
+        "core_type": "aiv",
+        "total_cycles": 221507408,
+        "pmu_counts": [
+          9732686,
+          0,
+          190668425,
+          0,
+          4597683,
+          2166467,
+          19752599,
+          553647,
+          0,
+          31871593
+        ],
+        "icache_requests": 19752599,
+        "icache_misses": 553647,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 23,
+        "core_type": "aic",
+        "total_cycles": 110429373,
+        "pmu_counts": [
+          0,
+          2546905,
+          88938401,
+          3399034,
+          15968115,
+          64,
+          9768821,
+          242489,
+          348834,
+          15404223
+        ],
+        "icache_requests": 9768821,
+        "icache_misses": 242489,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 23,
+        "core_type": "aiv",
+        "total_cycles": 220810257,
+        "pmu_counts": [
+          9730420,
+          0,
+          189945150,
+          0,
+          4608371,
+          2160929,
+          19560217,
+          551273,
+          0,
+          31559731
+        ],
+        "icache_requests": 19560217,
+        "icache_misses": 551273,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 28,
+        "core_type": "aic",
+        "total_cycles": 108659376,
+        "pmu_counts": [
+          0,
+          2546905,
+          87003561,
+          3398252,
+          16080637,
+          64,
+          9939149,
+          242290,
+          346765,
+          15689219
+        ],
+        "icache_requests": 9939149,
+        "icache_misses": 242290,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 28,
+        "core_type": "aiv",
+        "total_cycles": 217249763,
+        "pmu_counts": [
+          9731463,
+          0,
+          186350235,
+          0,
+          4583760,
+          2147550,
+          19973016,
+          552526,
+          0,
+          32217337
+        ],
+        "icache_requests": 19973016,
+        "icache_misses": 552526,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 33,
+        "core_type": "aic",
+        "total_cycles": 108743729,
+        "pmu_counts": [
+          0,
+          2546905,
+          87095332,
+          3395169,
+          16093437,
+          64,
+          9868333,
+          242024,
+          349910,
+          15575411
+        ],
+        "icache_requests": 9868333,
+        "icache_misses": 242024,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 33,
+        "core_type": "aiv",
+        "total_cycles": 217423800,
+        "pmu_counts": [
+          9736708,
+          0,
+          186573154,
+          0,
+          4638598,
+          2139047,
+          19933875,
+          541512,
+          0,
+          32155903
+        ],
+        "icache_requests": 19933875,
+        "icache_misses": 541512,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 38,
+        "core_type": "aic",
+        "total_cycles": 108705947,
+        "pmu_counts": [
+          0,
+          2546905,
+          87259630,
+          3397479,
+          15954115,
+          64,
+          9926283,
+          241054,
+          347120,
+          15659932
+        ],
+        "icache_requests": 9926283,
+        "icache_misses": 241054,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 38,
+        "core_type": "aiv",
+        "total_cycles": 217360227,
+        "pmu_counts": [
+          9736093,
+          0,
+          186608456,
+          0,
+          4545861,
+          2146564,
+          20059077,
+          550726,
+          0,
+          32314368
+        ],
+        "icache_requests": 20059077,
+        "icache_misses": 550726,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 43,
+        "core_type": "aic",
+        "total_cycles": 108429657,
+        "pmu_counts": [
+          0,
+          2546905,
+          86856950,
+          3400303,
+          16115930,
+          64,
+          9827565,
+          243308,
+          349440,
+          15504823
+        ],
+        "icache_requests": 9827565,
+        "icache_misses": 243308,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      },
+      {
+        "hardware_task_id": 43,
+        "core_type": "aiv",
+        "total_cycles": 216787232,
+        "pmu_counts": [
+          9729744,
+          0,
+          185886802,
+          0,
+          4587695,
+          2150516,
+          19760675,
+          551641,
+          0,
+          31888390
+        ],
+        "icache_requests": 19760675,
+        "icache_misses": 551641,
+        "scope": "该类核的整次常驻执行聚合，不是逐 core 或逐逻辑 task"
+      }
+    ],
+    "metrics": [
+      {
+        "aic_total_time": 2446.12,
+        "aic_total_cycles": 129073279,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.267428447370584,
+        "aic_mac_ratio": 0.0197322406289841,
+        "aic_scalar_time": 2035.2772642408813,
+        "aic_scalar_ratio": 0.832043098556441,
+        "aic_mte1_time": 64.35965402505967,
+        "aic_mte1_ratio": 0.02631091443799146,
+        "aic_mte2_time": 302.69659931797344,
+        "aic_mte2_ratio": 0.12374560500628484,
+        "aic_mte3_time": 0.001212889927434167,
+        "aic_mte3_ratio": 4.958423656378947e-07,
+        "aic_fixpipe_time": 6.618664528387784,
+        "aic_fixpipe_ratio": 0.002705780799138139,
+        "aic_icache_miss_rate": 0.023863016710231652,
+        "aiv_total_time": 2446.14,
+        "aiv_total_cycles": 258036621,
+        "aiv_vec_time": 92.236952984127,
+        "aiv_vec_ratio": 0.03770714390187275,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 2150.722077401874,
+        "aiv_scalar_ratio": 0.8792309832641934,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.29209743100767,
+        "aiv_mte2_ratio": 0.017698127429749595,
+        "aiv_mte3_time": 20.720842255564957,
+        "aiv_mte3_ratio": 0.008470832517993639,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.026770179661485257,
+        "task_id": 8,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832449891252721,
+        "end_time": 1832449893698842,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2070.16,
+        "aic_total_cycles": 109223199,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.272719560246536,
+        "aic_mac_ratio": 0.023318351992235642,
+        "aic_scalar_time": 1663.0068973643592,
+        "aic_scalar_ratio": 0.8033228819822427,
+        "aic_mte1_time": 64.35046604558798,
+        "aic_mte1_ratio": 0.031084778976305207,
+        "aic_mte2_time": 302.7858455550272,
+        "aic_mte2_ratio": 0.14626205006136106,
+        "aic_mte3_time": 0.0012130228853670544,
+        "aic_mte3_ratio": 5.859561026041729e-07,
+        "aic_fixpipe_time": 6.63877948420097,
+        "aic_fixpipe_ratio": 0.0032068919717321226,
+        "aic_icache_miss_rate": 0.02462889903553059,
+        "aiv_total_time": 2070.18,
+        "aiv_total_cycles": 218397561,
+        "aiv_vec_time": 92.29670739262514,
+        "aiv_vec_ratio": 0.04458390448783446,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1778.0074848374336,
+        "aiv_scalar_ratio": 0.85886612991983,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.91820274091797,
+        "aiv_mte2_ratio": 0.021214678308609868,
+        "aiv_mte3_time": 20.362713146508074,
+        "aiv_mte3_ratio": 0.009836204168965055,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.027636544246668265,
+        "task_id": 13,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832450526023519,
+        "end_time": 1832450528093674,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2099.64,
+        "aic_total_cycles": 110781815,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.271312527241044,
+        "aic_mac_ratio": 0.022990280489627292,
+        "aic_scalar_time": 1692.974123333148,
+        "aic_scalar_ratio": 0.8063163796332458,
+        "aic_mte1_time": 64.39834182677004,
+        "aic_mte1_ratio": 0.03067113496921855,
+        "aic_mte2_time": 302.3920860689997,
+        "aic_mte2_ratio": 0.1440209207621305,
+        "aic_mte3_time": 0.0012129875286841978,
+        "aic_mte3_ratio": 5.777121452649968e-07,
+        "aic_fixpipe_time": 6.589459984926226,
+        "aic_fixpipe_ratio": 0.003138376095390746,
+        "aic_icache_miss_rate": 0.02473444184835753,
+        "aiv_total_time": 2099.67,
+        "aiv_total_cycles": 221507408,
+        "aiv_vec_time": 92.25618681619895,
+        "aiv_vec_ratio": 0.043938422140716846,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1807.3471019973745,
+        "aiv_scalar_ratio": 0.860776742058216,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.581463716148036,
+        "aiv_mte2_ratio": 0.02075633967059016,
+        "aiv_mte3_time": 20.53595320789452,
+        "aiv_mte3_ratio": 0.009780562282594179,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.02802907100984534,
+        "task_id": 18,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832450647359184,
+        "end_time": 1832450649458827,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2092.89,
+        "aic_total_cycles": 110429373,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.26969365704901,
+        "aic_mac_ratio": 0.02306365535553661,
+        "aic_scalar_time": 1685.5867692818465,
+        "aic_scalar_ratio": 0.8053871771960527,
+        "aic_mte1_time": 64.41949342825663,
+        "aic_mte1_ratio": 0.03078016208604209,
+        "aic_mte2_time": 302.6324183000658,
+        "aic_mte2_ratio": 0.1446002505148698,
+        "aic_mte3_time": 0.0012129468488424723,
+        "aic_mte3_ratio": 5.79555948397896e-07,
+        "aic_fixpipe_time": 6.611204704204922,
+        "aic_fixpipe_ratio": 0.003158887807866119,
+        "aic_icache_miss_rate": 0.024822749848727906,
+        "aiv_total_time": 2092.91,
+        "aiv_total_cycles": 220810257,
+        "aiv_vec_time": 92.22802237035573,
+        "aiv_vec_ratio": 0.044066884085008785,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1800.3606774774958,
+        "aiv_scalar_ratio": 0.8602188710826055,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.679609274717706,
+        "aiv_mte2_ratio": 0.020870275967298024,
+        "aiv_mte3_time": 20.48197386677558,
+        "aiv_mte3_ratio": 0.009786361509465567,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.028183378538182882,
+        "task_id": 23,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832450770481590,
+        "end_time": 1832450772574477,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2059.28,
+        "aic_total_cycles": 108659376,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.26818192292951,
+        "aic_mac_ratio": 0.023439348666975595,
+        "aic_scalar_time": 1648.8654701650414,
+        "aic_scalar_ratio": 0.800699987454373,
+        "aic_mte1_time": 64.40265567657964,
+        "aic_mte1_ratio": 0.03127435592856709,
+        "aic_mte2_time": 304.7554236033898,
+        "aic_mte2_ratio": 0.1479912511185413,
+        "aic_mte3_time": 0.0012129088611736553,
+        "aic_mte3_ratio": 5.88996572187199e-07,
+        "aic_fixpipe_time": 6.57178658195129,
+        "aic_fixpipe_ratio": 0.00319130306803897,
+        "aic_icache_miss_rate": 0.02437733854276659,
+        "aiv_total_time": 2059.31,
+        "aiv_total_cycles": 217249763,
+        "aiv_vec_time": 92.2445152243043,
+        "aiv_vec_ratio": 0.04479389466583676,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1766.413445697752,
+        "aiv_scalar_ratio": 0.8577695663585143,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.44945041712197,
+        "aiv_mte2_ratio": 0.021099033373859193,
+        "aiv_mte3_time": 20.35662147304621,
+        "aiv_mte3_ratio": 0.009885166134795738,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.027663623761178584,
+        "task_id": 28,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832450892746769,
+        "end_time": 1832450894806053,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2061.03,
+        "aic_total_cycles": 108743729,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.27172711862769,
+        "aic_mac_ratio": 0.023421166658722913,
+        "aic_scalar_time": 1650.7259201306222,
+        "aic_scalar_ratio": 0.8009228007989316,
+        "aic_mte1_time": 64.34895352972492,
+        "aic_mte1_ratio": 0.031221745209785844,
+        "aic_mte2_time": 305.02040683293103,
+        "aic_mte2_ratio": 0.14799416157597464,
+        "aic_mte3_time": 0.0012129979467597621,
+        "aic_mte3_ratio": 5.885396848953009e-07,
+        "aic_fixpipe_time": 6.631876742979818,
+        "aic_fixpipe_ratio": 0.003217748767839293,
+        "aic_icache_miss_rate": 0.024525317497899594,
+        "aiv_total_time": 2061.05,
+        "aiv_total_cycles": 217423800,
+        "aiv_vec_time": 92.29827656125964,
+        "aiv_vec_ratio": 0.04478216276231029,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1768.6039847141851,
+        "aiv_scalar_ratio": 0.8581082383805269,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.97118626341735,
+        "aiv_mte2_ratio": 0.021334361739607163,
+        "aiv_mte3_time": 20.276909976506715,
+        "aiv_mte3_ratio": 0.00983814559399661,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.027165415655511033,
+        "task_id": 33,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832451015859348,
+        "end_time": 1832451017920376,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2060.59,
+        "aic_total_cycles": 108705947,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.27819561656549,
+        "aic_mac_ratio": 0.02342930695410804,
+        "aic_scalar_time": 1654.0614928979003,
+        "aic_scalar_ratio": 0.8027125691660641,
+        "aic_mte1_time": 64.40136391627222,
+        "aic_mte1_ratio": 0.03125384667317235,
+        "aic_mte2_time": 302.42034345968216,
+        "aic_mte2_ratio": 0.14676395763333905,
+        "aic_mte3_time": 0.0012131604906583447,
+        "aic_mte3_ratio": 5.887442386201742e-07,
+        "aic_fixpipe_time": 6.579879211208197,
+        "aic_fixpipe_ratio": 0.003193201564216169,
+        "aic_icache_miss_rate": 0.024284417440042762,
+        "aiv_total_time": 2060.61,
+        "aiv_total_cycles": 217360227,
+        "aiv_vec_time": 92.29973152691822,
+        "aiv_vec_ratio": 0.04479243113782725,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1769.0782523803678,
+        "aiv_scalar_ratio": 0.8585216282461833,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.095495272969146,
+        "aiv_mte2_ratio": 0.020913950370506376,
+        "aiv_mte3_time": 20.349772840640256,
+        "aiv_mte3_ratio": 0.009875606175181259,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.0274552014531875,
+        "task_id": 38,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832451132828872,
+        "end_time": 1832451134889460,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      },
+      {
+        "aic_total_time": 2054.96,
+        "aic_total_cycles": 108429657,
+        "aic_vec_time": 0,
+        "aic_vec_ratio": 0,
+        "aic_mac_time": 48.268970350058375,
+        "aic_mac_ratio": 0.02348900725564409,
+        "aic_scalar_time": 1646.1138300197704,
+        "aic_scalar_ratio": 0.8010442198484498,
+        "aic_mte1_time": 64.44257822267205,
+        "aic_mte1_ratio": 0.03135952924761166,
+        "aic_mte2_time": 305.42927487818207,
+        "aic_mte2_ratio": 0.1486302774157074,
+        "aic_mte3_time": 0.0012129286731950098,
+        "aic_mte3_ratio": 5.902444199376191e-07,
+        "aic_fixpipe_time": 6.622590555644753,
+        "aic_fixpipe_ratio": 0.0032227345328594004,
+        "aic_icache_miss_rate": 0.024757709564882043,
+        "aiv_total_time": 2054.98,
+        "aiv_total_cycles": 216787232,
+        "aiv_vec_time": 92.23065925358556,
+        "aiv_vec_ratio": 0.04488153619674428,
+        "aiv_mac_time": 0,
+        "aiv_mac_ratio": 0,
+        "aiv_scalar_time": 1762.067151509919,
+        "aiv_scalar_ratio": 0.8574619468364262,
+        "aiv_mte1_time": 0,
+        "aiv_mte1_ratio": 0,
+        "aiv_mte2_time": 43.48790002125217,
+        "aiv_mte2_ratio": 0.02116220110232322,
+        "aiv_mte3_time": 20.385275133177586,
+        "aiv_mte3_ratio": 0.00991993845836825,
+        "aiv_fixpipe_time": 0,
+        "aiv_fixpipe_ratio": 0,
+        "aiv_icache_miss_rate": 0.02791610104411919,
+        "task_id": 43,
+        "stream_id": 60,
+        "subtask_id": 4294967295,
+        "task_type": 0,
+        "start_time": 1832451252930809,
+        "end_time": 1832451254985769,
+        "ffts_type": 0,
+        "core_type": 0,
+        "batch_id": 0
+      }
+    ],
+    "per_block_rows": 0,
+    "derived_ratio_checks": "16 条原始 C/V 记录的 Scalar 比例和 ICache miss 比例均复算匹配 SDK SQLite"
+  },
+  "baseline_static_stack": {
+    "cube": {
+      "source": {
+        "path": "../reports/csa_stack_20261029.Dfaa9U/executor_cube.su",
+        "sha256": "70280d311988df028ed76d3405590fd79471c600ab4e8cde146199b84451c5b6"
+      },
+      "entries": [
+        {
+          "symbol": "_Z14aicore_executePU3AS17Runtimei8CoreType",
+          "frame_bytes": 104,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZL22scheduler_record_errorPU3AS119SchedulerRunControll20SchedulerGraphResultPK18SchedulerGraphViewPU3AS1K22SchedulerWorkerContext18SchedulerErrorSitePK22SchedulerErrorIdentity",
+          "frame_bytes": 56,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_122run_resident_schedulerILb1EEEvPU3AS122SchedulerWorkerContextPU3AS119SchedulerRunControlPU3AS1vmmm",
+          "frame_bytes": 1712,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_122run_resident_schedulerILb0EEEvPU3AS122SchedulerWorkerContextPU3AS119SchedulerRunControlPU3AS1vmmm",
+          "frame_bytes": 1432,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_121bootstrap_ready_graphERK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlmPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 688,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb1EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 832,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_133stage_task_trace_before_executionEP26SchedulerExecutorTaskTracemmmmb",
+          "frame_bytes": 0,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_134stage_task_trace_before_completionEP26SchedulerExecutorTaskTracemm",
+          "frame_bytes": 0,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 688,
+          "category": "static"
+        }
+      ]
+    },
+    "vec": {
+      "source": {
+        "path": "../reports/csa_stack_20261029.Dfaa9U/executor_vec.su",
+        "sha256": "3f46bfd5dfcedf24bf262e141e86e170fb0fe77745019781489b424669962926"
+      },
+      "entries": [
+        {
+          "symbol": "_Z14aicore_executePU3AS17Runtimei8CoreType",
+          "frame_bytes": 104,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZL22scheduler_record_errorPU3AS119SchedulerRunControll20SchedulerGraphResultPK18SchedulerGraphViewPU3AS1K22SchedulerWorkerContext18SchedulerErrorSitePK22SchedulerErrorIdentity",
+          "frame_bytes": 56,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_122run_resident_schedulerILb1EEEvPU3AS122SchedulerWorkerContextPU3AS119SchedulerRunControlPU3AS1vmmm",
+          "frame_bytes": 1712,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_122run_resident_schedulerILb0EEEvPU3AS122SchedulerWorkerContextPU3AS119SchedulerRunControlPU3AS1vmmm",
+          "frame_bytes": 1424,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_121bootstrap_ready_graphERK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlmPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 688,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb1EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 816,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_133stage_task_trace_before_executionEP26SchedulerExecutorTaskTracemmmmb",
+          "frame_bytes": 0,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_134stage_task_trace_before_completionEP26SchedulerExecutorTaskTracemm",
+          "frame_bytes": 0,
+          "category": "static"
+        },
+        {
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "frame_bytes": 704,
+          "category": "static"
+        }
+      ]
+    }
+  },
+  "caveats": [
+    "PMU 整次常驻执行包含业务 kernel 和调度轮询，不是纯 Scalar 调度成本。",
+    "ICache miss 比例是请求比例，不是时间比例；尚无 miss 等待周期归因。",
+    "硬件 task_id 是本次常驻启动标识，不是 CSA 逻辑 task 编号。",
+    "静态栈帧不是运行时峰值、访存流量或 DCache miss 测量。",
+    "提前准备候选的 L3 Dispatch 不再覆盖所有先前 poll 内的准备工作；不能按同口径比较阶段耗时。",
+    "候选 L3 kernel 窗口略短不代表无插桩完整 Device 更快。",
+    "PMU 的八轮正确性捕获不代替五批各百次正式性能验收。"
+  ],
+  "admission_mode_specialization": {
+    "decision": "代码缩小未转化为完整 Device 收益，源码和候选测试已撤回",
+    "benchmarks": [
+      {
+        "label": "idle-admission-mode-after-a",
+        "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-admission-mode-after-a/result.json",
+        "result_sha256": "36c171786cfb07370287c6690d5c3f989dfe98a8b683d0bbe654cdece376e179",
+        "identity": {
+          "runtime": "host_build_graph",
+          "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+          "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+          "torch": "2.12.0+cpu",
+          "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+          "simpler_branch": "feat/fully_distributed_within_core",
+          "tracked_diff_sha256": "daad5e3029c43b9247d11100f54d40ccb8754d13408c1ec085d624d970bdcc79",
+          "runtime_sha256": {
+            "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+            "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+            "aicore_kernel.o": "b496849b57578e25cf936aa07ffd25bde74844157bf9dbbc4fee62d6e0f5a8d4"
+          },
+          "case_sources_match_baseline": true,
+          "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+          "host_only_arguments": [
+            "hc_attn_scale"
+          ]
+        },
+        "production_diff_sha256": "b0f5c81326a194d359bf500e7a2e9d10487a152ee97256e8dbcf73af87ebf3a1",
+        "goldens": {
+          "rounds": 3,
+          "outputs_per_round": 7,
+          "passed": true
+        },
+        "metrics": {
+          "device_us": {
+            "min": 2024.328,
+            "median": 2064.6075,
+            "mean": 2068.76012,
+            "max": 2182.823,
+            "p90": 2093.6747,
+            "p99": 2143.7298800000003,
+            "samples": [
+              2076.849,
+              2143.335,
+              2055.815,
+              2093.495,
+              2059.062,
+              2048.29,
+              2046.142,
+              2079.016,
+              2054.848,
+              2062.717,
+              2079.951,
+              2072.219,
+              2032.706,
+              2077.571,
+              2062.248,
+              2071.364,
+              2078.074,
+              2065.585,
+              2073.321,
+              2061.127,
+              2083.647,
+              2033.905,
+              2075.496,
+              2043.697,
+              2041.821,
+              2067.881,
+              2067.278,
+              2076.826,
+              2127.954,
+              2058.911,
+              2035.018,
+              2061.388,
+              2060.725,
+              2065.458,
+              2067.149,
+              2062.754,
+              2048.199,
+              2088.123,
+              2082.313,
+              2066.357,
+              2055.286,
+              2060.828,
+              2077.002,
+              2054.361,
+              2049.9,
+              2092.411,
+              2100.125,
+              2054.201,
+              2062.817,
+              2067.195,
+              2059.463,
+              2053.288,
+              2053.706,
+              2058.574,
+              2063.368,
+              2089.951,
+              2048.972,
+              2115.41,
+              2065.458,
+              2055.472,
+              2095.679,
+              2086.002,
+              2073.748,
+              2064.857,
+              2129.052,
+              2050.784,
+              2064.633,
+              2052.644,
+              2065.51,
+              2051.666,
+              2069.884,
+              2065.627,
+              2038.538,
+              2061.281,
+              2024.328,
+              2069.708,
+              2095.292,
+              2051.802,
+              2047.96,
+              2073.63,
+              2064.331,
+              2060.831,
+              2086.469,
+              2055.497,
+              2072.206,
+              2047.202,
+              2054.761,
+              2056.055,
+              2095.723,
+              2057.778,
+              2061.053,
+              2064.582,
+              2088.813,
+              2068.585,
+              2089.437,
+              2075.301,
+              2042.87,
+              2128.131,
+              2182.823,
+              2044.516
+            ]
+          },
+          "host_us": {
+            "min": 80846.754,
+            "median": 88090.97200000001,
+            "mean": 91235.50677,
+            "max": 120399.538,
+            "p90": 100178.0794,
+            "p99": 120065.3536
+          }
+        }
+      },
+      {
+        "label": "idle-admission-mode-before-a",
+        "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-admission-mode-before-a/result.json",
+        "result_sha256": "9b44b9e1b20f9b51b795e822fbb8e8ec76aebba6106b2ea61dbeef52654bea44",
+        "identity": {
+          "runtime": "host_build_graph",
+          "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+          "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+          "torch": "2.12.0+cpu",
+          "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+          "simpler_branch": "feat/fully_distributed_within_core",
+          "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "runtime_sha256": {
+            "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+            "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+            "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+          },
+          "case_sources_match_baseline": true,
+          "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+          "host_only_arguments": [
+            "hc_attn_scale"
+          ]
+        },
+        "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "goldens": {
+          "rounds": 3,
+          "outputs_per_round": 7,
+          "passed": true
+        },
+        "metrics": {
+          "device_us": {
+            "min": 1970.49,
+            "median": 2006.061,
+            "mean": 2012.39137,
+            "max": 2124.958,
+            "p90": 2050.0381,
+            "p99": 2092.9018,
+            "samples": [
+              1994.385,
+              1993.6,
+              2025.404,
+              1978.262,
+              2017.995,
+              1996.924,
+              2020.245,
+              2003.438,
+              1988.256,
+              1970.49,
+              2032.155,
+              2015.485,
+              2012.977,
+              2018.929,
+              1977.046,
+              1992.316,
+              1992.9,
+              2067.704,
+              2092.578,
+              2009.976,
+              2091.313,
+              1986.317,
+              2000.935,
+              2018.92,
+              2017.086,
+              2055.862,
+              2060.964,
+              2004.526,
+              2002.148,
+              1989.123,
+              2005.148,
+              1988.148,
+              2006.974,
+              2011.966,
+              2027.483,
+              2002.733,
+              1996.018,
+              2016.094,
+              1983.358,
+              1993.005,
+              2042.364,
+              2040.603,
+              2013.704,
+              1995.752,
+              1998.869,
+              1987.347,
+              2008.528,
+              2008.235,
+              1982.762,
+              2005.134,
+              2007.383,
+              1995.536,
+              1995.144,
+              2018.3,
+              2000.994,
+              2089.809,
+              1984.374,
+              2124.958,
+              2026.317,
+              1997.825,
+              2009.093,
+              2011.919,
+              2021.672,
+              2003.145,
+              2004.918,
+              2032.218,
+              2011.836,
+              2017.932,
+              1993.748,
+              2009.038,
+              2023.041,
+              2002.524,
+              2027.253,
+              1992.981,
+              2036.314,
+              1995.363,
+              2036.388,
+              1979.255,
+              1991.012,
+              1984.596,
+              2001.161,
+              2014.208,
+              1998.514,
+              2054.166,
+              1997.487,
+              1993.504,
+              2018.619,
+              2015.368,
+              2008.698,
+              1990.767,
+              1971.568,
+              1994.124,
+              2079.062,
+              2052.892,
+              2007.989,
+              2002.215,
+              1996.276,
+              2049.721,
+              2024.151,
+              2001.277
+            ]
+          },
+          "host_us": {
+            "min": 81120.923,
+            "median": 129858.198,
+            "mean": 129951.33193,
+            "max": 313525.454,
+            "p90": 153730.2276,
+            "p99": 229986.25628000044
+          }
+        }
+      }
+    ],
+    "comparison_design": "B/A 初筛，不是最终性能验收",
+    "macro": {
+      "label": "l3-admission-mode",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-admission-mode/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "27db88c9a39f620cde75da16caab159ef87ed0fad600be355abf2f2c8e54d443",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "6a2db9aea9e9f44afd22beff2f5b5574390745c7",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "daad5e3029c43b9247d11100f54d40ccb8754d13408c1ec085d624d970bdcc79",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "b496849b57578e25cf936aa07ffd25bde74844157bf9dbbc4fee62d6e0f5a8d4"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1962.263,
+      "global_gap_us": 561.8259999999999,
+      "global_gap_count": 62,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 248.40999999999997,
+          "span_us": 248.40999999999997,
+          "global_gap_us": 113.91399999999999,
+          "aic_core_us": 479.25199999999984,
+          "aiv_core_us": 639.1190000000006
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 248.40999999999997,
+          "end_us": 645.3119999999999,
+          "span_us": 396.902,
+          "global_gap_us": 14.659999999999968,
+          "aic_core_us": 3082.4530000000004,
+          "aiv_core_us": 3707.204
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 645.3119999999999,
+          "end_us": 1354.585,
+          "span_us": 709.273,
+          "global_gap_us": 302.5829999999994,
+          "aic_core_us": 1635.428,
+          "aiv_core_us": 2839.6470000000027
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1354.585,
+          "end_us": 1706.23,
+          "span_us": 351.645,
+          "global_gap_us": 71.71800000000007,
+          "aic_core_us": 1968.3599999999997,
+          "aiv_core_us": 2248.581000000001
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1706.23,
+          "end_us": 1962.263,
+          "span_us": 256.0329999999999,
+          "global_gap_us": 58.95100000000048,
+          "aic_core_us": 4508.016,
+          "aiv_core_us": 4653.476
+        }
+      ],
+      "t23": {
+        "span_us": 396.902,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.586999999999989,
+          "median": 7.0,
+          "mean": 7.258736328125001,
+          "max": 13.173999999999978
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 15.110000000000014,
+          "median": 17.481499999999983,
+          "mean": 17.614414583333332,
+          "max": 22.59299999999996
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.94799999999998,
+          "median": 24.462999999999965,
+          "mean": 24.89860625,
+          "max": 35.31899999999996
+        },
+        "last_finishing_cluster": {
+          "cluster": 25,
+          "groups": 16,
+          "head_wait_us": 8.279000000000053,
+          "kernel_envelopes_us": 112.243,
+          "between_groups_us": 276.37999999999994
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 30.254000000000133,
+        "last_projection_first_start_after_t56_us": 255.66200000000003,
+        "projection_first_start_spread_us": 225.4079999999999,
+        "last_projection_return_after_t56_us": 285.34000000000015,
+        "all_pack_done_after_t56_us": 351.645,
+        "projection_span_us": {
+          "n": 16,
+          "min": 17.864000000000033,
+          "median": 27.84699999999998,
+          "mean": 27.7361875,
+          "max": 34.462999999999965
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 1.5420000000001437,
+          "median": 3.1779999999998836,
+          "mean": 3.639937499999988,
+          "max": 7.161000000000058
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 61.88999999999987,
+          "median": 139.55349999999999,
+          "mean": 129.73206249999998,
+          "max": 173.25099999999998
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 139.413,
+            "pack_span_us": 1.956000000000131
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 79.91800000000012,
+            "pack_span_us": 1.99799999999982
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 115.3929999999998,
+            "pack_span_us": 2.59699999999998
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 96.356,
+            "pack_span_us": 1.5420000000001437
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 61.88999999999987,
+            "pack_span_us": 4.414999999999964
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 122.1360000000002,
+            "pack_span_us": 3.116999999999962
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 160.17700000000013,
+            "pack_span_us": 3.181999999999789
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 171.0150000000001,
+            "pack_span_us": 7.161000000000058
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 139.69399999999996,
+            "pack_span_us": 2.872000000000071
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 173.25099999999998,
+            "pack_span_us": 5.190000000000055
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 151.73299999999995,
+            "pack_span_us": 4.543999999999869
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 142.05600000000004,
+            "pack_span_us": 5.578999999999951
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 89.76800000000003,
+            "pack_span_us": 2.3250000000000455
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 130.76,
+            "pack_span_us": 4.4659999999998945
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 141.20699999999988,
+            "pack_span_us": 3.173999999999978
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 160.9459999999999,
+            "pack_span_us": 4.121000000000095
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 25.16800000000012,
+          "median": 39.63599999999997,
+          "mean": 41.53010416666667,
+          "max": 72.24199999999996
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 14,
+        "groups": 2,
+        "head_wait_us": 7.925999999999931,
+        "kernel_envelopes_us": 165.1949999999997,
+        "between_groups_us": 19.682000000000244
+      }
+    },
+    "l4": {
+      "source": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-admission-mode-after-l4/result.json",
+        "sha256": "cdb4a6cce523506f819a01052139bdb58e0577109a41c0b5e82b66ced524a232"
+      },
+      "trace": {
+        "logical_tasks": 79,
+        "physical_tasks": 2308,
+        "clock_freq_hz": 1000000000,
+        "level": 4,
+        "sequence_integrity_verified": true,
+        "event_count": 46733,
+        "worker_count": 96,
+        "protocol_verified": true,
+        "device_logical_tasks": 81,
+        "executions": 2308,
+        "cooperative_tasks": 61,
+        "member_obligations": 4640,
+        "blocks": 1457,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "native_protocol",
+        "dependency_timing_guard": true,
+        "runtime": "host_build_graph",
+        "scheduler_producer": "aicore",
+        "distributed_scheduler_verified": true,
+        "require_aicore_scheduler": true,
+        "host_capture": {
+          "status": "complete",
+          "expected_records": 107,
+          "recorded_records": 107,
+          "pool_records": 117,
+          "dropped_records": 0,
+          "error": null
+        },
+        "clock_alignment_status": "bounded",
+        "cross_domain_latency_available": true
+      }
+    },
+    "loop_sizes": {
+      "aic": {
+        "baseline_bytes": 203436,
+        "specialized_bytes": 175932
+      },
+      "aiv": {
+        "baseline_bytes": 206944,
+        "specialized_bytes": 179028
+      }
+    },
+    "validation": {
+      "new_parameterized_cases": 66,
+      "new_missing_mode_guard_cases": 1,
+      "red_kind": "新增特化模板接口缺失导致编译 RED，不是业务行为失败",
+      "candidate_cpp_targets_passed": 21,
+      "candidate_python_passed": 3574,
+      "candidate_full_device_fault_matrix": "未运行，性能初筛后撤回",
+      "restored_cpp_targets_passed": 21,
+      "restored_a5sim_rebuilt": true
+    },
+    "archives": {
+      "production_patch": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-admission-mode-production.patch",
+        "sha256": "b0f5c81326a194d359bf500e7a2e9d10487a152ee97256e8dbcf73af87ebf3a1"
+      },
+      "tests_patch": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-admission-mode-tests.patch",
+        "sha256": "78ed20e997a2c5d72c4bbd036b5e7916f7ba71e38eea2b74f4125800e9cb66fb"
+      },
+      "runtime": "../reports/csa_poursoul_20261027.Osnaam/runtime-idle-admission-mode"
+    }
+  }
+}

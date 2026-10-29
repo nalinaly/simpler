@@ -7,6 +7,8 @@
 2026-10-29 的三份 L3 与同版本 L1 将重点收敛到任务交接、Mix 连续 block 周转和输出分支展开。
 跨类型协同后继直传实验未证明稳定收益，已撤回；详见
 [L3 宏观瓶颈与直接准入实验](../../../../docs/zh-cn/investigations/2026-10-csa-l3-direct-admission.md)。
+后续保留全部合法竞争者；准备重叠负例、PMU 与静态栈证据见
+[公平竞争约束下的诊断](../../../../docs/zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md)。
 
 ## 新基线的空窗
 
