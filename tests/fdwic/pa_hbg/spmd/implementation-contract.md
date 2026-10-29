@@ -129,6 +129,9 @@ N>1 的合法请求继续设置 SYNC_START，超过对应类型执行位置容�
 取得锁后遇错须释放自己的锁，没有取得锁则不能释放别人的锁。
 此锁不跨准备、kernel 或等待持有，也不是保持到 TaskDone 的全局锁。
 PREPARED／ADMITTED 由同一准入 owner 发布；扫描者仍核验阶段、身份、epoch、成员和顺序。
+`scheduler_ordered_publish_pending`只在同次调用新构建PREPARED时，复用该owner对三个零计数
+和记录形状的证明；ADMITTED之前不存在合法的block领取者。提交前及持锁后仍检查error／epoch。
+独立prepare、已有PREPARED或短锁RETRY后的下一次调用必须完整重验，不缓存跨轮提交许可。
 纯 C/V 的 `scheduler_fill_ordered_slots` 发现／发布候选，executor 的
 `scheduler_ordered_can_enter_slot` 在实际执行前校验许可；完成路径的 direct 候选
 进入同一个持久候选池。GM Mix 使用本核 own slot，入口再核对组、block、slot 和 generation。

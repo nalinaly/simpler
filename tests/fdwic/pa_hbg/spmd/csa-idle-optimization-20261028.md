@@ -181,44 +181,22 @@ CLI竞争观察均为空。Host的A2有明显漂移，最大470093.886us，不�
 
 ### 提前确认当前Mix组完成：负收益，已撤回
 
-排除t46/t56大扇出后，first-ready的L1最大十段全局计算空窗仍合计260.775us。
-L4中26个Mix task最后贡献组的阶段中位数为：最后active返回到最后资源lane release
-4.449us、全三lane release到C观察确认6.342us、确认到block完成贡献1.216us。
-这里只把原生事件当定位证据，不把包含插桩的时间直接算成无插桩可省时间。
-
-该实验基线的fill先做新候选发现，再处理当前已RELEASED的Mix组；确认完成晚，也推迟后继Ready。
-当时的候选保持已有pending发布优先，随后提前尝试当前C协调者的退休，再正常执行discovery：
-
-- 复用frontier和ordinary槽停放检查，坏状态不能先贡献完成数。
-- 三lane ACK仍走原有query和强确认；TASK_LAST仍由原完成路径唯一发布DONE/Resolve。
-- 提前路径只退休，不提前close、claim或发布下一组；discovery的两份credit预算保留。
-- WAIT只在本轮首次后段服务跳过重复退休，下一轮重新确认，不缓存跨轮许可。
-- 尚未发现的独立坏候选可能晚于当前有效block退休；错误一经发布，后续贡献、领取和入口仍停止。
-
-24项新增参数化测试覆盖四种Mix mask。在原顺序下16项确定性失败、8项保护通过，
-包括同轮后继准入、旧队列FIFO、满credit回退、frontier/park/错误、迟到ACK和不提前领取下一组。
-重复WAIT的无副作用调用次数没有现成统计或hook，不伪称动态覆盖，另以控制流审查保证。
-候选实现时，新增24项测试和六个关联C++目标全部通过。
-四项旧测试的“同轮后继不能READY”曾替换为READY必须已ADMITTED、
-cooperative、block/payload身份正确，原有完整exactly-once循环保留；撤回候选时旧断言一并恢复。
-
-恢复8B/v5后的独立基线为 `idle-prefix8-before-retire-l4` 与
-`idle-prefix8-before-retire-a`，完整Device单批2250.447us。其L4全局空窗921.875us，
-最后贡献组全release→C观察中位6.267us，全task最后raw kernel返回→DONE中位12.512us。
-这份prefix基线中还出现t79已全release后、C确认前提交t70准入的直接交错，
-故不沿用更早记录中“该区间没有成功commit”的观察来概括所有版本。
-退休候选 `idle-retire-first-after-l4` 通过严格v5身份/依赖审计，但完整Device为2380.2695us，
-恢复基线 `idle-retire-first-before-a` 为2251.311us，候选反而慢约5.73%。
-L4的最后贡献组全release→C确认中位降到4.435us，却把同task退休→下一claim中位
-从1.657us拉长到5.433us；同task内全核计算空窗增加70.931us。
-因此撤回生产和绑定该顺序的测试，完整补丁与测试日志保留；
-详见[提前退休负结果](../../../../docs/zh-cn/investigations/2026-10-csa-early-mix-retirement.md)。
+候选将已RELEASED组的退休放到discovery之前，但不同时领取／发布下一组。
+24项新测试（旧顺序16红8绿）、六个C++目标与严格v5 CSA L4通过，仍因性能负收益撤回。
+8B/v5基线、候选、恢复基线的完整Device分别为2250.447、2380.2695、2251.311us；
+候选慢约5.73%。全release→C确认中位6.267→4.435us，却将退休→下一claim
+从1.657→5.433us，同task全核空窗增加70.931us。不能用局部确认提前代替完整周转收益。
+该prefix基线还出现t79全release后、C确认前提交t70准入的交错，不能概括为该段从不commit。
+生产改动、策略测试和四项旧断言均恢复；完整补丁、原始数据及重开条件见
+[提前退休负结果](../../../../docs/zh-cn/investigations/2026-10-csa-early-mix-retirement.md)。
 
 ### 空Ready结果复用：保留
 
 不再移动退休与后续领取的相对顺序。现有poll已经逐个读取适用的own inbox和对应偷取目录；
 若它们都为空，无须在同一fill再次进入discovery反复清目录bit、barrier和重读空inbox。
 该候选没有新增GM判空，只把完整负探测结果作为本轮栈上的布尔输出。
+A5的目录清位helper先query、需要改变位时才CAS；不是每次空领取都必然执行一次原子写。
+因此收益包含重复读取、barrier与条件原子路径，不能按“空领取次数×170ns”直接拆算。
 
 只有无pending、无candidate、无local READY、全部适用队列确认为空且配置合法时才复用。
 坏scheduler_count/index等情况仍走原领取校验；提示不授予ownership或执行许可，不改变任何共享状态。
@@ -242,6 +220,31 @@ Host批次漂移明显，不声称Host收益。批次身份、分位数和结果
 t23同cluster相邻claim周期40.534→34.9255us，C/V入口偏斜2.886→0.835us。
 新L1（`idle-ready-probe-after-l1`）窗口1909.368us、全局计算空窗526.240us。
 该候选有可保留的实测收益，但完整Device仍高于1.5ms，不能结项。
+
+### 同次准入准备与提交复用：保留小幅收益
+
+唯一pending owner在CLAIMED→PREPARED时已经检查三个block计数为零，并构建合法记录。
+同一个有界调用内紧接的commit不再重复三次FAA0和完整记录校验；只有本次新准备才使用该路径。
+锁竞争返回RETRY后不保留证明，独立prepare后commit也仍走完整校验。
+提交前及持锁后的error／epoch门禁、容量检查、发布屏障和reader完整验证保留。
+
+新增14项GoogleTest实例覆盖形状／成员字／epoch等价、三个计数被污染、十一类坏记录、
+显式PREPARED与锁竞争后重试、满日志、首错和锁释放；基线也通过，属于等价保护而非业务RED。
+严格v5 L4保留2308身份、133依赖、46733事件。新L1窗口1873.455us，计算空窗508.134us；
+L4空窗833.188→800.898us，但窗口2506.685→2519.656us略增，不能宣称L4总体变快。
+
+A/B/A/B每臂200正式样本，四批完整Device中位数为2090.9585、2063.879、2088.427、2063.2565us；
+合并2089.9065→2063.458us，减少26.4485us（约1.27%）。54个kernel指纹一致，各批三轮七项golden通过。
+B1有一个7565.062us样本，全部保留；含该值的候选均值2095.47106us，高于基线2093.1115us，
+不宣称均值或长尾改善，异常原因尚未证实。详细样本身份与分位数见
+[准入复用摘要](perf_data/2026-10-28-idle/admission-fused-summary.json)。
+
+首次A5整批为9失败／79通过，主要为poisoned lane，原始日志保留在工作区outputs。
+五类失败用例单独复跑均通过；不改源码与二进制、按原顺序复跑为88通过／4跳过／4取消选择，
+CLI竞争观察为空，并保留清理前的Host日志。首次根因未证实，不归咎于已证实或未证实的外部干扰。
+回归证据在工作区reports下的`csa_poursoul_20261027.Osnaam/regressions/fused-candidate-r1/`。
+21个相关C++目标、3479项Python协议／身份／因果测试及A5sim回归（67通过／29取消选择）通过。
+完整故障矩阵与最终五批低于1500us验收仍未完成。
 
 ### 耗尽关闭预筛：撤回
 

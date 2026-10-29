@@ -145,6 +145,10 @@ struct AdmissionFixture {
     SchedulerAdmissionResult commit(uint64_t worker) {
         return scheduler_try_commit_admission(graph.graph(), base(), locals[worker], run(), &admissions[worker]);
     }
+    SchedulerAdmissionResult publish_pending(uint64_t worker) {
+        locals[worker]->admission = &admissions[worker];
+        return scheduler_ordered_publish_pending(graph.graph(), base(), locals[worker], run());
+    }
     uint64_t publisher(uint64_t task) const {
         const auto &metadata = storage.metadata[task];
         const uint32_t queue = scheduler_task_ready_queue(metadata.flags, metadata.active_mask);
@@ -766,6 +770,130 @@ TEST(HbgAdmission, NonzeroBlockCountersAreRejectedWithoutResettingTheirEvidence)
     }
 }
 
+TEST(HbgAdmission, PendingPublicationMatchesSeparatePreparationAndCommitAcrossShapesAndEpochs) {
+    for (uint64_t epoch : {UINT64_C(0), UINT64_C(17), UINT64_MAX}) {
+        for (uint64_t workers : {UINT64_C(6), UINT64_C(69)}) {
+            for (const auto &shape : std::vector<AdmissionShape>{
+                     {2, 1},
+                     {3, 2},
+                     {1, 3},
+                     {512, 7},
+                     {2, 6, SCHEDULER_TASK_SYNC_START},
+                     {4, 4, SCHEDULER_TASK_SYNC_START},
+                 }) {
+                SCOPED_TRACE(epoch);
+                SCOPED_TRACE(workers);
+                SCOPED_TRACE(static_cast<uint32_t>(shape.mask));
+                AdmissionFixture pending({shape}, workers, epoch, {}, true);
+                AdmissionFixture separate({shape}, workers, epoch, {}, true);
+                const uint64_t worker = pending.publisher(0);
+                SchedulerReadyClaim ready{};
+                ASSERT_TRUE(pending.ready_pop(0, worker, &ready));
+                ASSERT_EQ(pending.claim(worker, ready), SchedulerAdmissionResult::PROGRESS);
+                ASSERT_EQ(pending.publish_pending(worker), SchedulerAdmissionResult::PROGRESS);
+                ASSERT_TRUE(separate.publish(0, worker));
+                EXPECT_EQ(pending.control()->commit_tail, 1u);
+                EXPECT_EQ(pending.control()->commit_lock, 0u);
+                EXPECT_EQ(pending.log()[0], 0);
+                EXPECT_EQ(pending.admissions[worker].pending_task_ref, SCHEDULER_TASK_REF_INVALID);
+                EXPECT_EQ(pending.record(0)->run_epoch, epoch);
+                EXPECT_EQ(pending.record(0)->order_key, 0u);
+                EXPECT_EQ(pending.record(0)->member_count, separate.record(0)->member_count);
+                for (uint64_t word = 0; word < pending.admissions[worker].member_word_count; ++word)
+                    EXPECT_EQ(pending.members(0)[word], separate.members(0)[word]);
+                EXPECT_EQ(pending.task_control(0)->claim_tickets, 0u);
+                EXPECT_EQ(pending.task_control(0)->next_block, 0u);
+                EXPECT_EQ(pending.task_control(0)->completed_blocks, 0u);
+                EXPECT_EQ(
+                    pending.task_control(0)->admission_state, static_cast<uint64_t>(SchedulerAdmissionState::ADMITTED)
+                );
+                const auto *trace = scheduler_state_at<SchedulerProtocolTaskTrace>(
+                    pending.base(), pending.storage.layout.protocol.tasks_offset
+                );
+                EXPECT_EQ(trace->admission.before.sequence, 1u);
+                EXPECT_EQ(trace->admission.after.sequence, 2u);
+                EXPECT_EQ(pending.publish_pending(worker), SchedulerAdmissionResult::PROGRESS);
+                EXPECT_EQ(pending.control()->commit_tail, 1u);
+                EXPECT_EQ(trace->admission.after.sequence, 2u);
+                for (uint64_t member = 0; member < workers; ++member) {
+                    ASSERT_TRUE(pending.refresh(member));
+                    ASSERT_TRUE(separate.refresh(member));
+                    EXPECT_EQ(
+                        pending.admissions[member].current_task_ref, separate.admissions[member].current_task_ref
+                    );
+                    EXPECT_EQ(pending.admissions[member].scan_cursor, separate.admissions[member].scan_cursor);
+                }
+                EXPECT_EQ(scheduler_read_error(pending.run()), 0u);
+            }
+        }
+    }
+}
+
+TEST(HbgAdmission, PendingPublicationRejectsNonzeroCountersBeforePreparationAndAfterCommitRetry) {
+    for (bool retry : {false, true}) {
+        for (uint32_t counter = 0; counter < 3; ++counter) {
+            for (uint64_t value : {UINT64_C(1), UINT64_MAX}) {
+                SCOPED_TRACE(retry);
+                SCOPED_TRACE(counter);
+                SCOPED_TRACE(value);
+                AdmissionFixture fixture({{3, 7}});
+                SchedulerReadyClaim ready{};
+                ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+                ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+                if (retry) {
+                    scheduler_gm_store(fixture.control()->commit_lock, UINT64_C(4));
+                    ASSERT_EQ(fixture.publish_pending(0), SchedulerAdmissionResult::RETRY);
+                    EXPECT_EQ(fixture.control()->commit_lock, 4u);
+                    scheduler_gm_store(fixture.control()->commit_lock, UINT64_C(0));
+                }
+                auto *task = fixture.task_control(0);
+                volatile uint64_t *counts[] = {&task->claim_tickets, &task->next_block, &task->completed_blocks};
+                scheduler_gm_store(*counts[counter], value);
+                EXPECT_EQ(fixture.publish_pending(0), SchedulerAdmissionResult::ERROR);
+                EXPECT_EQ(*counts[counter], value);
+                EXPECT_EQ(fixture.control()->commit_tail, 0u);
+                EXPECT_EQ(fixture.control()->commit_lock, 0u);
+                EXPECT_EQ(fixture.log()[0], SCHEDULER_TASK_REF_INVALID);
+                EXPECT_EQ(fixture.admissions[0].pending_task_ref, 0);
+                EXPECT_EQ(
+                    fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::ADMISSION_INVALID_STATE)
+                );
+            }
+        }
+    }
+}
+
+TEST(HbgAdmission, PendingPublicationKeepsFreshErrorAndFullLogGates) {
+    for (uint32_t failure = 0; failure < 3; ++failure) {
+        SCOPED_TRACE(failure);
+        AdmissionFixture fixture({{2, 7}});
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+        ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+        if (failure == 0) {
+            scheduler_record_error(
+                fixture.run(), 0, SchedulerGraphResult::TIMEOUT, nullptr, fixture.locals[4],
+                SchedulerErrorSite::ORDERED_EXIT_TIMEOUT
+            );
+        } else {
+            scheduler_gm_store(fixture.control()->commit_tail, failure == 1 ? UINT64_C(1) : UINT64_MAX);
+        }
+        const uint64_t tail = fixture.control()->commit_tail;
+        EXPECT_EQ(fixture.publish_pending(0), SchedulerAdmissionResult::ERROR);
+        EXPECT_EQ(fixture.control()->commit_tail, tail);
+        EXPECT_EQ(fixture.control()->commit_lock, 0u);
+        EXPECT_EQ(fixture.log()[0], SCHEDULER_TASK_REF_INVALID);
+        EXPECT_EQ(fixture.admissions[0].pending_task_ref, 0);
+        EXPECT_NE(fixture.task_control(0)->admission_state, static_cast<uint64_t>(SchedulerAdmissionState::ADMITTED));
+        EXPECT_EQ(
+            fixture.run()->error_site,
+            static_cast<uint64_t>(
+                failure == 0 ? SchedulerErrorSite::ORDERED_EXIT_TIMEOUT : SchedulerErrorSite::ADMISSION_LOG_CAPACITY
+            )
+        );
+    }
+}
+
 TEST(HbgAdmission, InvalidTaskReferenceAndNoncooperativeTaskCannotAcquireOwnership) {
     for (int64_t task_ref : {INT64_C(-2), INT64_C(-1), INT64_C(1), INT64_MAX}) {
         SCOPED_TRACE(task_ref);
@@ -882,6 +1010,30 @@ TEST_P(HbgAdmissionPreparedCorruption, CorruptPreparedRecordCannotAdvanceCommitT
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.control()->commit_tail, UINT64_C(0)), 0u);
     EXPECT_EQ(scheduler_gm_load(fixture.log()[0]), SCHEDULER_TASK_REF_INVALID);
     EXPECT_EQ(fixture.admissions[0].pending_task_ref, 0);
+}
+
+TEST_P(HbgAdmissionPreparedCorruption, PendingPublicationRevalidatesExplicitPreparationAndRetriedRecords) {
+    for (bool retry : {false, true}) {
+        SCOPED_TRACE(retry);
+        AdmissionFixture fixture({{3, 1}});
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+        ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+        if (retry) {
+            scheduler_gm_store(fixture.control()->commit_lock, UINT64_C(4));
+            ASSERT_EQ(fixture.publish_pending(0), SchedulerAdmissionResult::RETRY);
+            EXPECT_EQ(fixture.control()->commit_lock, 4u);
+            scheduler_gm_store(fixture.control()->commit_lock, UINT64_C(0));
+        } else {
+            ASSERT_TRUE(fixture.prepare(0));
+        }
+        corrupt_record(fixture, GetParam(), true);
+        EXPECT_EQ(fixture.publish_pending(0), SchedulerAdmissionResult::ERROR);
+        EXPECT_EQ(fixture.control()->commit_tail, 0u);
+        EXPECT_EQ(fixture.control()->commit_lock, 0u);
+        EXPECT_EQ(fixture.log()[0], SCHEDULER_TASK_REF_INVALID);
+        EXPECT_EQ(fixture.admissions[0].pending_task_ref, 0);
+    }
 }
 
 TEST_P(HbgAdmissionPreparedCorruption, CorruptPublishedRecordCannotBecomeLocalObligation) {

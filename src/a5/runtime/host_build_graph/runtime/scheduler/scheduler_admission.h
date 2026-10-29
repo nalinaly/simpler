@@ -263,8 +263,9 @@ inline __aicore__ SchedulerAdmissionResult scheduler_try_claim_admission(
 
 inline __aicore__ bool scheduler_prepare_admission_record(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
-    SchedulerAdmissionLocalState *admission
+    SchedulerAdmissionLocalState *admission, bool *prepared_now = nullptr
 ) {
+    if (prepared_now != nullptr) *prepared_now = false;
     if (!scheduler_admission_context_valid(graph, base, local, run, admission)) return false;
     const int64_t task = admission->pending_task_ref;
     if (admission->capacity == 0 || !scheduler_task_ref_valid(graph, task))
@@ -299,37 +300,22 @@ inline __aicore__ bool scheduler_prepare_admission_record(
     scheduler_writeback_cache_line(words);
     scheduler_cache_barrier();
     scheduler_publish_signal(control->admission_state, static_cast<uint64_t>(SchedulerAdmissionState::PREPARED));
+    if (prepared_now != nullptr) *prepared_now = true;
     return true;
 }
 
-inline __aicore__ SchedulerAdmissionResult scheduler_try_commit_admission(
+namespace scheduler_admission_detail {
+
+// The pending owner reaches this only after complete validation or fresh
+// construction in the same bounded call. Before ADMITTED, no legitimate block
+// claimant can modify its counters. A returned RETRY discards that proof.
+inline __aicore__ SchedulerAdmissionResult commit_validated_record(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     SchedulerAdmissionLocalState *admission
 ) {
-    if (!scheduler_admission_context_valid(graph, base, local, run, admission)) return SchedulerAdmissionResult::ERROR;
     const int64_t task = admission->pending_task_ref;
-    if (admission->capacity == 0 || !scheduler_task_ref_valid(graph, task)) {
-        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_STATE);
-        return SchedulerAdmissionResult::ERROR;
-    }
     auto *control = scheduler_task_control_at(base, local, task);
     auto *record = scheduler_admission_record_at(base, admission, task);
-    if (scheduler_gm_query(control->admission_state) != static_cast<uint64_t>(SchedulerAdmissionState::PREPARED) ||
-        scheduler_gm_fetch_add(control->claim_tickets, UINT64_C(0)) != 0 ||
-        scheduler_gm_fetch_add(control->next_block, UINT64_C(0)) != 0 ||
-        scheduler_gm_fetch_add(control->completed_blocks, UINT64_C(0)) != 0) {
-        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_STATE);
-        return SchedulerAdmissionResult::ERROR;
-    }
-    if (record->run_epoch != admission->epoch) {
-        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_EPOCH_MISMATCH);
-        return SchedulerAdmissionResult::ERROR;
-    }
-    if (record->order_key != UINT64_MAX ||
-        !scheduler_admission_published_record_valid(base, local, admission, task, record)) {
-        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_RECORD);
-        return SchedulerAdmissionResult::ERROR;
-    }
     auto *shared = scheduler_state_at<SchedulerAdmissionControl>(base, admission->control_offset);
     const uint64_t owner = local->worker_id() + 1;
     if (owner == 0 || owner > local->config.runtime_worker_count) {
@@ -360,6 +346,39 @@ inline __aicore__ SchedulerAdmissionResult scheduler_try_commit_admission(
     if (!valid) return SchedulerAdmissionResult::ERROR;
     admission->pending_task_ref = SCHEDULER_TASK_REF_INVALID;
     return SchedulerAdmissionResult::PROGRESS;
+}
+
+}  // namespace scheduler_admission_detail
+
+inline __aicore__ SchedulerAdmissionResult scheduler_try_commit_admission(
+    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
+    SchedulerAdmissionLocalState *admission
+) {
+    if (!scheduler_admission_context_valid(graph, base, local, run, admission)) return SchedulerAdmissionResult::ERROR;
+    const int64_t task = admission->pending_task_ref;
+    if (admission->capacity == 0 || !scheduler_task_ref_valid(graph, task)) {
+        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_STATE);
+        return SchedulerAdmissionResult::ERROR;
+    }
+    auto *control = scheduler_task_control_at(base, local, task);
+    auto *record = scheduler_admission_record_at(base, admission, task);
+    if (scheduler_gm_query(control->admission_state) != static_cast<uint64_t>(SchedulerAdmissionState::PREPARED) ||
+        scheduler_gm_fetch_add(control->claim_tickets, UINT64_C(0)) != 0 ||
+        scheduler_gm_fetch_add(control->next_block, UINT64_C(0)) != 0 ||
+        scheduler_gm_fetch_add(control->completed_blocks, UINT64_C(0)) != 0) {
+        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_STATE);
+        return SchedulerAdmissionResult::ERROR;
+    }
+    if (record->run_epoch != admission->epoch) {
+        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_EPOCH_MISMATCH);
+        return SchedulerAdmissionResult::ERROR;
+    }
+    if (record->order_key != UINT64_MAX ||
+        !scheduler_admission_published_record_valid(base, local, admission, task, record)) {
+        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_RECORD);
+        return SchedulerAdmissionResult::ERROR;
+    }
+    return scheduler_admission_detail::commit_validated_record(graph, base, local, run, admission);
 }
 
 inline __aicore__ bool scheduler_refresh_local_obligation(
@@ -743,8 +762,14 @@ inline __aicore__ SchedulerAdmissionResult scheduler_ordered_publish_pending(
 ) {
     auto *admission = local->admission;
     if (scheduler_task_ref_is_null(admission->pending_task_ref)) return SchedulerAdmissionResult::PROGRESS;
-    if (!scheduler_prepare_admission_record(graph, base, local, run, admission)) return SchedulerAdmissionResult::ERROR;
-    return scheduler_try_commit_admission(graph, base, local, run, admission);
+    bool prepared_now = false;
+    if (!scheduler_prepare_admission_record(graph, base, local, run, admission, &prepared_now))
+        return SchedulerAdmissionResult::ERROR;
+    if (!prepared_now) return scheduler_try_commit_admission(graph, base, local, run, admission);
+    // Only the constructing owner may use this path, without returning to the
+    // scheduler between preparation and this attempt. Retries revalidate fully.
+    if (!scheduler_admission_context_valid(graph, base, local, run, admission)) return SchedulerAdmissionResult::ERROR;
+    return scheduler_admission_detail::commit_validated_record(graph, base, local, run, admission);
 }
 
 inline __aicore__ bool scheduler_ordered_can_enter_slot(
