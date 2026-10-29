@@ -19,6 +19,105 @@ from simpler_setup.tools.hbg.native_protocol import STAMPS, _event_records, audi
 from simpler_setup.tools.swimlane_converter import generate_chrome_trace_json, read_perf_data
 
 
+def _claim_seal_capture(mask, blocks, *, sync=False, sealed=True):
+    raw, identities = ProtocolBuilder([(mask, blocks, ())], sync_tasks=(0,) if sync else ()).run()
+    original = [
+        record[name] for record, kind, _ in _event_records(raw) for name in STAMPS[kind].split() if record[name][1]
+    ]
+    per_worker = {}
+    for record, kind, _ in _event_records(raw):
+        per_worker.setdefault(record["worker_index"], []).extend(
+            record[name] for name in STAMPS[kind].split() if record[name][1]
+        )
+    raw["schema"] = "hbg-native-protocol-v6"
+    cooperative = bool(raw["cooperative_task_count"])
+    raw["task_controls"][0].update(
+        claim_tickets=blocks if blocks > 1 and not sync else 0,
+        admission_claim_lock=0,
+        claim_seal=blocks if cooperative else 0,
+    )
+    insertion = {}
+    for block in raw["blocks"]:
+        owner = block["owner"]
+        assert owner is not None
+        certificate = dict(
+            run_epoch=raw["run_epoch"],
+            worker_index=owner["worker_index"],
+            block_idx=owner["block_idx"],
+            confirmed_count=owner["block_idx"] + 1,
+            seal_value=0,
+            published_before=[0, 0],
+            published_after=[0, 0],
+        )
+        block["claim"] = certificate
+        if certificate["confirmed_count"] == blocks:
+            certificate["seal_value"] = blocks
+            certificate["published_before"][0] = certificate["published_after"][0] = owner["claim_after"][0]
+            insertion[id(owner["claim_after"])] = [certificate["published_before"], certificate["published_after"]]
+    for worker in raw["workers"]:
+        events = sorted(per_worker.get(worker["index"], []), key=lambda stamp: stamp[1])
+        expanded = []
+        for stamp in events:
+            expanded.append(stamp)
+            expanded.extend(insertion.get(id(stamp), []))
+        for ordinal, stamp in enumerate(expanded, 1):
+            stamp[1] = ordinal
+        worker["next_sequence"] = len(expanded)
+    assert len(original) + 2 * int(cooperative) == sum(row["next_sequence"] for row in raw["workers"])
+    for member in raw["members"]:
+        cursor_reader = not (mask.bit_count() > 1 and member["worker_index"] % 3)
+        use = sealed and cursor_reader and member["closed_cursor"] == blocks
+        member.update(claim_seal_seen=blocks if use else 0, claim_cursor_seen=blocks if use else 0)
+    return raw, identities
+
+
+@pytest.mark.parametrize("mask", (1, 2, 3, 5, 6, 7))
+@pytest.mark.parametrize("blocks", (1, 2, 3, 16))
+@pytest.mark.parametrize("sealed", (False, True))
+def test_v6_claim_seal_and_strong_fallback_keep_the_complete_causal_chain(mask, blocks, sealed):
+    raw, identities = _claim_seal_capture(mask, blocks, sealed=sealed)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+
+
+@pytest.mark.parametrize("mask", (1, 2, 3, 5, 6, 7))
+@pytest.mark.parametrize("sealed", (False, True))
+def test_v6_sync_start_partial_cursor_closure_remains_valid(mask, sealed):
+    raw, identities = _claim_seal_capture(mask, 2, sync=True, sealed=sealed)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+
+
+@pytest.mark.parametrize("mask", (1, 2, 3, 5, 6, 7))
+@pytest.mark.parametrize(
+    "fault", ("missing", "duplicate", "publisher", "value", "early", "epoch", "witness", "terminal")
+)
+def test_v6_rejects_invalid_claim_seal_proof(mask, fault):
+    raw, identities = _claim_seal_capture(mask, 3)
+    last = next(block for block in raw["blocks"] if block["claim"]["confirmed_count"] == 3)
+    certificate = last["claim"]
+    if fault == "missing":
+        last["claim"] = None
+    elif fault == "duplicate":
+        certificate["confirmed_count"] = 1
+    elif fault == "publisher":
+        certificate["worker_index"] = (certificate["worker_index"] + 1) % raw["worker_count"]
+    elif fault == "value":
+        certificate["seal_value"] = 2
+    elif fault == "early":
+        last["owner"]["claim_after"], certificate["published_before"] = (
+            certificate["published_before"],
+            last["owner"]["claim_after"],
+        )
+    elif fault == "epoch":
+        certificate["run_epoch"] += 1
+    elif fault == "witness":
+        member = next(member for member in raw["members"] if member["claim_seal_seen"])
+        member["claim_cursor_seen"] = 2
+    elif fault == "terminal":
+        raw["task_controls"][0]["claim_seal"] = 2
+    with pytest.raises(ValueError, match="native protocol"):
+        audit_native_protocol(raw, identities)
+
+
 @pytest.mark.parametrize("mask", (1, 2, 4, 3, 5, 6, 7))
 @pytest.mark.parametrize("blocks", (1, 2, 3, 16))
 @pytest.mark.parametrize("tail", (False, True))

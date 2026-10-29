@@ -183,6 +183,22 @@ inline void block_owner(JsonObject &parent, const SchedulerProtocolBlockOwner &r
     row.numbers("released_seq", record.released_seq, 3);
 }
 
+inline void claim_certificate(JsonObject &parent, const SchedulerProtocolClaimTrace &record) {
+    auto &out = parent.field("claim");
+    if (!populated(record)) {
+        out << "null";
+        return;
+    }
+    JsonObject row(out);
+    row.stamp("published_before", record.published_before);
+    row.stamp("published_after", record.published_after);
+    row.number("confirmed_count", record.confirmed_count);
+    row.number("seal_value", record.seal_value);
+    row.number("worker_index", record.worker_index);
+    row.number("block_idx", record.block_idx);
+    row.number("run_epoch", record.run_epoch);
+}
+
 inline void lane(JsonObject &row, const SchedulerProtocolLaneTrace &record) {
     row.stamp("descriptor_ready", record.descriptor_ready);
     row.stamp("arrive_before", record.arrive_before);
@@ -322,8 +338,8 @@ inline std::string scheduler_export_protocol(
     std::ostringstream out;
     {
         JsonObject root(out);
-        // v5 records transient claim ownership separately from the published phase.
-        root.string("schema", "hbg-native-protocol-v5");
+        // v6 records valid-count confirmation and the exhaustion publication.
+        root.string("schema", "hbg-native-protocol-v6");
         root.string("producer", "aicore");
         root.number("run_epoch", epoch);
         root.number("task_count", plan.task_count);
@@ -404,6 +420,7 @@ inline std::string scheduler_export_protocol(
             row.number("completed_blocks", controls[task].completed_blocks);
             row.number("admission_state", controls[task].admission_state);
             row.number("admission_claim_lock", controls[task].admission_claim_lock);
+            row.number("claim_seal", controls[task].claim_seal);
         }
         out << ']';
         sparse(
@@ -428,12 +445,15 @@ inline std::string scheduler_export_protocol(
                 row.number("worker_index", record.worker_index);
                 row.number("flags", record.flags);
                 row.number("pending_mask", record.pending_mask);
+                row.number("claim_seal_seen", record.claim_seal_seen);
+                row.number("claim_cursor_seen", record.claim_cursor_seen);
             }
         );
         sparse(
             root, "blocks", image.array<SchedulerProtocolBlockTrace>(plan.blocks_offset, plan.trace_count),
             plan.trace_count, [](JsonObject &row, const auto &record) {
                 block_owner(row, record.owner);
+                claim_certificate(row, record.claim);
                 sparse(row, "lanes", record.lanes, 3, lane);
             }
         );

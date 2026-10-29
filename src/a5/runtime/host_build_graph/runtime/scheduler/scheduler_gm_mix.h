@@ -71,6 +71,7 @@ inline __aicore__ bool scheduler_gm_mix_close(
     auto &seal = seals[group.cluster_index];
     uint64_t closed_cursor = UINT64_MAX;
     uint64_t close_seal = 0;
+    bool used_claim_seal = false;
     if (local->is_mix_coordinator()) {
         if (group.phase != SchedulerGmMixPhase::IDLE) return true;
         auto *control = scheduler_task_control_at(base, local, admission.current_task_ref);
@@ -79,7 +80,8 @@ inline __aicore__ bool scheduler_gm_mix_close(
         // The query may only postpone closing. The error gate and the atomic
         // exhausted-cursor confirmation precede publishing a close seal.
         if (scheduler_read_error(run) != 0) return false;
-        const uint64_t cursor = scheduler_gm_fetch_add(control->next_block, UINT64_C(0));
+        uint64_t cursor = 0;
+        if (!scheduler_read_claim_cursor(graph, base, local, run, &cursor, &used_claim_seal)) return false;
         if (cursor < admission.current_block_num && !admission.sync_claimed) return true;
         if (cursor > admission.current_block_num || (admission.sync_claimed && cursor == 0) ||
             group.task_last_seq == UINT64_MAX)
@@ -117,7 +119,9 @@ inline __aicore__ bool scheduler_gm_mix_close(
         return scheduler_admission_fail(
             graph, local, run, admission.current_task_ref, SchedulerErrorSite::ADMISSION_INVALID_FRONTIER
         );
-    scheduler_protocol_member_closed(base, local, &admission, closed_cursor, close_seal, group.task_last_seq);
+    scheduler_protocol_member_closed(
+        base, local, &admission, closed_cursor, close_seal, group.task_last_seq, used_claim_seal
+    );
     ++admission.scan_cursor;
     admission.current_task_ref = SCHEDULER_TASK_REF_INVALID;
     admission.current_block_num = 0;

@@ -47,7 +47,7 @@ def expected_probe(params):
     checks = torch.zeros((params["blocks"] * 3 + 1, 16), dtype=torch.int64)
     for group in range(groups):
         row = controls[group]
-        row[16] = row[32] = entries
+        row[16] = row[32] = row[-16] = entries
         for index in range(entries):
             row[48 + index] = -index - 7 if index % 2 == 0 else index + 7
             payload = 48 + log_stride + index * 16
@@ -55,6 +55,7 @@ def expected_probe(params):
                 [_signed(params["epoch"] ^ (index << 32) ^ (0x1234000010000100 + word)) for word in range(16)]
             )
             row[48 + log_stride + entries * 16 + index * 16] = 3
+            row[48 + log_stride + entries * 16 + index * 16 + 1] = index + 1
     for block in range(params["blocks"]):
         for lane in range(3):
             rank = block * 3 + lane if params["shared"] else lane

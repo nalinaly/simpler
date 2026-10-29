@@ -39,6 +39,7 @@ NUMBERS = {
         "active_mask flags member_words_offset close_seals_offset"
     ),
     "control": "task_ref state next_block completed_blocks admission_state",
+    "claim": "run_epoch worker_index block_idx confirmed_count seal_value",
     "actor": "run_epoch task_ref order_key worker_index flags",
     "member": (
         "index run_epoch task_ref order_key observed_tail closed_cursor "
@@ -59,6 +60,7 @@ NUMBERS = {
     ),
 }
 STAMPS = {
+    "claim": "published_before published_after",
     "actor": "before after",
     "member": "observed closed",
     "owner": (
@@ -137,6 +139,7 @@ def read_native_protocol(section):
             "hbg-native-protocol-v3",
             "hbg-native-protocol-v4",
             "hbg-native-protocol-v5",
+            "hbg-native-protocol-v6",
         )
         or section["producer"] != "aicore"
     ):
@@ -158,8 +161,10 @@ def read_native_protocol(section):
         _indices(section[table], count, table, key=key, dense=True)
         for row in section[table]:
             extra = ("claim_tickets",) if kind == "control" and section["schema"] != "hbg-native-protocol-v1" else ()
-            if kind == "control" and section["schema"] == "hbg-native-protocol-v5":
+            if kind == "control" and section["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6"):
                 extra += ("admission_claim_lock",)
+            if kind == "control" and section["schema"] == "hbg-native-protocol-v6":
+                extra += ("claim_seal",)
             _record(row, kind, f"{table}[{row[key]}]", extra)
     for row in section["admissions"]:
         if len(row["member_words"]) != (section["worker_count"] + 63) // 64:
@@ -172,7 +177,12 @@ def read_native_protocol(section):
     ):
         _indices(section[table], count, table)
         for row in section[table]:
-            _record(row, kind, f"{table}[{row['index']}]")
+            extra = (
+                ("claim_seal_seen", "claim_cursor_seen")
+                if kind == "member" and section["schema"] == "hbg-native-protocol-v6"
+                else ()
+            )
+            _record(row, kind, f"{table}[{row['index']}]", extra)
     _read_nested_events(section)
     return section
 
@@ -186,7 +196,12 @@ def _read_nested_events(section):
                 _record(row[name], "actor", f"task_events[{row['index']}].{name}")
     _indices(section["blocks"], section["trace_count"], "blocks")
     for row in section["blocks"]:
-        _object(row, {"index", "owner", "lanes"}, "block row")
+        fields = {"index", "owner", "lanes"}
+        if section["schema"] == "hbg-native-protocol-v6":
+            fields.add("claim")
+        _object(row, fields, "block row")
+        if section["schema"] == "hbg-native-protocol-v6" and row["claim"] is not None:
+            _record(row["claim"], "claim", f"blocks[{row['index']}].claim")
         if row["owner"] is not None:
             _record(row["owner"], "owner", f"blocks[{row['index']}].owner")
         _indices(row["lanes"], 3, "block lanes")
@@ -200,6 +215,8 @@ def _event_records(section):
             if row[name] is not None:
                 yield row[name], "actor", f"task_events[{row['index']}].{name}"
     for row in section["blocks"]:
+        if section["schema"] == "hbg-native-protocol-v6" and row["claim"] is not None:
+            yield row["claim"], "claim", f"blocks[{row['index']}].claim"
         if row["owner"] is not None:
             yield row["owner"], "owner", f"blocks[{row['index']}].owner"
         for lane in row["lanes"]:

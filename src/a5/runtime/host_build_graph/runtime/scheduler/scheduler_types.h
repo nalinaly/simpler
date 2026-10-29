@@ -911,10 +911,12 @@ struct alignas(128) SchedulerTaskControl {
     uint8_t block_cursor_padding[120];
     alignas(128) volatile uint64_t completed_blocks;
     uint8_t block_completion_padding[120];
-    // Only the claimed owner publishes this phase after the claim lock
-    // serializes UNCLAIMED. This whole region excludes RMW and cached writes.
+    // Each signal has one publisher: the admission owner for its phase, and
+    // the final valid block confirmer for claim_seal. The whole region excludes
+    // RMW and cached writes, including writes to its padding.
     alignas(128) volatile uint64_t admission_state;
-    uint8_t admission_phase_padding[120];
+    volatile uint64_t claim_seal;
+    uint8_t admission_phase_padding[112];
 };
 
 // Each record's bitmap follows its header within an independently aligned
@@ -1360,6 +1362,7 @@ static_assert(
 static_assert(
     offsetof(SchedulerTaskControl, admission_state) == 384, "admission state requires an isolated signal region"
 );
+static_assert(offsetof(SchedulerTaskControl, claim_seal) == 392, "claim seal must stay in the bypass region");
 static_assert(sizeof(SchedulerAdmissionRecord) == 64, "admission header must occupy one cache line");
 static_assert(sizeof(SchedulerAdmissionControl) == 256, "admission control layout changed");
 static_assert(alignof(SchedulerAdmissionControl) == 128, "admission control requires isolated atomic regions");

@@ -109,7 +109,7 @@ def _large_ticket_capture(mask, lane, blocks=257):
 
 
 @pytest.mark.parametrize("mask,lane", ((1, 0), (2, 1), (4, 2), (6, 1), (7, 0), (7, 1), (7, 2)))
-@pytest.mark.parametrize("version", (2, 3, 4, 5))
+@pytest.mark.parametrize("version", (2, 3, 4, 5, 6))
 @pytest.mark.parametrize("blocks", (1, 2, 3))
 @pytest.mark.parametrize("tail", (False, True))
 def test_small_fault_capture_requires_the_versioned_claim_policy(native, mask, lane, version, blocks, tail):
@@ -120,9 +120,11 @@ def test_small_fault_capture_requires_the_versioned_claim_policy(native, mask, l
     protocol["workers"] = [{"worker_index": worker, "finished": 2, "error_flags": 0} for worker in range(6)]
     positions = 4 if mask in (2, 4) else 2
     uses_tickets = version >= 4 and blocks > 1
-    if version == 5:
+    if version >= 5:
         for control in protocol["task_controls"]:
             control["admission_claim_lock"] = 0
+            if version == 6:
+                control["claim_seal"] = 0
     protocol["task_controls"][0]["claim_tickets"] = blocks + (positions if tail else 0) if uses_tickets else 0
     native._check_failed_capture(raw, blocks, mask, lane)
     protocol["task_controls"][0]["claim_tickets"] = 0 if uses_tickets else blocks
@@ -184,6 +186,23 @@ def test_v5_kernel_timeout_cannot_hide_a_held_or_missing_admission_claim_lock(na
         del protocol["task_controls"][task]["admission_claim_lock"]
     else:
         protocol["task_controls"][task]["admission_claim_lock"] = value
+    with pytest.raises(AssertionError):
+        native._check_failed_capture(raw, 257, 7, 0)
+
+
+@pytest.mark.parametrize("task", (0, 1))
+@pytest.mark.parametrize("value", (None, False, True, -1, 1 << 32, (1 << 64) - 1))
+def test_v6_kernel_timeout_does_not_hide_invalid_claim_seal(native, task, value):
+    raw = _large_ticket_capture(7, 0)
+    protocol = raw["aicore_protocol"]
+    protocol["schema"] = "hbg-native-protocol-v6"
+    for control in protocol["task_controls"]:
+        control.update(admission_claim_lock=0, claim_seal=0)
+    native._check_failed_capture(raw, 257, 7, 0)
+    if value is None:
+        del protocol["task_controls"][task]["claim_seal"]
+    else:
+        protocol["task_controls"][task]["claim_seal"] = value
     with pytest.raises(AssertionError):
         native._check_failed_capture(raw, 257, 7, 0)
 

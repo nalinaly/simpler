@@ -45,7 +45,8 @@ inline __aicore__ bool scheduler_protocol_owner_matches(
 }
 
 inline __aicore__ void scheduler_protocol_block_claim(
-    __gm__ void *base, const SchedulerLocalState *local, uint32_t block, uint64_t before, uint64_t after
+    __gm__ void *base, const SchedulerLocalState *local, uint32_t block, uint64_t before, uint64_t after,
+    uint64_t confirmed_count = 0
 ) {
     auto *layout = scheduler_protocol_layout_at(base, local);
     if (layout == nullptr) return;
@@ -67,6 +68,33 @@ inline __aicore__ void scheduler_protocol_block_claim(
     owner->completion_ticket = UINT64_MAX;
     scheduler_protocol_stamp_at(base, local, layout, &owner->claim_after, after);
     scheduler_protocol_publish_record(owner);
+    auto *claim = &record->claim;
+    scheduler_protocol_observe_record(claim);
+    claim->confirmed_count = confirmed_count;
+    claim->worker_index = owner->worker_index;
+    claim->block_idx = block;
+    claim->run_epoch = admission.epoch;
+    scheduler_protocol_publish_record(claim);
+}
+
+inline __aicore__ void scheduler_protocol_claim_seal(
+    __gm__ void *base, const SchedulerLocalState *local, uint32_t block, bool before, uint64_t value
+) {
+    auto *layout = scheduler_protocol_layout_at(base, local);
+    if (layout == nullptr) return;
+    auto *record = scheduler_protocol_block_at(base, local, layout, block);
+    if (record == nullptr) return;
+    auto *claim = &record->claim;
+    if (!scheduler_protocol_owner_matches(local, &record->owner, block) ||
+        claim->confirmed_count != local->admission->current_block_num || value != claim->confirmed_count ||
+        (!before && claim->published_before.sequence == 0)) {
+        scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
+        return;
+    }
+    if (!scheduler_protocol_stamp(base, local, layout, before ? &claim->published_before : &claim->published_after))
+        return;
+    claim->seal_value = value;
+    scheduler_protocol_publish_record(claim);
 }
 
 inline __aicore__ void scheduler_protocol_block_complete(

@@ -43,6 +43,7 @@ static inline __aicore__ bool admission_signal_record_visible(
     for (uint32_t word = 0; word < 16; ++word)
         if (payload[word] != admission_signal_pattern(epoch, index, word)) valid = false;
     if (scheduler_gm_query(states[index * 16]) != 3) valid = false;
+    if (scheduler_gm_query(states[index * 16 + 1]) != index + 1) valid = false;
     return valid;
 }
 
@@ -67,6 +68,9 @@ static inline __aicore__ void admission_signal_probe(__gm__ int64_t *args, uint3
     auto *log = reinterpret_cast<__gm__ int64_t *>(base + 48);
     auto *payloads = base + 48 + log_stride;
     auto *states = payloads + entries * 16;
+    // This atomic counter occupies the otherwise unused trailing 128B region;
+    // neither the notice nor the lock can drain it by touching the same line.
+    auto &confirmed_count = base[arena_words - 16];
     auto *check = reinterpret_cast<__gm__ ExecutionRecord *>(tensor_data(args[1])) + block * 3 + lane;
     scheduler_gm_fetch_add(check->visits, UINT64_C(1));
     uint64_t errors = 0;
@@ -93,6 +97,7 @@ static inline __aicore__ void admission_signal_probe(__gm__ int64_t *args, uint3
         // The preceding publisher returned before its atomic notice and lock
         // release. This first bypass observation must see its entire prefix.
         if (scheduler_gm_query(control->commit_tail) != index) errors |= 4;
+        if (scheduler_gm_query(confirmed_count) != index) errors |= 1024;
         if (index != 0 && !admission_signal_record_visible(log, payloads, states, epoch, index - 1)) errors |= 8;
         if (static_cast<int64_t>(rank) == delayed_rank) {
             const uint64_t delay_start = get_sys_cnt_aicore();
@@ -110,6 +115,14 @@ static inline __aicore__ void admission_signal_probe(__gm__ int64_t *args, uint3
         if (scheduler_gm_query(states[index * 16]) != 2) errors |= 512;
         scheduler_publish_signal(log[index], admission_signal_log_value(index));
         scheduler_publish_signal(states[index * 16], UINT64_C(3));
+        const uint64_t confirmed = scheduler_gm_fetch_add(confirmed_count, UINT64_C(1)) + 1;
+        if (confirmed != index + 1) errors |= 2048;
+        scheduler_cache_barrier();
+        scheduler_publish_signal(states[index * 16 + 1], confirmed);
+        // First reads after publication return, with no intervening RMW on
+        // either the confirmation region or the signal region.
+        if (scheduler_gm_query(states[index * 16 + 1]) != confirmed || scheduler_gm_query(confirmed_count) != confirmed)
+            errors |= 4096;
         scheduler_cache_barrier();
         scheduler_publish_signal(control->commit_tail, static_cast<uint64_t>(index + 1));
         scheduler_cache_barrier();
@@ -122,6 +135,7 @@ static inline __aicore__ void admission_signal_probe(__gm__ int64_t *args, uint3
             errors |= 16;
         } else {
             if (scheduler_gm_query(control->commit_tail) != entries) errors |= 32;
+            if (scheduler_gm_query(confirmed_count) != entries) errors |= 8192;
             for (uint32_t round = 0; round < rounds; ++round)
                 if (!admission_signal_record_visible(log, payloads, states, epoch, round * participants + rank))
                     errors |= 64;

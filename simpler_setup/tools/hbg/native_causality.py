@@ -55,6 +55,8 @@ class NativeAudit:
         self.admission_points = {}
         self.done_points = {}
         self.claim_points = {}
+        self.confirm_points = {}
+        self.claim_seals = {}
         self.close_reads = {}
         self.payload_points = {}
 
@@ -518,6 +520,8 @@ class NativeAudit:
                 "duplicate or missing block completion ticket",
             )
             self.ordered_intervals([b["owner"] for b in by_ticket], "completion_before", "completion_after")
+            if self.raw["schema"] == "hbg-native-protocol-v6":
+                self.claim_certificates(ref, blocks)
             owned = defaultdict(list)
             for block in blocks:
                 owned[block["owner"]["worker_index"]].append(block["owner"]["block_idx"])
@@ -525,8 +529,78 @@ class NativeAudit:
                 require(all(len(indices) == 1 for indices in owned.values()), "sync_start reused an execution position")
             for worker in self.task_members[ref]:
                 if self.tasks[ref]["flags"] & MIX and self.positions[worker][1]:
+                    if self.raw["schema"] == "hbg-native-protocol-v6":
+                        member = self.member(ref, worker)
+                        require(
+                            member["claim_seal_seen"] == member["claim_cursor_seen"] == 0,
+                            "vector Mix member fabricated a cursor read",
+                        )
                     continue
                 self.close_cursor(ref, worker, owned[worker])
+
+    def claim_certificates(self, ref, blocks):
+        task = self.tasks[ref]
+        count = task["block_num"]
+        uses_tickets = count > 1 and not task["flags"] & SYNC
+        for block in blocks:
+            certificate, owner = block["claim"], block["owner"]
+            require(certificate is not None, "missing claim certificate")
+            require(
+                certificate["run_epoch"] == self.raw["run_epoch"]
+                and certificate["worker_index"] == owner["worker_index"]
+                and certificate["block_idx"] == owner["block_idx"],
+                "claim certificate identity mismatch",
+            )
+        ordered = sorted(blocks, key=lambda block: block["claim"]["confirmed_count"])
+        require(
+            [block["claim"]["confirmed_count"] for block in ordered] == list(range(1, count + 1)),
+            "duplicate or missing valid claim confirmation",
+        )
+        prior = None
+        for block in ordered:
+            certificate, owner = block["claim"], block["owner"]
+            confirmed = certificate["confirmed_count"]
+            ticket = self.claim_points[(ref, owner["block_idx"])]
+            if uses_tickets:
+                current = self.causal.bounded(
+                    ("claim_confirm", ref, confirmed), point(owner, "claim_before"), point(owner, "claim_after")
+                )
+                self.causal.add(ticket, current)
+            else:
+                require(confirmed == owner["block_idx"] + 1, "CAS confirmation disagrees with its block")
+                current = ticket
+            if prior is not None:
+                self.causal.add(prior, current)
+            self.confirm_points[(ref, confirmed)] = current
+            prior = current
+            if confirmed != count:
+                require(
+                    certificate["seal_value"] == 0
+                    and certificate["published_before"] == [0, 0]
+                    and certificate["published_after"] == [0, 0],
+                    "non-final confirmer published claim seal",
+                )
+                continue
+            require(certificate["seal_value"] == count, "invalid claim seal value")
+            self.before(
+                point(owner, "claim_after"),
+                point(certificate, "published_before"),
+                "claim seal published before final confirmation",
+            )
+            publication = self.causal.bounded(
+                ("claim_seal", ref), point(certificate, "published_before"), point(certificate, "published_after")
+            )
+            self.claim_seals[ref] = publication
+            target = (
+                point(owner, "publish_before")
+                if task["flags"] & MIX
+                else point(self.executions[block["index"]], "permit")
+            )
+            self.before(
+                point(certificate, "published_after"),
+                target,
+                "last block entered before claim seal publication returned",
+            )
 
     def close_cursor(self, ref, worker, owned):
         task, member = self.tasks[ref], self.member(ref, worker)
@@ -542,9 +616,20 @@ class NativeAudit:
         self.close_reads[(ref, worker)] = read
         self.causal.add(("event", worker, closed[2] - 1), read)
         self.causal.add(read, closed)
-        self.causal.add(self.claim_points[(ref, cursor - 1)], read)
-        if cursor < blocks:
-            self.causal.add(read, self.claim_points[(ref, cursor)])
+        if self.raw["schema"] == "hbg-native-protocol-v6":
+            self.causal.add(self.confirm_points[(ref, cursor)], read)
+            if cursor < blocks:
+                self.causal.add(read, self.confirm_points[(ref, cursor + 1)])
+            seal, observed = member["claim_seal_seen"], member["claim_cursor_seen"]
+            require(
+                (seal == observed == 0) or (seal == observed == cursor == blocks), "invalid claim seal close witness"
+            )
+            if seal:
+                self.causal.add(self.claim_seals[ref], read)
+        else:
+            self.causal.add(self.claim_points[(ref, cursor - 1)], read)
+            if cursor < blocks:
+                self.causal.add(read, self.claim_points[(ref, cursor)])
 
     def completions(self):
         for ref, task in self.tasks.items():
@@ -558,13 +643,18 @@ class NativeAudit:
                 control["next_block"] == control["completed_blocks"] == (task["block_num"] if cooperative else 0),
                 "terminal block counters mismatch",
             )
-            if self.raw["schema"] == "hbg-native-protocol-v5":
+            if self.raw["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6"):
                 require(control["admission_claim_lock"] == 0, "invalid terminal admission claim lock")
+            if self.raw["schema"] == "hbg-native-protocol-v6":
+                require(
+                    control["claim_seal"] == (task["block_num"] if cooperative else 0), "invalid terminal claim seal"
+                )
             if self.raw["schema"] != "hbg-native-protocol-v1":
                 positions = self.raw["cluster_count"] * (2 if task["active_mask"] in (2, 4) else 1)
                 minimum_blocks = (
                     2
-                    if self.raw["schema"] in ("hbg-native-protocol-v4", "hbg-native-protocol-v5")
+                    if self.raw["schema"]
+                    in ("hbg-native-protocol-v4", "hbg-native-protocol-v5", "hbg-native-protocol-v6")
                     else positions * 2 + (1 if self.raw["schema"] == "hbg-native-protocol-v2" else 0)
                 )
                 uses_tickets = cooperative and not task["flags"] & SYNC and task["block_num"] >= minimum_blocks

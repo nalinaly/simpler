@@ -186,15 +186,23 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
         "hbg-native-protocol-v3",
         "hbg-native-protocol-v4",
         "hbg-native-protocol-v5",
+        "hbg-native-protocol-v6",
     )
-    if protocol["schema"] == "hbg-native-protocol-v5":
+    if protocol["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6"):
         assert all(
             type(control.get("admission_claim_lock")) is int and control["admission_claim_lock"] == 0
             for control in control_rows
         )
+    if protocol["schema"] == "hbg-native-protocol-v6":
+        for task in protocol["tasks"]:
+            control = controls[task["task_ref"]]
+            seal = control.get("claim_seal")
+            assert type(seal) is int and seal >= 0
+            cooperative = task["block_num"] > 1 or task["active_mask"].bit_count() > 1
+            assert seal == 0 or (cooperative and seal == control["next_block"] == task["block_num"])
     minimum_blocks = (
         2
-        if protocol["schema"] in ("hbg-native-protocol-v4", "hbg-native-protocol-v5")
+        if protocol["schema"] in ("hbg-native-protocol-v4", "hbg-native-protocol-v5", "hbg-native-protocol-v6")
         else positions * 2 + (1 if protocol["schema"] == "hbg-native-protocol-v2" else 0)
     )
     uses_tickets = blocks >= minimum_blocks
@@ -241,7 +249,12 @@ def _two_wave_blocks(platform, mask):
 def _check_two_wave_topology(protocol, blocks, mask, required):
     if not required:
         return
-    assert protocol["schema"] in ("hbg-native-protocol-v3", "hbg-native-protocol-v4", "hbg-native-protocol-v5")
+    assert protocol["schema"] in (
+        "hbg-native-protocol-v3",
+        "hbg-native-protocol-v4",
+        "hbg-native-protocol-v5",
+        "hbg-native-protocol-v6",
+    )
     positions = protocol["cluster_count"] * (2 if mask in (2, 4) else 1)
     assert blocks == positions * 2, "two-wave fault must use the actual device topology"
 
@@ -319,7 +332,7 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
                         worker.copy_from(value, buffer)
                     _check_output(values, blocks, mask, failed=failed)
                 path, raw = _capture(prefix)
-                assert raw["aicore_protocol"]["schema"] == "hbg-native-protocol-v5"
+                assert raw["aicore_protocol"]["schema"] == "hbg-native-protocol-v6"
                 _check_two_wave_topology(raw["aicore_protocol"], blocks, mask, two_wave)
                 if failed:
                     assert raw["aicore_protocol"]["run_epoch"] > evidence[-1]["run_epoch"]

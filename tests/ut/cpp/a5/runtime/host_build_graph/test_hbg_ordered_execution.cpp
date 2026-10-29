@@ -1667,6 +1667,8 @@ TEST_P(HbgOrderedConcurrentProtocol, ConcurrentWorkersKeepUniqueOwnersAndContigu
     EXPECT_LE(fixture.control(0)->claim_tickets, count + participants.size());
     EXPECT_EQ(fixture.control(0)->next_block, count);
     std::vector<bool> seen(count, false);
+    std::vector<bool> confirmations(count, false);
+    uint32_t seal_publishers = 0;
     const auto *records =
         scheduler_state_at<SchedulerProtocolBlockTrace>(fixture.base(), fixture.storage.layout.protocol.blocks_offset);
     const auto *workers = scheduler_state_at<SchedulerProtocolWorkerTrace>(
@@ -1683,10 +1685,30 @@ TEST_P(HbgOrderedConcurrentProtocol, ConcurrentWorkersKeepUniqueOwnersAndContigu
             EXPECT_EQ(owner.block_idx, block);
             EXPECT_EQ(owner.claim_before.sequence, ++sequence);
             EXPECT_EQ(owner.claim_after.sequence, ++sequence);
+            const auto &certificate = records[block].claim;
+            EXPECT_EQ(certificate.worker_index, owner.worker_index);
+            EXPECT_EQ(certificate.block_idx, block);
+            EXPECT_EQ(certificate.run_epoch, owner.run_epoch);
+            ASSERT_GE(certificate.confirmed_count, 1u);
+            ASSERT_LE(certificate.confirmed_count, count);
+            EXPECT_FALSE(confirmations[certificate.confirmed_count - 1]);
+            confirmations[certificate.confirmed_count - 1] = true;
+            if (certificate.confirmed_count == count) {
+                ++seal_publishers;
+                EXPECT_EQ(certificate.seal_value, count);
+                EXPECT_EQ(certificate.published_before.sequence, ++sequence);
+                EXPECT_EQ(certificate.published_after.sequence, ++sequence);
+            } else {
+                EXPECT_EQ(certificate.seal_value, 0u);
+                EXPECT_EQ(certificate.published_before.sequence, 0u);
+                EXPECT_EQ(certificate.published_after.sequence, 0u);
+            }
         }
         EXPECT_EQ(workers[participants[participant]].next_sequence, sequence);
         EXPECT_EQ(workers[participants[participant]].error_flags, 0u);
     }
+    EXPECT_EQ(seal_publishers, 1u);
+    EXPECT_EQ(fixture.control(0)->claim_seal, count);
     EXPECT_TRUE(std::all_of(seen.begin(), seen.end(), [](bool value) {
         return value;
     }));

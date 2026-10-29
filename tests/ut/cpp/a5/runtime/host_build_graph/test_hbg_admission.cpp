@@ -1631,4 +1631,124 @@ TEST_P(HbgProtocolLayoutCorruption, BootstrapRejectsBadLayoutAndRetainedWorkerSt
 
 INSTANTIATE_TEST_SUITE_P(InvalidProtocolStorage, HbgProtocolLayoutCorruption, ::testing::Range(0, 19));
 
+std::vector<AdmissionShape> claim_seal_shapes() {
+    std::vector<AdmissionShape> shapes;
+    for (uint8_t mask : {1, 2, 3, 5, 6, 7})
+        for (uint16_t blocks : {1, 2, 3, 4, 17, 65}) {
+            if (blocks == 1 && __builtin_popcount(mask) == 1) continue;
+            shapes.push_back({blocks, mask, 0});
+            if (blocks > 1 && blocks <= 4) shapes.push_back({blocks, mask, SCHEDULER_TASK_SYNC_START});
+        }
+    return shapes;
+}
+
+class HbgClaimSeal : public ::testing::TestWithParam<AdmissionShape> {};
+
+TEST_P(HbgClaimSeal, OnlyFinalValidClaimPublishesAndDoesNotCompleteTheTask) {
+    const auto shape = GetParam();
+    AdmissionFixture fixture({shape}, 12);
+    ASSERT_EQ(fixture.task_control(0)->claim_seal, 0u);
+    ASSERT_TRUE(fixture.publish(0));
+    std::vector<uint32_t> claimants;
+    for (uint32_t worker = 0; worker < 12; ++worker) {
+        auto *local = fixture.locals[worker];
+        local->admission = &fixture.admissions[worker];
+        ASSERT_TRUE(fixture.refresh(worker));
+        if (fixture.admissions[worker].current_task_ref != 0) continue;
+        if (shape.mask == 2 || worker % 3 == 0) claimants.push_back(worker);
+    }
+    ASSERT_FALSE(claimants.empty());
+    std::vector<bool> seen(shape.blocks, false);
+    for (uint32_t index = 0; index < shape.blocks; ++index) {
+        const uint32_t worker = claimants[index % claimants.size()];
+        uint32_t block = UINT32_MAX;
+        ASSERT_EQ(
+            scheduler_claim_ordered_cursor(
+                fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &block
+            ),
+            SchedulerBlockClaimResult::CLAIMED
+        );
+        ASSERT_LT(block, shape.blocks);
+        EXPECT_FALSE(seen[block]);
+        seen[block] = true;
+        EXPECT_EQ(fixture.task_control(0)->claim_seal, index + 1 == shape.blocks ? shape.blocks : 0u);
+        uint64_t cursor = UINT64_MAX;
+        bool sealed = false;
+        ASSERT_TRUE(scheduler_read_claim_cursor(
+            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &cursor, &sealed
+        ));
+        EXPECT_EQ(cursor, index + 1u);
+        EXPECT_EQ(sealed, index + 1 == shape.blocks);
+        EXPECT_EQ(fixture.task_control(0)->completed_blocks, 0u);
+        EXPECT_NE(fixture.task_control(0)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+    }
+    for (const uint32_t worker : claimants) {
+        uint32_t block = UINT32_MAX;
+        const auto result = scheduler_claim_ordered_cursor(
+            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &block
+        );
+        EXPECT_TRUE(result == SchedulerBlockClaimResult::EXHAUSTED || result == SchedulerBlockClaimResult::RETRY);
+        EXPECT_EQ(block, UINT32_MAX);
+        EXPECT_EQ(fixture.task_control(0)->claim_seal, shape.blocks);
+    }
+    EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
+}
+
+TEST_P(HbgClaimSeal, MissingSignalUsesStrongCursorAndEarlyOrMalformedSignalIsRejected) {
+    const auto shape = GetParam();
+    for (uint32_t scenario = 0; scenario < 9; ++scenario) {
+        SCOPED_TRACE(scenario);
+        AdmissionFixture fixture({shape}, 12);
+        ASSERT_TRUE(fixture.publish(0));
+        const uint64_t worker = fixture.publisher(0);
+        fixture.locals[worker]->admission = &fixture.admissions[worker];
+        ASSERT_TRUE(fixture.refresh(worker));
+        auto *control = fixture.task_control(0);
+        control->next_block = shape.blocks;
+        if (scenario == 1) control->next_block = shape.blocks - 1;
+        if (scenario >= 2) control->claim_seal = shape.blocks;
+        if (scenario == 2) control->next_block = shape.blocks - 1;
+        if (scenario == 3) control->claim_seal = shape.blocks + 1;
+        if (scenario == 4) control->next_block = shape.blocks + 1;
+        if (scenario == 5) ++fixture.admissions[worker].epoch;
+        if (scenario == 6) fixture.run()->scheduler_error = static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT);
+        if (scenario == 7) control->claim_seal = (UINT64_C(1) << 32) + shape.blocks;
+        if (scenario == 8) control->claim_seal = UINT64_MAX;
+        uint64_t cursor = UINT64_MAX;
+        bool sealed = true;
+        const bool valid = scheduler_read_claim_cursor(
+            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &cursor, &sealed
+        );
+        EXPECT_EQ(valid, scenario < 2);
+        EXPECT_FALSE(sealed);
+        if (scenario < 2) EXPECT_EQ(cursor, shape.blocks - scenario);
+        else EXPECT_NE(scheduler_read_error(fixture.run()), 0u);
+        EXPECT_EQ(control->completed_blocks, 0u);
+        EXPECT_NE(control->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+    }
+}
+
+TEST_P(HbgClaimSeal, AdmissionRejectsPreexistingSealAndRunInitializationClearsIt) {
+    const auto shape = GetParam();
+    for (bool after_prepare : {false, true}) {
+        AdmissionFixture fixture({shape}, 12);
+        const uint64_t worker = fixture.publisher(0);
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, worker, &ready));
+        ASSERT_EQ(fixture.claim(worker, ready), SchedulerAdmissionResult::PROGRESS);
+        if (after_prepare) ASSERT_TRUE(fixture.prepare(worker));
+        fixture.task_control(0)->claim_seal = shape.blocks;
+        if (after_prepare) EXPECT_EQ(fixture.commit(worker), SchedulerAdmissionResult::ERROR);
+        else EXPECT_FALSE(fixture.prepare(worker));
+        EXPECT_EQ(fixture.control()->commit_tail, 0u);
+        EXPECT_EQ(fixture.task_control(0)->next_block, 0u);
+        ASSERT_TRUE(scheduler_init_data_from_layout(
+            fixture.base(), fixture.storage.layout, reinterpret_cast<uint64_t>(fixture.base())
+        ));
+        EXPECT_EQ(fixture.task_control(0)->claim_seal, 0u);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(MasksSizesAndSyncModes, HbgClaimSeal, ::testing::ValuesIn(claim_seal_shapes()));
+
 }  // namespace
