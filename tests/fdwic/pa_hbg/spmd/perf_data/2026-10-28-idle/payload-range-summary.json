@@ -1,0 +1,672 @@
+{
+  "schema": "csa-payload-range-initial-screen-v1",
+  "date": "2026-10-29",
+  "base_commit": "7704b5760",
+  "decision": "初筛差值不足以证明可保留收益，撤回全部生产改动及实验专用测试；保留 49 个通用物化保护。",
+  "mechanism": "本次成功解析的参数数量沿同一次调用传递，只写回控制行、实际参数前缀及 context 后缀；未知范围仍全量写回。",
+  "benchmarks": [
+    {
+      "label": "idle-payload-range-after-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-payload-range-after-a/result.json",
+      "result_sha256": "d8938202e1fa2b8670c45deb0ad04313887855f842aaa4898196e7b991a99754",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "7704b576050a1d2ec620abe1f93ee5608824d5d9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "5db1012b93238db8ac4d99dce865f78e5f9d535b3dbab6fffaf8ed63679ba80b",
+        "runtime_sha256": {
+          "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3",
+          "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+          "aicore_kernel.o": "ab987117494ca080a3010d3c45ece02f43e9b8c62a12bc562d69de2bf3cc35f5"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "69e2594d4f854372f747fd705dd58ebdbaffbd95df9e3bc977bfe171f209c3dc",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1940.658,
+          "median": 1974.993,
+          "mean": 1980.3097,
+          "max": 2123.479,
+          "p90": 2018.1532,
+          "p99": 2063.9582200000004,
+          "samples": [
+            1972.97,
+            1958.885,
+            1968.096,
+            1953.46,
+            1982.057,
+            1968.89,
+            1940.658,
+            2022.28,
+            1968.371,
+            1958.729,
+            1963.086,
+            1981.192,
+            1941.79,
+            1958.161,
+            1969.553,
+            1987.955,
+            1973.738,
+            1972.075,
+            1963.831,
+            1949.016,
+            2000.663,
+            2030.488,
+            1965.69,
+            1963.383,
+            1982.222,
+            1949.985,
+            1976.265,
+            2017.793,
+            1941.29,
+            2010.855,
+            1976.605,
+            1958.467,
+            1997.825,
+            1946.436,
+            1998.788,
+            1970.206,
+            1980.899,
+            1991.169,
+            2021.395,
+            2046.057,
+            1974.281,
+            1996.073,
+            1948.615,
+            1943.484,
+            1978.325,
+            1959.628,
+            1985.61,
+            1968.89,
+            1964.976,
+            1963.554,
+            2035.346,
+            2044.11,
+            1985.059,
+            1983.957,
+            1959.718,
+            1991.954,
+            1982.135,
+            2041.781,
+            2010.413,
+            1987.599,
+            1974.816,
+            1975.17,
+            1972.125,
+            1966.945,
+            1975.871,
+            2016.566,
+            2046.612,
+            1965.168,
+            1955.885,
+            1978.765,
+            1985.312,
+            1972.536,
+            1975.488,
+            1962.028,
+            1986.634,
+            1977.731,
+            2063.357,
+            2123.479,
+            1987.907,
+            1949.544,
+            1995.822,
+            1940.933,
+            1969.345,
+            1981.049,
+            1973.953,
+            1978.962,
+            1957.749,
+            1987.415,
+            1964.367,
+            1964.529,
+            1992.504,
+            1990.782,
+            1949.418,
+            1952.018,
+            1953.447,
+            1969.265,
+            1958.779,
+            1976.887,
+            1994.722,
+            1980.303
+          ]
+        },
+        "host_us": {
+          "min": 77790.077,
+          "median": 78575.661,
+          "mean": 79097.35996,
+          "max": 91420.088,
+          "p90": 79988.4587,
+          "p99": 90136.35401000001
+        }
+      },
+      "arm": "candidate"
+    },
+    {
+      "label": "idle-payload-range-before-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-payload-range-before-a/result.json",
+      "result_sha256": "35140fccc82ebbc1db9c5a119db4e475f854306f663e64947f53640e850042cd",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "7704b576050a1d2ec620abe1f93ee5608824d5d9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3",
+          "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+          "aicore_kernel.o": "161591427b96f4f95ea2fbd9d9abdbf9a9c5d4159483a896c6330e03d5432e8c"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1937.785,
+          "median": 1975.5115,
+          "mean": 1980.00816,
+          "max": 2052.312,
+          "p90": 2013.0633,
+          "p99": 2049.45882,
+          "samples": [
+            1959.28,
+            2000.079,
+            1957.65,
+            1986.991,
+            1976.948,
+            1962.204,
+            1966.022,
+            2045.412,
+            1975.774,
+            1968.653,
+            1947.068,
+            1952.0,
+            1974.106,
+            1993.758,
+            1942.892,
+            1980.251,
+            1977.654,
+            1980.867,
+            1980.21,
+            1997.065,
+            1963.308,
+            1998.539,
+            1968.978,
+            1977.331,
+            2031.745,
+            1951.94,
+            2019.093,
+            1968.117,
+            1963.458,
+            2001.513,
+            1992.986,
+            1970.73,
+            1965.485,
+            1986.131,
+            2003.326,
+            1975.249,
+            1963.102,
+            1959.535,
+            1967.41,
+            1987.992,
+            2012.774,
+            1968.297,
+            1965.591,
+            1982.788,
+            1980.088,
+            1969.273,
+            1974.378,
+            1972.719,
+            2000.301,
+            2024.972,
+            1967.679,
+            1991.588,
+            2011.398,
+            1983.513,
+            2018.827,
+            1970.7,
+            2001.179,
+            1973.929,
+            1960.527,
+            1972.298,
+            1974.947,
+            1997.725,
+            1982.236,
+            1950.062,
+            1980.618,
+            1970.25,
+            1966.233,
+            1978.752,
+            1981.005,
+            1967.883,
+            1989.706,
+            1964.804,
+            2015.667,
+            1976.964,
+            1974.708,
+            1973.751,
+            1974.409,
+            1955.38,
+            1950.841,
+            1950.981,
+            1978.203,
+            1937.785,
+            1987.216,
+            2049.43,
+            1950.198,
+            1995.242,
+            2052.312,
+            1976.706,
+            1994.995,
+            1978.025,
+            2025.461,
+            1948.62,
+            1953.918,
+            1965.634,
+            2025.272,
+            1970.967,
+            1950.92,
+            1993.441,
+            1982.67,
+            1963.208
+          ]
+        },
+        "host_us": {
+          "min": 132355.967,
+          "median": 137259.848,
+          "mean": 137590.47656,
+          "max": 154851.379,
+          "p90": 140988.6789,
+          "p99": 152505.96703000003
+        }
+      },
+      "arm": "baseline"
+    }
+  ],
+  "device_median_difference_us": 0.518500000000131,
+  "device_median_difference_percent": 0.026246367080127394,
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "probe": {
+    "result": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/regressions/payload-range-probe-a5-r2/result.json",
+      "sha256": "e11192c4666faa79d67823f730c543d50887def26696b351865f5de6838de932"
+    },
+    "identity": {
+      "commit": "7704b576050a1d2ec620abe1f93ee5608824d5d9",
+      "production_diff_sha256": "69e2594d4f854372f747fd705dd58ebdbaffbd95df9e3bc977bfe171f209c3dc",
+      "binaries": {
+        "aicore_kernel.o": "ab987117494ca080a3010d3c45ece02f43e9b8c62a12bc562d69de2bf3cc35f5",
+        "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+        "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3"
+      }
+    },
+    "args": [
+      "--import-mode=importlib",
+      "--import-mode=importlib",
+      "-q",
+      "-p",
+      "no:xdist",
+      "tests/fdwic/pa_hbg/spmd/test_payload_publication.py",
+      "--platform",
+      "a5",
+      "--device",
+      "0",
+      "--runtime",
+      "host_build_graph",
+      "--manual",
+      "exclude",
+      "--require-pto-isa",
+      "--pto-session-timeout",
+      "1200"
+    ],
+    "note": "每平台一个聚合 pytest 项，场景目录含 42 形状；首次 bypass 读不插入补刷操作。"
+  },
+  "validation": {
+    "candidate_cpp_targets": 21,
+    "candidate_cpp_new_cases": 107,
+    "candidate_python_before_oracle_correction": 4552,
+    "corrected_oracle_cases": 828,
+    "retained_generic_cpp_cases": 49,
+    "retained_tensor_scalar_combinations": 561,
+    "restored_cpp_targets": 21,
+    "api_red_kind": "缺失新增范围接口导致编译失败，不代表原业务错误",
+    "fixture_failure": "初始 golden 错把单独 AIV1 提交的 sub_block_id 期望为 1；既有 Host 归一化为 AIV0，正确值为 0。新增 12 项规则检查先 3 红 9 绿，修复测试后通过。",
+    "build_failure": "新 helper 漏标 __aicore__，补齐后 A5/A5sim 构建通过。",
+    "not_run": [
+      "候选严格 L4",
+      "候选完整 HBG 常规回归",
+      "候选完整故障矩阵",
+      "最终低于 1500us 的五批验收"
+    ],
+    "logs": {
+      "cpp": {
+        "path": "outputs/csa-payload-range-cpp.log",
+        "sha256": "8d9a4de8b81b1039eb6c1729ce1c25aff1d156622dc368c3c77b6973190f19fc"
+      },
+      "python": {
+        "path": "outputs/csa-payload-range-python.log",
+        "sha256": "972eb2f98b8ddae853c8fd2ce42642a7b303f251ae71f2949ef2d582fcc271da"
+      },
+      "oracle-r1": {
+        "path": "outputs/csa-payload-range-oracle-r1.log",
+        "sha256": "5eb8723b0f4678f174e89de07cea655c1553b4a876574b9509e8b7c2d653973e"
+      },
+      "normalization-red": {
+        "path": "outputs/csa-payload-range-normalization-red.log",
+        "sha256": "e1c8c39cce45917ac74faed1ad91e36e82877ab4f0ae951c63614ef4511b3f88"
+      },
+      "probe-a5-r2": {
+        "path": "outputs/csa-payload-range-probe-a5-r2.log",
+        "sha256": "c74860f16ee4f9a4ad0ae33d72b2b264871452a8d1bb4c9432852f8ebc92c10c"
+      },
+      "probe-sim-r2": {
+        "path": "outputs/csa-payload-range-probe-sim-r2.log",
+        "sha256": "92ac9db9859ffa2f1a76eb0272c15c549972de99fff55a5d7893609b6d68a617"
+      },
+      "restore-cpp-r1": {
+        "path": "outputs/csa-payload-range-restore-cpp-r1.log",
+        "sha256": "a5c08938d87cfa912a63990698b5e9806d0e97a90e53caa591c159762bcb5362"
+      },
+      "retained-tests": {
+        "path": "outputs/csa-payload-range-retained-tests.log",
+        "sha256": "4415044f97fd3662507b9c8f1a518aa87739b2f230029adc03e6fa4b033ecebe"
+      },
+      "red": {
+        "path": "outputs/csa-payload-range-red.log",
+        "sha256": "d6de0db62eb2e00094b4c04cd3fef4c28b7020aa4f88b340cb668e723df3242d"
+      },
+      "runtime-build": {
+        "path": "outputs/csa-payload-range-runtime-build.log",
+        "sha256": "bab5adbc9c82e13f02e506318140a37fd23778637c51639ee89e6e1612c5ddff"
+      },
+      "runtime-build-r1": {
+        "path": "outputs/csa-payload-range-runtime-build-r1.log",
+        "sha256": "ffb2f7dec8739d36f991db253c7f76d5b312455d8ddea5d173ca769e46ad2db1"
+      },
+      "probe-a5": {
+        "path": "outputs/csa-payload-range-probe-a5.log",
+        "sha256": "3a9ad611809ad01823bf488428c33e6e99fa16bfe21a2b3469bf811fc2d1faa8"
+      },
+      "probe-sim": {
+        "path": "outputs/csa-payload-range-probe-sim.log",
+        "sha256": "8aa1995be085d4ee5f5fe6b5268e0391378addb4461c6d7fc677425dee05dba5"
+      },
+      "restore-sim": {
+        "path": "outputs/csa-payload-range-restore-sim.log",
+        "sha256": "1af2e5e72dee859ff7a97ab7245f1ecb9fd4c3470b03470412cb056601a36ba5"
+      },
+      "restore-cpp-all": {
+        "path": "outputs/csa-payload-range-restore-cpp-all.log",
+        "sha256": "1381f4d10ff55851d9b337fb702125c6c0a5155781b05162505ab8cc30fab701"
+      }
+    }
+  },
+  "archives": {
+    "production": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-payload-range-production.patch",
+      "sha256": "69e2594d4f854372f747fd705dd58ebdbaffbd95df9e3bc977bfe171f209c3dc"
+    },
+    "tests": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-payload-range-tests.patch",
+      "sha256": "5934f423f9193327602fd68548bb277ddddf1c5200d715cf8487c4210846144b"
+    },
+    "runtime": "../reports/csa_poursoul_20261027.Osnaam/runtime-idle-payload-range"
+  },
+  "restoration": {
+    "production_commit": "7704b5760",
+    "runtime_sha256": {
+      "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3",
+      "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+      "aicore_kernel.o": "161591427b96f4f95ea2fbd9d9abdbf9a9c5d4159483a896c6330e03d5432e8c"
+    }
+  },
+  "caveats": [
+    "只有 B/A 两批初筛，不是稳定零收益证明，也不报告某次最快样本为成绩。",
+    "Host 中位数从候选约 78.6ms 漂移至基线约 137.3ms，不宣称 Host 收益。",
+    "不能仅凭少执行 cache 指令推导 Device 收益；本次未证明差值的具体微架构原因。",
+    "正式计时与构建、测试和设备查询分开；CLI 观察为空不等于系统级独占证明。",
+    "保留全体公平竞争、三 lane 和原样 CSA；1.5ms 目标仍未完成。"
+  ]
+}

@@ -502,4 +502,66 @@ TEST(SchedulerClusterTopology, UsesMixedKernelLaunchCoordinate) {
     EXPECT_FALSE(scheduler_cluster_coordinate_from_worker(12, false, kClusters, 2, &coordinate));
 }
 
+class SchedulerPayloadArgumentCount : public ::testing::TestWithParam<uint32_t> {};
+
+TEST_P(SchedulerPayloadArgumentCount, MaterializationPreservesContextAndUnusedArgumentsAcrossCountChanges) {
+    struct Image {
+        ChipTaskStorage task{};
+        simpler::hbg::Tensor tensors[MAX_TENSOR_ARGS]{};
+        uint64_t scalars[MAX_SCALAR_ARGS]{};
+    };
+    const uint32_t count = GetParam();
+    for (uint32_t tensor_count = 0; tensor_count <= std::min<uint32_t>(count, MAX_TENSOR_ARGS); ++tensor_count) {
+        if (count - tensor_count > MAX_SCALAR_ARGS) continue;
+        SCOPED_TRACE(tensor_count);
+        Image image;
+        auto &payload = image.task.payload;
+        payload.tensor_count = tensor_count;
+        payload.scalar_count = count - payload.tensor_count;
+        payload.bind_regions(image.tensors, image.scalars, nullptr);
+        for (uint32_t index = 0; index < MAX_SCALAR_ARGS; ++index)
+            image.scalars[index] = UINT64_C(0x1234000012340000) + index;
+        SchedulerGraphView graph{reinterpret_cast<uint64_t>(&image.task), 0, 1, 0};
+        SchedulerTaskInfo task{0, 1, 0, CoreType::AIC};
+        DispatchPayload target{};
+        constexpr uint64_t canary = UINT64_C(0x5555aaaaffff0000);
+        std::fill(std::begin(target.args), std::end(target.args), canary);
+        target.args[SPMD_LOCAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&target.local_context);
+        target.args[SPMD_GLOBAL_CONTEXT_INDEX] = reinterpret_cast<uint64_t>(&target.global_context);
+        target.local_context.block_idx = 17;
+        target.local_context.block_num = 65;
+        target.global_context.sub_block_id = 1;
+        ASSERT_EQ(scheduler_materialize_task_payload_resolved(graph, task, 0x1000, &target), SchedulerGraphResult::OK);
+        EXPECT_EQ(target.function_bin_addr, 0x1000u);
+        for (uint32_t index = 0; index < static_cast<uint32_t>(payload.tensor_count); ++index)
+            EXPECT_EQ(target.args[index], reinterpret_cast<uint64_t>(&image.tensors[index]));
+        for (uint32_t index = 0; index < static_cast<uint32_t>(payload.scalar_count); ++index)
+            EXPECT_EQ(target.args[payload.tensor_count + index], image.scalars[index]);
+        for (uint32_t index = count; index < SPMD_LOCAL_CONTEXT_INDEX; ++index)
+            EXPECT_EQ(target.args[index], canary);
+        EXPECT_EQ(target.args[SPMD_LOCAL_CONTEXT_INDEX], reinterpret_cast<uint64_t>(&target.local_context));
+        EXPECT_EQ(target.args[SPMD_GLOBAL_CONTEXT_INDEX], reinterpret_cast<uint64_t>(&target.global_context));
+        const auto saved = target;
+        graph.reserved = 1;
+        EXPECT_EQ(
+            scheduler_materialize_task_payload_resolved(graph, task, 0x2000, &target),
+            SchedulerGraphResult::INVALID_ARGUMENTS
+        );
+        EXPECT_TRUE(std::equal(std::begin(saved.args), std::end(saved.args), std::begin(target.args)));
+        EXPECT_EQ(target.function_bin_addr, saved.function_bin_addr);
+        graph.reserved = 0;
+        payload.tensor_count = payload.scalar_count = 0;
+        ASSERT_EQ(scheduler_materialize_task_payload_resolved(graph, task, 0x2000, &target), SchedulerGraphResult::OK);
+        EXPECT_EQ(target.function_bin_addr, 0x2000u);
+        EXPECT_TRUE(std::equal(std::begin(saved.args), std::end(saved.args), std::begin(target.args)));
+        EXPECT_EQ(target.local_context.block_idx, 17);
+        EXPECT_EQ(target.local_context.block_num, 65);
+        EXPECT_EQ(target.global_context.sub_block_id, 1u);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllArgumentCounts, SchedulerPayloadArgumentCount, ::testing::Range<uint32_t>(0, SPMD_LOCAL_CONTEXT_INDEX + 1)
+);
+
 }  // namespace
