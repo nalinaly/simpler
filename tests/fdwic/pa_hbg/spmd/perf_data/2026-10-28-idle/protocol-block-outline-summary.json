@@ -1,0 +1,577 @@
+{
+  "schema": "csa-protocol-block-outline-summary-v1",
+  "date": "2026-10-29",
+  "decision": "未证明值得保留的完整Device收益，且L4膨胀；撤回生产，只保留关闭记录的等价保护测试",
+  "artifact_root": "reports/csa_poursoul_20261027.Osnaam",
+  "order": "最近同二进制基线／候选／恢复基线",
+  "sample_storage": "每批5预热＋100正式样本；原始result.json全部保留，不冒充每臂200样本的重复确认",
+  "batches": [
+    {
+      "label": "idle-full-service-before-c",
+      "result_sha256": "398860c4ac5d2ea7fb0a46ef788beea356d6a002765ec3b55069fd39741d3d65",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 80299.017,
+        "median": 82774.859,
+        "mean": 83555.05938,
+        "max": 106271.969,
+        "p90": 86657.5361,
+        "p99": 96526.89212000005
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1963.555,
+        "median": 2000.2325,
+        "mean": 2004.17414,
+        "max": 2122.778,
+        "p90": 2034.139,
+        "p99": 2101.91177
+      }
+    },
+    {
+      "label": "idle-protocol-block-outline-after-a",
+      "result_sha256": "9546aaa4f02dd13f38f803a818c0990365f3843ce29c014bab104af76fc46b6a",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "7b036cbb3d3aa929d32952e6ab038da6d70e5a09",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "61b4791842c56af6161e83f365e2cca56a606ac46dec7846a0b1c78ecdfa43c8",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "1a41578d1d8d7acdfae8b4130aa9a2cee7dffd3a2ed812886ddacdee37aa6e67"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 79538.777,
+        "median": 81027.42000000001,
+        "mean": 81763.19333,
+        "max": 101082.027,
+        "p90": 83847.578,
+        "p99": 86704.50648000007
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1959.283,
+        "median": 1997.0749999999998,
+        "mean": 2000.71167,
+        "max": 2094.145,
+        "p90": 2030.4579,
+        "p99": 2092.50061
+      }
+    },
+    {
+      "label": "idle-protocol-block-outline-before-a",
+      "result_sha256": "794c4b128c3ff99933328e997dfcc7654ed3c101273be37a9fd8eb059b6445d4",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "7b036cbb3d3aa929d32952e6ab038da6d70e5a09",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 81197.143,
+        "median": 84303.544,
+        "mean": 86353.68522,
+        "max": 103366.393,
+        "p90": 93974.4075,
+        "p99": 101031.11566000001
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1971.257,
+        "median": 2010.658,
+        "mean": 2015.67906,
+        "max": 2160.621,
+        "p90": 2040.4645,
+        "p99": 2097.2303100000004
+      }
+    }
+  ],
+  "l4_phases": [
+    {
+      "label": "idle-cold-error-after-l4",
+      "schema": "hbg-native-protocol-v5",
+      "raw_execution_count": 2308,
+      "kernel_window_us": 2461.003,
+      "global_gap_us": 798.6419999999999,
+      "same_task_gap_us": 79.454,
+      "gap_count": 47,
+      "top_gaps": [
+        {
+          "duration_us": 45.6,
+          "before": 13,
+          "after": 25
+        },
+        {
+          "duration_us": 42.696,
+          "before": 46,
+          "after": 48
+        },
+        {
+          "duration_us": 41.777,
+          "before": 56,
+          "after": 94
+        },
+        {
+          "duration_us": 38.431,
+          "before": 105,
+          "after": 106
+        },
+        {
+          "duration_us": 36.152,
+          "before": 22,
+          "after": 23
+        },
+        {
+          "duration_us": 36.007,
+          "before": 32,
+          "after": 36
+        },
+        {
+          "duration_us": 35.989,
+          "before": 71,
+          "after": 105
+        },
+        {
+          "duration_us": 34.156,
+          "before": 31,
+          "after": 32
+        },
+        {
+          "duration_us": 33.971,
+          "before": 45,
+          "after": 46
+        },
+        {
+          "duration_us": 33.885,
+          "before": 23,
+          "after": 24
+        }
+      ],
+      "all_groups": {
+        "returned_to_all_released": {
+          "count": 833,
+          "median_us": 4.606,
+          "min_us": 4.121,
+          "max_us": 6.153
+        },
+        "all_released_to_observed": {
+          "count": 833,
+          "median_us": 3.929,
+          "min_us": 2.133,
+          "max_us": 13.229
+        },
+        "observed_to_block_completed": {
+          "count": 833,
+          "median_us": 1.078,
+          "min_us": 0.879,
+          "max_us": 2.102
+        },
+        "published_to_all_arrived": {
+          "count": 833,
+          "median_us": 4.215,
+          "min_us": 3.283,
+          "max_us": 67.156
+        },
+        "entry_skew": {
+          "count": 833,
+          "median_us": 0.868,
+          "min_us": 0.011,
+          "max_us": 16.466
+        },
+        "last_arrive_to_first_entry": {
+          "count": 833,
+          "median_us": 8.818,
+          "min_us": 5.917,
+          "max_us": 12.14
+        },
+        "acks_observed_to_payload_publication": {
+          "count": 1666,
+          "median_us": 1.8645,
+          "min_us": 1.373,
+          "max_us": 4.248
+        },
+        "payload_publication_to_entry": {
+          "count": 1666,
+          "median_us": 3.8015,
+          "min_us": 2.667,
+          "max_us": 12.494
+        },
+        "block_completed_to_next_claim": {
+          "count": 536,
+          "median_us": 1.7065000000000001,
+          "min_us": 0.973,
+          "max_us": 4.541
+        },
+        "t23_claim_period": {
+          "count": 480,
+          "median_us": 34.480000000000004,
+          "min_us": 30.945,
+          "max_us": 47.764
+        }
+      },
+      "task_last_groups": {
+        "returned_to_all_released": {
+          "count": 26,
+          "median_us": 4.565,
+          "min_us": 4.226,
+          "max_us": 5.393
+        },
+        "all_released_to_observed": {
+          "count": 26,
+          "median_us": 4.3385,
+          "min_us": 2.549,
+          "max_us": 13.229
+        },
+        "observed_to_block_completed": {
+          "count": 26,
+          "median_us": 1.088,
+          "min_us": 0.932,
+          "max_us": 1.272
+        },
+        "block_completed_to_task_done_before": {
+          "count": 26,
+          "median_us": 0.452,
+          "min_us": 0.312,
+          "max_us": 0.932
+        },
+        "task_done_publication": {
+          "count": 26,
+          "median_us": 0.745,
+          "min_us": 0.555,
+          "max_us": 1.059
+        },
+        "last_raw_end_to_task_done": {
+          "count": 26,
+          "median_us": 10.7675,
+          "min_us": 8.796,
+          "max_us": 15.499
+        }
+      },
+      "selected_tasks": {
+        "23": {
+          "returned_to_all_released": 4.565,
+          "all_released_to_observed": 4.158,
+          "observed_to_block_completed": 1.081,
+          "block_completed_to_task_done_before": 0.333,
+          "task_done_publication": 0.725,
+          "last_raw_end_to_task_done": 10.374
+        },
+        "32": {
+          "returned_to_all_released": 4.438,
+          "all_released_to_observed": 4.442,
+          "observed_to_block_completed": 1.112,
+          "block_completed_to_task_done_before": 0.559,
+          "task_done_publication": 0.557,
+          "last_raw_end_to_task_done": 10.186
+        },
+        "42": {
+          "returned_to_all_released": 4.636,
+          "all_released_to_observed": 3.65,
+          "observed_to_block_completed": 1.09,
+          "block_completed_to_task_done_before": 0.434,
+          "task_done_publication": 0.833,
+          "last_raw_end_to_task_done": 10.109
+        },
+        "105": {
+          "returned_to_all_released": 4.517,
+          "all_released_to_observed": 4.794,
+          "observed_to_block_completed": 1.272,
+          "block_completed_to_task_done_before": 0.326,
+          "task_done_publication": 0.806,
+          "last_raw_end_to_task_done": 11.23
+        }
+      },
+      "caveat": "Independent instrumented captures; phase differences are not isolated level0 costs."
+    },
+    {
+      "label": "idle-protocol-block-outline-after-l4",
+      "schema": "hbg-native-protocol-v5",
+      "raw_execution_count": 2308,
+      "kernel_window_us": 2557.442,
+      "global_gap_us": 840.052,
+      "same_task_gap_us": 75.256,
+      "gap_count": 51,
+      "top_gaps": [
+        {
+          "duration_us": 46.062,
+          "before": 13,
+          "after": 25
+        },
+        {
+          "duration_us": 45.274,
+          "before": 46,
+          "after": 49
+        },
+        {
+          "duration_us": 41.771,
+          "before": 56,
+          "after": 85
+        },
+        {
+          "duration_us": 39.459,
+          "before": 105,
+          "after": 106
+        },
+        {
+          "duration_us": 38.37,
+          "before": 32,
+          "after": 36
+        },
+        {
+          "duration_us": 37.879,
+          "before": 23,
+          "after": 24
+        },
+        {
+          "duration_us": 37.144,
+          "before": 31,
+          "after": 32
+        },
+        {
+          "duration_us": 36.57,
+          "before": 22,
+          "after": 23
+        },
+        {
+          "duration_us": 36.149,
+          "before": 71,
+          "after": 105
+        },
+        {
+          "duration_us": 35.889,
+          "before": 45,
+          "after": 46
+        }
+      ],
+      "all_groups": {
+        "returned_to_all_released": {
+          "count": 833,
+          "median_us": 4.459,
+          "min_us": 3.869,
+          "max_us": 7.133
+        },
+        "all_released_to_observed": {
+          "count": 833,
+          "median_us": 3.913,
+          "min_us": 2.368,
+          "max_us": 5.729
+        },
+        "observed_to_block_completed": {
+          "count": 833,
+          "median_us": 1.543,
+          "min_us": 1.231,
+          "max_us": 2.445
+        },
+        "published_to_all_arrived": {
+          "count": 833,
+          "median_us": 4.68,
+          "min_us": 3.282,
+          "max_us": 71.004
+        },
+        "entry_skew": {
+          "count": 833,
+          "median_us": 0.669,
+          "min_us": 0.004,
+          "max_us": 32.411
+        },
+        "last_arrive_to_first_entry": {
+          "count": 833,
+          "median_us": 9.192,
+          "min_us": 6.146,
+          "max_us": 13.44
+        },
+        "acks_observed_to_payload_publication": {
+          "count": 1666,
+          "median_us": 2.141,
+          "min_us": 1.621,
+          "max_us": 4.688
+        },
+        "payload_publication_to_entry": {
+          "count": 1666,
+          "median_us": 3.633,
+          "min_us": 2.481,
+          "max_us": 18.275
+        },
+        "block_completed_to_next_claim": {
+          "count": 536,
+          "median_us": 2.0564999999999998,
+          "min_us": 1.379,
+          "max_us": 4.367
+        },
+        "t23_claim_period": {
+          "count": 480,
+          "median_us": 36.2485,
+          "min_us": 32.13,
+          "max_us": 47.587
+        }
+      },
+      "task_last_groups": {
+        "returned_to_all_released": {
+          "count": 26,
+          "median_us": 4.425,
+          "min_us": 3.869,
+          "max_us": 5.061
+        },
+        "all_released_to_observed": {
+          "count": 26,
+          "median_us": 4.16,
+          "min_us": 2.658,
+          "max_us": 5.204
+        },
+        "observed_to_block_completed": {
+          "count": 26,
+          "median_us": 1.5685,
+          "min_us": 1.365,
+          "max_us": 2.191
+        },
+        "block_completed_to_task_done_before": {
+          "count": 26,
+          "median_us": 0.4605,
+          "min_us": 0.283,
+          "max_us": 0.508
+        },
+        "task_done_publication": {
+          "count": 26,
+          "median_us": 0.767,
+          "min_us": 0.536,
+          "max_us": 1.087
+        },
+        "last_raw_end_to_task_done": {
+          "count": 26,
+          "median_us": 10.937999999999999,
+          "min_us": 9.662,
+          "max_us": 13.144
+        }
+      },
+      "selected_tasks": {
+        "23": {
+          "returned_to_all_released": 4.448,
+          "all_released_to_observed": 4.105,
+          "observed_to_block_completed": 1.488,
+          "block_completed_to_task_done_before": 0.453,
+          "task_done_publication": 0.989,
+          "last_raw_end_to_task_done": 10.996
+        },
+        "32": {
+          "returned_to_all_released": 4.696,
+          "all_released_to_observed": 4.23,
+          "observed_to_block_completed": 1.502,
+          "block_completed_to_task_done_before": 0.48,
+          "task_done_publication": 0.891,
+          "last_raw_end_to_task_done": 11.326
+        },
+        "42": {
+          "returned_to_all_released": 4.982,
+          "all_released_to_observed": 2.658,
+          "observed_to_block_completed": 1.365,
+          "block_completed_to_task_done_before": 0.444,
+          "task_done_publication": 0.962,
+          "last_raw_end_to_task_done": 9.986
+        },
+        "105": {
+          "returned_to_all_released": 5.061,
+          "all_released_to_observed": 5.204,
+          "observed_to_block_completed": 1.883,
+          "block_completed_to_task_done_before": 0.455,
+          "task_done_publication": 0.989,
+          "last_raw_end_to_task_done": 13.144
+        }
+      },
+      "caveat": "Independent instrumented captures; phase differences are not isolated level0 costs."
+    }
+  ],
+  "loop_sizes_bytes": {
+    "baseline_no_profile": [
+      203436,
+      206944
+    ],
+    "candidate_no_profile": [
+      192880,
+      197668
+    ],
+    "baseline_profile": [
+      227300,
+      231352
+    ],
+    "candidate_profile": [
+      224984,
+      215468
+    ]
+  },
+  "checks": {
+    "cpp_targets_passed": 21,
+    "disabled_recording_cases": 3,
+    "baseline_and_candidate_gm_mix_cases": 361,
+    "strict_l4_passed": true,
+    "kernel_fingerprints_identical": 54,
+    "no_cli_overlap_observed": true
+  },
+  "limits": [
+    "候选只测一批，未证明稳定Device收益；不称为实测无插桩负收益",
+    "L4为独立捕获，不据阶段差值精确分摊level0成本",
+    "未运行候选全HBG设备回归或完整故障矩阵",
+    "CLI观察不证明系统级独占，不声称Host改善"
+  ]
+}

@@ -2327,4 +2327,32 @@ TEST(HbgGmMixReadyProbeOwnership, InvalidDiscoveryConfigurationCannotBeHiddenByA
     }
 }
 
+class HbgGmMixDisabledProtocol : public ::testing::TestWithParam<uint32_t> {};
+
+TEST_P(HbgGmMixDisabledProtocol, BlockWritersDoNotInspectInvalidArgumentsOrChangeSharedState) {
+    GmMixFixture fixture({{2, 7}}, true);
+    auto *local = fixture.locals[0];
+    ASSERT_TRUE(scheduler_protocol_enabled(local));
+    if (GetParam() == 0) local = nullptr;
+    else if (GetParam() == 1) local->profiling = nullptr;
+    else local->profiling->protocol_layout_offset = 0;
+    ASSERT_FALSE(scheduler_protocol_enabled(local));
+    const auto *begin = static_cast<const uint8_t *>(fixture.base());
+    const auto *end = begin + fixture.storage.layout.protocol.storage_end_offset;
+    ASSERT_GT(end, begin);
+    const std::vector<uint8_t> before(begin, end);
+    scheduler_protocol_block_claim(fixture.base(), local, UINT32_MAX, UINT64_MAX, UINT64_MAX);
+    scheduler_protocol_group_descriptor(fixture.base(), local, nullptr);
+    for (bool first : {false, true}) {
+        scheduler_protocol_block_complete(fixture.base(), local, UINT32_MAX, first, UINT64_MAX);
+        scheduler_protocol_group_publish(fixture.base(), local, first);
+        scheduler_protocol_group_acks(fixture.base(), local, first, nullptr);
+        for (bool release : {false, true})
+            scheduler_protocol_lane_publication(fixture.base(), local, release, first);
+    }
+    EXPECT_EQ(std::vector<uint8_t>(begin, end), before);
+}
+
+INSTANTIATE_TEST_SUITE_P(NullLocalNullProfileAndNoLayout, HbgGmMixDisabledProtocol, ::testing::Values(0u, 1u, 2u));
+
 }  // namespace

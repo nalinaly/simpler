@@ -1,7 +1,8 @@
-# CSA无记录调度循环：常量传播的编译实验
+# CSA无记录调度循环：编译形态实验
 
 日期：2026-10-29。结论：撤回强制内联和显式重申空profiling状态的拓展，
 保留已独立评估的模板特化。两个撤回候选均未做真机性能采样，不能称为已测得负收益。
+组协议记录体独立化的真机对照另列于末节，不与上述未采样实验混同。
 
 ## 假设与改动
 
@@ -61,3 +62,36 @@ A5与A5sim构建成功。当前生产源码、原生二进制与仿真均恢复�
 `runtime-idle-noprofile-state/`；主仓`outputs/csa-noprofile-state-{aic,aiv}-symbols.txt`
 保存ELF尺寸，`outputs/csa-noprofile-state-runtime-build.log`保存构建日志。
 下一次编译形态实验需有更直接的代码分离或常量传播机制，不重复仅重申此空指针事实。
+
+## 组协议记录体独立化：收益证据不足，撤回
+
+基线生产实现不变。候选只改`scheduler_protocol_block.h`中的六类记录函数：
+领取、完成、组发布、descriptor、lane发布与ACK观察。函数体原样移至LOCAL绑定的noinline函数，
+原入口保留inline开关判断，关闭记录时不进入新函数。没有修改调度协议、原子操作或缓存屏障。
+无记录AIC／AIV循环为203436／206944→192880／197668B，约缩小5.19%／4.48%；
+尺寸不是I-cache缺失或实际性能收益的直接证据。
+
+新增三种关闭记录情形：空local、空profiling、layout offset为零。用非法block、空descriptor、
+空ACK数组调用全部六类入口，比较整个共享状态保持不变。361项Mix用例在基线／候选通过，
+候选21个C++目标与静态检查通过；两平台构建成功，原样CSA严格L4和七项golden通过。
+这是等价保护，不伪称旧代码业务RED。
+
+每批三轮七项golden、5预热＋100正式样本，54个kernel指纹一致，CLI竞争观察为空：
+
+| 批次 | 完整Device中位数（us） |
+| ---- | ---------------------- |
+| `idle-full-service-before-c`：最近同二进制基线 | 2000.2325 |
+| `idle-protocol-block-outline-after-a`：候选 | 1997.0750 |
+| `idle-protocol-block-outline-before-a`：恢复基线 | 2010.6580 |
+
+候选比前后基线分别低3.1575／13.583us，但两基线自身相差10.4255us。
+没有扩大到每臂200样本的重复确认，不据此声称稳定Device收益，更不能称为无插桩负收益。
+L4任务窗口2461.003→2557.442us、全核空窗798.642→840.052us均增大；
+t23同cluster领取周期中位34.480→36.2485us。它们是独立捕获，不精确拆分level0成本。
+结合记录路径的退化和有限的无插桩收益证据，撤回生产，保留三项关闭记录保护测试。
+没有运行候选的全HBG设备回归或完整故障矩阵，当前生产源码、原生二进制及仿真恢复基线。
+
+原始数据与验证限制见
+[组记录独立化摘要](../../../tests/fdwic/pa_hbg/spmd/perf_data/2026-10-28-idle/protocol-block-outline-summary.json)。
+工作区归档保留`idle-protocol-block-outline-{production,tests}.patch`、
+`runtime-idle-protocol-block-outline/`与`artifacts/idle-protocol-block-outline-after-l4/`。
