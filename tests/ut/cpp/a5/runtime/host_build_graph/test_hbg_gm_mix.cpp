@@ -2327,6 +2327,121 @@ TEST(HbgGmMixReadyProbeOwnership, InvalidDiscoveryConfigurationCannotBeHiddenByA
     }
 }
 
+using GmMultiWaveCompletionCase = std::tuple<uint8_t, uint16_t, uint32_t, uint32_t>;
+
+std::vector<GmMultiWaveCompletionCase> gm_multiwave_completion_cases() {
+    std::vector<GmMultiWaveCompletionCase> cases;
+    for (uint8_t mask : {3, 5, 6, 7})
+        for (uint16_t blocks : {3, 17, 65})
+            for (uint32_t clusters : {1, 2, 4}) {
+                cases.emplace_back(mask, blocks, clusters, 0);
+                if (clusters != 1) cases.emplace_back(mask, blocks, clusters, clusters - 1);
+            }
+    return cases;
+}
+
+class HbgGmMixMultiWaveCompletion : public ::testing::TestWithParam<GmMultiWaveCompletionCase> {};
+
+TEST_P(HbgGmMixMultiWaveCompletion, EveryReturnPrecedesExactlyOneSuccessorAcrossAllEligibleClusters) {
+    const auto [mask, blocks, clusters, first] = GetParam();
+    GmMixFixture fixture({{blocks, mask}, {1, 2}}, false, clusters);
+    fixture.graph.executable(1, 1, {0});
+    fixture.storage.metadata[1].flags |= SCHEDULER_TASK_HAS_FANIN;
+    ASSERT_TRUE(fixture.admit(0, first * 3));
+    ASSERT_TRUE(fixture.refresh_all());
+    ASSERT_EQ(
+        scheduler_route_task(
+            fixture.graph.graph(), fixture.base(), fixture.locals[first * 3], fixture.run(), 1, nullptr
+        ),
+        SchedulerRouteResult::WAITING
+    );
+    std::map<std::pair<uint32_t, uint8_t>, uint32_t> visits;
+    for (uint32_t block = 0; block < 2; ++block) {
+        ASSERT_EQ(fixture.claim(first), SchedulerBlockClaimResult::CLAIMED);
+        ASSERT_TRUE(fixture.publish(first));
+        ASSERT_TRUE(fixture.rendezvous(first));
+        ASSERT_TRUE(fixture.finish_lanes(first));
+        ASSERT_EQ(fixture.retire(first), SchedulerGmMixResult::PROGRESS);
+        const uint64_t completed = fixture.control(0)->completed_blocks;
+        EXPECT_LE(completed, block + 1u);
+        ASSERT_EQ(fixture.retire(first), SchedulerGmMixResult::WAIT);
+        EXPECT_EQ(fixture.control(0)->completed_blocks, completed);
+        ASSERT_NE(fixture.control(0)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+        for (uint8_t subtask = 0; subtask < 3; ++subtask)
+            if ((mask & (1U << subtask)) != 0) ++visits[{block, subtask}];
+    }
+    uint32_t successor_entries = 0;
+    for (uint32_t step = 0; step < blocks * 100 + 100; ++step) {
+        for (uint32_t index = 0; index < clusters * 3; ++index) {
+            const uint32_t worker = (index + step + first * 3) % (clusters * 3);
+            ASSERT_TRUE(fixture.fill(worker));
+            GmExecution execution{};
+            if (!fixture.begin(worker, &execution)) continue;
+            if (execution.task == 0) {
+                ASSERT_LT(execution.block, blocks);
+                ++visits[{execution.block, execution.subtask}];
+            } else {
+                ASSERT_EQ(execution.task, 1);
+                EXPECT_EQ(fixture.control(0)->completed_blocks, blocks);
+                EXPECT_EQ(fixture.control(0)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+                EXPECT_EQ(visits.size(), blocks * static_cast<uint32_t>(__builtin_popcount(mask)));
+                ++successor_entries;
+            }
+            ASSERT_TRUE(fixture.complete(execution));
+        }
+        if (fixture.control(1)->state == static_cast<int64_t>(SchedulerTaskState::DONE)) break;
+    }
+    EXPECT_EQ(successor_entries, 1u);
+    for (uint32_t block = 0; block < blocks; ++block)
+        for (uint8_t subtask = 0; subtask < 3; ++subtask)
+            EXPECT_EQ(visits[std::make_pair(block, subtask)], (mask & (1U << subtask)) != 0 ? 1u : 0u);
+    EXPECT_EQ(fixture.control(0)->completed_blocks, blocks);
+    EXPECT_EQ(fixture.control(1)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+    for (uint32_t worker = 0; worker < clusters * 3; ++worker) {
+        bool done = false;
+        for (uint32_t step = 0; step < 16 && !done; ++step)
+            ASSERT_TRUE(fixture.drain(worker, &done));
+        EXPECT_TRUE(done);
+        EXPECT_EQ(fixture.admissions[worker].scan_cursor, fixture.admissions[worker].capacity);
+        scheduler_flush_completions(fixture.run(), fixture.locals[worker]);
+    }
+    EXPECT_EQ(fixture.run()->resolved_task_count, 2u);
+    EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
+}
+
+TEST_P(HbgGmMixMultiWaveCompletion, CompletedPrefixCannotAdvanceAfterErrorEpochCursorOrSealFailure) {
+    const auto [mask, blocks, clusters, first] = GetParam();
+    for (uint32_t fault = 0; fault < 4; ++fault) {
+        SCOPED_TRACE(fault);
+        GmMixFixture fixture({{blocks, mask}}, false, clusters);
+        ASSERT_TRUE(fixture.admit(0, first * 3));
+        ASSERT_TRUE(fixture.refresh_all());
+        ASSERT_EQ(fixture.claim(first), SchedulerBlockClaimResult::CLAIMED);
+        ASSERT_TRUE(fixture.publish(first));
+        ASSERT_TRUE(fixture.rendezvous(first));
+        ASSERT_TRUE(fixture.finish_lanes(first));
+        ASSERT_EQ(fixture.retire(first), SchedulerGmMixResult::PROGRESS);
+        const uint64_t completed_prefix = fixture.control(0)->completed_blocks;
+        ASSERT_LE(completed_prefix, 1u);
+        if (fault == 0) fixture.run()->scheduler_error = static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT);
+        else if (fault == 1) ++fixture.admissions[first * 3].epoch;
+        else if (fault == 2) fixture.control(0)->next_block = blocks + 1;
+        else {
+            fixture.control(0)->next_block = blocks;
+            fixture.seal(0, first) = 1;
+        }
+        EXPECT_FALSE(fixture.fill(first * 3));
+        EXPECT_NE(scheduler_read_error(fixture.run()), 0u);
+        EXPECT_EQ(fixture.control(0)->completed_blocks, completed_prefix);
+        EXPECT_NE(fixture.control(0)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
+        EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    MasksSizesClustersAndClaimants, HbgGmMixMultiWaveCompletion, ::testing::ValuesIn(gm_multiwave_completion_cases())
+);
+
 class HbgGmMixDisabledProtocol : public ::testing::TestWithParam<uint32_t> {};
 
 TEST_P(HbgGmMixDisabledProtocol, BlockWritersDoNotInspectInvalidArgumentsOrChangeSharedState) {

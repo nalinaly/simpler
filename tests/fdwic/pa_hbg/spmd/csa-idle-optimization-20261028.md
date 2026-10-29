@@ -9,6 +9,8 @@
 [L3 宏观瓶颈与直接准入实验](../../../../docs/zh-cn/investigations/2026-10-csa-l3-direct-admission.md)。
 后续保留全部合法竞争者；准备重叠负例、PMU 与静态栈证据见
 [公平竞争约束下的诊断](../../../../docs/zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md)。
+[Mix 完成计数聚合](../../../../docs/zh-cn/investigations/2026-10-csa-batched-completion.md)也未见收益，
+已撤回运行时；保留 120 项多分波依赖与故障保护，竞争成员集合不变。
 
 ## 新基线的空窗
 
