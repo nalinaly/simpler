@@ -2302,8 +2302,8 @@ TEST(HbgGmMixReadyProbeOwnership, OwnReadyWithoutDirectoryAndShardReadyBothKeepD
     }
 }
 
-TEST(HbgGmMixReadyProbeOwnership, InvalidDiscoveryCountAndIndexCannotBeHiddenByAnEmptyHint) {
-    for (uint32_t invalid = 0; invalid < 3; ++invalid) {
+TEST(HbgGmMixReadyProbeOwnership, InvalidDiscoveryConfigurationCannotBeHiddenByAnEmptyHint) {
+    for (uint32_t invalid = 0; invalid < 6; ++invalid) {
         SCOPED_TRACE(invalid);
         GmMixFixture fixture({{2, 7}});
         ASSERT_NO_FATAL_FAILURE(prepare_service_phase(fixture, {0, SchedulerGmMixPhase::RUNNING}));
@@ -2312,7 +2312,10 @@ TEST(HbgGmMixReadyProbeOwnership, InvalidDiscoveryCountAndIndexCannotBeHiddenByA
         auto *local = fixture.locals[0];
         if (invalid == 0) local->config.scheduler_count = 0;
         else if (invalid == 1) local->config.scheduler_count = SCHEDULER_WORKER_CAPACITY + 1;
-        else local->config.scheduler_index = local->config.scheduler_count;
+        else if (invalid == 2) local->config.scheduler_index = local->config.scheduler_count;
+        else if (invalid == 3) local->config.cluster_type_ranks[0] = local->config.cluster_count;
+        else if (invalid == 4) local->config.cluster_type_ranks[0] = scheduler_ready_queue_capacity(0);
+        else local->config.self_core_type = SCHEDULER_READY_QUEUE_COUNT;
         bool empty = true;
         EXPECT_TRUE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), local, &empty));
         EXPECT_FALSE(empty);

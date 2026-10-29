@@ -1,0 +1,797 @@
+{
+  "schema": "csa-full-mix-service-summary-v1",
+  "date": "2026-10-29",
+  "decision": "撤回双调用及单循环的提前完整服务；恢复539e58b6d生产实现，只保留独立的非法配置测试扩展",
+  "artifact_root": "reports/csa_poursoul_20261027.Osnaam",
+  "order": "基线A1／双调用B1／基线A2／单循环C1／基线A3",
+  "sample_storage": "每批5预热＋100正式样本，原始result.json全部保留；不是每候选200样本的交替确认",
+  "batches": [
+    {
+      "label": "idle-full-service-before-a",
+      "result_sha256": "8c3a03bc12dacecfc34ac00d69a7a8ff819ea2a8ac28bb9b13edb7d39f05bd2c",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 78850.435,
+        "median": 82167.205,
+        "mean": 82614.99523,
+        "max": 103504.583,
+        "p90": 85550.4591,
+        "p99": 97064.98445000003
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1975.914,
+        "median": 2012.044,
+        "mean": 2016.9154800000001,
+        "max": 2202.256,
+        "p90": 2038.6213,
+        "p99": 2126.6398000000004
+      }
+    },
+    {
+      "label": "idle-full-service-after-a",
+      "result_sha256": "7e758c34823726fa464d1172de3c06b624b8ca15cc89db366c170993d48f63d9",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "76a2326ef7fbef4ea1e73187a1a246daa9b4fe8a9f647654aa162008f2714138",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "ceb783f1f020ae7d4c09fd3598f7815c222ab37a7c7780096967594d7e65e90f"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 71834.679,
+        "median": 73903.543,
+        "mean": 74153.7045,
+        "max": 84230.311,
+        "p90": 75944.0627,
+        "p99": 79066.39081000003
+      },
+      "device_us": {
+        "n": 100,
+        "min": 2004.085,
+        "median": 2040.863,
+        "mean": 2046.81089,
+        "max": 2159.366,
+        "p90": 2077.7566,
+        "p99": 2127.35435
+      }
+    },
+    {
+      "label": "idle-full-service-before-b",
+      "result_sha256": "b76dbceb12e1a74fa9a8bbbda36678096cde519dc36ed43397f09d1c98423bea",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 73470.014,
+        "median": 75741.1645,
+        "mean": 76370.67169,
+        "max": 84146.823,
+        "p90": 79730.2902,
+        "p99": 83824.01073
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1958.941,
+        "median": 2001.48,
+        "mean": 2008.7259099999999,
+        "max": 2126.876,
+        "p90": 2038.9741999999999,
+        "p99": 2099.6727800000003
+      }
+    },
+    {
+      "label": "idle-full-service-single-after-a",
+      "result_sha256": "dc38b32dfcd74c856be09d847407c76acc5f3e1790bf3a2e0ed6c9aa0402b48e",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "1cafa94ee00867669a3415c532e3c2a6b91838a1954d7f31657533b287847a1d",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "75a7349afe77470ca2592aaa27b0625bec3d1a5267bf6c415be673c9f3dc10cc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 123639.12,
+        "median": 145774.673,
+        "mean": 148446.1806,
+        "max": 222192.8,
+        "p90": 165120.0489,
+        "p99": 220692.29066
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1989.758,
+        "median": 2021.0439999999999,
+        "mean": 2023.54014,
+        "max": 2090.708,
+        "p90": 2046.8031,
+        "p99": 2069.48636
+      }
+    },
+    {
+      "label": "idle-full-service-before-c",
+      "result_sha256": "398860c4ac5d2ea7fb0a46ef788beea356d6a002765ec3b55069fd39741d3d65",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "539e58b6d7638ccf4a41102bbfe3b2bf58b21cc9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5670ffc0833cef2d80a38238b24c1c7c60b527db874e18ff100eba0cf3e00117",
+          "libaicpu_kernel.so": "370d10d2234053583caa95a1ab4a7f45090c76a7a4690af46ed9c9b825f6c89f",
+          "aicore_kernel.o": "20f8434731a84061a7eed344838464cd53ed55f63198f587999c15deee14e6fc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "correctness": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "warmup": 5,
+      "host_us": {
+        "n": 100,
+        "min": 80299.017,
+        "median": 82774.859,
+        "mean": 83555.05938,
+        "max": 106271.969,
+        "p90": 86657.5361,
+        "p99": 96526.89212000005
+      },
+      "device_us": {
+        "n": 100,
+        "min": 1963.555,
+        "median": 2000.2325,
+        "mean": 2004.17414,
+        "max": 2122.778,
+        "p90": 2034.139,
+        "p99": 2101.91177
+      }
+    }
+  ],
+  "l4_phases": {
+    "idle-cold-error-after-l4": {
+      "label": "idle-cold-error-after-l4",
+      "schema": "hbg-native-protocol-v5",
+      "raw_execution_count": 2308,
+      "kernel_window_us": 2461.003,
+      "global_gap_us": 798.6419999999999,
+      "same_task_gap_us": 79.454,
+      "gap_count": 47,
+      "top_gaps": [
+        {
+          "duration_us": 45.6,
+          "before": 13,
+          "after": 25
+        },
+        {
+          "duration_us": 42.696,
+          "before": 46,
+          "after": 48
+        },
+        {
+          "duration_us": 41.777,
+          "before": 56,
+          "after": 94
+        },
+        {
+          "duration_us": 38.431,
+          "before": 105,
+          "after": 106
+        },
+        {
+          "duration_us": 36.152,
+          "before": 22,
+          "after": 23
+        },
+        {
+          "duration_us": 36.007,
+          "before": 32,
+          "after": 36
+        },
+        {
+          "duration_us": 35.989,
+          "before": 71,
+          "after": 105
+        },
+        {
+          "duration_us": 34.156,
+          "before": 31,
+          "after": 32
+        },
+        {
+          "duration_us": 33.971,
+          "before": 45,
+          "after": 46
+        },
+        {
+          "duration_us": 33.885,
+          "before": 23,
+          "after": 24
+        }
+      ],
+      "all_groups": {
+        "returned_to_all_released": {
+          "count": 833,
+          "median_us": 4.606,
+          "min_us": 4.121,
+          "max_us": 6.153
+        },
+        "all_released_to_observed": {
+          "count": 833,
+          "median_us": 3.929,
+          "min_us": 2.133,
+          "max_us": 13.229
+        },
+        "observed_to_block_completed": {
+          "count": 833,
+          "median_us": 1.078,
+          "min_us": 0.879,
+          "max_us": 2.102
+        },
+        "published_to_all_arrived": {
+          "count": 833,
+          "median_us": 4.215,
+          "min_us": 3.283,
+          "max_us": 67.156
+        },
+        "entry_skew": {
+          "count": 833,
+          "median_us": 0.868,
+          "min_us": 0.011,
+          "max_us": 16.466
+        },
+        "block_completed_to_next_claim": {
+          "count": 536,
+          "median_us": 1.7065000000000001,
+          "min_us": 0.973,
+          "max_us": 4.541
+        },
+        "t23_claim_period": {
+          "count": 480,
+          "median_us": 34.480000000000004,
+          "min_us": 30.945,
+          "max_us": 47.764
+        }
+      },
+      "task_last_groups": {
+        "returned_to_all_released": {
+          "count": 26,
+          "median_us": 4.565,
+          "min_us": 4.226,
+          "max_us": 5.393
+        },
+        "all_released_to_observed": {
+          "count": 26,
+          "median_us": 4.3385,
+          "min_us": 2.549,
+          "max_us": 13.229
+        },
+        "observed_to_block_completed": {
+          "count": 26,
+          "median_us": 1.088,
+          "min_us": 0.932,
+          "max_us": 1.272
+        },
+        "block_completed_to_task_done_before": {
+          "count": 26,
+          "median_us": 0.452,
+          "min_us": 0.312,
+          "max_us": 0.932
+        },
+        "task_done_publication": {
+          "count": 26,
+          "median_us": 0.745,
+          "min_us": 0.555,
+          "max_us": 1.059
+        },
+        "last_raw_end_to_task_done": {
+          "count": 26,
+          "median_us": 10.7675,
+          "min_us": 8.796,
+          "max_us": 15.499
+        }
+      },
+      "selected_tasks": {
+        "23": {
+          "returned_to_all_released": 4.565,
+          "all_released_to_observed": 4.158,
+          "observed_to_block_completed": 1.081,
+          "block_completed_to_task_done_before": 0.333,
+          "task_done_publication": 0.725,
+          "last_raw_end_to_task_done": 10.374
+        },
+        "32": {
+          "returned_to_all_released": 4.438,
+          "all_released_to_observed": 4.442,
+          "observed_to_block_completed": 1.112,
+          "block_completed_to_task_done_before": 0.559,
+          "task_done_publication": 0.557,
+          "last_raw_end_to_task_done": 10.186
+        },
+        "42": {
+          "returned_to_all_released": 4.636,
+          "all_released_to_observed": 3.65,
+          "observed_to_block_completed": 1.09,
+          "block_completed_to_task_done_before": 0.434,
+          "task_done_publication": 0.833,
+          "last_raw_end_to_task_done": 10.109
+        },
+        "105": {
+          "returned_to_all_released": 4.517,
+          "all_released_to_observed": 4.794,
+          "observed_to_block_completed": 1.272,
+          "block_completed_to_task_done_before": 0.326,
+          "task_done_publication": 0.806,
+          "last_raw_end_to_task_done": 11.23
+        }
+      },
+      "caveat": "Independent instrumented captures; phase differences are not isolated level0 costs."
+    },
+    "idle-full-service-after-l4": {
+      "label": "idle-full-service-after-l4",
+      "schema": "hbg-native-protocol-v5",
+      "raw_execution_count": 2308,
+      "kernel_window_us": 2485.944,
+      "global_gap_us": 780.055,
+      "same_task_gap_us": 95.845,
+      "gap_count": 49,
+      "top_gaps": [
+        {
+          "duration_us": 42.798,
+          "before": 33,
+          "after": 25
+        },
+        {
+          "duration_us": 42.544,
+          "before": 46,
+          "after": 52
+        },
+        {
+          "duration_us": 39.325,
+          "before": 56,
+          "after": 94
+        },
+        {
+          "duration_us": 38.423,
+          "before": 32,
+          "after": 36
+        },
+        {
+          "duration_us": 37.97,
+          "before": 31,
+          "after": 32
+        },
+        {
+          "duration_us": 37.644,
+          "before": 105,
+          "after": 106
+        },
+        {
+          "duration_us": 36.996,
+          "before": 22,
+          "after": 23
+        },
+        {
+          "duration_us": 35.529,
+          "before": 71,
+          "after": 105
+        },
+        {
+          "duration_us": 33.479,
+          "before": 41,
+          "after": 42
+        },
+        {
+          "duration_us": 33.116,
+          "before": 45,
+          "after": 46
+        }
+      ],
+      "all_groups": {
+        "returned_to_all_released": {
+          "count": 833,
+          "median_us": 4.436,
+          "min_us": 3.871,
+          "max_us": 6.915
+        },
+        "all_released_to_observed": {
+          "count": 833,
+          "median_us": 4.654,
+          "min_us": 2.582,
+          "max_us": 6.213
+        },
+        "observed_to_block_completed": {
+          "count": 833,
+          "median_us": 1.19,
+          "min_us": 0.977,
+          "max_us": 2.538
+        },
+        "published_to_all_arrived": {
+          "count": 833,
+          "median_us": 4.481,
+          "min_us": 2.858,
+          "max_us": 72.511
+        },
+        "entry_skew": {
+          "count": 833,
+          "median_us": 1.44,
+          "min_us": 0.005,
+          "max_us": 28.8
+        },
+        "block_completed_to_next_claim": {
+          "count": 536,
+          "median_us": 1.7425000000000002,
+          "min_us": 1.155,
+          "max_us": 4.448
+        },
+        "t23_claim_period": {
+          "count": 480,
+          "median_us": 35.700500000000005,
+          "min_us": 31.883,
+          "max_us": 49.476
+        }
+      },
+      "task_last_groups": {
+        "returned_to_all_released": {
+          "count": 26,
+          "median_us": 4.473000000000001,
+          "min_us": 4.135,
+          "max_us": 5.354
+        },
+        "all_released_to_observed": {
+          "count": 26,
+          "median_us": 4.5825,
+          "min_us": 3.319,
+          "max_us": 5.778
+        },
+        "observed_to_block_completed": {
+          "count": 26,
+          "median_us": 1.258,
+          "min_us": 1.014,
+          "max_us": 2.019
+        },
+        "block_completed_to_task_done_before": {
+          "count": 26,
+          "median_us": 0.3355,
+          "min_us": 0.224,
+          "max_us": 0.51
+        },
+        "task_done_publication": {
+          "count": 26,
+          "median_us": 0.877,
+          "min_us": 0.607,
+          "max_us": 1.161
+        },
+        "last_raw_end_to_task_done": {
+          "count": 26,
+          "median_us": 10.8705,
+          "min_us": 8.919,
+          "max_us": 12.647
+        }
+      },
+      "selected_tasks": {
+        "23": {
+          "returned_to_all_released": 4.421,
+          "all_released_to_observed": 5.141,
+          "observed_to_block_completed": 1.151,
+          "block_completed_to_task_done_before": 0.337,
+          "task_done_publication": 1.047,
+          "last_raw_end_to_task_done": 11.453
+        },
+        "32": {
+          "returned_to_all_released": 4.135,
+          "all_released_to_observed": 5.461,
+          "observed_to_block_completed": 1.26,
+          "block_completed_to_task_done_before": 0.392,
+          "task_done_publication": 1.161,
+          "last_raw_end_to_task_done": 11.596
+        },
+        "42": {
+          "returned_to_all_released": 4.868,
+          "all_released_to_observed": 4.182,
+          "observed_to_block_completed": 1.383,
+          "block_completed_to_task_done_before": 0.363,
+          "task_done_publication": 0.611,
+          "last_raw_end_to_task_done": 10.135
+        },
+        "105": {
+          "returned_to_all_released": 5.354,
+          "all_released_to_observed": 5.07,
+          "observed_to_block_completed": 1.262,
+          "block_completed_to_task_done_before": 0.281,
+          "task_done_publication": 0.883,
+          "last_raw_end_to_task_done": 11.943
+        }
+      },
+      "caveat": "Independent instrumented captures; phase differences are not isolated level0 costs."
+    },
+    "idle-full-service-single-after-l4": {
+      "label": "idle-full-service-single-after-l4",
+      "schema": "hbg-native-protocol-v5",
+      "raw_execution_count": 2308,
+      "kernel_window_us": 2455.317,
+      "global_gap_us": 777.012,
+      "same_task_gap_us": 95.836,
+      "gap_count": 53,
+      "top_gaps": [
+        {
+          "duration_us": 43.04,
+          "before": 46,
+          "after": 49
+        },
+        {
+          "duration_us": 41.96,
+          "before": 9,
+          "after": 25
+        },
+        {
+          "duration_us": 36.725,
+          "before": 56,
+          "after": 79
+        },
+        {
+          "duration_us": 36.568,
+          "before": 22,
+          "after": 23
+        },
+        {
+          "duration_us": 36.057,
+          "before": 32,
+          "after": 36
+        },
+        {
+          "duration_us": 35.406,
+          "before": 31,
+          "after": 32
+        },
+        {
+          "duration_us": 35.224,
+          "before": 23,
+          "after": 24
+        },
+        {
+          "duration_us": 34.724,
+          "before": 105,
+          "after": 106
+        },
+        {
+          "duration_us": 33.409,
+          "before": 45,
+          "after": 46
+        },
+        {
+          "duration_us": 33.237,
+          "before": 59,
+          "after": 105
+        }
+      ],
+      "all_groups": {
+        "returned_to_all_released": {
+          "count": 833,
+          "median_us": 4.313,
+          "min_us": 3.652,
+          "max_us": 7.197
+        },
+        "all_released_to_observed": {
+          "count": 833,
+          "median_us": 3.944,
+          "min_us": 1.448,
+          "max_us": 5.723
+        },
+        "observed_to_block_completed": {
+          "count": 833,
+          "median_us": 1.038,
+          "min_us": 0.786,
+          "max_us": 2.203
+        },
+        "published_to_all_arrived": {
+          "count": 833,
+          "median_us": 4.373,
+          "min_us": 3.316,
+          "max_us": 68.001
+        },
+        "entry_skew": {
+          "count": 833,
+          "median_us": 0.966,
+          "min_us": 0.003,
+          "max_us": 20.01
+        },
+        "block_completed_to_next_claim": {
+          "count": 536,
+          "median_us": 1.7885,
+          "min_us": 1.143,
+          "max_us": 4.543
+        },
+        "t23_claim_period": {
+          "count": 480,
+          "median_us": 34.5075,
+          "min_us": 30.968,
+          "max_us": 46.327
+        }
+      },
+      "task_last_groups": {
+        "returned_to_all_released": {
+          "count": 26,
+          "median_us": 4.436999999999999,
+          "min_us": 3.978,
+          "max_us": 5.671
+        },
+        "all_released_to_observed": {
+          "count": 26,
+          "median_us": 4.154,
+          "min_us": 2.841,
+          "max_us": 4.943
+        },
+        "observed_to_block_completed": {
+          "count": 26,
+          "median_us": 1.1035,
+          "min_us": 0.964,
+          "max_us": 1.825
+        },
+        "block_completed_to_task_done_before": {
+          "count": 26,
+          "median_us": 0.346,
+          "min_us": 0.299,
+          "max_us": 0.443
+        },
+        "task_done_publication": {
+          "count": 26,
+          "median_us": 0.756,
+          "min_us": 0.639,
+          "max_us": 1.233
+        },
+        "last_raw_end_to_task_done": {
+          "count": 26,
+          "median_us": 10.303,
+          "min_us": 9.012,
+          "max_us": 11.554
+        }
+      },
+      "selected_tasks": {
+        "23": {
+          "returned_to_all_released": 4.196,
+          "all_released_to_observed": 4.246,
+          "observed_to_block_completed": 1.014,
+          "block_completed_to_task_done_before": 0.337,
+          "task_done_publication": 1.016,
+          "last_raw_end_to_task_done": 10.324
+        },
+        "32": {
+          "returned_to_all_released": 4.425,
+          "all_released_to_observed": 4.875,
+          "observed_to_block_completed": 1.068,
+          "block_completed_to_task_done_before": 0.318,
+          "task_done_publication": 0.871,
+          "last_raw_end_to_task_done": 11.062
+        },
+        "42": {
+          "returned_to_all_released": 4.438,
+          "all_released_to_observed": 3.6,
+          "observed_to_block_completed": 1.164,
+          "block_completed_to_task_done_before": 0.354,
+          "task_done_publication": 0.972,
+          "last_raw_end_to_task_done": 9.994
+        },
+        "105": {
+          "returned_to_all_released": 5.671,
+          "all_released_to_observed": 2.841,
+          "observed_to_block_completed": 1.032,
+          "block_completed_to_task_done_before": 0.343,
+          "task_done_publication": 1.233,
+          "last_raw_end_to_task_done": 10.282
+        }
+      },
+      "caveat": "Independent instrumented captures; phase differences are not isolated level0 costs."
+    }
+  },
+  "checks": {
+    "kernel_fingerprints_identical": 54,
+    "no_cli_overlap_observed": true,
+    "each_variant_cpp_targets_passed": 21,
+    "python_passed_on_dual_service": 3527,
+    "new_policy_tests": 28,
+    "baseline_red": 16,
+    "baseline_green": 12,
+    "strict_l4_both_variants_passed": true
+  },
+  "limits": [
+    "候选无收益，未做各候选全HBG设备回归和完整故障矩阵",
+    "单次L4阶段差值不等同于无插桩成本",
+    "代码体积变化不证明I-cache缺失或全部退化成因",
+    "CLI观察不证明系统级独占，不声称Host收益"
+  ]
+}
