@@ -328,10 +328,10 @@ TEST(HbgProtocolStartupExit, RealExecutorSealTimeoutPreservesObservedButUnclosed
     EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
 }
 
-class HbgExecutionIdentityEntry : public ::testing::TestWithParam<std::tuple<uint32_t, uint64_t>> {};
+class HbgExecutionIdentityEntry : public ::testing::TestWithParam<std::tuple<uint32_t, uint64_t, bool>> {};
 
 TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCanChangeIt) {
-    const auto [worker, level] = GetParam();
+    const auto [worker, level, sampled] = GetParam();
     scheduler_test::FixtureStorage storage(1, 3, 1, SchedulerSpmdRequirements{3, 1, 0, 0}, level == 4);
     scheduler_test::BasicGraphBuffer<1> graph(1);
     graph.executable(0, worker == 0 ? 0 : 1);
@@ -339,7 +339,7 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
     metadata.active_mask = worker == 0 ? 1 : 2;
     metadata.kernel_ids[0] = worker == 0 ? 1 : UINT16_MAX;
     metadata.kernel_ids[1] = worker == 0 ? UINT16_MAX : 1;
-    metadata.timing_slot = -1;
+    metadata.timing_slot = sampled ? 0 : -1;
     auto *base = storage.scheduler_state->base();
     ASSERT_TRUE(scheduler_init_spmd_task_records(base, storage.layout, 59));
     storage.callable_addresses[1] = reinterpret_cast<uint64_t>(&identity_test_kernel);
@@ -347,6 +347,8 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
     for (uint32_t lane = 0; lane < 3; ++lane)
         storage.contexts[worker].cluster_worker_ids[lane] = lane;
     auto *local = storage.local_context(&storage.contexts[worker]);
+    const bool with_profiling = level != 0 || sampled;
+    if (!with_profiling) local->profiling = nullptr;
     ASSERT_TRUE(scheduler_protocol_bind(base, local));
     local->config.scheduler_count = 3;
     auto *run = storage.run_control;
@@ -361,7 +363,11 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
         scheduler_state_at<DispatchPayload>(base, local->dispatch_payload_offset(local->config.self_lane, 0));
     write_reg(RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
     SchedulerWorkerStats stats{};
-    ASSERT_TRUE(run_ready_dispatch_loop(graph.graph(), base, local, run, &stats, level));
+    if (with_profiling) {
+        ASSERT_TRUE(run_ready_dispatch_loop<true>(graph.graph(), base, local, run, &stats, level));
+    } else {
+        ASSERT_TRUE(run_ready_dispatch_loop<false>(graph.graph(), base, local, run, &stats, level));
+    }
     ASSERT_EQ(startup_kernel_calls, 1u);
     ASSERT_EQ(identity_test_payload->local_context.block_idx, 77);
     uint64_t refilled = 0;
@@ -371,6 +377,14 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
     const auto *trace = scheduler_state_at<SchedulerTaskTrace>(base, storage.layout.trace_cells_offset);
     if (level == 0) {
         EXPECT_EQ(trace->execution_identity_flags, 0u);
+        EXPECT_EQ(trace->valid, 0u);
+        if (sampled) {
+            EXPECT_GT(trace->kernel_start_cycles, 0u);
+            EXPECT_GE(trace->kernel_end_cycles, trace->kernel_start_cycles);
+        } else {
+            EXPECT_EQ(trace->kernel_start_cycles, 0u);
+            EXPECT_EQ(trace->kernel_end_cycles, 0u);
+        }
     } else {
         EXPECT_EQ(trace->valid, 1u);
         EXPECT_EQ(trace->execution_run_epoch, 59u);
@@ -423,7 +437,7 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
 
 INSTANTIATE_TEST_SUITE_P(
     LanesAndProfilingLevels, HbgExecutionIdentityEntry,
-    ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Values<uint64_t>(0, 1, 2, 4))
+    ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Values<uint64_t>(0, 1, 2, 4), ::testing::Bool())
 );
 
 TEST(HbgProtocolExecution, DirectRefillKeepsTheCompletedGenerationSeparateFromItsSuccessor) {
@@ -452,7 +466,7 @@ TEST(HbgProtocolExecution, DirectRefillKeepsTheCompletedGenerationSeparateFromIt
     startup_kernel_calls = 0;
     write_reg(RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
     SchedulerWorkerStats stats{};
-    ASSERT_TRUE(run_ready_dispatch_loop(graph.graph(), base, local, run, &stats, 4));
+    ASSERT_TRUE(run_ready_dispatch_loop<true>(graph.graph(), base, local, run, &stats, 4));
     ASSERT_EQ(startup_kernel_calls, 2u);
     ASSERT_TRUE(scheduler_service_cluster_completions(
         graph.graph(), base, local, run, nullptr, nullptr, nullptr, 4, nullptr, nullptr
