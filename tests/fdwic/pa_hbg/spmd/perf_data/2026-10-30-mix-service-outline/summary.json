@@ -1,0 +1,616 @@
+{
+  "schema": "csa-mix-service-outline-investigation-v1",
+  "date": "2026-10-30",
+  "base_commit": "595c1e75d77006943c840d9642e95781c3e60775",
+  "accepted_runtime_commit": "d19885deda2551463fe519382d7df7ea1e88f7fc",
+  "decision": "候选真机 L4 未通过，运行时撤回；保留 40 项独立于编译形态的保护测试。",
+  "candidate_failures": [
+    {
+      "label": "idle-mix-service-outline-after-l4",
+      "result": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-after-l4/result.json",
+        "sha256": "713686f441215ba50f546d312135fa7b1778d2349207a0e2d904a4c8619dca49"
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "595c1e75d77006943c840d9642e95781c3e60775",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "bfe39561f66f547f6b28d199c221cc4b9813be8d44c134d1b2f78d56ca3daae8",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "bc32ca51342908b1b8850034f00121c25efb2c1f0fbfa39dc97ac20a815d8321"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "deps_goldens": 7,
+      "l4_passed": false,
+      "raw_diagnostic_only": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-after-l4/failure-native/chip_swimlane_records.json",
+        "sha256": "5668be79e02638f8d2a4cc4b396475604565fb7c8a1afdfb23f26e7d4a793399"
+      },
+      "schema": "hbg-native-protocol-v8",
+      "scheduler_error": 10,
+      "audit_rejection": "native protocol: scheduler reported an error",
+      "overlaps": 123,
+      "overlap_log": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-mix-service-outline-after-l4-overlaps.json",
+        "sha256": "75bcdd18fe81d6f9dff3aa9a71624144426896e97c253ac227ade4a2a2bf12b3"
+      },
+      "error": {
+        "task_ref": 18446744073709551615,
+        "core_id": 18446744073709551615,
+        "core_type": 18446744073709551615,
+        "site": 95,
+        "run_epoch": 18446744073709551615,
+        "order_key": 18446744073709551615,
+        "block_idx": 18446744073709551615,
+        "group_seq": 18446744073709551615,
+        "worker_index": 18446744073709551615,
+        "cluster_lane": 4294967295,
+        "identity_fields": 0
+      },
+      "commit_tail": 8,
+      "commit_lock": 0,
+      "resolved_task_count": 21,
+      "selected_controls": [
+        {
+          "task_ref": 19,
+          "state": 2,
+          "next_block": 12,
+          "claim_tickets": 32,
+          "completed_blocks": 12,
+          "admission_state": 3,
+          "admission_claim_lock": 0,
+          "claim_seal": 12
+        },
+        {
+          "task_ref": 23,
+          "state": 0,
+          "next_block": 512,
+          "claim_tickets": 512,
+          "completed_blocks": 504,
+          "admission_state": 3,
+          "admission_claim_lock": 0,
+          "claim_seal": 512
+        },
+        {
+          "task_ref": 25,
+          "state": 2,
+          "next_block": 4,
+          "claim_tickets": 20,
+          "completed_blocks": 4,
+          "admission_state": 3,
+          "admission_claim_lock": 0,
+          "claim_seal": 4
+        }
+      ]
+    },
+    {
+      "label": "idle-mix-service-outline-after-l4-r2",
+      "result": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-after-l4-r2/result.json",
+        "sha256": "00e7bfcaba69ad5a49f6c0d66dd0cef38489de9d963c7effe04cc90bcf797bd0"
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "595c1e75d77006943c840d9642e95781c3e60775",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "bfe39561f66f547f6b28d199c221cc4b9813be8d44c134d1b2f78d56ca3daae8",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "bc32ca51342908b1b8850034f00121c25efb2c1f0fbfa39dc97ac20a815d8321"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "deps_goldens": 7,
+      "l4_passed": false,
+      "raw_diagnostic_only": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-after-l4-r2/failure-native/chip_swimlane_records.json",
+        "sha256": "b3db23c5f99f56b0ce215784586a2a1a02acec11690912f20f88129e43ff75eb"
+      },
+      "schema": "hbg-native-protocol-v8",
+      "scheduler_error": 10,
+      "audit_rejection": "native protocol: scheduler reported an error",
+      "overlaps": 0,
+      "overlap_log": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/idle-mix-service-outline-after-l4-r2-overlaps.json",
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "error": {
+        "task_ref": 18446744073709551615,
+        "core_id": 18446744073709551615,
+        "core_type": 18446744073709551615,
+        "site": 95,
+        "run_epoch": 18446744073709551615,
+        "order_key": 18446744073709551615,
+        "block_idx": 18446744073709551615,
+        "group_seq": 18446744073709551615,
+        "worker_index": 18446744073709551615,
+        "cluster_lane": 4294967295,
+        "identity_fields": 0
+      },
+      "commit_tail": 5,
+      "commit_lock": 0,
+      "resolved_task_count": 14,
+      "selected_controls": [
+        {
+          "task_ref": 19,
+          "state": 0,
+          "next_block": 12,
+          "claim_tickets": 28,
+          "completed_blocks": 9,
+          "admission_state": 3,
+          "admission_claim_lock": 0,
+          "claim_seal": 12
+        },
+        {
+          "task_ref": 23,
+          "state": 0,
+          "next_block": 0,
+          "claim_tickets": 0,
+          "completed_blocks": 0,
+          "admission_state": 0,
+          "admission_claim_lock": 0,
+          "claim_seal": 0
+        },
+        {
+          "task_ref": 25,
+          "state": 2,
+          "next_block": 4,
+          "claim_tickets": 10,
+          "completed_blocks": 4,
+          "admission_state": 3,
+          "admission_claim_lock": 0,
+          "claim_seal": 4
+        }
+      ]
+    }
+  ],
+  "restored_l4": {
+    "result": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-baseline-l4/result.json",
+      "sha256": "59fa90be55bbad8ac13f8c49ab8e8a8b94715ed58a049cb7328dd264c9728153"
+    },
+    "identity": {
+      "runtime": "host_build_graph",
+      "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+      "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+      "torch": "2.12.0+cpu",
+      "simpler_commit": "595c1e75d77006943c840d9642e95781c3e60775",
+      "simpler_branch": "feat/fully_distributed_within_core",
+      "tracked_diff_sha256": "bfe39561f66f547f6b28d199c221cc4b9813be8d44c134d1b2f78d56ca3daae8",
+      "runtime_sha256": {
+        "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+        "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+        "aicore_kernel.o": "5d84ffb546f5740b83bdfd4f88f0cbd5f980dcfe9f7ab292f7e588ee2388b8cc"
+      },
+      "case_sources_match_baseline": true,
+      "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+      "host_only_arguments": [
+        "hc_attn_scale"
+      ]
+    },
+    "raw": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-mix-service-outline-baseline-l4/chip_swimlane_records.json",
+      "sha256": "2f88596d0d389baeda72ce418024c3467f97e2582bc7919b559c66e6c59a4270"
+    },
+    "trace": {
+      "logical_tasks": 79,
+      "physical_tasks": 2308,
+      "clock_freq_hz": 1000000000,
+      "level": 4,
+      "sequence_integrity_verified": true,
+      "event_count": 40193,
+      "worker_count": 96,
+      "protocol_verified": true,
+      "device_logical_tasks": 81,
+      "executions": 2308,
+      "cooperative_tasks": 61,
+      "member_obligations": 3808,
+      "blocks": 1457,
+      "execution_epoch": 1,
+      "per_kind_executions": {
+        "aiv": 1444,
+        "aic": 864
+      },
+      "dependency_edges_checked": 133,
+      "block_identity_verified": true,
+      "dependency_order_source": "native_protocol",
+      "dependency_timing_guard": true,
+      "runtime": "host_build_graph",
+      "scheduler_producer": "aicore",
+      "distributed_scheduler_verified": true,
+      "require_aicore_scheduler": true,
+      "host_capture": {
+        "status": "complete",
+        "expected_records": 107,
+        "recorded_records": 107,
+        "pool_records": 117,
+        "dropped_records": 0,
+        "error": null
+      },
+      "clock_alignment_status": "bounded",
+      "cross_domain_latency_available": true
+    },
+    "correctness": {
+      "rounds": 2,
+      "outputs_per_round": 7,
+      "passed": true
+    }
+  },
+  "symbols": {
+    "baseline": {
+      "source": {
+        "path": "outputs/csa-mix-service-outline-baseline-symbols.txt",
+        "sha256": "28a97673b53e130942edbcaa9b0e845ea750bb732f87e607e4b9442a760613b9"
+      },
+      "true": {
+        "aic": {
+          "loop": 237232,
+          "service": 0,
+          "total": 237232
+        },
+        "aiv": {
+          "loop": 245148,
+          "service": 0,
+          "total": 245148
+        }
+      },
+      "false": {
+        "aic": {
+          "loop": 222924,
+          "service": 0,
+          "total": 222924
+        },
+        "aiv": {
+          "loop": 222232,
+          "service": 0,
+          "total": 222232
+        }
+      }
+    },
+    "candidate": {
+      "source": {
+        "path": "outputs/csa-mix-service-outline-candidate-symbols.txt",
+        "sha256": "1075c8ff81e06c92bf0382bca6cfc7957094b47a7ba46ca71cba949516ba54d0"
+      },
+      "true": {
+        "aic": {
+          "loop": 206080,
+          "service": 42784,
+          "total": 248864
+        },
+        "aiv": {
+          "loop": 198292,
+          "service": 41860,
+          "total": 240152
+        }
+      },
+      "false": {
+        "aic": {
+          "loop": 175524,
+          "service": 42104,
+          "total": 217628
+        },
+        "aiv": {
+          "loop": 182956,
+          "service": 41332,
+          "total": 224288
+        }
+      }
+    },
+    "ordering": "按链接输入 aicore_aic_combined.o、aicore_aiv_combined.o 的次序解释同名 LOCAL 符号。"
+  },
+  "validation": {
+    "initial_guards_on_baseline_and_candidate": 20,
+    "candidate_cpp_targets": 21,
+    "candidate_python": 3989,
+    "candidate_builds": [
+      "a5",
+      "a5sim"
+    ],
+    "restored_guards": 40,
+    "restored_cpp_targets": 21,
+    "restored_a5sim_build": true,
+    "candidate_full_device_fault_matrix": "未执行；候选未通过基础真机门禁。",
+    "formal_performance_samples": 0
+  },
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "archives": {
+    "idle-mix-service-outline-production.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-mix-service-outline-production.patch",
+      "sha256": "6f31bf9f56b0edc622e9350cb03c11ae99522e56af0160acac839a10dbd310a8"
+    },
+    "idle-mix-service-outline-tests.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-mix-service-outline-tests.patch",
+      "sha256": "de6facbc6e0fe29a154c722e73118b6bd2f3221b423245d84603334ceec3909c"
+    },
+    "idle-mix-service-outline-final-tests.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-mix-service-outline-final-tests.patch",
+      "sha256": "2333cb829228ae3bed272f3b3b2e71bc171467e83c12083065d4629f39a57a8b"
+    }
+  },
+  "candidate_runtime_archive": "../reports/csa_poursoul_20261027.Osnaam/runtime-mix-service-outline",
+  "logs": [
+    {
+      "path": "outputs/csa-mix-service-outline-baseline.log",
+      "sha256": "3c13bff163ee38f32cb033f21fedb56d73b8259ecb31a03d2e4b328f5d667c15"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-cpp.log",
+      "sha256": "76ce558adadd5f26e368f1d1ec064c3befc671c8feac4fc9acaf44bf4ddb6f64"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-python.log",
+      "sha256": "cb895326508b821dbbfea279d847f259591f6222262e299b98f0c92d05e641c5"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-runtime-build.log",
+      "sha256": "ffb2f7dec8739d36f991db253c7f76d5b312455d8ddea5d173ca769e46ad2db1"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-l4.log",
+      "sha256": "3a4cd1af3bf6308d1f7226a408ebdaeaea485a5f10627944e42aa7349a096297"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-l4-r2.log",
+      "sha256": "88be10c72b965903ef4d76b315bff3a805c127f2f4864598e20ca20592a6ba5d"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-baseline-l4.log",
+      "sha256": "cc5b7dbb7a3645e9e9fddb7a35018104f9ce4e917b7b83b11d39930702f9d44a"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-final-guards.log",
+      "sha256": "82541db5edef753751874ff255bb568f205e00da4eb72160c17ee502f6a61012"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-restored-cpp.log",
+      "sha256": "ddb036531b89ce06a99af84fa020e3251bcdd6c04560146b564b39f3ff3f6b70"
+    },
+    {
+      "path": "outputs/csa-mix-service-outline-restored-sim-build.log",
+      "sha256": "1af2e5e72dee859ff7a97ab7245f1ecb9fd4c3470b03470412cb056601a36ba5"
+    }
+  ],
+  "caveats": [
+    "未观察到其他 A5 CLI 重叠不是系统级独占证明。",
+    "未确定栈、参数传递或编译器根因；不从外提与失败的关联直接断言底层原因。",
+    "失败 raw 仅用于诊断，不作为完整泳道或性能数据。",
+    "代码尺寸不是栈峰值、I-cache 耗时或性能测量。",
+    "保留版完整 Device 仍约 1.926ms，尚未达到 1.5ms。"
+  ]
+}

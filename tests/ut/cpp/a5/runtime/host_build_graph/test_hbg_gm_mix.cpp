@@ -846,6 +846,91 @@ TEST(HbgGmMix, ServiceRetiresOnlyAfterAllReleasesAndPublishesTheNextGroupWithout
     EXPECT_EQ(fixture.mailbox(0)->published_seq, 2u);
 }
 
+class HbgGmMixServiceProfiling : public ::testing::TestWithParam<std::tuple<uint8_t, uint64_t, bool>> {};
+
+TEST_P(HbgGmMixServiceProfiling, ResourceArrivalAndReleaseGuardsHoldAcrossTwoWaves) {
+    const auto [mask, level, with_stats] = GetParam();
+    GmMixFixture fixture({{2, mask}}, level == 4, 1);
+    ASSERT_TRUE(fixture.admit(0));
+    ASSERT_TRUE(fixture.refresh_all());
+    SchedulerWakeStats wake_stats{};
+    SchedulerReadyStats ready_stats{};
+    SchedulerCompletionStats completion_stats{};
+    const auto service = [&](uint32_t worker, bool *progress) {
+        return scheduler_service_gm_mix(
+            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), level,
+            with_stats ? &wake_stats : nullptr, with_stats ? &ready_stats : nullptr,
+            with_stats ? &completion_stats : nullptr, progress
+        );
+    };
+    bool progress = false;
+    ASSERT_TRUE(service(0, &progress));
+    ASSERT_TRUE(progress);
+    std::set<std::pair<uint32_t, uint8_t>> identities;
+    for (uint32_t block = 0; block < 2; ++block) {
+        SCOPED_TRACE(block);
+        EXPECT_EQ(fixture.mailbox(0)->published_seq, block + 1);
+        EXPECT_EQ(fixture.control(0)->next_block, block + 1);
+        EXPECT_EQ(fixture.control(0)->completed_blocks, block);
+        EXPECT_EQ(fixture.locals[0]->local_ready_mask, 0u);
+        EXPECT_EQ(fixture.admissions[0].gm_mix.phase, SchedulerGmMixPhase::ARRIVED);
+        for (uint32_t worker = 1; worker < 3; ++worker) {
+            if (!fixture.participant(worker)) continue;
+            ASSERT_TRUE(service(worker, &progress));
+            EXPECT_TRUE(progress);
+        }
+        for (uint32_t worker = 0; worker < 3; ++worker) {
+            if (!fixture.participant(worker)) continue;
+            if (fixture.admissions[worker].gm_mix.phase == SchedulerGmMixPhase::ARRIVED)
+                ASSERT_TRUE(service(worker, &progress));
+        }
+        GmExecution last{};
+        for (uint32_t worker = 0; worker < 3; ++worker) {
+            if ((mask & (1U << worker)) == 0) continue;
+            GmExecution execution{};
+            ASSERT_TRUE(fixture.begin(worker, &execution));
+            EXPECT_EQ(execution.task, 0);
+            EXPECT_EQ(execution.block, block);
+            EXPECT_EQ(execution.blocks, 2u);
+            EXPECT_EQ(execution.subtask, worker);
+            EXPECT_TRUE(identities.emplace(block, execution.subtask).second);
+            if (worker == ((mask & 4U) != 0 ? 2u : 1u)) last = execution;
+            else ASSERT_TRUE(fixture.complete(execution));
+        }
+        ASSERT_TRUE(service(0, &progress));
+        EXPECT_FALSE(progress);
+        EXPECT_EQ(fixture.control(0)->completed_blocks, block);
+        EXPECT_EQ(fixture.mailbox(0)->published_seq, block + 1);
+        ASSERT_TRUE(fixture.complete(last));
+        ASSERT_TRUE(service(0, &progress));
+        EXPECT_TRUE(progress);
+        EXPECT_EQ(fixture.control(0)->completed_blocks, block + 1);
+    }
+    for (uint32_t worker = 1; worker < 3; ++worker) {
+        if (!fixture.participant(worker)) {
+            EXPECT_EQ(fixture.mailbox(0)->lanes[worker].assigned_seq, 0u);
+            EXPECT_EQ(fixture.mailbox(0)->lanes[worker].arrived_seq, 0u);
+            EXPECT_EQ(fixture.mailbox(0)->lanes[worker].released_seq, 0u);
+            continue;
+        }
+        ASSERT_TRUE(service(worker, &progress));
+        EXPECT_TRUE(progress);
+        EXPECT_EQ(fixture.admissions[worker].current_task_ref, SCHEDULER_TASK_REF_INVALID);
+    }
+    EXPECT_EQ(identities.size(), static_cast<size_t>(2 * __builtin_popcount(mask)));
+    EXPECT_EQ(fixture.admissions[0].current_task_ref, SCHEDULER_TASK_REF_INVALID);
+    EXPECT_EQ(fixture.control(0)->state, static_cast<uint64_t>(SchedulerTaskState::DONE));
+    EXPECT_EQ(completion_stats.resolve_count, with_stats ? 1u : 0u);
+    EXPECT_EQ(fixture.run()->scheduler_error, 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    MasksAndLevels, HbgGmMixServiceProfiling,
+    ::testing::Combine(
+        ::testing::Values<uint8_t>(3, 5, 6, 7), ::testing::Values<uint64_t>(0, 1, 2, 3, 4), ::testing::Bool()
+    )
+);
+
 TEST(HbgGmMix, PublishedRunErrorRejectsNewClaimAndDescriptorPublication) {
     for (uint8_t mask : {3, 5, 6, 7}) {
         SCOPED_TRACE(mask);
