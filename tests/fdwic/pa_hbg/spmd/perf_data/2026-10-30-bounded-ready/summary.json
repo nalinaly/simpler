@@ -1,0 +1,1851 @@
+{
+  "schema": "csa-bounded-ready-probe-investigation-v1",
+  "date": "2026-10-30",
+  "base_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+  "accepted_runtime_commit": "d19885deda2551463fe519382d7df7ea1e88f7fc",
+  "decision": "未见完整 Device 收益，撤回跨 poll 负 Ready 复用；保留 248 项独立保护测试。",
+  "mechanism": "普通多 block Mix 等待中，完整负 Ready 探测后最多推迟三次探测；组信号每次仍检查。",
+  "constraints": [
+    "全部合法 cluster 公平竞争，固定物理资源位置",
+    "1C1V 两 lane、1C2V 三 lane",
+    "实际资源全部 ARRIVED 后执行、全部 RELEASED 后复用 mailbox",
+    "N=1 和 sync_start 不采用负探测延期",
+    "无新增行为开关、无共享 ABI 变化"
+  ],
+  "device_policy": {
+    "device": 0,
+    "soc": "Ascend950PR_958b",
+    "order": "A/B/B/A",
+    "warmup_per_batch": 5,
+    "formal_per_batch": 100,
+    "formal_per_arm": 200,
+    "metric": "完整 Device，包括启动和退出；不是业务 kernel 窗口",
+    "isolation": "未观察到其他 A5 CLI 重叠，不等于系统级独占证明"
+  },
+  "benchmarks": [
+    {
+      "label": "idle-bounded-ready-a1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-a1/result.json",
+      "result_sha256": "bfb395f3e2e630081bac0d4c21b2b3bb46f80c69d8b4ee105d13a4dc735cdfe8",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "33cfb84d4ecb224fe71da3234502f1dd73cf71a70e3a4cca8bd1464071c38aec",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "bd7e58e0c5f211f5c18c1b67ee32a3b706191e4a3e61b30c01c0be72b23f350d"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "2420e35bf76b58a89e0f34239292d10a63fea7b174b287891d3bee54dda052e2",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1895.428,
+          "median": 1929.9834999999998,
+          "mean": 1933.57927,
+          "max": 1989.847,
+          "p90": 1964.7444,
+          "p99": 1986.5889100000002,
+          "samples": [
+            1908.938,
+            1931.009,
+            1921.702,
+            1919.764,
+            1916.59,
+            1968.114,
+            1936.236,
+            1937.053,
+            1927.277,
+            1942.334,
+            1973.331,
+            1915.205,
+            1895.428,
+            1920.473,
+            1941.07,
+            1921.826,
+            1927.709,
+            1923.241,
+            1930.043,
+            1925.064,
+            1902.008,
+            1981.528,
+            1930.89,
+            1919.137,
+            1989.847,
+            1932.625,
+            1920.454,
+            1912.506,
+            1923.447,
+            1944.658,
+            1928.925,
+            1968.444,
+            1945.583,
+            1919.851,
+            1937.952,
+            1911.736,
+            1906.296,
+            1926.664,
+            1926.58,
+            1952.725,
+            1949.509,
+            1914.113,
+            1930.438,
+            1922.819,
+            1931.994,
+            1922.935,
+            1918.993,
+            1986.556,
+            1941.117,
+            1932.387,
+            1939.885,
+            1971.173,
+            1923.347,
+            1939.072,
+            1955.212,
+            1929.033,
+            1916.546,
+            1921.192,
+            1908.578,
+            1929.924,
+            1913.052,
+            1927.807,
+            1936.103,
+            1947.697,
+            1931.334,
+            1962.771,
+            1938.515,
+            1914.292,
+            1926.748,
+            1980.658,
+            1927.064,
+            1943.492,
+            1930.338,
+            1910.873,
+            1939.567,
+            1975.931,
+            1921.381,
+            1936.042,
+            1937.455,
+            1934.787,
+            1918.329,
+            1957.389,
+            1933.792,
+            1921.933,
+            1908.514,
+            1937.796,
+            1949.23,
+            1937.064,
+            1917.809,
+            1964.37,
+            1931.758,
+            1921.626,
+            1925.967,
+            1923.4,
+            1932.076,
+            1916.249,
+            1921.04,
+            1976.807,
+            1924.481,
+            1953.304
+          ]
+        },
+        "host_us": {
+          "min": 78125.893,
+          "median": 79004.506,
+          "mean": 80306.2112,
+          "max": 102604.379,
+          "p90": 82262.4776,
+          "p99": 99464.41382000002
+        }
+      }
+    },
+    {
+      "label": "idle-bounded-ready-b1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-b1/result.json",
+      "result_sha256": "0544d9008459436551a35ae36c39f7d2512aa2abb299f93c572dbf7541be33f5",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "5d84ffb546f5740b83bdfd4f88f0cbd5f980dcfe9f7ab292f7e588ee2388b8cc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1894.994,
+          "median": 1923.6545,
+          "mean": 1926.65135,
+          "max": 2004.679,
+          "p90": 1950.4595000000002,
+          "p99": 2000.44477,
+          "samples": [
+            1923.73,
+            1950.246,
+            1932.067,
+            1918.31,
+            1913.888,
+            1896.518,
+            1924.018,
+            1929.184,
+            1911.629,
+            1922.312,
+            1914.229,
+            1924.156,
+            1904.604,
+            1920.548,
+            1906.414,
+            1910.536,
+            1921.677,
+            1910.128,
+            1927.293,
+            1930.809,
+            1910.48,
+            1950.003,
+            1900.048,
+            1909.487,
+            1950.392,
+            1921.848,
+            1909.054,
+            1932.431,
+            1921.437,
+            1969.898,
+            1935.765,
+            1898.862,
+            1933.222,
+            1905.331,
+            1920.181,
+            1923.61,
+            1949.418,
+            1961.039,
+            1911.385,
+            1907.589,
+            1930.2,
+            1926.136,
+            1914.504,
+            1902.428,
+            1951.067,
+            1936.299,
+            1939.063,
+            1924.626,
+            1984.333,
+            1919.767,
+            2004.679,
+            1937.299,
+            1950.284,
+            1935.273,
+            1927.539,
+            1927.299,
+            1918.895,
+            1923.076,
+            1918.28,
+            1915.071,
+            1933.897,
+            1925.204,
+            1917.052,
+            1916.399,
+            1905.323,
+            1951.61,
+            1916.884,
+            1916.808,
+            1906.54,
+            1945.462,
+            1905.072,
+            1930.018,
+            1925.204,
+            1929.233,
+            1972.714,
+            1920.858,
+            1945.15,
+            1929.097,
+            1941.065,
+            1907.443,
+            1915.583,
+            1911.655,
+            1958.091,
+            1925.401,
+            1926.761,
+            1902.072,
+            1921.147,
+            1925.599,
+            1894.994,
+            1926.11,
+            1923.699,
+            1927.904,
+            1971.699,
+            1903.294,
+            1917.536,
+            1916.93,
+            1917.56,
+            2000.402,
+            1926.568,
+            1911.203
+          ]
+        },
+        "host_us": {
+          "min": 79171.696,
+          "median": 119491.065,
+          "mean": 115196.75445,
+          "max": 310530.561,
+          "p90": 145810.9957,
+          "p99": 219952.60287000047
+        }
+      }
+    },
+    {
+      "label": "idle-bounded-ready-b2",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-b2/result.json",
+      "result_sha256": "2516ffefff3f14e9a812ed866c66a7ca9facbfe95a4f93d5275cb025f53dd833",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "5d84ffb546f5740b83bdfd4f88f0cbd5f980dcfe9f7ab292f7e588ee2388b8cc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1886.726,
+          "median": 1924.861,
+          "mean": 1927.45708,
+          "max": 2011.813,
+          "p90": 1958.1385,
+          "p99": 2011.58035,
+          "samples": [
+            1904.204,
+            1895.9,
+            1916.542,
+            1907.576,
+            1913.363,
+            1921.752,
+            1973.536,
+            1892.918,
+            1925.774,
+            1927.54,
+            1948.568,
+            1959.322,
+            1906.87,
+            1906.207,
+            1910.162,
+            1918.631,
+            1894.567,
+            1929.271,
+            1898.273,
+            1904.104,
+            1931.907,
+            1906.478,
+            1913.486,
+            1898.387,
+            1943.618,
+            1943.215,
+            1922.599,
+            1926.163,
+            1894.055,
+            1974.663,
+            1925.595,
+            1958.007,
+            1967.725,
+            1909.511,
+            1918.765,
+            1988.75,
+            1922.581,
+            1919.244,
+            1952.505,
+            1918.75,
+            1985.593,
+            1934.9,
+            1928.611,
+            1919.268,
+            1927.812,
+            1941.85,
+            1901.705,
+            1949.424,
+            1943.614,
+            1909.096,
+            1931.604,
+            1904.897,
+            1912.399,
+            1911.202,
+            1929.719,
+            1886.726,
+            1933.084,
+            1941.19,
+            1902.625,
+            1953.129,
+            1928.045,
+            1922.183,
+            1961.473,
+            1926.552,
+            1907.326,
+            1910.369,
+            1931.133,
+            1906.792,
+            1919.038,
+            1909.635,
+            1913.823,
+            1913.37,
+            1979.525,
+            1942.139,
+            1925.14,
+            1941.072,
+            1937.38,
+            1924.582,
+            1924.357,
+            1930.889,
+            1920.097,
+            1952.022,
+            1926.681,
+            1931.969,
+            1905.11,
+            1921.108,
+            1904.24,
+            2011.578,
+            1933.827,
+            1927.655,
+            1905.549,
+            1905.058,
+            2011.813,
+            1904.164,
+            1926.69,
+            1918.36,
+            1928.107,
+            1935.181,
+            1955.826,
+            1926.318
+          ]
+        },
+        "host_us": {
+          "min": 77865.709,
+          "median": 79681.1955,
+          "mean": 80148.23273,
+          "max": 99666.965,
+          "p90": 82017.4879,
+          "p99": 89287.60700000005
+        }
+      }
+    },
+    {
+      "label": "idle-bounded-ready-a2",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-a2/result.json",
+      "result_sha256": "10f00fd51786c08d1587c187421709e60ee716c2847c89a0c798b8c7a444d25c",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "33cfb84d4ecb224fe71da3234502f1dd73cf71a70e3a4cca8bd1464071c38aec",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "bd7e58e0c5f211f5c18c1b67ee32a3b706191e4a3e61b30c01c0be72b23f350d"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "2420e35bf76b58a89e0f34239292d10a63fea7b174b287891d3bee54dda052e2",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1901.471,
+          "median": 1927.4505,
+          "mean": 1934.01124,
+          "max": 2080.82,
+          "p90": 1959.7222,
+          "p99": 2039.6686700000002,
+          "samples": [
+            1929.472,
+            1941.041,
+            1931.592,
+            1948.353,
+            1925.324,
+            1912.734,
+            2080.82,
+            1981.447,
+            1937.218,
+            1932.366,
+            1908.928,
+            1914.247,
+            1914.319,
+            1914.368,
+            1919.107,
+            1929.841,
+            2039.253,
+            1918.263,
+            1936.811,
+            1925.136,
+            1940.8,
+            1923.508,
+            1923.468,
+            1942.178,
+            2014.386,
+            1922.539,
+            1911.331,
+            1940.033,
+            1901.471,
+            1924.308,
+            1962.721,
+            1929.309,
+            1939.741,
+            1944.778,
+            1927.203,
+            1921.259,
+            1941.656,
+            1923.957,
+            1910.74,
+            1908.243,
+            1920.726,
+            1929.347,
+            1928.381,
+            1969.792,
+            1930.256,
+            1929.836,
+            1925.839,
+            1929.717,
+            1935.066,
+            1928.669,
+            1908.918,
+            1927.92,
+            1932.527,
+            1915.55,
+            1959.122,
+            1956.938,
+            1915.52,
+            1926.744,
+            1908.3,
+            1940.155,
+            1921.11,
+            1973.312,
+            1925.376,
+            1959.389,
+            1916.418,
+            1925.209,
+            1912.654,
+            1917.633,
+            1925.392,
+            2011.677,
+            1921.179,
+            1912.532,
+            1937.209,
+            1916.327,
+            1915.6,
+            1923.454,
+            1910.847,
+            1916.78,
+            1908.135,
+            1932.952,
+            1934.726,
+            1908.111,
+            1927.698,
+            1925.604,
+            1987.459,
+            1921.761,
+            1938.548,
+            1952.296,
+            1923.32,
+            1938.369,
+            1937.983,
+            1944.217,
+            1953.758,
+            2000.501,
+            1907.214,
+            1918.418,
+            1933.566,
+            1906.651,
+            1915.174,
+            1928.973
+          ]
+        },
+        "host_us": {
+          "min": 77927.352,
+          "median": 79014.2785,
+          "mean": 80103.90165,
+          "max": 104564.856,
+          "p90": 82008.35979999999,
+          "p99": 95742.37695000005
+        }
+      }
+    }
+  ],
+  "pooled_device_us": {
+    "candidate": 1928.525,
+    "baseline": 1923.874,
+    "candidate_minus_baseline": 4.651000000000067,
+    "candidate_change_percent": 0.2417517987144624
+  },
+  "candidate_l4": {
+    "result": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-after-l4/result.json",
+      "sha256": "f638c5c03e96eb0c39cd323b52230cfec3c580e73f0bb2d2d19d309e8de825dc"
+    },
+    "raw": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-bounded-ready-after-l4/chip_swimlane_records.json",
+      "sha256": "5b353e7c13dd15555883b2592ed217571b35d29da6b0b6138b7ce237316efd16"
+    },
+    "identity": {
+      "runtime": "host_build_graph",
+      "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+      "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+      "torch": "2.12.0+cpu",
+      "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+      "simpler_branch": "feat/fully_distributed_within_core",
+      "tracked_diff_sha256": "33cfb84d4ecb224fe71da3234502f1dd73cf71a70e3a4cca8bd1464071c38aec",
+      "runtime_sha256": {
+        "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+        "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+        "aicore_kernel.o": "bd7e58e0c5f211f5c18c1b67ee32a3b706191e4a3e61b30c01c0be72b23f350d"
+      },
+      "case_sources_match_baseline": true,
+      "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+      "host_only_arguments": [
+        "hc_attn_scale"
+      ]
+    },
+    "correctness": {
+      "rounds": 2,
+      "outputs_per_round": 7,
+      "passed": true
+    },
+    "trace": {
+      "logical_tasks": 79,
+      "physical_tasks": 2308,
+      "clock_freq_hz": 1000000000,
+      "level": 4,
+      "sequence_integrity_verified": true,
+      "event_count": 40193,
+      "worker_count": 96,
+      "protocol_verified": true,
+      "device_logical_tasks": 81,
+      "executions": 2308,
+      "cooperative_tasks": 61,
+      "member_obligations": 3808,
+      "blocks": 1457,
+      "execution_epoch": 1,
+      "per_kind_executions": {
+        "aiv": 1444,
+        "aic": 864
+      },
+      "dependency_edges_checked": 133,
+      "block_identity_verified": true,
+      "dependency_order_source": "native_protocol",
+      "dependency_timing_guard": true,
+      "runtime": "host_build_graph",
+      "scheduler_producer": "aicore",
+      "distributed_scheduler_verified": true,
+      "require_aicore_scheduler": true,
+      "host_capture": {
+        "status": "complete",
+        "expected_records": 107,
+        "recorded_records": 107,
+        "pool_records": 117,
+        "dropped_records": 0,
+        "error": null
+      },
+      "clock_alignment_status": "bounded",
+      "cross_domain_latency_available": true
+    }
+  },
+  "macro": [
+    {
+      "label": "l3-resource-scopev8",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-resource-scopev8/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "879a02709b29515765ac650c28e455d823c459cf3e871adffdb629787710705f",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "02335c0f46d6f12a0fd0adaeccf4869b1164ff64",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "4785e009d93099c71176a282e637c11678b33f0a359abce936cc01af227e90f2",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "5d84ffb546f5740b83bdfd4f88f0cbd5f980dcfe9f7ab292f7e588ee2388b8cc"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1829.8020000000001,
+      "global_gap_us": 521.6739999999998,
+      "global_gap_count": 45,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 260.62699999999995,
+          "span_us": 260.62699999999995,
+          "global_gap_us": 117.53600000000006,
+          "aic_core_us": 465.87100000000004,
+          "aiv_core_us": 620.1120000000003
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 260.62699999999995,
+          "end_us": 632.777,
+          "span_us": 372.1500000000001,
+          "global_gap_us": 13.23700000000008,
+          "aic_core_us": 3201.7699999999995,
+          "aiv_core_us": 3742.6049999999987
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 632.777,
+          "end_us": 1332.147,
+          "span_us": 699.3699999999999,
+          "global_gap_us": 296.46199999999976,
+          "aic_core_us": 1645.5290000000005,
+          "aiv_core_us": 2868.5910000000017
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1332.147,
+          "end_us": 1582.7160000000001,
+          "span_us": 250.5690000000002,
+          "global_gap_us": 44.36600000000021,
+          "aic_core_us": 2000.6979999999992,
+          "aiv_core_us": 2240.563000000001
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1582.7160000000001,
+          "end_us": 1829.8020000000001,
+          "span_us": 247.086,
+          "global_gap_us": 50.07299999999964,
+          "aic_core_us": 4401.567999999999,
+          "aiv_core_us": 4559.426000000001
+        }
+      ],
+      "t23": {
+        "span_us": 372.1500000000001,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.607999999999947,
+          "median": 7.110000000000014,
+          "mean": 7.421916015624999,
+          "max": 13.255999999999972
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 12.865999999999985,
+          "median": 15.764500000000055,
+          "mean": 15.953072916666668,
+          "max": 22.48300000000006
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 18.866999999999962,
+          "median": 22.98350000000005,
+          "mean": 23.409939583333333,
+          "max": 34.3420000000001
+        },
+        "last_finishing_cluster": {
+          "cluster": 9,
+          "groups": 17,
+          "head_wait_us": 3.1620000000000346,
+          "kernel_envelopes_us": 125.40400000000011,
+          "between_groups_us": 243.58399999999995
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 27.807999999999993,
+        "last_projection_first_start_after_t56_us": 206.95800000000008,
+        "projection_first_start_spread_us": 179.1500000000001,
+        "last_projection_return_after_t56_us": 226.789,
+        "all_pack_done_after_t56_us": 250.5690000000002,
+        "projection_span_us": {
+          "n": 16,
+          "min": 18.639999999999873,
+          "median": 22.934499999999957,
+          "mean": 24.21249999999999,
+          "max": 35.84699999999998
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 1.6320000000000618,
+          "median": 2.6355000000000928,
+          "mean": 2.894250000000028,
+          "max": 4.412000000000035
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 20.986000000000104,
+          "median": 22.648999999999887,
+          "mean": 25.03449999999998,
+          "max": 46.25499999999988
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 22.054000000000087,
+            "pack_span_us": 4.412000000000035
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 31.826000000000022,
+            "pack_span_us": 2.5809999999999036
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 22.569999999999936,
+            "pack_span_us": 2.214000000000169
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 46.25499999999988,
+            "pack_span_us": 3.4249999999999545
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 21.15800000000013,
+            "pack_span_us": 2.622000000000071
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 22.072999999999865,
+            "pack_span_us": 3.3170000000000073
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 20.986000000000104,
+            "pack_span_us": 3.338999999999942
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 23.60699999999997,
+            "pack_span_us": 3.66800000000012
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 27.322999999999865,
+            "pack_span_us": 3.1400000000001
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 24.57899999999995,
+            "pack_span_us": 2.6490000000001146
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 22.727999999999838,
+            "pack_span_us": 1.6320000000000618
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 21.434999999999945,
+            "pack_span_us": 2.564000000000078
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 22.399000000000115,
+            "pack_span_us": 3.5149999999998727
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 21.00799999999981,
+            "pack_span_us": 2.41800000000012
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 24.086000000000013,
+            "pack_span_us": 2.2100000000000364
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 26.465000000000146,
+            "pack_span_us": 2.6019999999998618
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 22.024999999999864,
+          "median": 29.347999999999956,
+          "mean": 29.95246875000001,
+          "max": 55.874000000000024
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 18,
+        "groups": 2,
+        "head_wait_us": 11.232999999999947,
+        "kernel_envelopes_us": 160.62800000000016,
+        "between_groups_us": 14.504000000000133
+      },
+      "capture": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-resource-scopev8/evidence/L3/result.json",
+        "sha256": "e33ee1c8ae9ab315f547abdc4f7cfb5d8211017fc05082ddacf2590fe3dcfdfe"
+      }
+    },
+    {
+      "label": "l3-bounded-ready",
+      "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-bounded-ready/evidence/L3/chip_swimlane_records.json",
+      "raw_sha256": "fa986885d3dfcd35239c5895d3462b02ec70114f56e151ba2ae8be9de4b514e6",
+      "audit": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "2b8a2ec794d78b2b4a12ef2e212dc12ef5a80825",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "33cfb84d4ecb224fe71da3234502f1dd73cf71a70e3a4cca8bd1464071c38aec",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "bd7e58e0c5f211f5c18c1b67ee32a3b706191e4a3e61b30c01c0be72b23f350d"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "kernel_window_us": 1822.09,
+      "global_gap_us": 529.9600000000002,
+      "global_gap_count": 43,
+      "regions": [
+        {
+          "name": "前处理至t23首块",
+          "start_us": 0.0,
+          "end_us": 254.033,
+          "span_us": 254.033,
+          "global_gap_us": 109.49099999999999,
+          "aic_core_us": 485.89699999999993,
+          "aiv_core_us": 647.4659999999997
+        },
+        {
+          "name": "t23大投影",
+          "start_us": 254.033,
+          "end_us": 631.23,
+          "span_us": 377.19700000000006,
+          "global_gap_us": 17.55099999999993,
+          "aic_core_us": 3207.1979999999994,
+          "aiv_core_us": 3463.2140000000018
+        },
+        {
+          "name": "t23结束至t56结束",
+          "start_us": 631.23,
+          "end_us": 1318.439,
+          "span_us": 687.209,
+          "global_gap_us": 295.3960000000001,
+          "aic_core_us": 1662.172,
+          "aiv_core_us": 2871.8539999999994
+        },
+        {
+          "name": "t56结束至16路pack结束",
+          "start_us": 1318.439,
+          "end_us": 1577.919,
+          "span_us": 259.48,
+          "global_gap_us": 48.694999999999936,
+          "aic_core_us": 1986.071000000001,
+          "aiv_core_us": 2224.0769999999993
+        },
+        {
+          "name": "最终投影及后处理",
+          "start_us": 1577.919,
+          "end_us": 1822.09,
+          "span_us": 244.17099999999982,
+          "global_gap_us": 58.827000000000226,
+          "aic_core_us": 4385.582,
+          "aiv_core_us": 4510.216999999999
+        }
+      ],
+      "t23": {
+        "span_us": 377.19700000000006,
+        "calls_per_used_core": {
+          "n": 64,
+          "min": 15,
+          "median": 16.0,
+          "mean": 16.0,
+          "max": 17
+        },
+        "group_kernel_envelope_us": {
+          "n": 512,
+          "min": 5.641999999999939,
+          "median": 6.4809999999999945,
+          "mean": 6.850533203125003,
+          "max": 13.100999999999999
+        },
+        "same_cluster_group_gap_us": {
+          "n": 480,
+          "min": 14.301999999999907,
+          "median": 16.64500000000004,
+          "mean": 16.82266458333333,
+          "max": 20.597000000000094
+        },
+        "same_cluster_group_period_us": {
+          "n": 480,
+          "min": 20.20399999999995,
+          "median": 23.27600000000001,
+          "mean": 23.707645833333334,
+          "max": 33.53100000000006
+        },
+        "last_finishing_cluster": {
+          "cluster": 31,
+          "groups": 16,
+          "head_wait_us": 5.9360000000000355,
+          "kernel_envelopes_us": 111.16199999999986,
+          "between_groups_us": 260.09900000000016
+        }
+      },
+      "output_fanout": {
+        "all_projections_kernel_ready_at": 56,
+        "first_projection_start_after_t56_us": 30.948000000000093,
+        "last_projection_first_start_after_t56_us": 211.19700000000012,
+        "projection_first_start_spread_us": 180.24900000000002,
+        "last_projection_return_after_t56_us": 235.64200000000005,
+        "all_pack_done_after_t56_us": 259.48,
+        "projection_span_us": {
+          "n": 16,
+          "min": 18.847999999999956,
+          "median": 22.624500000000012,
+          "mean": 23.57287500000001,
+          "max": 28.226000000000113
+        },
+        "pack_span_us": {
+          "n": 16,
+          "min": 1.8719999999998436,
+          "median": 3.375,
+          "mean": 3.439562499999994,
+          "max": 4.669999999999845
+        },
+        "pack_parent_return_to_start_us": {
+          "n": 16,
+          "min": 19.97499999999991,
+          "median": 23.682999999999993,
+          "mean": 25.519624999999976,
+          "max": 46.62900000000013
+        },
+        "per_branch": [
+          {
+            "projection": 58,
+            "pack": 59,
+            "parent_return_to_pack_start_us": 22.55099999999993,
+            "pack_span_us": 3.3559999999999945
+          },
+          {
+            "projection": 61,
+            "pack": 62,
+            "parent_return_to_pack_start_us": 21.6099999999999,
+            "pack_span_us": 4.032999999999902
+          },
+          {
+            "projection": 64,
+            "pack": 65,
+            "parent_return_to_pack_start_us": 21.774999999999864,
+            "pack_span_us": 3.1950000000001637
+          },
+          {
+            "projection": 67,
+            "pack": 68,
+            "parent_return_to_pack_start_us": 22.41599999999994,
+            "pack_span_us": 4.150000000000091
+          },
+          {
+            "projection": 70,
+            "pack": 71,
+            "parent_return_to_pack_start_us": 20.667999999999893,
+            "pack_span_us": 3.1700000000000728
+          },
+          {
+            "projection": 73,
+            "pack": 74,
+            "parent_return_to_pack_start_us": 22.625,
+            "pack_span_us": 3.130000000000109
+          },
+          {
+            "projection": 76,
+            "pack": 77,
+            "parent_return_to_pack_start_us": 36.662000000000035,
+            "pack_span_us": 4.669999999999845
+          },
+          {
+            "projection": 79,
+            "pack": 80,
+            "parent_return_to_pack_start_us": 19.97499999999991,
+            "pack_span_us": 4.0090000000000146
+          },
+          {
+            "projection": 82,
+            "pack": 83,
+            "parent_return_to_pack_start_us": 23.75,
+            "pack_span_us": 2.66800000000012
+          },
+          {
+            "projection": 85,
+            "pack": 86,
+            "parent_return_to_pack_start_us": 24.701999999999998,
+            "pack_span_us": 1.8719999999998436
+          },
+          {
+            "projection": 88,
+            "pack": 89,
+            "parent_return_to_pack_start_us": 24.329999999999927,
+            "pack_span_us": 3.451999999999998
+          },
+          {
+            "projection": 91,
+            "pack": 92,
+            "parent_return_to_pack_start_us": 25.09900000000016,
+            "pack_span_us": 3.2959999999998217
+          },
+          {
+            "projection": 94,
+            "pack": 95,
+            "parent_return_to_pack_start_us": 26.631000000000085,
+            "pack_span_us": 3.229999999999791
+          },
+          {
+            "projection": 97,
+            "pack": 98,
+            "parent_return_to_pack_start_us": 46.62900000000013,
+            "pack_span_us": 3.981999999999971
+          },
+          {
+            "projection": 100,
+            "pack": 101,
+            "parent_return_to_pack_start_us": 25.274999999999864,
+            "pack_span_us": 3.3940000000000055
+          },
+          {
+            "projection": 103,
+            "pack": 104,
+            "parent_return_to_pack_start_us": 23.615999999999985,
+            "pack_span_us": 3.4260000000001583
+          }
+        ],
+        "same_cluster_between_projection_groups_us": {
+          "n": 96,
+          "min": 21.9670000000001,
+          "median": 29.908000000000015,
+          "mean": 30.84020833333334,
+          "max": 59.47199999999998
+        }
+      },
+      "t105_last_finishing_cluster": {
+        "cluster": 4,
+        "groups": 2,
+        "head_wait_us": 6.37700000000018,
+        "kernel_envelopes_us": 155.3409999999999,
+        "between_groups_us": 19.804000000000087
+      },
+      "capture": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-bounded-ready/evidence/L3/result.json",
+        "sha256": "cba3e65647d2f19a838c2b9b139fbb0230f96a5b120e16d3145450ca65a478eb"
+      }
+    }
+  ],
+  "handoffs": [
+    {
+      "label": "l3-resource-scopev8",
+      "handoffs": [
+        {
+          "parent": 46,
+          "child": 48,
+          "global_gap_us": 33.73900000000003,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.7710000000001855,
+          "resolve_us": 13.761999999999944,
+          "resolve_end_to_first_prepare_us": 10.231999999999971,
+          "first_prepare_to_kernel_us": 3.9739999999999327
+        },
+        {
+          "parent": 56,
+          "child": 67,
+          "global_gap_us": 27.807999999999993,
+          "serial_decomposition": false,
+          "last_kernel_to_resolve_us": 2.0860000000000127,
+          "resolve_us": 36.41600000000017,
+          "resolve_end_to_first_prepare_us": -14.514000000000124,
+          "first_prepare_to_kernel_us": 3.8199999999999363
+        },
+        {
+          "parent": 32,
+          "child": 36,
+          "global_gap_us": 26.11299999999983,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.701999999999998,
+          "resolve_us": 7.230000000000018,
+          "resolve_end_to_first_prepare_us": 10.24799999999982,
+          "first_prepare_to_kernel_us": 3.9329999999999927
+        },
+        {
+          "parent": 22,
+          "child": 23,
+          "global_gap_us": 25.624999999999943,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.009999999999991,
+          "resolve_us": 2.225999999999999,
+          "resolve_end_to_first_prepare_us": 16.680999999999983,
+          "first_prepare_to_kernel_us": 3.70799999999997
+        },
+        {
+          "parent": 105,
+          "child": 106,
+          "global_gap_us": 25.07699999999977,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.286999999999807,
+          "resolve_us": 3.125,
+          "resolve_end_to_first_prepare_us": 11.635999999999967,
+          "first_prepare_to_kernel_us": 5.028999999999996
+        },
+        {
+          "parent": 71,
+          "child": 105,
+          "global_gap_us": 24.995999999999867,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.5799999999999272,
+          "resolve_us": 3.257000000000062,
+          "resolve_end_to_first_prepare_us": 15.629999999999882,
+          "first_prepare_to_kernel_us": 3.5289999999999964
+        },
+        {
+          "parent": 23,
+          "child": 24,
+          "global_gap_us": 23.872999999999934,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.815999999999917,
+          "resolve_us": 3.3090000000000828,
+          "resolve_end_to_first_prepare_us": 11.307000000000016,
+          "first_prepare_to_kernel_us": 4.440999999999917
+        },
+        {
+          "parent": 45,
+          "child": 46,
+          "global_gap_us": 23.711000000000013,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.9700000000000273,
+          "resolve_us": 3.3890000000001237,
+          "resolve_end_to_first_prepare_us": 15.01299999999992,
+          "first_prepare_to_kernel_us": 3.338999999999942
+        },
+        {
+          "parent": 31,
+          "child": 32,
+          "global_gap_us": 23.649999999999864,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.7719999999999345,
+          "resolve_us": 3.622000000000071,
+          "resolve_end_to_first_prepare_us": 14.376999999999953,
+          "first_prepare_to_kernel_us": 3.8789999999999054
+        },
+        {
+          "parent": 41,
+          "child": 42,
+          "global_gap_us": 23.43899999999985,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.9710000000000036,
+          "resolve_us": 1.8439999999998236,
+          "resolve_end_to_first_prepare_us": 16.072000000000116,
+          "first_prepare_to_kernel_us": 3.5519999999999072
+        },
+        {
+          "parent": 24,
+          "child": 29,
+          "global_gap_us": 21.697000000000003,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.5879999999999654,
+          "resolve_us": 1.7210000000000036,
+          "resolve_end_to_first_prepare_us": 13.585000000000036,
+          "first_prepare_to_kernel_us": 3.8029999999999973
+        },
+        {
+          "parent": 42,
+          "child": 43,
+          "global_gap_us": 20.317000000000007,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.832000000000107,
+          "resolve_us": 2.9249999999999545,
+          "resolve_end_to_first_prepare_us": 8.82100000000014,
+          "first_prepare_to_kernel_us": 3.7389999999998054
+        },
+        {
+          "parent": 51,
+          "child": 56,
+          "global_gap_us": 17.322999999999865,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.4689999999998236,
+          "resolve_us": 1.8790000000001328,
+          "resolve_end_to_first_prepare_us": 9.258000000000038,
+          "first_prepare_to_kernel_us": 3.716999999999871
+        }
+      ],
+      "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready."
+    },
+    {
+      "label": "l3-bounded-ready",
+      "handoffs": [
+        {
+          "parent": 46,
+          "child": 52,
+          "global_gap_us": 33.891000000000076,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.525000000000091,
+          "resolve_us": 14.395999999999958,
+          "resolve_end_to_first_prepare_us": 11.024000000000115,
+          "first_prepare_to_kernel_us": 3.9459999999999127
+        },
+        {
+          "parent": 13,
+          "child": 25,
+          "global_gap_us": 32.774,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.791999999999973,
+          "resolve_us": 0.8000000000000114,
+          "resolve_end_to_first_prepare_us": 24.394999999999982,
+          "first_prepare_to_kernel_us": 4.787000000000035
+        },
+        {
+          "parent": 56,
+          "child": 76,
+          "global_gap_us": 30.948000000000093,
+          "serial_decomposition": false,
+          "last_kernel_to_resolve_us": 2.4220000000000255,
+          "resolve_us": 37.33400000000006,
+          "resolve_end_to_first_prepare_us": -11.40800000000013,
+          "first_prepare_to_kernel_us": 2.6000000000001364
+        },
+        {
+          "parent": 105,
+          "child": 106,
+          "global_gap_us": 27.147000000000162,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.254999999999882,
+          "resolve_us": 4.085000000000036,
+          "resolve_end_to_first_prepare_us": 12.204999999999927,
+          "first_prepare_to_kernel_us": 4.6020000000003165
+        },
+        {
+          "parent": 31,
+          "child": 32,
+          "global_gap_us": 25.98799999999983,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 1.88799999999992,
+          "resolve_us": 3.4880000000000564,
+          "resolve_end_to_first_prepare_us": 18.173000000000002,
+          "first_prepare_to_kernel_us": 2.438999999999851
+        },
+        {
+          "parent": 23,
+          "child": 24,
+          "global_gap_us": 25.749000000000024,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.398000000000025,
+          "resolve_us": 2.810999999999922,
+          "resolve_end_to_first_prepare_us": 13.072999999999979,
+          "first_prepare_to_kernel_us": 4.467000000000098
+        },
+        {
+          "parent": 71,
+          "child": 105,
+          "global_gap_us": 25.42599999999993,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.5170000000000528,
+          "resolve_us": 2.9739999999999327,
+          "resolve_end_to_first_prepare_us": 15.871000000000095,
+          "first_prepare_to_kernel_us": 4.063999999999851
+        },
+        {
+          "parent": 32,
+          "child": 38,
+          "global_gap_us": 25.169999999999845,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 5.335000000000036,
+          "resolve_us": 6.139999999999873,
+          "resolve_end_to_first_prepare_us": 9.473999999999933,
+          "first_prepare_to_kernel_us": 4.221000000000004
+        },
+        {
+          "parent": 22,
+          "child": 23,
+          "global_gap_us": 25.067999999999984,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 3.002999999999986,
+          "resolve_us": 1.8199999999999932,
+          "resolve_end_to_first_prepare_us": 16.67700000000002,
+          "first_prepare_to_kernel_us": 3.5679999999999836
+        },
+        {
+          "parent": 45,
+          "child": 46,
+          "global_gap_us": 23.996000000000095,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.091000000000122,
+          "resolve_us": 3.0239999999998872,
+          "resolve_end_to_first_prepare_us": 15.317999999999984,
+          "first_prepare_to_kernel_us": 3.563000000000102
+        },
+        {
+          "parent": 41,
+          "child": 42,
+          "global_gap_us": 23.80399999999986,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.071999999999889,
+          "resolve_us": 2.1520000000000437,
+          "resolve_end_to_first_prepare_us": 15.857999999999947,
+          "first_prepare_to_kernel_us": 3.72199999999998
+        },
+        {
+          "parent": 24,
+          "child": 29,
+          "global_gap_us": 21.889999999999986,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.338999999999942,
+          "resolve_us": 2.0260000000000673,
+          "resolve_end_to_first_prepare_us": 13.345000000000027,
+          "first_prepare_to_kernel_us": 4.17999999999995
+        },
+        {
+          "parent": 42,
+          "child": 43,
+          "global_gap_us": 20.868000000000166,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 4.638000000000147,
+          "resolve_us": 3.196999999999889,
+          "resolve_end_to_first_prepare_us": 9.274000000000115,
+          "first_prepare_to_kernel_us": 3.7590000000000146
+        },
+        {
+          "parent": 48,
+          "child": 56,
+          "global_gap_us": 18.715000000000146,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 2.689000000000078,
+          "resolve_us": 2.8599999999999,
+          "resolve_end_to_first_prepare_us": 8.695000000000164,
+          "first_prepare_to_kernel_us": 4.471000000000004
+        },
+        {
+          "parent": 40,
+          "child": 41,
+          "global_gap_us": 17.25999999999999,
+          "serial_decomposition": true,
+          "last_kernel_to_resolve_us": 6.374000000000024,
+          "resolve_us": 2.599999999999909,
+          "resolve_end_to_first_prepare_us": 3.7329999999999472,
+          "first_prepare_to_kernel_us": 4.553000000000111
+        }
+      ],
+      "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready."
+    }
+  ],
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "validation": {
+    "initial_policy_red": 120,
+    "initial_guard_passes": 248,
+    "candidate_cpp_targets": 21,
+    "candidate_gm_cases": 1110,
+    "candidate_python": 3989,
+    "candidate_python_scope": "末次配置保护修正前通过；最终候选 C++ 与原生验证另列。",
+    "candidate_builds": [
+      "a5",
+      "a5sim"
+    ],
+    "restored_cpp_targets": 21,
+    "retained_guards": 248,
+    "restored_gm_cases": 987,
+    "restored_a5sim_build": true,
+    "restored_python": 3989,
+    "candidate_full_device_fault_matrix": "未执行；未扩大不具收益的候选验收范围。"
+  },
+  "archives": {
+    "idle-bounded-ready-production.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-bounded-ready-production.patch",
+      "sha256": "2420e35bf76b58a89e0f34239292d10a63fea7b174b287891d3bee54dda052e2"
+    },
+    "idle-bounded-ready-tests.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-bounded-ready-tests.patch",
+      "sha256": "80cf932badd99e1e32f61864e491ac6d0d110aaab55ae7f0c1e02ab90087fce0"
+    },
+    "idle-bounded-ready-retained-tests.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-bounded-ready-retained-tests.patch",
+      "sha256": "7771bce9fab6d0b85dfd7affa687e6e51c881fb843fba60dcf2167923fe41d9c"
+    }
+  },
+  "reproducer": {
+    "path": "../reports/csa_macro_l3_20261029.W2dr2E/summarize_bounded_ready.py",
+    "sha256": "3d892367177b6d09a442323418986f7138746498d5783011023eb27eabedb4ee"
+  },
+  "candidate_runtime_archive": "../reports/csa_poursoul_20261027.Osnaam/runtime-bounded-ready",
+  "logs": [
+    {
+      "path": "outputs/csa-bounded-ready-red2.log",
+      "sha256": "b745d82aef228be2544c3a9cb0e6b77e7354563e20da2247839cb810612e9753"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-cpp1.log",
+      "sha256": "51e655bfccfb41260f9d220ea69721f777f5c0650427f713f165d4405ff12c84"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-cpp2.log",
+      "sha256": "76f6bfe972fbd8cdea0ff9f6ac71e71684800a865caa02adeed0ca05813bf904"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-cpp3.log",
+      "sha256": "e9720f1b1fad57d59396ec582be3200054ce84d1159f7e0703277fa4195367ea"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-python.log",
+      "sha256": "ea390b7eaeefcc1f7766defc3d9d78c7e2896da451a94c4fcfb8dc03ce91a406"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-runtime-build2.log",
+      "sha256": "ffb2f7dec8739d36f991db253c7f76d5b312455d8ddea5d173ca769e46ad2db1"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-l4.log",
+      "sha256": "8be0861fadc7c3076292d2384364aa9e4ef71b00083277a4e6a778ec26eba167"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-l3.log",
+      "sha256": "6aa89a04a4bd483a9d590243442c1329d1b54d332906362ee1ad4915d4ab0275"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-restored-cpp.log",
+      "sha256": "a4263944c5c92338c8f8cc386f2ddb4eed71fee57cf5405d84ff541b7c1f2827"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-retained-guards.log",
+      "sha256": "9ab9978e6a89968777ac97d68afc34fb99d8bba58f817355d78cb96f9f5060ff"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-restored-sim-build.log",
+      "sha256": "1af2e5e72dee859ff7a97ab7245f1ecb9fd4c3470b03470412cb056601a36ba5"
+    },
+    {
+      "path": "outputs/csa-bounded-ready-restored-python.log",
+      "sha256": "5d4090b02eb9a0a4db03fb4b2255b55589a28b425de7d93c6dc33141eea1015a"
+    }
+  ],
+  "caveats": [
+    "L3 是独立插桩捕获，不能把分段差值精确归因到 L0 的某条指令。",
+    "全员无业务 kernel 不等于 Scalar 全部无工作；重叠阶段不能串行相加。",
+    "少掉源码中的 query 不是已测得的 GM 带宽或 atomic 耗时收益。",
+    "这里只是不保留无收益候选，不证明所有负探测复用策略均无效。",
+    "四批是局部候选对照，不是低于 1.5ms 的最终五批门禁。"
+  ]
+}

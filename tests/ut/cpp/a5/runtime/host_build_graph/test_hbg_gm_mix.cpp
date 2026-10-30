@@ -2650,6 +2650,173 @@ TEST_P(HbgGmMixReadyProbe, MissingReleaseDoesNotAdvanceAndTheNextFillSeesNewRead
 
 INSTANTIATE_TEST_SUITE_P(AllMasks, HbgGmMixReadyProbe, ::testing::Values<uint8_t>(3, 5, 6, 7));
 
+struct GmReadyWaitCase {
+    uint8_t mask;
+    uint32_t worker;
+    bool releases;
+    uint32_t ready_location;
+};
+
+std::vector<GmReadyWaitCase> gm_ready_wait_cases() {
+    std::vector<GmReadyWaitCase> result;
+    for (uint8_t mask : {3, 5, 6, 7})
+        for (uint32_t worker = 0; worker < 6; ++worker) {
+            if (((mask | 1U) & (1U << (worker % 3))) == 0) continue;
+            for (uint32_t location = 0; location < 3; ++location) {
+                result.push_back({mask, worker, false, location});
+                result.push_back({mask, worker, true, location});
+            }
+        }
+    return result;
+}
+
+void prepare_ready_wait(GmMixFixture &fixture, const GmReadyWaitCase &scenario, GmExecution *late) {
+    ASSERT_TRUE(fixture.admit(0));
+    ASSERT_TRUE(fixture.refresh_all());
+    const uint32_t cluster = scenario.worker / 3;
+    ASSERT_EQ(fixture.claim(cluster), SchedulerBlockClaimResult::CLAIMED);
+    ASSERT_TRUE(fixture.publish(cluster));
+    if (scenario.releases) {
+        ASSERT_TRUE(fixture.rendezvous(cluster));
+        const uint32_t late_lane = scenario.worker % 3 == 0  ? ((scenario.mask & 4U) != 0 ? 2 : 1) :
+                                   (scenario.mask & 1U) != 0 ? 0 :
+                                                               3 - scenario.worker % 3;
+        for (uint32_t lane = 0; lane < 3; ++lane) {
+            if ((scenario.mask & (1U << lane)) == 0) continue;
+            GmExecution execution{};
+            ASSERT_TRUE(fixture.begin(cluster * 3 + lane, &execution));
+            if (lane == late_lane) *late = execution;
+            else ASSERT_TRUE(fixture.complete(execution));
+        }
+    } else {
+        bool progress = false;
+        if (scenario.worker % 3 != 0) ASSERT_TRUE(fixture.observe(scenario.worker, &progress));
+        ASSERT_TRUE(fixture.arrive(scenario.worker, &progress));
+    }
+    ASSERT_NO_FATAL_FAILURE(clear_drained_ready_directories(fixture));
+    ASSERT_EQ(
+        fixture.admissions[scenario.worker].gm_mix.phase,
+        scenario.releases ? SchedulerGmMixPhase::RELEASED : SchedulerGmMixPhase::ARRIVED
+    );
+}
+
+uint32_t ready_wait_task(const GmReadyWaitCase &scenario) { return scenario.worker % 3 == 1 ? 2 : 1; }
+
+void enqueue_ready_wait(GmMixFixture &fixture, const GmReadyWaitCase &scenario) {
+    const uint32_t task = ready_wait_task(scenario);
+    const uint32_t producer = scenario.ready_location == 2 ? (scenario.worker < 3 ? 3 : 0) : scenario.worker / 3 * 3;
+    ASSERT_TRUE(fixture.enqueue(task, producer));
+    if (scenario.ready_location == 1) {
+        auto *local = fixture.locals[scenario.worker];
+        const auto &metadata = fixture.storage.metadata[task];
+        scheduler_ready_directory_clear(
+            scheduler_ready_directory_at(fixture.base(), local),
+            scheduler_task_ready_queue(metadata.flags, metadata.active_mask), local->self_type_rank()
+        );
+    }
+}
+
+class HbgGmReadyWaitProbe : public ::testing::TestWithParam<GmReadyWaitCase> {};
+
+TEST_P(HbgGmReadyWaitProbe, GroupSignalsAndReadyAreFreshAfterAnEmptyProbe) {
+    const auto scenario = GetParam();
+    GmMixFixture fixture(
+        {{2, scenario.mask}, {1, static_cast<uint8_t>(scenario.worker % 3 == 0 ? scenario.mask : 2)}, {1, 2}}
+    );
+    GmExecution late{};
+    ASSERT_NO_FATAL_FAILURE(prepare_ready_wait(fixture, scenario, &late));
+    auto *local = fixture.locals[scenario.worker];
+    bool empty = false;
+    auto phase = SchedulerGmMixPhase::IDLE;
+    ASSERT_FALSE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), local, &empty, &phase));
+    ASSERT_TRUE(empty);
+    if (scenario.releases) {
+        ASSERT_TRUE(fixture.complete(late));
+        if (scenario.worker % 3 != 0) {
+            const uint32_t cluster = scenario.worker / 3;
+            ASSERT_EQ(fixture.retire(cluster), SchedulerGmMixResult::PROGRESS);
+            ASSERT_EQ(fixture.claim(cluster), SchedulerBlockClaimResult::CLAIMED);
+            ASSERT_TRUE(fixture.publish(cluster));
+        }
+    } else {
+        const uint32_t cluster = scenario.worker / 3;
+        for (uint32_t lane = 0; lane < 3; ++lane) {
+            const uint32_t peer = cluster * 3 + lane;
+            if (peer == scenario.worker || !fixture.participant(peer)) continue;
+            bool progress = false;
+            if (lane != 0) ASSERT_TRUE(fixture.observe(peer, &progress));
+            ASSERT_TRUE(fixture.arrive(peer, &progress));
+        }
+    }
+    ASSERT_TRUE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), local, &empty, &phase));
+    EXPECT_TRUE(empty);
+    EXPECT_EQ(
+        phase, !scenario.releases       ? SchedulerGmMixPhase::ARRIVED :
+               scenario.worker % 3 == 0 ? SchedulerGmMixPhase::RELEASED :
+                                          SchedulerGmMixPhase::IDLE
+    );
+    EXPECT_EQ(fixture.control(0)->completed_blocks, scenario.releases && scenario.worker % 3 != 0 ? 1u : 0u);
+    ASSERT_NO_FATAL_FAILURE(enqueue_ready_wait(fixture, scenario));
+    EXPECT_TRUE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), local, &empty, &phase));
+    EXPECT_FALSE(empty);
+    EXPECT_EQ(phase, SchedulerGmMixPhase::IDLE);
+    EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
+}
+
+TEST_P(HbgGmReadyWaitProbe, PublishedErrorAfterAnEmptyProbeStopsFillBeforeAnyNewOwnership) {
+    const auto scenario = GetParam();
+    GmMixFixture fixture(
+        {{2, scenario.mask}, {1, static_cast<uint8_t>(scenario.worker % 3 == 0 ? scenario.mask : 2)}, {1, 2}}
+    );
+    GmExecution late{};
+    ASSERT_NO_FATAL_FAILURE(prepare_ready_wait(fixture, scenario, &late));
+    auto *local = fixture.locals[scenario.worker];
+    bool empty = false;
+    ASSERT_FALSE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), local, &empty));
+    ASSERT_TRUE(empty);
+    ASSERT_NO_FATAL_FAILURE(enqueue_ready_wait(fixture, scenario));
+    scheduler_record_error(
+        fixture.run(), 0, SchedulerGraphResult::TIMEOUT, nullptr, fixture.locals[5],
+        SchedulerErrorSite::ORDERED_EXIT_TIMEOUT
+    );
+    EXPECT_FALSE(fixture.fill(scenario.worker));
+    EXPECT_EQ(fixture.control(0)->next_block, 1u);
+    EXPECT_EQ(fixture.control(0)->completed_blocks, 0u);
+    EXPECT_EQ(fixture.mailbox(scenario.worker / 3)->published_seq, 1u);
+    EXPECT_EQ(fixture.control(ready_wait_task(scenario))->admission_state, 0u);
+    for (const auto &candidate : fixture.admissions[scenario.worker].candidates)
+        EXPECT_TRUE(scheduler_task_ref_is_null(candidate.ready.task_ref));
+    EXPECT_EQ(local->local_ready_mask, 0u);
+    EXPECT_EQ(fixture.run()->error_worker_index, 5u);
+    EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::ORDERED_EXIT_TIMEOUT));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ResourceMembersAndPublicationRaces, HbgGmReadyWaitProbe, ::testing::ValuesIn(gm_ready_wait_cases())
+);
+
+class HbgGmImmediateReadyProbe : public ::testing::TestWithParam<std::tuple<uint8_t, bool>> {};
+
+TEST_P(HbgGmImmediateReadyProbe, SingleBlockAndSyncStartDoNotDeferNewReady) {
+    const auto [mask, sync] = GetParam();
+    GmMixFixture fixture({{static_cast<uint16_t>(sync ? 2 : 1), mask, sync}, {1, mask}});
+    GmExecution late{};
+    ASSERT_NO_FATAL_FAILURE(prepare_ready_wait(fixture, {mask, 0, false, 0}, &late));
+    bool empty = false;
+    ASSERT_FALSE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), fixture.locals[0], &empty));
+    ASSERT_TRUE(empty);
+    ASSERT_TRUE(fixture.enqueue(1));
+    EXPECT_TRUE(scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), fixture.locals[0], &empty));
+    EXPECT_FALSE(empty);
+    EXPECT_EQ(fixture.control(0)->next_block, 1u);
+    EXPECT_EQ(fixture.control(0)->completed_blocks, 0u);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    MasksAndShapes, HbgGmImmediateReadyProbe,
+    ::testing::Combine(::testing::Values<uint8_t>(3, 5, 6, 7), ::testing::Bool())
+);
+
 TEST(HbgGmMixReadyProbeOwnership, CandidatePendingAndLocalReadyNeverReuseAnEmptyHint) {
     for (uint32_t owned = 0; owned < 3; ++owned) {
         SCOPED_TRACE(owned);
