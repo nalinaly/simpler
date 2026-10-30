@@ -1,0 +1,355 @@
+{
+  "schema": "csa-retained-handoff-audit-v1",
+  "l3": {
+    "label": "l3-close128v7",
+    "handoffs": [
+      {
+        "parent": 46,
+        "child": 52,
+        "global_gap_us": 33.789999999999964,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 5.279999999999973,
+        "resolve_us": 13.664999999999964,
+        "resolve_end_to_first_prepare_us": 10.661000000000058,
+        "first_prepare_to_kernel_us": 4.183999999999969
+      },
+      {
+        "parent": 13,
+        "child": 25,
+        "global_gap_us": 33.13299999999998,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 3.290999999999997,
+        "resolve_us": 0.9379999999999882,
+        "resolve_end_to_first_prepare_us": 23.673000000000002,
+        "first_prepare_to_kernel_us": 5.2309999999999945
+      },
+      {
+        "parent": 56,
+        "child": 79,
+        "global_gap_us": 32.08400000000006,
+        "serial_decomposition": false,
+        "last_kernel_to_resolve_us": 2.538000000000011,
+        "resolve_us": 37.60299999999984,
+        "resolve_end_to_first_prepare_us": -11.856999999999971,
+        "first_prepare_to_kernel_us": 3.800000000000182
+      },
+      {
+        "parent": 32,
+        "child": 38,
+        "global_gap_us": 28.31100000000015,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 5.602000000000089,
+        "resolve_us": 7.178000000000111,
+        "resolve_end_to_first_prepare_us": 10.917999999999893,
+        "first_prepare_to_kernel_us": 4.613000000000056
+      },
+      {
+        "parent": 23,
+        "child": 24,
+        "global_gap_us": 26.898000000000025,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 5.432000000000016,
+        "resolve_us": 3.8070000000000164,
+        "resolve_end_to_first_prepare_us": 13.55099999999993,
+        "first_prepare_to_kernel_us": 4.108000000000061
+      },
+      {
+        "parent": 31,
+        "child": 32,
+        "global_gap_us": 26.48599999999999,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 1.94399999999996,
+        "resolve_us": 4.113000000000056,
+        "resolve_end_to_first_prepare_us": 16.291000000000054,
+        "first_prepare_to_kernel_us": 4.13799999999992
+      },
+      {
+        "parent": 92,
+        "child": 105,
+        "global_gap_us": 26.44399999999996,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 2.8460000000000036,
+        "resolve_us": 4.94399999999996,
+        "resolve_end_to_first_prepare_us": 14.976000000000113,
+        "first_prepare_to_kernel_us": 3.6779999999998836
+      },
+      {
+        "parent": 105,
+        "child": 106,
+        "global_gap_us": 25.96199999999976,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 5.173999999999751,
+        "resolve_us": 3.7400000000002365,
+        "resolve_end_to_first_prepare_us": 12.974999999999909,
+        "first_prepare_to_kernel_us": 4.072999999999865
+      },
+      {
+        "parent": 41,
+        "child": 42,
+        "global_gap_us": 24.330999999999904,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 2.06899999999996,
+        "resolve_us": 2.4429999999999836,
+        "resolve_end_to_first_prepare_us": 14.707000000000107,
+        "first_prepare_to_kernel_us": 5.111999999999853
+      },
+      {
+        "parent": 24,
+        "child": 29,
+        "global_gap_us": 24.035999999999945,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 2.83299999999997,
+        "resolve_us": 2.5819999999999936,
+        "resolve_end_to_first_prepare_us": 14.562000000000012,
+        "first_prepare_to_kernel_us": 4.058999999999969
+      },
+      {
+        "parent": 45,
+        "child": 46,
+        "global_gap_us": 23.563000000000102,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 2.242000000000189,
+        "resolve_us": 3.522999999999911,
+        "resolve_end_to_first_prepare_us": 15.547000000000025,
+        "first_prepare_to_kernel_us": 2.2509999999999764
+      },
+      {
+        "parent": 42,
+        "child": 43,
+        "global_gap_us": 22.948000000000093,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 6.251999999999953,
+        "resolve_us": 2.811000000000149,
+        "resolve_end_to_first_prepare_us": 9.225999999999885,
+        "first_prepare_to_kernel_us": 4.6590000000001055
+      },
+      {
+        "parent": 40,
+        "child": 41,
+        "global_gap_us": 19.590000000000146,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 7.359000000000151,
+        "resolve_us": 2.4659999999998945,
+        "resolve_end_to_first_prepare_us": 4.641000000000076,
+        "first_prepare_to_kernel_us": 5.124000000000024
+      },
+      {
+        "parent": 51,
+        "child": 56,
+        "global_gap_us": 18.417999999999893,
+        "serial_decomposition": true,
+        "last_kernel_to_resolve_us": 2.8279999999999745,
+        "resolve_us": 2.40099999999984,
+        "resolve_end_to_first_prepare_us": 8.926000000000158,
+        "first_prepare_to_kernel_us": 4.26299999999992
+      }
+    ],
+    "caveat": "L3 phase boundaries are instrumented. Negative pieces indicate overlapping early publication. Resolve end is not the time at which every dependent became ready.",
+    "serial_handoffs": 13,
+    "serial_gap_sum_us": 333.9099999999999,
+    "serial_parts_sum_us": {
+      "last_kernel_to_resolve_us": 53.15199999999999,
+      "resolve_us": 54.611000000000104,
+      "resolve_end_to_first_prepare_us": 170.65400000000022,
+      "first_prepare_to_kernel_us": 55.4929999999996
+    }
+  },
+  "l4": {
+    "raw": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-after-l4/chip_swimlane_records.json",
+    "sha256": "eab194308c5edf32353a76648446b82f2373e25b4b3c5783a5497069ccc3674b",
+    "mix_first_entry_handoffs": [
+      {
+        "task": 25,
+        "block": 0,
+        "cluster": 4,
+        "admission_actor": 0,
+        "first_kernel_worker": 40,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 1.6,
+          "coordinator_observed_to_claim_before": 1.41,
+          "claim_before_to_claim_after": 0.79,
+          "claim_after_to_group_publish_after": 2.818,
+          "group_publish_after_to_last_lane_arrive_after": 4.301,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 2.928,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 3.149,
+          "entry_lane_payload_published_to_kernel_entry": 4.587
+        },
+        "all_nonnegative": true
+      },
+      {
+        "task": 79,
+        "block": 1,
+        "cluster": 21,
+        "admission_actor": 31,
+        "first_kernel_worker": 21,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 73.782,
+          "coordinator_observed_to_claim_before": 1.877,
+          "claim_before_to_claim_after": 0.454,
+          "claim_after_to_group_publish_after": 3.085,
+          "group_publish_after_to_last_lane_arrive_after": 4.09,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 2.905,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 2.519,
+          "entry_lane_payload_published_to_kernel_entry": 3.002
+        },
+        "all_nonnegative": true
+      },
+      {
+        "task": 32,
+        "block": 0,
+        "cluster": 25,
+        "admission_actor": 26,
+        "first_kernel_worker": 25,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 0.183,
+          "coordinator_observed_to_claim_before": 1.859,
+          "claim_before_to_claim_after": 0.427,
+          "claim_after_to_group_publish_after": 2.907,
+          "group_publish_after_to_last_lane_arrive_after": 4.453,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 2.294,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 2.344,
+          "entry_lane_payload_published_to_kernel_entry": 3.064
+        },
+        "all_nonnegative": true
+      },
+      {
+        "task": 105,
+        "block": 0,
+        "cluster": 13,
+        "admission_actor": 5,
+        "first_kernel_worker": 58,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 1.147,
+          "coordinator_observed_to_claim_before": 1.791,
+          "claim_before_to_claim_after": 0.588,
+          "claim_after_to_group_publish_after": 2.438,
+          "group_publish_after_to_last_lane_arrive_after": 3.43,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 1.822,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 2.674,
+          "entry_lane_payload_published_to_kernel_entry": 4.147
+        },
+        "all_nonnegative": true
+      },
+      {
+        "task": 42,
+        "block": 2,
+        "cluster": 19,
+        "admission_actor": 18,
+        "first_kernel_worker": 70,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 1.565,
+          "coordinator_observed_to_claim_before": 1.305,
+          "claim_before_to_claim_after": 0.962,
+          "claim_after_to_group_publish_after": 2.78,
+          "group_publish_after_to_last_lane_arrive_after": 3.604,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 2.245,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 2.675,
+          "entry_lane_payload_published_to_kernel_entry": 3.926
+        },
+        "all_nonnegative": true
+      },
+      {
+        "task": 46,
+        "block": 2,
+        "cluster": 31,
+        "admission_actor": 21,
+        "first_kernel_worker": 94,
+        "recorded_deltas_us": {
+          "admission_after_to_coordinator_observed": 1.707,
+          "coordinator_observed_to_claim_before": 2.27,
+          "claim_before_to_claim_after": 1.406,
+          "claim_after_to_group_publish_after": 2.973,
+          "group_publish_after_to_last_lane_arrive_after": 4.146,
+          "last_lane_arrive_after_to_entry_lane_arrivals_observed": 1.257,
+          "entry_lane_arrivals_observed_to_entry_lane_payload_published": 3.025,
+          "entry_lane_payload_published_to_kernel_entry": 4.043
+        },
+        "all_nonnegative": true
+      }
+    ],
+    "t23_group_turnover": {
+      "last_lane_release_after_to_coordinator_releases_observed": {
+        "n": 480,
+        "min": 2.439,
+        "median": 3.6535,
+        "max": 5.186
+      },
+      "coordinator_releases_observed_to_completion_before": {
+        "n": 480,
+        "min": 0.537,
+        "median": 0.681,
+        "max": 1.644
+      },
+      "completion_before_to_completion_after": {
+        "n": 480,
+        "min": 0.358,
+        "median": 0.507,
+        "max": 0.664
+      },
+      "completion_after_to_next_claim_before": {
+        "n": 480,
+        "min": 0.959,
+        "median": 1.6684999999999999,
+        "max": 3.562
+      },
+      "next_claim_before_to_next_claim_after": {
+        "n": 480,
+        "min": 0.372,
+        "median": 0.658,
+        "max": 1.974
+      },
+      "next_claim_after_to_next_group_publish_after": {
+        "n": 480,
+        "min": 2.441,
+        "median": 3.002,
+        "max": 4.472
+      },
+      "next_group_publish_after_to_next_last_lane_arrive_after": {
+        "n": 480,
+        "min": 3.361,
+        "median": 4.2095,
+        "max": 5.642
+      },
+      "next_last_lane_arrive_after_to_next_first_arrivals_observed": {
+        "n": 480,
+        "min": 0.396,
+        "median": 1.41,
+        "max": 2.573
+      }
+    },
+    "protocol_verified": true
+  },
+  "caveats": [
+    "L3 and L4 are independent instrumented captures, not paired wall-time attribution.",
+    "Cross-core timestamps do not replace causal ordering; negative deltas can reflect record publication overlap.",
+    "The L3 summary includes selected dependency handoffs, not every global gap.",
+    "Per-part medians need not sum to the median total, and parallel core time is not device wall time."
+  ],
+  "reference_checkout": "simpler_dev@3699b7ae4ff47abcfa1e2916881d4309cf39c00f",
+  "reference_documents": [
+    "simpler_dev/tests/atomic_probe/atomic_bank_conflict.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/claim_fetch_max_contention_analysis.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/two_level_per_task_cas_tournament_summary.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/shared_cross_vs_same_core.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/cross_core_only_scheduler/README.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/cross_core_only_scheduler/test_record/2026-09-14/README.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/cross_core_ordinary/AIC执行提前受阻问题分析.md",
+    "simpler_dev/tests/atomic_probe/perf_opt_record.md",
+    "simpler_dev/tests/atomic_probe/cache_preload_usage_guide.md",
+    "simpler_dev/tests/atomic_probe/pa_scheduler/loser_overhead.md"
+  ],
+  "sources": {
+    "l3_raw": {
+      "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-close128v7/evidence/L3/chip_swimlane_records.json",
+      "sha256": "44986b4901a64548946a6d790872c1a9ddfb49991d91b07145c23816b4380fa5"
+    },
+    "analysis": {
+      "path": "../reports/csa_macro_l3_20261029.W2dr2E/audit_retained_handoffs.py",
+      "sha256": "56a53c6a7c4f08d0daea4aca819ffe1bb800500bd59fa8404ccc6c9947cc3497"
+    },
+    "handoff_helper": {
+      "path": "../reports/csa_macro_l3_20261029.W2dr2E/analyze_handoffs.py",
+      "sha256": "951e67aaef386dbd5846b23d550f71581ff108ada7bd5d30770fe37ca4cc57f9"
+    }
+  }
+}

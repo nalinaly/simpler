@@ -491,3 +491,54 @@ A5 常规回归 88 通过、4 跳过、4 deselected；仿真常规 67 通过、2
 四批样本和严格 L4 在 `artifacts/idle-close128v7-*`。
 L3 与分析在 `reports/csa_macro_l3_20261029.W2dr2E/l3-close128v7/` 及同目录的宏观摘要。
 目标仍为完整 Device 低于 1500us，最终五批验收没有完成，也没有 push。
+
+### 旧 demo 对照与下一项结构性优化边界
+
+2026-10-30，按用户新增要求重点查阅 `simpler_dev/tests/atomic_probe`，参考 checkout
+为 `3699b7ae4ff47abcfa1e2916881d4309cf39c00f`。路径以下均相对该目录；只读参考仓，
+不将 standalone 的 synthetic PA 数值、16 核拓扑或 Build/Register 路径当成当前 CSA。
+
+| 已读记录 | 当前可以借鉴的机制 | 不直接套用的部分 |
+| -------- | ------------------ | ---------------- |
+| `atomic_bank_conflict.md` | 独立原子热点按对齐 128B 单元隔离，以同卡实验验证 | 不是普遍硬件保证，不能按 atomic 数量直接推算 wall time |
+| `pa_scheduler/claim_fetch_max_contention_analysis.md`、同目录 `two_level_per_task_cas_tournament_summary.md` | 全候选资格不变时降低重复仲裁，区分唯一 owner 与提交顺序 | 旧 Build 的每 task 唯一 winner 不等于当前每 block 动态领取；不能直接换成静态代表 |
+| `pa_scheduler/shared_cross_vs_same_core.md` | 把删除的重复工作与新增的跨核发布／取得成本同时核算 | HBG 没有 Scalar Build/Register，不能照搬其编排等待优化 |
+| `pa_scheduler/cross_core_only_scheduler/README.md`、该目录下 `test_record/2026-09-14/README.md` | 将真正不可变的 dispatch 参数和静态校验前置，保留动态领取／依赖／完成 | 旧例依赖固定 G1、稳定只读 context、sub_block_id=0；CSA 的 Mix block/lane/context 不满足直接复用条件 |
+| `perf_opt_record.md` §15.68–15.73 | 动态双项领取、重复检查前置、按真实控制职责拆解启动等待 | 静态均分已否决；三项批次虽减少原子却因囤积未就绪工作变慢，不能只优化次数 |
+| `pa_scheduler/cross_core_ordinary/AIC执行提前受阻问题分析.md` §3.2 | 查证优化是否推迟关键发布及造成链式放大 | Register poll 内执行 kernel 已实测回退，不重开用户此前否决的 poll-with-execute |
+| `cache_preload_usage_guide.md`、`pa_scheduler/loser_overhead.md` | 区分真实发布边界、插桩写入与业务工作，预取必须有可重叠工作 | 微探针收益不等于 CSA 收益，不用 full trace 的 residual 冒充纯指令时延 |
+
+复用已有 L3 phase 与严格读端解析保留版捕获，没有增加热路径计时点。
+选出的 13 段依赖交接空窗可以按下表顺序拆分；其并集为 333.910us，
+不是所有 540.119us 全局空窗，也不含被排除的重叠发布区间。
+
+| 区间 | 13 段合计 us |
+| ---- | ------------ |
+| 最后 kernel 返回 → Resolve 开始 | 53.152 |
+| Resolve 本体 | 54.611 |
+| Resolve 结束 → 后继首次准备 | 170.654 |
+| 首次准备 → kernel 入口 | 55.493 |
+
+t56→t79 的 Resolve 结束晚于首个准备，差值为 -11.857us，属于发布与消费重叠，
+不能强行将它加进上述串行账本。独立 L4 进一步表明 t23 的 480 次组周转分散在
+释放观察、完成、下一块领取、组描述符发布和三 lane 到达，不能只把完成原子当作整个空窗。
+L4 含原生事件记录开销，不把其各段时长直接当成 L0 可省时间。
+可复算明细见[交接摘要](perf_data/2026-10-28-idle/retained-handoffs-summary.json)，
+脚本为工作区 `reports/csa_macro_l3_20261029.W2dr2E/audit_retained_handoffs.py`。
+
+下一项先审查**共同准入的静态成员信息能否前置准备**，其边界是：
+
+1. 保持全体合法成员 bitmap，不预选 cluster，不提前指定 block owner。
+2. Host 当前先初始化 task records，再填 worker context；AICPU discovery 随后还会核验并写入
+   实际 core type／cluster 映射。不能仅凭 `worker<32` 或 Host 预计拓扑提前授予执行许可。
+   若前置静态成员信息，必须与 discovery 的实际拓扑逐项一致，失败在 READY 前收敛。
+3. Ready 依赖满足、唯一 candidate 所有权、共同 order_key、commit_lock、tail 发布仍由原动态路径决定；
+   “静态信息准备好”不等于 CLAIMED、ADMITTED、领取耗尽或 TaskDone。
+4. 先补齐冷／暖拓扑、任意 compact worker 排列、跨 64-bit bitmap、Mix mask 3/5/6/7、
+   N=1/2/边界值、同数量错误成员、run_epoch 更换和错误发生后零领取等 TDD；复用现有测试，
+   不把旧零初始化策略断言与真正的成员／顺序／错误不变量混为一谈。
+5. 参数预绑定作为独立候选：必须覆盖动态 block_idx、原 N、sub_block_id、双槽 generation、
+   可变 async context、predicate、运行间真实地址与 INOUT 恢复。不能复制旧例的只读 context 假设。
+
+以上为待验证方向，尚未改动运行时；普通 Mix 仍等待三 lane ARRIVED，sync_start 也保持原行为。
+完整性能基线仍为已验收的 1953.8505us，没有将此次分析记作新增性能收益。
