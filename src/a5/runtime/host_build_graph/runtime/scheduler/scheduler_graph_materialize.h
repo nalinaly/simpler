@@ -148,8 +148,10 @@ inline __aicore__ void scheduler_graph_writeback_range(uint64_t address, uint64_
         scheduler_writeback_cache_line(reinterpret_cast<__gm__ uint8_t *>(address) + offset);
 }
 
-inline __aicore__ SchedulerGraphResult
-scheduler_graph_materialize(const __gm__ SchedulerGraphInstance &instance, const SchedulerGraphView &graph) {
+inline __aicore__ SchedulerGraphResult scheduler_graph_materialize(
+    const __gm__ SchedulerGraphInstance &instance, const SchedulerGraphView &graph, int32_t *failed_child = nullptr
+) {
+    if (failed_child != nullptr) *failed_child = -1;
     SchedulerGraphDefinitionView view{};
     if (!scheduler_graph_definition_open(
             instance.definition_section_address, instance.definition_section_bytes, instance.definition_offset,
@@ -177,6 +179,7 @@ scheduler_graph_materialize(const __gm__ SchedulerGraphInstance &instance, const
          (instance.scalar_pool_address == 0 || instance.scalar_pool_address % 8 != 0)))
         return SchedulerGraphResult::INVALID_ARGUMENTS;
     for (int32_t child = 0; child < tasks; ++child) {
+        if (failed_child != nullptr) *failed_child = child;
         SubTaskDefinition source{};
         uint64_t output_offset = 0;
         if (!scheduler_graph_definition_read(view, definition->off_sub_tasks, tasks, child, &source) ||
@@ -274,5 +277,6 @@ scheduler_graph_materialize(const __gm__ SchedulerGraphInstance &instance, const
         instance.scalar_pool_address, static_cast<uint64_t>(instance.scalar_arg_count) * sizeof(uint64_t)
     );
     scheduler_cache_barrier();
+    if (failed_child != nullptr) *failed_child = -1;
     return SchedulerGraphResult::OK;
 }

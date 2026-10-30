@@ -1,6 +1,6 @@
 # A5 HBG AICore resident Graph 支持设计
 
-日期：2026-10-30。状态：**实施中；多 block、Mix、sync-start、单 block predicate 及原生 Graph L4 已通过 A5sim/A5 功能验证，完整故障矩阵与性能/资源验收尚未完成**。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)。
+日期：2026-10-30。状态：**实施中；多 block、Mix、sync-start、单 block predicate、原生 Graph L4、有界设备故障回收及相邻实例参数发布已通过 A5sim/A5 验证，完整性能/资源验收尚未完成**。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)。
 
 开发基线：`02335c0f46d6f12a0fd0adaeccf4869b1164ff64`，来自 `feat/fully_distributed_within_core`；独立分支 `feat/a5-hbg-aicore-graph`，工作目录 `simpler-aicore-graph`。不包含其他工作目录的未跟踪文件，不以旧精简 PR 的版本代替当前基线。
 

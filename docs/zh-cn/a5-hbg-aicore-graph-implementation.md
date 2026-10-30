@@ -11,7 +11,7 @@
 | P0 合同/来源门禁 | 基础门禁已验证 | 基线数值通过而 resident 来源失败；当前 22 项门禁单测通过，包含逐轮独立采集与原生 L4 强制审计 |
 | P1 数据/引用/布局 | 最小路径已接线验证 | GM 载体、实例/引用布局、Scalar 物化和启动发布已接线；framing 跨编译器差异已修复，A5 复测通过 |
 | P2 最小 native Graph | 最小纯 C/V 场景已通过 | 原样 1D、2D、AIC+AIV Graph 在 A5sim/A5 上通过；真机各 3 轮，数值与 fresh resident 来源均通过；完整边界矩阵仍继续补齐 |
-| P3 能力与故障矩阵 | 核心功能与部分故障门禁通过，整体未完成 | 188 场景/宽 fanin、旧 epoch/唯一 owner、父子首现场、空边界和双 slot 复用已验证；详见[专项记录](a5-hbg-aicore-graph-p3-validation.md) |
+| P3 能力与故障矩阵 | 核心功能、有界设备故障及参数发布边界已验证 | 188 场景/宽 fanin、epoch/owner、双 slot；新增每平台 11 个实际故障/恢复用例和 48 轮参数/alias；详见[专项记录](a5-hbg-aicore-graph-p3-validation.md) |
 | P4 协议/泳道/性能资源 | 原生 L4 已通过，性能/资源验收未完成 | v8、父子身份、物化/聚合因果、9 类场景在 A5sim/A5 各 27 份独立捕获通过；详见[协议记录](a5-hbg-aicore-graph-p4-protocol.md) |
 | P5 有证据的优化 | 未开始 | 先获得功能与计时基线 |
 
@@ -194,10 +194,18 @@ libhost_runtime.so a51d5fb5fccd02c78188aaeb364c5b87f63aa26cf72ece6a35a02134129bf
 
 已开放多 block/Mix/sync-start/单 block predicate；188 个执行场景、6 个宽 fanin 场景在 A5sim/A5 均通过。后续补齐旧 epoch、owner 唯一性、错位控制地址、父子首错误身份，以及空边界、超容量拒绝和双 slot prepare/finalize 复用。相关 C++ 为 20/20 个可执行文件通过，完整 A5sim HBG 为 127 passed。
 
-完整设计仍未完成：设备实际故障/回收和部分缓存边界专项还需补齐；完整性能与资源验收尚未完成。不主动 push。
+该阶段尚缺设备实际故障/回收、缓存边界专项和完整性能资源验收；前两项的后续验证见下节，性能资源验收仍未完成。不主动 push。
 
 ### 原生协议与父子泳道
 
 已接入 Graph 专属 v8 协议和真实 Scalar 事件，9 类原样场景在 A5sim/A5 各运行 3 轮，54 份 raw 逐轮通过严格审计；最后一轮还生成标准泳道图。真实子任务显示公共父/子身份，ENTER/EXIT/Dummy 是控制服务，predicate skip 不是 kernel span。普通图继续输出 v7。
 
 采集包装器不再将三轮写入同一个 raw：前两轮放入独立子目录，末轮保留标准目录，且已有文件拒绝覆盖。完整 A5sim HBG 回归为 127 passed；23 个相关 C++ 测试可执行文件通过。实现、失败复现、全量 Python 检查及本地泳道图路径见[协议与泳道验证记录](a5-hbg-aicore-graph-p4-protocol.md)。
+
+### 实际故障和相邻实例发布
+
+补齐 Scalar 物化失败的具体 child 定位；相应 C++ 反例先失败后转绿。A5sim/A5 各通过 11 个实际故障/恢复用例（每用例正常、失败、重建后正常三次调用），覆盖物化失败和纯 C/V、Mix 的有界子任务超时。失败 Graph 不释放 EXIT/外部后继，失败 Worker 不接受继续提交或提前 free 借用的 buffer。
+
+AIC/AIV × 16/65 个相邻实例 × 1/7/9/15 scalar 的 16 场景，各平台均 48 轮通过完整数值/alias 与 v8 审计。真机观察到 16/65 个不同物化 owner、共享一份 Definition、写回范围互不交叠。完整 A5sim HBG 回归增至 139 passed。详细口径、启动前退出与正常退出的区别、故障回收耗时和日志见[专项记录](a5-hbg-aicore-graph-p3-validation.md)。
+
+性能对照采用开发前 `02335c0f` 的隔离 detached worktree，独立 venv 和 runtime 构建；不改现有工作分支、不复制其他 session 的二进制。P4 的完整性能/资源报告仍未完成，不能从上述功能通过推断性能收益。

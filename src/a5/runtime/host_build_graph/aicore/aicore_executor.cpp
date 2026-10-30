@@ -498,12 +498,15 @@ __aicore__ bool bootstrap_graph_instances(
             record =
                 scheduler_graph_protocol_materialize_begin(base, local, build, index, instance, control->child_count);
         scheduler_gm_store(control->materialize_state, UINT64_C(1));
-        const auto status = scheduler_graph_materialize(instance, graph);
+        int32_t failed_child = -1;
+        const auto status = scheduler_graph_materialize(instance, graph, &failed_child);
         if constexpr (WithProfiling) scheduler_graph_protocol_materialize_end(base, local, record, status);
         if (status != SchedulerGraphResult::OK) {
             scheduler_gm_store(control->materialize_state, UINT64_C(3));
+            const int64_t failed_ref =
+                failed_child < 0 ? control->enter_ref : static_cast<int64_t>(control->child_begin) + failed_child;
             scheduler_record_error(
-                run, control->enter_ref, status, &graph, context, SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+                run, failed_ref, status, &graph, context, SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
             );
             return false;
         }

@@ -124,9 +124,72 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 
 上卡时将平台改为 a5，先检查 A5 设备，设置新的 `ASCEND_PROCESS_LOG_PATH` 并指定设备。本机无 task-submit，这些上卡记录只作为功能证据，不作为性能 A/B。
 
-## 尚未完成的验收
+## 2026-10-30：设备实际故障与参数发布边界
 
-1. 设备实际故障下的退出收敛与失败回收；不能拿 CPU 注入或 Host 预提交拒绝替代全部设备错误场景。
-2. 相邻实例参数写回/alias 的专项边界测试；已有多实例结果与原 view/predicate 测试不能宣称穷尽所有交错。
-3. 完整内存预算与端到端数据。原生 v8、父子泳道和严格 L4 功能矩阵已在后续通过，见[协议与泳道记录](a5-hbg-aicore-graph-p4-protocol.md)。
-4. 同负载 legacy/native 和无 Graph 固定 CSA 的性能对照。未获得数据前不宣称 Graph 性能收益。
+### 真实设备错误、父完成与回收
+
+新增 `tests/st/a5/host_build_graph/graph_execution/test_graph_device_failure.py`，不使用私有诊断 arena 冒充 runtime 故障：
+
+| 场景 | 每平台数量 | A5sim / A5 结果与检查 |
+| ---- | ---------- | --------------------- |
+| Scalar 物化失败 | 1 | 两实例共享同一合法 Definition，第 2 个实例故意传入越界 predicate view；Host prepare 和 resident publication 成功，实际 Scalar 在 site=132 报错，status=6，计算 kernel 零进入 |
+| 子任务超时 | 10 | N=2，纯 AIC、纯 AIV、Mix mask=7 的三种慢 lane；分别有/无依赖慢任务的尾部 Dummy；原有 stall kernel 有界运行 2500ms，既有 watchdog 为 2000ms |
+| 每个故障用例的完整流程 | 3 次调用 | 正常运行 → 实际失败 → 关闭失败 Worker 后创建新 Worker 正常运行；每平台共 33 次调用，全部通过 |
+
+物化负例曾暴露错误定位只指向 Graph ENTER、没有具体子任务的问题。新增生产 bootstrap C++ 反例在修复前失败；materializer 现在返回失败 child 索引，bootstrap 通过真实 dense ref 记录首现场。真机捕获为 `public_task_id=1, sub_task_id=0, task_ref=4`，不是从 kernel 数量推测。失败实例保持 state=3、remaining 未归零，没有 publish 或完成贡献，没有外部成功。
+
+超时用例复用 `resident_failure/test_resident_failure.py` 的失败退出、输出 oracle 和恢复检查，只替换 Host 编排为 Graph。真实执行记录确认目标 block/lane 进入并在 2500ms 后返回；发生超时后，外部消费者没有进入，Graph child remaining 不减少、EXIT 不完成、公共完成数为零。尾部 Dummy 也不得借错误路径退休成成功。**这里覆盖有界子任务超时，不把它描述为硬件 trap 或永不返回 kernel 的验证。**
+
+两类故障都检查：失败调用不能作为正常成功返回；失败 Worker 再提交明确报 poisoned；仍被失败 run 借用的 device buffer 不允许提前 free；`close()` 收敛后，新 Worker 用相同计算 kernel 和完整 golden 恢复运行。遵循既有“失败 Worker 退出后重建”的合同，**不声称可以在 poisoned Worker 内直接复用 slot**。
+
+超时的首发布者是 AICPU 的全局进度/退出屏障 watchdog（site=95/102），没有子任务所有权，因此首错误身份保持 unknown；具体慢任务通过执行记录与 v8 父子映射定位。不能为了填满字段，把全局 watchdog 的首现场伪造成 AICore 子任务错误。物化错误则有真实 child 身份。
+
+启动失败时，未收到 context READY 的核可能直接执行 EXIT/ACK，不进入 scheduler，因此它的协议 sequence/finished 都为零；已经进入的 worker 必须以失败状态 `finished=2` 收尾。测试区分两条真实退出路径，没有补造 finished 记录。
+
+真机故障调用约 0.029s（物化错误）或 2.524–2.597s（有界超时），失败 Worker 的 `close()` 约 10.15–12.20s，包含既有设备故障回收流程。这不是正常 Graph 调度性能，也没有通过缩短 stall、放宽 watchdog 或省略回收来让测试通过。没有手动 reset 设备。
+
+### 相邻实例、奇数 scalar 尾部和 alias
+
+新增 `test_graph_parameter_boundary.py`：AIC/AIV × 16/65 实例 × 1/7/9/15 scalar，共 16 场景，每场景 3 轮。每轮检查完整输出、固定/继承 scalar、实际 view origin、同 buffer 两个 boundary view 的 alias 关系，以及逐轮 fresh resident 和严格 v8 因果审计。输出未写区域也必须保持原值。
+
+**A5sim/A5 均 48 轮通过。** 真机的 48 份 capture 均只有一个共享 Definition；16 实例由 16 个不同 owner 物化，65 实例由 65 个不同 owner 物化，没有退化为一个 owner 串行完成全图。以下是这批实际 GM 地址的检查，不是把 Host 地址当 device 地址：
+
+| 每个子任务 scalar 数 | descriptor + tensor + scalar 的 64B 写回覆盖 | 相邻实例 task-storage 起点最小距离 | 完整数值/alias 检查 |
+| -------------------- | -------------------------------------------- | ---------------------------------- | ------------------- |
+| 1 | 640B | 832B | PASS |
+| 7 | 640B | 896B | PASS |
+| 9 | 704B | 896B | PASS |
+| 15 | 704B | 960B | PASS |
+
+每个实例只有一个 child、两个 tensor 参数；写回覆盖按 `round_up(320 + 2×128 + 8×scalar_count, 64)` 计算。起点全部 64B 对齐，排序后的任意相邻实例写回范围不交叠。这个数字是本 probe 的参数区域，不是整个 Graph GM 占用；原实例 heap、共享 Definition、调度控制区和 L4 存储另计。
+
+### 回归与复现
+
+- 生产 bootstrap 的父/子错误定位红绿反例通过；bootstrap/materializer 两个 C++ 测试可执行文件共 21 项通过。
+- 完整 A5sim HBG 回归为 **139 passed、391 deselected、1 个既有 Python 弃用 warning**；包含普通 resident 失败路径，新的 Graph 参数不会改变旧 v7 检查口径。
+- A5 参数矩阵日志：`outputs/graph-boundary-a5.y7sGFM/run.log`。48 份捕获分别在 `outputs/TestGraphParameterBoundary_*_20261030_2059*/` 及其逐轮子目录，旧文件未覆盖。
+- A5 实际故障矩阵日志：`outputs/graph-device-failure-a5.TNHA1s/run.log`，11 个独立子任务全部 PASS、父进程退出码为 0。每个用例独立的 healthy/failed/recovered raw 和 `result.json` 留在 `outputs/resident-failure-bounded-a5-*-gFalse-*` / `gTrue-*`；物化失败在 `outputs/graph-materialize-failure-a5-vpjoj1wj/`。
+
+最终源码重建后，物化故障/恢复和 65 实例、15 scalar 的 AIV 场景再次通过，日志在 `outputs/graph-p3-final-a5.h7KijN/`。本版二进制 SHA256：
+
+```text
+aicore_kernel.o     8465fdedc5631f2e6209a134b4b551f7d42cb9af01afda15d041e2dd33bdce91
+libaicpu_kernel.so  396de9b49313372adc2183e45edc19ab288b099300f31a04ea6bdbaba0dadd89
+libhost_runtime.so d936ac420b06b4930a082ec0b75382132352f528425dc902ff0e9630dba098ae
+```
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+  .venv/bin/python tests/st/a5/host_build_graph/graph_execution/test_graph_parameter_boundary.py \
+  -p a5sim --enable-chip-swimlane 4
+
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
+  .venv/bin/python -m pytest tests/st/a5/host_build_graph/graph_execution/test_graph_device_failure.py \
+  --platform a5sim --device 0-1 --max-parallel 2 --pto-session-timeout 600 -q
+```
+
+真机先做架构/空闲检查、设置独立 CANN 日志目录，然后改为 `a5`、设备 `0`；本机无 task-submit，未获得队列锁。故障套件必须独占顺序运行，不与性能测量并行。上述 raw、日志和泳道图均不提交 Git。
+
+### 尚未完成的验收
+
+完整内存预算、同负载 legacy/native 和无 Graph 固定 CSA 性能对照仍在进行，未获得数据前不宣称 Graph 性能收益。原生 v8、父子泳道和严格 L4 功能矩阵见[协议与泳道记录](a5-hbg-aicore-graph-p4-protocol.md)。有界故障矩阵不穷尽任意硬件异常；后续扩展真实不可返回 kernel、额外故障交错时仍须单独验证。

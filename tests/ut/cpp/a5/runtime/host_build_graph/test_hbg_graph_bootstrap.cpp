@@ -185,6 +185,22 @@ TEST(HbgGraphBootstrap, FailedOwnerWakesOtherWorkersWithoutDecrementingTheBuildC
     EXPECT_EQ(f.build.public_completed, 0u);
 }
 
+TEST(HbgGraphBootstrap, FailedChildBindingKeepsItsParentAndLocalIdentity) {
+    BootstrapFixture f;
+    f.payloads[1].boundary[0].start_offset = UINT64_MAX;
+    EXPECT_FALSE(f.execute());
+    EXPECT_EQ(f.run.error_site, static_cast<uint64_t>(SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED));
+    EXPECT_EQ(f.run.error_task_ref, 5u);
+    EXPECT_EQ(f.run.error_public_task_id, 1u);
+    EXPECT_EQ(f.run.error_sub_task_id, 0u);
+    EXPECT_EQ(f.payloads[0].control.materialize_state, 2u);
+    EXPECT_EQ(f.payloads[1].control.materialize_state, 3u);
+    EXPECT_EQ(f.build.remaining_instances, 1u);
+    EXPECT_EQ(f.build.public_completed, 0u);
+    EXPECT_FALSE(f.execute(2));
+    EXPECT_EQ(f.run.error_sub_task_id, 0u);
+}
+
 TEST(HbgGraphBootstrap, WaitingWorkerCannotPassAPausedOwner) {
     BootstrapFixture f;
     f.build.next_instance = 2;

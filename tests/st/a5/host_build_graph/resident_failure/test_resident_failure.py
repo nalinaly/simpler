@@ -39,13 +39,19 @@ pytestmark = [
 ]
 
 
-def _compile(platform):
+def _compile(platform, graph_tail=None):
     compiler = KernelCompiler(platform=platform)
     variant = "sim" if platform.endswith("sim") else "onboard"
     includes = [str(compiler.platform_dir / variant / "aicore")]
+    orchestration = (
+        _KERNELS / "runtime_failure_orchestration.cpp"
+        if graph_tail is None
+        else Path(__file__).resolve().parent.parent
+        / "graph_execution/kernels/orchestration/graph_kernel_failure_orch.cpp"
+    )
     spec = {
         "orchestration": {
-            "source": str(_KERNELS / "runtime_failure_orchestration.cpp"),
+            "source": str(orchestration),
             "function_name": "aicpu_orchestration_entry",
             "signature": [ArgDirection.INOUT, ArgDirection.INOUT],
         },
@@ -72,11 +78,11 @@ def _compile(platform):
         ],
     }
     return compile_chip_callable_spec(
-        spec, platform, "host_build_graph", (__name__, platform, _pto_isa_compile_cache_token())
+        spec, platform, "host_build_graph", (__name__, platform, graph_tail, _pto_isa_compile_cache_token())
     )
 
 
-def _args(worker, buffers, values, blocks, mask, lane, stall_ms):
+def _args(worker, buffers, values, blocks, mask, lane, stall_ms, graph_tail=None):
     args = TaskArgs()
     for buffer, value in zip(buffers, values, strict=True):
         value.zero_()
@@ -84,6 +90,8 @@ def _args(worker, buffers, values, blocks, mask, lane, stall_ms):
         args.add_tensor(buffer.tensor(shapes=tuple(value.shape), dtype=DataType.INT64), TensorArgType.INOUT)
     for scalar in (blocks, mask, lane, stall_ms):
         args.add_scalar(scalar)
+    if graph_tail is not None:
+        args.add_scalar(int(graph_tail))
     return args
 
 
@@ -112,7 +120,7 @@ def _check_output(values, blocks, mask, *, failed):
     torch.testing.assert_close(values[1], summary, rtol=0, atol=0)
 
 
-def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
+def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_tail=None):
     protocol = raw["aicore_protocol"]
     assert protocol["producer"] == "aicore"
     assert protocol["scheduler_error"] == 10
@@ -123,11 +131,12 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
     assert len(protocol["workers"]) == worker_count
     assert {worker["worker_index"] for worker in protocol["workers"]} == set(range(worker_count))
     assert all(worker["error_flags"] == 0 for worker in protocol["workers"])
-    roots = [task for task in protocol["tasks"] if task["active_mask"] and 3 not in task["kernel_ids"]]
+    roots = [task for task in protocol["tasks"] if any(kernel in (0, 1, 2) for kernel in task["kernel_ids"])]
     consumers = [task for task in protocol["tasks"] if 3 in task["kernel_ids"]]
     assert len(roots) == len(consumers) == 1
     root, consumer = roots[0], consumers[0]
-    assert root["task_ref"] in consumer["dependencies"]
+    producer_ref = root["task_ref"] if graph_tail is None else protocol["graph"]["instances"][0]["exit_ref"]
+    assert producer_ref in consumer["dependencies"]
     assert root["block_num"] == blocks and root["active_mask"] == (2 if mask == 4 else mask)
     expected_slot = 1 if mask == 4 else lane
     stalled = [
@@ -188,17 +197,23 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
         "hbg-native-protocol-v5",
         "hbg-native-protocol-v6",
         "hbg-native-protocol-v7",
+        "hbg-native-protocol-v8",
     )
-    if protocol["schema"] == "hbg-native-protocol-v7":
+    if protocol["schema"] in ("hbg-native-protocol-v7", "hbg-native-protocol-v8"):
         assert type(protocol.get("close_seal_stride")) is int and protocol["close_seal_stride"] == 128
     else:
         assert "close_seal_stride" not in protocol
-    if protocol["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+    if protocol["schema"] in (
+        "hbg-native-protocol-v5",
+        "hbg-native-protocol-v6",
+        "hbg-native-protocol-v7",
+        "hbg-native-protocol-v8",
+    ):
         assert all(
             type(control.get("admission_claim_lock")) is int and control["admission_claim_lock"] == 0
             for control in control_rows
         )
-    if protocol["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+    if protocol["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
         for task in protocol["tasks"]:
             control = controls[task["task_ref"]]
             seal = control.get("claim_seal")
@@ -208,7 +223,13 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
     minimum_blocks = (
         2
         if protocol["schema"]
-        in ("hbg-native-protocol-v4", "hbg-native-protocol-v5", "hbg-native-protocol-v6", "hbg-native-protocol-v7")
+        in (
+            "hbg-native-protocol-v4",
+            "hbg-native-protocol-v5",
+            "hbg-native-protocol-v6",
+            "hbg-native-protocol-v7",
+            "hbg-native-protocol-v8",
+        )
         else positions * 2 + (1 if protocol["schema"] == "hbg-native-protocol-v2" else 0)
     )
     uses_tickets = blocks >= minimum_blocks
@@ -219,8 +240,25 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
     else:
         assert tickets == 0
     assert controls[consumer["task_ref"]]["claim_tickets"] == 0
-    assert protocol["resolved_task_count"] == 0
+    assert protocol["resolved_task_count"] == (0 if graph_tail is None else 1)
     assert all(controls[ref]["state"] == 0 for ref in (root["task_ref"], consumer["task_ref"]))
+    if graph_tail is not None:
+        graph = protocol["graph"]
+        assert protocol["schema"] == "hbg-native-protocol-v8"
+        assert graph["instance_count"] == 1 and graph["remaining_instances"] == 0
+        assert graph["public_completed"] == 0 and not graph["contributions"]
+        instance = graph["instances"][0]
+        assert instance["remaining_children"] == instance["child_count"] == 1 + int(graph_tail)
+        assert instance["materialize_state"] == 2
+        assert instance["exit_ref"] in consumer["dependencies"]
+        assert controls[instance["exit_ref"]]["state"] == 0
+        first = protocol["first_error"]
+        # Both AICPU watchdogs see a stalled run, not an owned child. The
+        # execution record above locates the bounded stall; the first-error
+        # record must not invent an identity on behalf of the supervisor.
+        assert first["public_task_id"] == first["sub_task_id"] == (1 << 32) - 1
+        node = graph["nodes"][root["task_ref"]]
+        assert node["public_task_id"] == node["sub_task_id"] == 0
 
 
 @pytest.mark.parametrize("mask,lane", _SHAPES)
@@ -280,16 +318,26 @@ def test_two_wave_ticket_claim_timeout_keeps_failed_run_contained(st_platform, s
     )
 
 
-def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatch, stall_ms, *, two_wave=False):
+def _check_successful_capture(path, graph_tail):
+    audit = read_perf_data(str(path))["protocol_audit"]
+    assert audit["protocol_verified"]
+    if graph_tail is not None:
+        assert audit["graph_verified"]
+
+
+def _exercise_failure(
+    st_platform, st_device_ids, mask, lane, blocks, monkeypatch, stall_ms, *, two_wave=False, graph_tail=None
+):
     monkeypatch.setenv("SIMPLER_SCHEDULER_TIMEOUT_MS", str(_TIMEOUT_MS))
     nonreturning = stall_ms < 0
     failure_kind = "nonreturning" if nonreturning else "bounded"
-    callable_obj = _compile(st_platform)
+    callable_obj = _compile(st_platform, graph_tail)
     output_root = _ROOT / "outputs"
     output_root.mkdir(exist_ok=True)
     artifacts = Path(
         tempfile.mkdtemp(
-            prefix=f"resident-failure-{failure_kind}-{st_platform}-m{mask}-l{lane}-n{blocks}-", dir=output_root
+            prefix=f"resident-failure-{failure_kind}-{st_platform}-m{mask}-l{lane}-n{blocks}-g{graph_tail}-",
+            dir=output_root,
         )
     )
     evidence = []
@@ -310,7 +358,7 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
             for value in values:
                 buffers.append(worker.malloc(value.nbytes))
             for duration in (0,) if recovery else (0, stall_ms):
-                args = _args(worker, buffers, values, blocks, mask, lane, duration)
+                args = _args(worker, buffers, values, blocks, mask, lane, duration, graph_tail)
                 prefix = artifacts / ("recovered" if recovery else "failed" if duration else "healthy")
                 prefix.mkdir()
                 config = CallConfig()
@@ -339,11 +387,12 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
                         worker.copy_from(value, buffer)
                     _check_output(values, blocks, mask, failed=failed)
                 path, raw = _capture(prefix)
-                assert raw["aicore_protocol"]["schema"] == "hbg-native-protocol-v7"
+                expected_schema = "hbg-native-protocol-v7" if graph_tail is None else "hbg-native-protocol-v8"
+                assert raw["aicore_protocol"]["schema"] == expected_schema
                 _check_two_wave_topology(raw["aicore_protocol"], blocks, mask, two_wave)
                 if failed:
                     assert raw["aicore_protocol"]["run_epoch"] > evidence[-1]["run_epoch"]
-                    _check_failed_capture(raw, blocks, mask, lane, nonreturning=nonreturning)
+                    _check_failed_capture(raw, blocks, mask, lane, nonreturning=nonreturning, graph_tail=graph_tail)
                     if not nonreturning:
                         assert values[0].view(-1, 16)[lane, 0] == 1
                     rejected_count = worker.scheduler_mode_publish_count
@@ -354,7 +403,7 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
                         with pytest.raises(RuntimeError, match="still in use by a submitted run"):
                             worker.free(buffer)
                 else:
-                    assert read_perf_data(str(path))["protocol_audit"]["protocol_verified"]
+                    _check_successful_capture(path, graph_tail)
                 evidence.append(
                     {
                         "capture": str(path.relative_to(artifacts)),
@@ -382,6 +431,14 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
                 evidence[-1]["worker_close_seconds"] = close_elapsed
     (artifacts / "result.json").write_text(
         json.dumps(
-            {"mask": mask, "lane": lane, "blocks": blocks, "failure_kind": failure_kind, "runs": evidence}, indent=2
+            {
+                "mask": mask,
+                "lane": lane,
+                "blocks": blocks,
+                "failure_kind": failure_kind,
+                "graph_tail": graph_tail,
+                "runs": evidence,
+            },
+            indent=2,
         )
     )
