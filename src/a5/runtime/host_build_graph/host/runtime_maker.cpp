@@ -69,6 +69,7 @@
 #include "scheduler/scheduler_graph.h"
 #include "scheduler/scheduler_types.h"
 #include "scheduler_protocol_export.h"
+#include "scheduler_graph_binding.h"
 #include "host_build_graph/host_tensor_access.h"
 #include "host_build_graph/graph_host_state.h"
 #include "host_build_graph/host_phase_trace.h"
@@ -909,6 +910,7 @@ struct DefinitionUploads {
     size_t count;
     uint64_t bytes;
     size_t spilled;
+    const std::byte *section;
 };
 
 // Prepare the run's Definition objects and bind every outer Graph task to the one
@@ -989,30 +991,13 @@ bool bind_graph_definitions(
         }
         uploads->count = packed.size();
         uploads->bytes = block_bytes;
-        // Into the run's AICPU launch package, which RTS copies with the launch:
-        // no device block is allocated, uploaded or freed for these bytes, and a
-        // length the package cannot represent is refused here, before any
-        // submission.
-        uint32_t section_source = static_cast<uint32_t>(GraphSectionSource::None);
-        uint64_t section_base = 0;
-        if (api->publish_graph_section(staging, block_bytes, &section_source, &section_base) != 0) {
-            LOG_ERROR("host-orch: failed to carry %zu Definition byte(s) to the device", block_bytes);
-            return false;
-        }
-        // Which carrier delivered it is the platform's answer, not this bind's:
-        // onboard it is the launch package RTS copies, in simulation a run-owned
-        // host snapshot.
-        runtime->publish_graph_section(
-            static_cast<GraphSectionSource>(section_source), section_base, static_cast<uint32_t>(block_bytes)
-        );
+        uploads->section = staging;
         char attrs[kBindAttrsCapacity];
         snprintf(
             attrs, sizeof(attrs), "defs=%zu bytes=%zu submissions=%zu spilled=%zu", uploads->count, block_bytes, count,
             uploads->spilled
         );
-        // Packing, not an upload: the phase measures assembling the section and
-        // taking it into the launch package, and the transfer it used to name is
-        // now part of the launch RTS makes.
+        // The selected backend owns publication of this prepared section.
         record_bind_phase(HostPhaseKind::BindGraphPack, pack_phase, attrs, block_bytes);
     }
 
@@ -1142,7 +1127,8 @@ void select_legacy_scheduler(Runtime *runtime, const HostApi *api, uint32_t mode
 
 bool create_scheduler_state(
     Runtime *runtime, const HostApi *api, SharedMemoryHandle &host_sm_handle, int32_t total_tasks,
-    uint64_t task_window_size, const sm_layout::SegmentOffsets &device_segments
+    uint64_t task_window_size, const sm_layout::SegmentOffsets &device_segments, const DefinitionUploads &definitions,
+    const void *packed_image
 ) {
     release_scheduler_state(runtime);
     if (total_tasks < 0 || task_window_size == 0 || static_cast<uint64_t>(total_tasks) > task_window_size) {
@@ -1157,13 +1143,27 @@ bool create_scheduler_state(
         static_cast<uint64_t>(total_tasks),
         task_window_size - 1,
     };
+    bool contains_graph = false;
     for (int64_t task_ref = 0; task_ref < total_tasks; ++task_ref) {
         ChipTaskSlotState &slot = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_ref);
-        if (slot.task_kind == TaskKind::GRAPH) {
+        if (slot.task_kind == TaskKind::GRAPH) contains_graph = true;
+    }
+    std::optional<SchedulerGraphBinding> graph_binding;
+    if (contains_graph) {
+        graph_binding = SchedulerGraphBinding::prepare(
+            host_sm_handle.header->tasks, total_tasks, definitions.section, definitions.bytes
+        );
+        if (!graph_binding) {
+            LOG_ERROR("A5 HBG: invalid resident Graph definition or dependency map");
+            return false;
+        }
+        if (!graph_binding->supported() ||
+            api->chip_swimlane_level() >= static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES)) {
             select_legacy_scheduler(runtime, api, SCHEDULER_RUNTIME_MODE_LEGACY_GRAPH);
-            LOG_INFO("A5 HBG: retaining AICPU scheduling for a graph-execution run");
+            LOG_INFO("A5 HBG: retaining AICPU Graph scheduling for a combination without native acceptance");
             return true;
         }
+        total_tasks = graph_binding->plan().node_count();
     }
     const int32_t worker_count = runtime->get_worker_count();
     if (worker_count <= 0 || worker_count > static_cast<int32_t>(SCHEDULER_WORKER_CAPACITY) ||
@@ -1190,24 +1190,40 @@ bool create_scheduler_state(
     // bind. So `is_completed` and its negation partition the tasks here, and a
     // future host-side publication would silently change what these tests mean.
     for (int64_t task_ref = 0; task_ref < total_tasks; ++task_ref) {
-        ChipTaskSlotState &slot = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_ref);
-        SchedulerTaskShape shape{};
-        SchedulerGraphResult status = scheduler_classify_task_shape(host_graph, task_ref, &shape);
+        SchedulerGraphSubmitState slot{};
+        if (graph_binding) {
+            slot = graph_binding->submission(task_ref, host_graph);
+        } else {
+            const auto &original = host_sm_handle.header->tasks.get_slot_state_by_task_id(task_ref);
+            slot.active_mask = original.active_mask;
+            slot.task_attrs = original.task_attrs;
+            slot.logical_block_num = original.logical_block_num;
+            slot.total_required_subtasks = original.total_required_subtasks;
+            slot.completed = host_sm_handle.header->tasks.is_completed(task_ref);
+            slot.fanin_count = original.to_payload().fanin_count;
+            slot.status = scheduler_classify_task_shape(host_graph, task_ref, &slot.shape);
+            const auto &predicate = original.to_payload().predicate;
+            slot.predicate = {
+                predicate.addr, predicate.target, predicate.elem_size, static_cast<uint8_t>(predicate.op)
+            };
+        }
+        SchedulerTaskShape shape = slot.shape;
+        SchedulerGraphResult status = slot.status;
         bool inline_dispatch_task = false;
         if (status != SchedulerGraphResult::OK) {
-            bool inline_completed_task =
-                status == SchedulerGraphResult::UNSUPPORTED_SHAPE && slot.active_mask.raw() == 0 &&
-                slot.logical_block_num == 1 && slot.total_required_subtasks == 0 &&
-                host_sm_handle.header->tasks.is_completed(task_ref) && slot.task_attrs.allow_early_resolve() &&
-                !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
+            bool inline_completed_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE &&
+                                         slot.active_mask.raw() == 0 && slot.logical_block_num == 1 &&
+                                         slot.total_required_subtasks == 0 && slot.completed &&
+                                         slot.task_attrs.allow_early_resolve() &&
+                                         !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
             if (inline_completed_task) {
                 inline_completed_task_refs.push_back(task_ref);
                 continue;
             }
             inline_dispatch_task = status == SchedulerGraphResult::UNSUPPORTED_SHAPE && slot.active_mask.raw() == 0 &&
                                    slot.logical_block_num == 1 && slot.total_required_subtasks == 0 &&
-                                   !host_sm_handle.header->tasks.is_completed(task_ref) &&
-                                   !slot.task_attrs.requires_sync_start() && !slot.task_attrs.has_predicate();
+                                   !slot.completed && !slot.task_attrs.requires_sync_start() &&
+                                   !slot.task_attrs.has_predicate();
             if (!inline_dispatch_task) {
                 LOG_ERROR(
                     "A5 HBG AICore scheduler: invalid task ref=%" PRId64 " status=%" PRIu64, task_ref,
@@ -1244,8 +1260,7 @@ bool create_scheduler_state(
         }
         if ((!inline_dispatch_task && (slot.active_mask.raw() != classified_active_mask ||
                                        static_cast<uint32_t>(slot.total_required_subtasks) != expected_subtasks)) ||
-            host_sm_handle.header->tasks.is_completed(task_ref) ||
-            (slot.task_attrs.has_predicate() && (active_subtasks != 1 || logical_block_num != 1))) {
+            slot.completed || (slot.task_attrs.has_predicate() && (active_subtasks != 1 || logical_block_num != 1))) {
             LOG_ERROR(
                 "A5 HBG AICore scheduler: task ref=%" PRId64
                 " has inconsistent shape/state or uses predicate/early-resolve",
@@ -1264,14 +1279,12 @@ bool create_scheduler_state(
                 return false;
             }
         }
-        __gm__ uint8_t *payload = scheduler_graph_payload(host_graph, task_ref);
-        const auto *predicate =
-            reinterpret_cast<const SchedulerDispatchPredicate *>(payload + SCHEDULER_GRAPH_PREDICATE_OFFSET);
+        const auto *predicate = &slot.predicate;
         if (!scheduler_dispatch_predicate_metadata_valid(predicate->addr, predicate->elem_size, predicate->op)) {
             LOG_ERROR("A5 HBG AICore scheduler: task ref=%" PRId64 " has malformed predicate metadata", task_ref);
             return false;
         }
-        int32_t fanin_count = *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
+        int32_t fanin_count = slot.fanin_count;
         if (fanin_count < 0) {
             LOG_ERROR(
                 "A5 HBG AICore scheduler: task ref=%" PRId64 " has invalid fanin count %d", task_ref, fanin_count
@@ -1391,6 +1404,10 @@ bool create_scheduler_state(
     layout.executable_subtask_count = executable_subtask_count;
     layout.aic_worker_demand = aic_worker_demand;
     layout.aiv_worker_demand = aiv_worker_demand;
+    if (graph_binding && !graph_binding->reserve(&layout)) {
+        LOG_ERROR("A5 HBG: expanded Graph storage layout overflow");
+        return false;
+    }
 
     const uint64_t allocation_size = layout.total_size + SCHEDULER_STATE_ALIGNMENT - 1;
     // The slot's retained pair, each side aligned with at least total_size
@@ -1433,6 +1450,13 @@ bool create_scheduler_state(
     }
 
     const uint64_t device_sm_address = reinterpret_cast<uint64_t>(runtime->get_gm_sm_ptr());
+    if (graph_binding && !graph_binding->bind(
+                             host_base, aligned_address, layout, packed_image, device_sm_address, device_segments,
+                             api->run_epoch(), inline_completed_task_refs.size()
+                         )) {
+        LOG_ERROR("A5 HBG: failed to bind Graph instance addresses");
+        return false;
+    }
     auto *run_control = scheduler_state_at<SchedulerRunControl>(host_base, layout.run_control_offset);
     run_control->expected_task_count = static_cast<uint64_t>(total_tasks);
     run_control->inline_completed_count = inline_completed_task_refs.size();
@@ -1481,6 +1505,12 @@ bool create_scheduler_state(
         context.graph_summary_offset = layout.graph_summary_offset;
         context.graph_storage_address = device_sm_address + device_segments.storage;
         context.graph_reserved_address = 0;
+        if (graph_binding) {
+            context.graph_nodes_address = aligned_address + layout.graph.nodes_offset;
+            context.graph_instances_address = aligned_address + layout.graph.instances_offset;
+            context.graph_instance_count = layout.graph.instance_count;
+            context.graph_build_control_address = aligned_address + layout.graph.build_control_offset;
+        }
         context.scheduler_state_base_address = aligned_address;
         context.dispatch_payload_offset = layout.dispatch_payloads_offset + static_cast<uint64_t>(i) *
                                                                                 SCHEDULER_PENDING_SLOT_COUNT *
@@ -1869,8 +1899,21 @@ int32_t run_host_orchestration(
     always_assert(compacted == image_bytes);
 
     const sm_layout::SegmentOffsets device_segments = sm_layout::segment_offsets(sm_layout::image_extents(bind_usage));
-    if (!create_scheduler_state(runtime, api, host_sm_handle, total_tasks, task_capacity, device_segments)) {
+    if (!create_scheduler_state(
+            runtime, api, host_sm_handle, total_tasks, task_capacity, device_segments, definition_uploads,
+            upload_base + copied_bytes
+        )) {
         return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    if (definition_uploads.bytes != 0 &&
+        runtime->dev.scheduler_bootstrap.runtime_mode != SCHEDULER_RUNTIME_MODE_RESIDENT_PENDING) {
+        uint32_t source = static_cast<uint32_t>(GraphSectionSource::None);
+        uint64_t base = 0;
+        if (api->publish_graph_section(definition_uploads.section, definition_uploads.bytes, &source, &base) != 0)
+            return PTO_RUNTIME_ERR_INTERNAL;
+        runtime->publish_graph_section(
+            static_cast<GraphSectionSource>(source), base, static_cast<uint32_t>(definition_uploads.bytes)
+        );
     }
 
     // Prepared, not published: `publish_run_image_impl` performs this write, and

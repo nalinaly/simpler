@@ -20,6 +20,22 @@ a5_hbg_case(test_hbg_scheduler_contracts.cpp
 a5_hbg_case(test_hbg_protocol_export.cpp
     INCLUDES ${SIMPLER_SRC}/a5/runtime/host_build_graph/host)
 
+a5_hbg_case(test_hbg_graph_plan.cpp
+    INCLUDES ${SIMPLER_SRC}/a5/runtime/host_build_graph/host)
+
+a5_hbg_case(test_hbg_graph_services.cpp
+    INCLUDES ${SIMPLER_SRC}/a5/platform/sim/aicore ${SIMPLER_SRC}/a5/runtime/host_build_graph/host
+    DEFINES __CPU_SIM)
+
+a5_hbg_case(test_hbg_graph_materialize.cpp
+    INCLUDES ${SIMPLER_SRC}/a5/platform/sim/aicore
+    SOURCES ${SIMPLER_SRC}/common/host_build_graph/device/graph_execution.cpp
+    DEFINES __CPU_SIM)
+
+a5_hbg_case(test_hbg_graph_binding.cpp
+    INCLUDES ${SIMPLER_SRC}/a5/platform/sim/aicore ${SIMPLER_SRC}/a5/runtime/host_build_graph/host
+    DEFINES __CPU_SIM)
+
 a5_hbg_case(test_hbg_ordered_execution.cpp
     INCLUDES ${SIMPLER_SRC}/a5/platform/sim/aicore
     DEFINES __CPU_SIM)

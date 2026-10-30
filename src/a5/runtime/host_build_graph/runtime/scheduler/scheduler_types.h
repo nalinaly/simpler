@@ -1088,6 +1088,11 @@ enum class SchedulerErrorSite : uint64_t {
     GROUP_CLOSE_INVALID = 124,
     ORDERED_EXIT_IN_FLIGHT = 125,
     ORDERED_EXIT_TIMEOUT = 126,
+    GRAPH_INSTANCE_INVALID = 130,
+    GRAPH_CHILD_COUNT_INVALID = 131,
+    GRAPH_MATERIALIZE_FAILED = 132,
+    GRAPH_MATERIALIZE_TIMEOUT = 133,
+    GRAPH_PUBLIC_COUNT_INVALID = 134,
 };
 
 enum SchedulerErrorIdentityField : uint32_t {
@@ -1238,6 +1243,10 @@ struct alignas(128) SchedulerWorkerContext {
     volatile uint64_t mix_payloads_offset;
     volatile uint64_t mix_traces_offset;
     uint64_t topology_reserved[1];
+    uint64_t graph_nodes_address;
+    uint64_t graph_instances_address;
+    uint64_t graph_instance_count;
+    uint64_t graph_build_control_address;
 
     alignas(128) uint64_t bootstrap_task_count;
     uint64_t ready_enqueue_count;

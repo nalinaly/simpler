@@ -14,6 +14,7 @@
 #include <cstdint>
 
 #include "scheduler_protocol_types.h"
+#include "scheduler_graph_nodes.h"
 
 constexpr uint32_t SCHEDULER_RUNTIME_MODE_RESIDENT_PENDING = 1;
 constexpr uint32_t SCHEDULER_RUNTIME_MODE_RESIDENT_READY = 2;
@@ -63,4 +64,5 @@ struct AicoreSchedulerLayout {
     uint64_t mix_close_seal_count;
     uint64_t protocol_layout_offset;
     SchedulerProtocolLayout protocol;
+    SchedulerGraphStorageLayout graph;
 };

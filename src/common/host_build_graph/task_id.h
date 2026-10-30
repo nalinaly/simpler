@@ -210,6 +210,16 @@ public:
         return id.raw_;
     }
 
+    template <typename T>
+    PTO_DEVICE_FUNC static constexpr Space space_of(const T &id) {
+        return static_cast<Space>(to_uint64(id) >> SPACE_SHIFT);
+    }
+
+    template <typename T>
+    PTO_DEVICE_FUNC static constexpr int32_t local_id_of(const T &id) {
+        return static_cast<int32_t>(static_cast<uint32_t>(to_uint64(id)));
+    }
+
     // Copy one handle onto another, in whatever pair of address spaces they
     // live: ccec cannot do it through operator=, which is a member and so has
     // the same pinned-`this` problem. Deduction covers all four combinations of

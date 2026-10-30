@@ -18,6 +18,7 @@
 #include "dispatch_payload.h"
 #include "runtime.h"
 #include "scheduler/scheduler_memory.h"
+#include "scheduler/scheduler_graph_materialize.h"
 #include "scheduler/scheduler_ready.h"
 #include "scheduler/scheduler_watchdog.h"
 
@@ -161,6 +162,7 @@ __aicore__ bool bootstrap_ready_graph(
             scheduler_task_metadata_at(scheduler_state_base, scheduler, static_cast<int64_t>(task_ref));
         scheduler_observe_cache_line(metadata);
         if (!scheduler_task_is_executable(metadata->flags)) continue;
+        if (scheduler_graph_is_exit(graph, static_cast<int64_t>(task_ref))) continue;
         const bool has_fanin = scheduler_task_has_fanin(metadata->flags);
         SchedulerRouteResult route =
             has_fanin ? scheduler_bootstrap_route_task(
@@ -445,6 +447,52 @@ __aicore__ bool run_ready_dispatch_loop(
 
 struct SchedulerNoProfilingState {};
 
+__aicore__ bool bootstrap_graph_instances(
+    const SchedulerGraphView &graph, __gm__ SchedulerWorkerContext *context, __gm__ SchedulerRunControl *run,
+    uint64_t timeout_cycles
+) {
+    if (context->graph_instance_count == 0) return graph.node_map_address == 0 && graph.build_control_address == 0;
+    if (graph.node_map_address == 0 || graph.build_control_address == 0 || context->graph_instances_address == 0)
+        return false;
+    auto *build = reinterpret_cast<__gm__ SchedulerGraphBuildControl *>(graph.build_control_address);
+    const auto *instances = reinterpret_cast<const __gm__ SchedulerGraphInstance *>(context->graph_instances_address);
+    if (build->instance_count != context->graph_instance_count) return false;
+    const uint64_t start = get_sys_cnt_aicore();
+    while (scheduler_read_error(run) == 0) {
+        const uint64_t index = scheduler_gm_fetch_add(build->next_instance, UINT64_C(1));
+        if (index >= build->instance_count) break;
+        const auto &instance = instances[index];
+        auto *control = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(instance.control_address);
+        if (control == nullptr) return false;
+        scheduler_gm_store(control->materialize_owner, context->worker_index + 1);
+        scheduler_gm_store(control->materialize_state, UINT64_C(1));
+        const auto status = scheduler_graph_materialize(instance, graph);
+        if (status != SchedulerGraphResult::OK) {
+            scheduler_gm_store(control->materialize_state, UINT64_C(3));
+            scheduler_record_error(
+                run, control->enter_ref, status, &graph, context, SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+            );
+            return false;
+        }
+        scheduler_gm_store(control->materialize_state, UINT64_C(2));
+        const uint64_t prior = scheduler_gm_fetch_add(build->remaining_instances, UINT64_MAX);
+        if (prior == 0 || prior > build->instance_count) return false;
+    }
+    while (scheduler_gm_fetch_add(build->remaining_instances, UINT64_C(0)) != 0) {
+        if (scheduler_read_error(run) != 0) return false;
+        if (scheduler_watchdog_expired(start, get_sys_cnt_aicore(), timeout_cycles)) {
+            scheduler_record_error(
+                run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::TIMEOUT, &graph, context,
+                SchedulerErrorSite::GRAPH_MATERIALIZE_TIMEOUT
+            );
+            return false;
+        }
+        SPIN_WAIT_HINT();
+    }
+    scheduler_observe_data_cache(reinterpret_cast<__gm__ void *>(graph.node_map_address));
+    return scheduler_read_error(run) == 0;
+}
+
 template <bool WithProfiling>
 __aicore__ __attribute__((noinline)) void run_resident_scheduler(
     __gm__ SchedulerWorkerContext *context, __gm__ SchedulerRunControl *run_control, __gm__ void *scheduler_state_base,
@@ -454,10 +502,8 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
     // READY publishes this run's timeout; no writer changes it during execution.
     const uint64_t timeout_cycles = scheduler_gm_query(run_control->scheduler_timeout_cycles);
     SchedulerGraphView graph{
-        context->graph_storage_address,
-        context->graph_reserved_address,
-        context->graph_task_count,
-        context->task_window_last_index,
+        context->graph_storage_address,  context->graph_reserved_address, context->graph_task_count,
+        context->task_window_last_index, context->graph_nodes_address,    context->graph_build_control_address,
     };
     SchedulerWorkerStats stats{};
     std::conditional_t<WithProfiling, SchedulerLocalProfilingState, SchedulerNoProfilingState> profile{};
@@ -479,6 +525,15 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
     uint64_t descriptor_cache_observed_cycles = 0;
     if (config_valid) {
         scheduler_observe_data_cache(reinterpret_cast<__gm__ void *>(graph.storage_address));
+        if (!bootstrap_graph_instances(graph, context, run_control, timeout_cycles)) {
+            scheduler_record_error(
+                run_control, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+            );
+            config_valid = false;
+        }
+    }
+    if (config_valid) {
         descriptor_cache_observed_cycles = phase_timing_enabled ? get_sys_cnt_aicore() : 0;
         if (context->is_scheduler != 0 && !bootstrap_ready_graph(
                                               graph, scheduler_state_base, &scheduler_local_state, run_control,
@@ -557,6 +612,15 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
     // interval. Both startup and dispatch-loop exits close their obligations
     // here, before the acknowledgement allows the AICPU to retire that core.
     wait_for_aicpu_exit_signal();
+    if (config_valid && graph.build_control_address != 0 && context->worker_index == 0 &&
+        scheduler_read_error(run_control) == 0) {
+        auto *build = reinterpret_cast<__gm__ SchedulerGraphBuildControl *>(graph.build_control_address);
+        if (scheduler_gm_fetch_add(build->public_completed, UINT64_C(0)) != build->public_task_count)
+            scheduler_record_error(
+                run_control, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_PUBLIC_COUNT_INVALID
+            );
+    }
     if (config_valid && scheduler_read_error(run_control) == 0) {
         const uint64_t drain_start = get_sys_cnt_aicore();
         while (true) {
