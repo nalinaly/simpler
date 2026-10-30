@@ -1687,10 +1687,11 @@ inline __aicore__ bool scheduler_graph_child_completed(
     }
     auto *instance = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(node->instance_control_address);
     const auto *exit_node = scheduler_graph_node_at(graph, instance->exit_ref);
-    if (instance->child_count <= 0 || instance->child_count > SCHEDULER_GRAPH_MAX_BODY_FANIN + 1 ||
-        instance->child_begin < 0 || task_ref < instance->child_begin ||
-        task_ref - instance->child_begin >= instance->child_count || exit_node == nullptr ||
-        exit_node->kind != SchedulerGraphNodeKind::EXIT ||
+    const auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, local->config.graph_summary_offset);
+    if (instance->run_epoch != summary->run_epoch || instance->child_count <= 0 ||
+        instance->child_count > SCHEDULER_GRAPH_MAX_BODY_FANIN + 1 || instance->child_begin < 0 ||
+        task_ref < instance->child_begin || task_ref - instance->child_begin >= instance->child_count ||
+        exit_node == nullptr || exit_node->kind != SchedulerGraphNodeKind::EXIT ||
         exit_node->instance_control_address != node->instance_control_address) {
         scheduler_record_error(
             run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,

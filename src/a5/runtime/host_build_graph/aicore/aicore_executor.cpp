@@ -452,19 +452,45 @@ __aicore__ bool bootstrap_graph_instances(
     uint64_t timeout_cycles
 ) {
     if (context->graph_instance_count == 0) return graph.node_map_address == 0 && graph.build_control_address == 0;
-    if (graph.node_map_address == 0 || graph.build_control_address == 0 || context->graph_instances_address == 0)
+    if (graph.node_map_address == 0 || graph.build_control_address == 0 || context->graph_instances_address == 0 ||
+        graph.build_control_address % alignof(SchedulerGraphBuildControl) != 0 ||
+        context->graph_instances_address % alignof(SchedulerGraphInstance) != 0 ||
+        context->scheduler_state_base_address == 0 || context->graph_summary_offset == 0)
         return false;
     auto *build = reinterpret_cast<__gm__ SchedulerGraphBuildControl *>(graph.build_control_address);
     const auto *instances = reinterpret_cast<const __gm__ SchedulerGraphInstance *>(context->graph_instances_address);
-    if (build->instance_count != context->graph_instance_count) return false;
+    const auto *summary = scheduler_state_at<SchedulerGraphSummary>(
+        reinterpret_cast<__gm__ void *>(context->scheduler_state_base_address), context->graph_summary_offset
+    );
+    if (build->instance_count != context->graph_instance_count || build->run_epoch != summary->run_epoch) {
+        scheduler_record_error(
+            run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+            SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+        );
+        return false;
+    }
     const uint64_t start = get_sys_cnt_aicore();
     while (scheduler_read_error(run) == 0) {
         const uint64_t index = scheduler_gm_fetch_add(build->next_instance, UINT64_C(1));
         if (index >= build->instance_count) break;
         const auto &instance = instances[index];
+        if (instance.control_address == 0 || instance.control_address % alignof(SchedulerGraphInstanceControl) != 0) {
+            scheduler_record_error(
+                run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+            );
+            return false;
+        }
         auto *control = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(instance.control_address);
-        if (control == nullptr) return false;
-        scheduler_gm_store(control->materialize_owner, context->worker_index + 1);
+        if (control->run_epoch != build->run_epoch ||
+            scheduler_gm_fetch_add(control->materialize_state, UINT64_C(0)) != 0 ||
+            scheduler_gm_compare_exchange(control->materialize_owner, UINT64_C(0), context->worker_index + 1) != 0) {
+            scheduler_record_error(
+                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+            );
+            return false;
+        }
         scheduler_gm_store(control->materialize_state, UINT64_C(1));
         const auto status = scheduler_graph_materialize(instance, graph);
         if (status != SchedulerGraphResult::OK) {

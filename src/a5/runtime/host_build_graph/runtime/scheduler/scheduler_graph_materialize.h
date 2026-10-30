@@ -20,6 +20,12 @@ inline constexpr uint32_t SCHEDULER_GRAPH_TENSOR_BYTES = 96;
 inline constexpr uint32_t SCHEDULER_GRAPH_TENSOR_OWNER_OFFSET = 16;
 inline constexpr uint32_t SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET = 24;
 inline constexpr uint32_t SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET = 40;
+inline constexpr uint32_t SCHEDULER_GRAPH_TENSOR_EXTENT_OFFSET = 64;
+inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_BYTES = 120;
+inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_ELEMENT_OFFSET = 96;
+inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_TARGET_OFFSET = 104;
+inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_WIDTH_OFFSET = 112;
+inline constexpr uint32_t SCHEDULER_GRAPH_PREDICATE_OP_OFFSET = 113;
 inline constexpr uint32_t SCHEDULER_GRAPH_PACKED_BASE_OFFSET = 24;
 inline constexpr uint32_t SCHEDULER_GRAPH_PACKED_END_OFFSET = 32;
 inline constexpr uint32_t SCHEDULER_GRAPH_DUMP_METADATA_OFFSET = 152;
@@ -42,13 +48,21 @@ inline __aicore__ bool scheduler_graph_bind_region(__gm__ uint8_t *field, uint64
     return true;
 }
 
-inline __aicore__ bool scheduler_graph_rebind_tensor(
-    const __gm__ SchedulerGraphInstance &instance, const __gm__ uint8_t *record, __gm__ uint8_t *target
+struct SchedulerGraphTensorBinding {
+    uint64_t address;
+    uint64_t size;
+    uint64_t start;
+    uint8_t address_space;
+};
+
+inline __aicore__ bool scheduler_graph_tensor_binding(
+    const __gm__ SchedulerGraphInstance &instance, const __gm__ uint8_t *record, SchedulerGraphTensorBinding *out
 ) {
     const auto *source_words = reinterpret_cast<const __gm__ uint64_t *>(record);
-    auto *target_words = reinterpret_cast<__gm__ uint64_t *>(target);
-    for (uint32_t word = 0; word < TASKPAYLOAD_TENSOR_STRIDE / sizeof(uint64_t); ++word)
-        target_words[word] = word < SCHEDULER_GRAPH_TENSOR_BYTES / sizeof(uint64_t) ? source_words[word] : 0;
+    out->address = source_words[0];
+    out->size = source_words[1];
+    out->start = *reinterpret_cast<const __gm__ uint64_t *>(record + SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET);
+    out->address_space = record[SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET];
     const auto *owner = reinterpret_cast<const __gm__ TaskId *>(record + SCHEDULER_GRAPH_TENSOR_OWNER_OFFSET);
     const auto space = TaskId::space_of(*owner);
     if (space == TaskId::Space::PARAM) {
@@ -58,20 +72,74 @@ inline __aicore__ bool scheduler_graph_rebind_tensor(
         const auto *boundary = reinterpret_cast<const __gm__ uint8_t *>(instance.boundary_tensors_address) +
                                static_cast<uint64_t>(param) * TASKPAYLOAD_TENSOR_STRIDE;
         const auto *boundary_words = reinterpret_cast<const __gm__ uint64_t *>(boundary);
-        target_words[0] = boundary_words[0];
-        target_words[1] = boundary_words[1];
-        auto *origin = reinterpret_cast<__gm__ uint64_t *>(target + SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET);
+        out->address = boundary_words[0];
+        out->size = boundary_words[1];
         const uint64_t start =
             *reinterpret_cast<const __gm__ uint64_t *>(boundary + SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET);
-        if (*origin > UINT64_MAX - start) return false;
-        *origin += start;
-        target[SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET] = boundary[SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET];
+        if (out->start > UINT64_MAX - start) return false;
+        out->start += start;
+        out->address_space = boundary[SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET];
         return true;
     }
-    if (space != TaskId::Space::SUB_TASK || target_words[0] > instance.heap_bytes ||
-        target_words[1] > instance.heap_bytes - target_words[0] || instance.heap_address > UINT64_MAX - target_words[0])
+    if (space != TaskId::Space::SUB_TASK || out->address > instance.heap_bytes ||
+        out->size > instance.heap_bytes - out->address || instance.heap_address > UINT64_MAX - out->address)
         return false;
-    target_words[0] += instance.heap_address;
+    out->address += instance.heap_address;
+    return true;
+}
+
+inline __aicore__ bool scheduler_graph_rebind_tensor(
+    const __gm__ SchedulerGraphInstance &instance, const __gm__ uint8_t *record, __gm__ uint8_t *target
+) {
+    SchedulerGraphTensorBinding binding{};
+    if (!scheduler_graph_tensor_binding(instance, record, &binding)) return false;
+    const auto *source_words = reinterpret_cast<const __gm__ uint64_t *>(record);
+    auto *target_words = reinterpret_cast<__gm__ uint64_t *>(target);
+    for (uint32_t word = 0; word < TASKPAYLOAD_TENSOR_STRIDE / sizeof(uint64_t); ++word)
+        target_words[word] = word < SCHEDULER_GRAPH_TENSOR_BYTES / sizeof(uint64_t) ? source_words[word] : 0;
+    target_words[0] = binding.address;
+    target_words[1] = binding.size;
+    *reinterpret_cast<__gm__ uint64_t *>(target + SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET) = binding.start;
+    target[SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET] = binding.address_space;
+    return true;
+}
+
+inline __aicore__ bool scheduler_graph_materialize_predicate(
+    const __gm__ SchedulerGraphInstance &instance, const SchedulerGraphDefinitionView &view, uint16_t slot,
+    int32_t child, __gm__ SchedulerDispatchPredicate *target
+) {
+    const auto *definition = reinterpret_cast<const __gm__ GraphDefinition *>(view.image_address);
+    if (slot == 0 || definition->predicate_count < 0 || slot > definition->predicate_count) return false;
+    const uint64_t offset = static_cast<uint64_t>(definition->off_predicates) +
+                            static_cast<uint64_t>(slot - 1) * SCHEDULER_GRAPH_PREDICATE_BYTES;
+    if (offset > UINT32_MAX) return false;
+    const auto *words = scheduler_graph_definition_array<uint64_t>(
+        view, static_cast<uint32_t>(offset), SCHEDULER_GRAPH_PREDICATE_BYTES / sizeof(uint64_t)
+    );
+    if (words == nullptr) return false;
+    const auto *record = reinterpret_cast<const __gm__ uint8_t *>(words);
+    const auto *owner = reinterpret_cast<const __gm__ TaskId *>(record + SCHEDULER_GRAPH_TENSOR_OWNER_OFFSET);
+    if (TaskId::space_of(*owner) == TaskId::Space::SUB_TASK &&
+        (TaskId::local_id_of(*owner) < 0 || TaskId::local_id_of(*owner) >= child))
+        return false;
+    const uint64_t element =
+        *reinterpret_cast<const __gm__ uint64_t *>(record + SCHEDULER_GRAPH_PREDICATE_ELEMENT_OFFSET);
+    const uint64_t extent = *reinterpret_cast<const __gm__ uint64_t *>(record + SCHEDULER_GRAPH_TENSOR_EXTENT_OFFSET);
+    const uint8_t width = record[SCHEDULER_GRAPH_PREDICATE_WIDTH_OFFSET];
+    const uint8_t op = record[SCHEDULER_GRAPH_PREDICATE_OP_OFFSET];
+    SchedulerGraphTensorBinding binding{};
+    if ((width != 1 && width != 2 && width != 4 && width != 8) || op == 0 || op > 6 || element >= extent ||
+        !scheduler_graph_tensor_binding(instance, record, &binding) || binding.start > UINT64_MAX - element ||
+        binding.size < width || binding.start + element > (binding.size - width) / width)
+        return false;
+    const uint64_t byte_offset = (binding.start + element) * width;
+    if (binding.address > UINT64_MAX - byte_offset ||
+        !scheduler_dispatch_predicate_metadata_valid(binding.address + byte_offset, width, op))
+        return false;
+    target->addr = binding.address + byte_offset;
+    target->target = *reinterpret_cast<const __gm__ int64_t *>(record + SCHEDULER_GRAPH_PREDICATE_TARGET_OFFSET);
+    target->elem_size = width;
+    target->op = op;
     return true;
 }
 
@@ -120,7 +188,6 @@ scheduler_graph_materialize(const __gm__ SchedulerGraphInstance &instance, const
             source.scalar_offset > instance.scalar_arg_count ||
             source.scalar_count > instance.scalar_arg_count - source.scalar_offset || source.total_output_size < 0)
             return SchedulerGraphResult::INVALID_ARGUMENTS;
-        if (source.predicate_slot != 0) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
         const uint64_t output_bytes = (static_cast<uint64_t>(source.total_output_size) + 63) & ~UINT64_C(63);
         if (output_offset > instance.heap_bytes || output_bytes > instance.heap_bytes - output_offset)
             return SchedulerGraphResult::INVALID_ARGUMENTS;
@@ -143,6 +210,12 @@ scheduler_graph_materialize(const __gm__ SchedulerGraphInstance &instance, const
         *reinterpret_cast<__gm__ uint64_t *>(storage + SCHEDULER_GRAPH_PACKED_END_OFFSET) =
             instance.heap_address + output_offset + output_bytes;
         auto *payload = storage + SCHEDULER_GRAPH_PAYLOAD_OFFSET;
+        if (source.predicate_slot != 0 &&
+            !scheduler_graph_materialize_predicate(
+                instance, view, source.predicate_slot, child,
+                reinterpret_cast<__gm__ SchedulerDispatchPredicate *>(payload + SCHEDULER_GRAPH_PREDICATE_OFFSET)
+            ))
+            return SchedulerGraphResult::INVALID_ARGUMENTS;
         *reinterpret_cast<__gm__ int32_t *>(payload + TASKPAYLOAD_TENSOR_COUNT_OFFSET) = source.tensor_count;
         *reinterpret_cast<__gm__ int32_t *>(payload + TASKPAYLOAD_SCALAR_COUNT_OFFSET) = source.scalar_count;
         const uint64_t tensors =

@@ -33,6 +33,7 @@ struct MaterializeFixture {
         std::array<GraphScalarInheritance, 2> sources{
             GraphScalarInheritance::from_boundary(0), GraphScalarInheritance::self_value()
         };
+        std::array<GraphPredicate, 2> predicates{};
     };
     struct Object {
         GraphDefinitionHeader header{};
@@ -127,5 +128,22 @@ struct MaterializeFixture {
     SchedulerGraphResult materialize() {
         SchedulerGraphView graph{0, 0, nodes.size(), nodes.size() - 1, reinterpret_cast<uint64_t>(nodes.data())};
         return scheduler_graph_materialize(instance, graph);
+    }
+
+    void enable_predicates() {
+        object.body.definition.predicate_count = 2;
+        object.body.definition.off_predicates = offsetof(Body, predicates);
+        TaskAttrs attrs{};
+        attrs.set_predicate();
+        for (int32_t i = 0; i < 2; ++i) {
+            object.body.tasks[i].predicate_slot = i + 1;
+            object.body.tasks[i].task_attrs = attrs.raw();
+            auto &predicate = object.body.predicates[i];
+            predicate.operand = object.body.tensors[i];
+            predicate.elem_offset = 1;
+            predicate.elem_size = 4;
+            predicate.op = static_cast<uint8_t>(PredicateOp::EQ);
+            predicate.target = 13 + i;
+        }
     }
 };

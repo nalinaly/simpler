@@ -8,10 +8,10 @@
 
 | 阶段 | 当前状态 | 完成证据 |
 | ---- | -------- | -------- |
-| P0 合同/来源门禁 | 基础门禁已验证 | 基线数值通过而 resident 来源失败；当前 12 项门禁单测通过，业务和 golden 复用原测试 |
+| P0 合同/来源门禁 | 基础门禁已验证 | 基线数值通过而 resident 来源失败；当前 18 项门禁单测通过，业务和 golden 复用原测试 |
 | P1 数据/引用/布局 | 最小路径已接线验证 | GM 载体、实例/引用布局、Scalar 物化和启动发布已接线；framing 跨编译器差异已修复，A5 复测通过 |
 | P2 最小 native Graph | 最小纯 C/V 场景已通过 | 原样 1D、2D、AIC+AIV Graph 在 A5sim/A5 上通过；真机各 3 轮，数值与 fresh resident 来源均通过；完整边界矩阵仍继续补齐 |
-| P3 能力与故障矩阵 | 未完成 | 无新增通过结论 |
+| P3 能力与故障矩阵 | 核心功能与部分故障门禁通过，整体未完成 | 188 场景/宽 fanin、旧 epoch/唯一 owner、父子首现场、空边界和双 slot 复用已验证；详见[专项记录](a5-hbg-aicore-graph-p3-validation.md) |
 | P4 协议/泳道/性能资源 | 未完成 | 无新增通过结论 |
 | P5 有证据的优化 | 未开始 | 先获得功能与计时基线 |
 
@@ -120,7 +120,7 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 - worker context 在已有配置行的未使用空间中增加映射、实例和构造控制地址，`bootstrap_task_count` 的 384B 偏移不变。无 Graph run 的地址/数量为零，不分配上述 Graph 专属区。
 - Scalar 动态领取实例，一个实例一个临时 owner；在原存储内写 descriptor/payload、tensor/scalar pool，进行范围写回和 barrier 后再发布物化完成。所有实例完成后才开放现有 bootstrap/ready 路径。
 - 内部退休数仍覆盖 ENTER/子任务/EXIT；独立公共完成计数只由普通顶层任务和 EXIT 贡献，Host 已完成节点计入初值。退出前核对公共完成总数。
-- 当前开放单 block、单 lane、无 predicate 的 Graph 子集。Mix、多 block、sync-start、predicate 以及需要新版 Graph L4 证据的 run 仍整轮 legacy，后续逐项验收后开放；这不是最终范围缩减。
+- 本阶段仅开放单 block、单 lane、无 predicate 的 Graph 子集。Mix、多 block、sync-start、predicate 以及需要新版 Graph L4 证据的 run 在这一阶段仍整轮 legacy，后续逐项验收后开放；这不是最终范围缩减。
 
 新增物化测试 6 项，验证边界/内部 heap 重绑定、固定与继承 scalar、重复实例化刷新、非法参数/存储拒绝及 predicate 不误变为无条件执行，并用同一份 Definition 对照实际 legacy materializer 的字段结果。binding 测试 6 项验证 Definition 共享、两实例地址隔离、GLOBAL producer → EXIT、非法边、predicate 元数据矛盾、分配溢出和映射查询越界；公共完成计数另有专门测试。连同前节，当前 Graph 基础 C++ 测试为 46 项。
 
@@ -188,9 +188,10 @@ libaicpu_kernel.so  fa0bec99a948e2c4a44516a3e76934105f6947116ab760c572642856cb01
 libhost_runtime.so a51d5fb5fccd02c78188aaeb364c5b87f63aa26cf72ece6a35a02134129bf0bb
 ```
 
-### 后续验收
+## 2026-10-30：能力扩展、故障检查与生命周期
 
-1. 开放并验证 Mix/SPMD/sync-start/predicate 原生能力，保持公平竞争和原负载。
-2. 补齐错误、容量、跨 Graph 重叠、边界 view/alias 与 pipeline slot 复用等完整矩阵，不能用已通过的最小例子替代这些要求。
-3. 新版 Graph 原生协议、父子泳道、严格 L4、资源和端到端数据；当前没有 native Graph 性能结论。
-4. 完整无 Graph 回归与性能对照，然后分阶段本地提交；不主动 push。
+详细实现、红绿证据、命令和日志目录见[能力与故障验证记录](a5-hbg-aicore-graph-p3-validation.md)。
+
+已开放多 block/Mix/sync-start/单 block predicate；188 个执行场景、6 个宽 fanin 场景在 A5sim/A5 均通过。后续补齐旧 epoch、owner 唯一性、错位控制地址、父子首错误身份，以及空边界、超容量拒绝和双 slot prepare/finalize 复用。相关 C++ 为 20/20 个可执行文件通过，完整 A5sim HBG 为 127 passed。
+
+完整设计仍未完成：设备实际故障/回收和部分缓存边界专项还需补齐；原生 Graph L4、父子泳道、性能与资源验收尚未完成。不主动 push。

@@ -115,16 +115,42 @@ TEST(HbgGraphBinding, RejectsNonPredecessorExternalEdgesBeforeAllocation) {
     EXPECT_FALSE(f.prepare());
 }
 
-TEST(HbgGraphBinding, MalformedCsrIsAnErrorButUnopenedShapesAreACapabilityChoice) {
+TEST(HbgGraphBinding, MalformedCsrIsRejected) {
     BindingFixture f;
     f.definition.object.body.fanin_indices[0] = 1;
     EXPECT_FALSE(f.prepare());
     f.definition.object.body.fanin_indices[0] = 0;
-    f.definition.object.body.tasks[0].logical_block_num = 2;
-    f.definition.object.body.tasks[0].total_required_subtasks = 2;
     auto binding = f.prepare();
     ASSERT_TRUE(binding);
-    EXPECT_FALSE(binding->supported());
+    EXPECT_TRUE(binding->supported());
+}
+
+TEST(HbgGraphBinding, KeepsTheOriginalMixMasksBlockCountsAndSyncStartAttribute) {
+    for (uint8_t mask : {1, 2, 4, 3, 5, 6, 7}) {
+        for (int16_t blocks : {1, 2, 32, 33, 512}) {
+            for (bool sync : {false, true}) {
+                if (sync && blocks == 1) continue;
+                BindingFixture f;
+                auto &task = f.definition.object.body.tasks[0];
+                task.active_mask = mask;
+                task.logical_block_num = blocks;
+                task.total_required_subtasks = blocks * __builtin_popcount(mask);
+                TaskAttrs attrs{};
+                if (sync) attrs.set_sync_start();
+                task.task_attrs = attrs.raw();
+                for (uint32_t lane = 0; lane < 3; ++lane)
+                    task.kernel_id[lane] = (mask & (1U << lane)) != 0 ? 7 : INVALID_KERNEL_ID;
+                auto binding = f.prepare();
+                ASSERT_TRUE(binding);
+                EXPECT_TRUE(binding->supported()) << "mask=" << +mask << " blocks=" << blocks << " sync=" << sync;
+                SchedulerGraphView ordinary{reinterpret_cast<uint64_t>(f.image.tasks.data()), 0, 2, 1};
+                const auto child = binding->submission(1, ordinary);
+                EXPECT_EQ(child.active_mask.raw(), mask);
+                EXPECT_EQ(child.logical_block_num, blocks);
+                EXPECT_EQ(child.task_attrs.requires_sync_start(), sync);
+            }
+        }
+    }
 }
 
 TEST(HbgGraphBinding, CheckedTailLayoutRejectsOverflow) {
@@ -139,6 +165,47 @@ TEST(HbgGraphBinding, CheckedTailLayoutRejectsOverflow) {
 TEST(HbgGraphBinding, PredicateMetadataMismatchIsNotAValidFallbackRequest) {
     BindingFixture f;
     f.definition.object.body.tasks[0].predicate_slot = 1;
+    EXPECT_FALSE(f.prepare());
+}
+
+TEST(HbgGraphBinding, PredicateSupportRemainsSingleBlockAndSingleLane) {
+    BindingFixture f;
+    f.definition.enable_predicates();
+    auto binding = f.prepare();
+    ASSERT_TRUE(binding);
+    EXPECT_TRUE(binding->supported());
+    auto &task = f.definition.object.body.tasks[0];
+    task.logical_block_num = task.total_required_subtasks = 2;
+    binding = f.prepare();
+    ASSERT_TRUE(binding);
+    EXPECT_FALSE(binding->supported());
+    task.logical_block_num = 1;
+    task.active_mask = 3;
+    task.kernel_id[0] = 6;
+    binding = f.prepare();
+    ASSERT_TRUE(binding);
+    EXPECT_FALSE(binding->supported());
+}
+
+TEST(HbgGraphBinding, PredicateImageValidationPrecedesBackendSelection) {
+    BindingFixture f;
+    f.definition.enable_predicates();
+    auto &predicate = f.definition.object.body.predicates[0];
+    predicate.op = 0;
+    EXPECT_FALSE(f.prepare());
+    predicate.op = static_cast<uint8_t>(PredicateOp::EQ);
+    predicate.elem_size = 8;
+    EXPECT_FALSE(f.prepare());
+    predicate.elem_size = 4;
+    predicate.operand.dtype = static_cast<DataType>(255);
+    EXPECT_FALSE(f.prepare());
+    predicate.operand.dtype = DataType::FLOAT32;
+    predicate.operand.owner_task_id = TaskId::make_sub_task(0, 0);
+    EXPECT_FALSE(f.prepare());
+    predicate.operand.owner_task_id = TaskId::make_param(1);
+    EXPECT_FALSE(f.prepare());
+    predicate.operand.owner_task_id = TaskId::make_param(0);
+    f.definition.object.body.definition.off_predicates = sizeof(MaterializeFixture::Body) - 8;
     EXPECT_FALSE(f.prepare());
 }
 

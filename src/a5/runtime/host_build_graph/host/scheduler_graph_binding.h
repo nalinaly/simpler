@@ -25,6 +25,13 @@ static_assert(sizeof(simpler::hbg::TensorData) == SCHEDULER_GRAPH_TENSOR_BYTES);
 static_assert(offsetof(simpler::hbg::TensorData, owner_task_id) == SCHEDULER_GRAPH_TENSOR_OWNER_OFFSET);
 static_assert(offsetof(simpler::hbg::TensorData, start_offset) == SCHEDULER_GRAPH_TENSOR_ORIGIN_OFFSET);
 static_assert(offsetof(simpler::hbg::TensorData, address_space) == SCHEDULER_GRAPH_TENSOR_SPACE_OFFSET);
+static_assert(offsetof(simpler::hbg::TensorData, extent_elem_cache) == SCHEDULER_GRAPH_TENSOR_EXTENT_OFFSET);
+static_assert(sizeof(GraphPredicate) == SCHEDULER_GRAPH_PREDICATE_BYTES);
+static_assert(offsetof(GraphPredicate, operand) == 0);
+static_assert(offsetof(GraphPredicate, elem_offset) == SCHEDULER_GRAPH_PREDICATE_ELEMENT_OFFSET);
+static_assert(offsetof(GraphPredicate, target) == SCHEDULER_GRAPH_PREDICATE_TARGET_OFFSET);
+static_assert(offsetof(GraphPredicate, elem_size) == SCHEDULER_GRAPH_PREDICATE_WIDTH_OFFSET);
+static_assert(offsetof(GraphPredicate, op) == SCHEDULER_GRAPH_PREDICATE_OP_OFFSET);
 static_assert(offsetof(TaskDescriptor, packed_buffer_base) == SCHEDULER_GRAPH_PACKED_BASE_OFFSET);
 static_assert(offsetof(TaskDescriptor, packed_buffer_end) == SCHEDULER_GRAPH_PACKED_END_OFFSET);
 static_assert(offsetof(TaskPayload, dump_metadata) == SCHEDULER_GRAPH_DUMP_METADATA_OFFSET);
@@ -284,6 +291,23 @@ public:
     }
 
 private:
+    static bool validate_predicate(const GraphDefinition &definition, int32_t child, uint16_t slot) {
+        const auto *predicates =
+            graph_definition_array<GraphPredicate>(definition, definition.off_predicates, definition.predicate_count);
+        if (predicates == nullptr || slot == 0 || slot > definition.predicate_count) return false;
+        const auto &predicate = predicates[slot - 1];
+        const uint64_t width = get_element_size(predicate.operand.dtype);
+        if ((width != 1 && width != 2 && width != 4 && width != 8) || predicate.elem_size != width ||
+            predicate.op < static_cast<uint8_t>(PredicateOp::EQ) ||
+            predicate.op > static_cast<uint8_t>(PredicateOp::LE) ||
+            predicate.elem_offset >= predicate.operand.extent_elem_cache)
+            return false;
+        const auto owner = predicate.operand.owner_task_id;
+        if (owner.space() == TaskId::Space::PARAM)
+            return owner.local_id() >= 0 && owner.local_id() < definition.boundary_tensor_count;
+        return owner.space() == TaskId::Space::SUB_TASK && owner.local_id() >= 0 && owner.local_id() < child;
+    }
+
     bool validate_definition(const GraphDefinition &definition) {
         GraphExecutionStorageLayout storage{};
         if (!graph_execution_storage_layout(
@@ -321,9 +345,10 @@ private:
             if (attrs.has_predicate() != (task.predicate_slot != 0) || definition.predicate_count < 0 ||
                 task.predicate_slot > definition.predicate_count)
                 return false;
-            if (task.logical_block_num != 1 || __builtin_popcount(task.active_mask) > 1 || task.predicate_slot != 0 ||
-                attrs.has_predicate() || attrs.requires_sync_start())
-                supported_ = false;
+            if (task.predicate_slot != 0) {
+                if (!validate_predicate(definition, child, task.predicate_slot)) return false;
+                if (task.logical_block_num != 1 || __builtin_popcount(task.active_mask) != 1) supported_ = false;
+            }
         }
         return true;
     }

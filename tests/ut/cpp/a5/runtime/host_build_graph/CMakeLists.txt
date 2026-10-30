@@ -84,6 +84,14 @@ a5_hbg_case(test_hbg_gm_mix_startup.cpp
     COMPILE_OPTIONS -ffunction-sections -fdata-sections
     LINK_OPTIONS ${_retirement_gc_link_option})
 
+a5_hbg_case(test_hbg_graph_bootstrap.cpp
+    INCLUDES
+        ${SIMPLER_SRC}/a5/platform/sim/aicore
+        ${SIMPLER_SRC}/a5/runtime/host_build_graph
+    DEFINES __CPU_SIM
+    COMPILE_OPTIONS -ffunction-sections -fdata-sections
+    LINK_OPTIONS ${_retirement_gc_link_option})
+
 # Drives the real orchestrator submit path.
 a5_hbg_case(test_hbg_submit_poison.cpp ORCH)
 

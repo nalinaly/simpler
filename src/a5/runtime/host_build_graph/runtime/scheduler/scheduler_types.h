@@ -1102,6 +1102,7 @@ enum SchedulerErrorIdentityField : uint32_t {
     SCHEDULER_ERROR_HAS_GROUP = 1U << 3,
     SCHEDULER_ERROR_HAS_WORKER = 1U << 4,
     SCHEDULER_ERROR_HAS_LANE = 1U << 5,
+    SCHEDULER_ERROR_HAS_PUBLIC_TASK = 1U << 6,
 };
 
 struct alignas(128) SchedulerRunControl {
@@ -1143,7 +1144,8 @@ struct alignas(128) SchedulerRunControl {
     volatile uint64_t sampled_task_timing_enabled;
 
     volatile uint64_t error_claimed;
-    uint64_t error_status_padding;
+    volatile uint32_t error_public_task_id;
+    volatile uint32_t error_sub_task_id;
     volatile uint64_t error_task_ref;
     volatile uint64_t error_core_id;
     volatile uint64_t error_core_type;
@@ -1685,6 +1687,8 @@ scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout,
             workers[worker].worker_index = worker;
     }
     auto *run = scheduler_state_at<SchedulerRunControl>(base, layout.run_control_offset);
+    run->error_public_task_id = UINT32_MAX;
+    run->error_sub_task_id = UINT32_MAX;
     run->error_run_epoch = UINT64_MAX;
     run->error_order_key = UINT64_MAX;
     run->error_block_idx = UINT64_MAX;

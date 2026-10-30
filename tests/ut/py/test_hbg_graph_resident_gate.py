@@ -99,3 +99,46 @@ def test_runner_preserves_three_rounds_and_captures_initial_publication(native, 
     scene._run_and_validate(worker, object(), {"name": "original"}, rounds=1)
     assert received == [{"rounds": 3}]
     assert scene._graph_worker is worker and scene._graph_publish_count == 21
+
+
+@pytest.mark.parametrize(
+    "scene_name,original_name,directory",
+    [
+        ("TestGraphMixResident", "_OriginalMix", "graph_execution"),
+        ("TestGraphSyncResident", "_OriginalSync", "graph_sync_start_early_dispatch"),
+        ("TestGraphPredicateResident", "_OriginalPredicate", "graph_predicated_dispatch"),
+    ],
+)
+def test_capability_wrappers_keep_original_sources_inputs_and_golden(native, scene_name, original_name, directory):
+    scene, original = getattr(native, scene_name), getattr(native, original_name)
+    root = Path(native.__file__).parent.parent / directory
+    assert scene.CASES is original.CASES
+    assert scene.generate_args is original.generate_args
+    assert scene.compute_golden is original.compute_golden
+    assert scene.RTOL == original.RTOL and scene.ATOL == original.ATOL
+    original_specs = [original.CALLABLE["orchestration"], *original.CALLABLE["incores"]]
+    native_specs = [scene.CALLABLE["orchestration"], *scene.CALLABLE["incores"]]
+    assert len(original_specs) == len(native_specs)
+    for source, target in zip(original_specs, native_specs, strict=True):
+        assert (root / source["source"]).resolve() == (root / target["source"]).resolve()
+        assert {k: v for k, v in source.items() if k != "source"} == {k: v for k, v in target.items() if k != "source"}
+    assert [m.args for m in scene.pytestmark if m.name == "scheduler_mode"] == [("resident",)]
+
+
+@pytest.mark.parametrize(
+    "scene_name,original_name",
+    [
+        ("TestGraphMixResident", "_OriginalMix"),
+        ("TestGraphSyncResident", "_OriginalSync"),
+        ("TestGraphPredicateResident", "_OriginalPredicate"),
+    ],
+)
+def test_capability_wrappers_call_original_oracle_before_resident_check(native, monkeypatch, scene_name, original_name):
+    calls = []
+    monkeypatch.setattr(getattr(native, original_name), "compare_outputs", lambda *args: calls.append(args))
+    scene = getattr(native, scene_name)()
+    scene._graph_worker = SimpleNamespace(scheduler_runtime_mode=3, scheduler_mode_publish_count=2)
+    scene._graph_publish_count = 1
+    with pytest.raises(AssertionError, match="resident Graph required"):
+        scene.compare_outputs(None, None, [], {})
+    assert len(calls) == 1

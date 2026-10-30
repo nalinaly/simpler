@@ -88,11 +88,57 @@ TEST(HbgGraphMaterialize, RejectsTruncationAndHeapOverflow) {
 TEST(HbgGraphMaterialize, PredicateCannotSilentlyBecomeAnUnconditionalTask) {
     MaterializeFixture f;
     f.object.body.tasks[0].predicate_slot = 1;
-    EXPECT_EQ(f.materialize(), SchedulerGraphResult::UNSUPPORTED_SHAPE);
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+}
+
+TEST(HbgGraphMaterialize, PredicateBindsBoundaryViewAndInternalHeapPerInvocation) {
+    MaterializeFixture f;
+    f.enable_predicates();
+    ASSERT_EQ(f.materialize(), SchedulerGraphResult::OK);
+    const auto &boundary = f.output.tasks[0].payload.predicate;
+    const auto &internal = f.output.tasks[1].payload.predicate;
+    EXPECT_EQ(boundary.addr, 0x100000u + (5 + 2 + 1) * 4);
+    EXPECT_EQ(boundary.target, 13);
+    EXPECT_EQ(boundary.elem_size, 4);
+    EXPECT_EQ(boundary.op, PredicateOp::EQ);
+    EXPECT_EQ(internal.addr, reinterpret_cast<uint64_t>(f.heap.data()) + 16 + (2 + 1) * 4);
+    EXPECT_EQ(internal.target, 14);
+    f.boundary[0].buffer.addr = 0x200000;
+    f.boundary[0].start_offset = 11;
+    ASSERT_EQ(f.materialize(), SchedulerGraphResult::OK);
+    EXPECT_EQ(boundary.addr, 0x200000u + (11 + 2 + 1) * 4);
+    EXPECT_EQ(internal.addr, reinterpret_cast<uint64_t>(f.heap.data()) + 28);
+}
+
+TEST(HbgGraphMaterialize, PredicateRejectsSelfReadInvalidOperatorAndAddressOverflow) {
+    MaterializeFixture f;
+    f.enable_predicates();
+    auto &predicate = f.object.body.predicates[0];
+    predicate.operand.owner_task_id = TaskId::make_sub_task(0, 0);
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    predicate.operand.owner_task_id = TaskId::make_param(0);
+    predicate.op = 7;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    predicate.op = static_cast<uint8_t>(PredicateOp::EQ);
+    predicate.elem_offset = predicate.operand.extent_elem_cache;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    predicate.elem_offset = 1;
+    predicate.elem_size = 3;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    predicate.elem_size = 4;
+    f.boundary[0].buffer.addr = UINT64_MAX - 8;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    f.boundary[0].buffer.addr = 0x100000;
+    f.boundary[0].buffer.size = 16;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    f.boundary[0].buffer.size = 1024;
+    f.boundary[0].start_offset = UINT64_MAX / 4;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
 }
 
 TEST(HbgGraphMaterialize, MatchesLegacyParameterBindingForTheSameDefinition) {
     MaterializeFixture f;
+    f.enable_predicates();
     const auto &definition = f.object.body.definition;
     const uint64_t bytes = definition.required_heap + definition.execution_storage_bytes;
     std::unique_ptr<void, decltype(&std::free)> heap(std::aligned_alloc(64, (bytes + 63) & ~UINT64_C(63)), &std::free);
@@ -133,6 +179,10 @@ TEST(HbgGraphMaterialize, MatchesLegacyParameterBindingForTheSameDefinition) {
         EXPECT_EQ(a.extent_elem_cache, b.extent_elem_cache);
         EXPECT_EQ(a.shapes[0], b.shapes[0]);
         EXPECT_EQ(a.strides[0], b.strides[0]);
+        EXPECT_EQ(native.payload.predicate.addr - a_base, legacy.payload.predicate.addr - b_base);
+        EXPECT_EQ(native.payload.predicate.target, legacy.payload.predicate.target);
+        EXPECT_EQ(native.payload.predicate.elem_size, legacy.payload.predicate.elem_size);
+        EXPECT_EQ(native.payload.predicate.op, legacy.payload.predicate.op);
     }
 }
 

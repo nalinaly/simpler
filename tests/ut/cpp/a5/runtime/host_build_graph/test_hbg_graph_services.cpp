@@ -174,6 +174,17 @@ TEST(HbgGraphServices, DuplicateChildCompletionDoesNotDecrementTheInstanceTwice)
     EXPECT_EQ(f.pop(), SCHEDULER_TASK_REF_INVALID);
 }
 
+TEST(HbgGraphServices, OldInstanceEpochCannotContributeToTheCurrentRun) {
+    GraphServices f({{true, 2}});
+    auto *summary = scheduler_state_at<SchedulerGraphSummary>(f.base(), f.storage.layout.graph_summary_offset);
+    summary->run_epoch = 7;
+    f.instances[0].run_epoch = 6;
+    EXPECT_FALSE(f.complete(1));
+    EXPECT_EQ(f.instances[0].remaining_children, 2u);
+    EXPECT_NE(scheduler_read_error(f.run()), 0u);
+    EXPECT_EQ(f.pop(), SCHEDULER_TASK_REF_INVALID);
+}
+
 TEST(HbgGraphServices, AggregateUnderflowIsAnErrorAndNeverReleasesTheParent) {
     GraphServices f({{true, 2}});
     scheduler_gm_store(f.instances[0].remaining_children, UINT64_C(0));
