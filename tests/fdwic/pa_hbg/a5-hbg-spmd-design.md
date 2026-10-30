@@ -41,8 +41,10 @@ N=1 不设置多 block SYNC_START 标志，但 Mix 类型、组内配对和资�
 - 本核关闭 A 后可进入 B；真实 A→B 数据依赖仍须等待 A 的逻辑完成。
 - 先原样跑通 CSA 的普通多 block／Mix 分波，再完成 sync_start。
 
-当前 Mix 的准入成员是所有候选 cluster 的三个 lane；由于所有 cluster 都允许动态领取，
-实际覆盖全芯片。单个 block 的三 lane 握手仍只发生在其所属 cluster，不是全芯片同时起跑。
+2026-10-30 用户将资源合同修订为按经验证的实际资源范围协调：
+1C1V 使用 C 与指定 V 的两 lane，1C2V 使用三 lane；mask 6 仍包括不执行 kernel 的协调 C。
+所有 cluster 继续公平竞争，准入成员为所有候选 cluster 中该任务需要的资源 lane，
+并非预选部分 cluster。单个 block 的握手只发生在所属 cluster，不是全芯片同时起跑。
 不能将成员缩为仅 AIC，否则 AIV 可能跳过前序 Mix 并阻塞于后序 sync_start，令前序组无法到齐。
 详细边界见 [Mix 的局部资源与 task 成员](spmd/block-and-mix-execution.md#本地资源的进入和退出)。
 
@@ -129,7 +131,7 @@ N=1 和多 block Mix 共用 GM 组协议，AIC 只负责组领取、身份发布
 - `scheduler_runtime_mode` 与 `scheduler_mode_publish_count` 逐轮验证 resident 来源，
   不必要求所有功能测试先打开完整泳道。原有单 block predicate 继续保留。
 - GM Mix 已使用 descriptor／ack／保留到 run 结束的 seal，各 lane 自备参数，
-  AIC 收齐三条资源 lane 的 release 后才贡献一次 block 完成；mask 6 不伪造 AIC kernel。
+  AIC 收齐本组全部资源 lane 的 release 后才贡献一次 block 完成；mask 6 不伪造 AIC kernel。
   正常 EXIT 在公共尾部排空本核义务，覆盖启动直接看见 EXIT 的零工作核；错误退出不补 seal。
 - 无 kernel 服务节点只推进依赖和逻辑完成，不分配 payload／kernel trace，
   不等待无关 Mix 的资源义务；Host 已完成节点不在设备重复处理。

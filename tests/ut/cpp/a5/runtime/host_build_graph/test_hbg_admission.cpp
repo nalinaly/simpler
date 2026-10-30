@@ -430,6 +430,8 @@ TEST_P(HbgAdmissionMembership, FreezesCompactWorkerMembershipFromTopologyNotPhys
     ASSERT_TRUE(fixture.publish(0));
     const uint64_t expected = mask == 1                     ? UINT64_C(0x12) :
                               __builtin_popcount(mask) == 1 ? UINT64_C(0x2d) :
+                              mask == 3                     ? UINT64_C(0x33) :
+                              mask == 5                     ? UINT64_C(0x1e) :
                                                               UINT64_C(0x3f);
     EXPECT_EQ(fixture.members(0)[0], expected);
     EXPECT_EQ(fixture.record(0)->member_count, static_cast<uint32_t>(__builtin_popcountll(expected)));
@@ -491,7 +493,8 @@ TEST(HbgAdmission, PublishedSecondBitmapWordDistinguishesMembersAndNonmembers) {
         ASSERT_EQ(fixture.admissions[0].member_word_count, 2u);
         for (uint64_t worker : {63u, 64u, 65u, 66u, 67u, 68u}) {
             SCOPED_TRACE(worker);
-            const bool member = __builtin_popcount(mask) > 1 || (mask == 1 ? worker % 3 == 0 : worker % 3 != 0);
+            const bool member = __builtin_popcount(mask) > 1 ? ((mask | 1U) & (1U << (worker % 3))) != 0 :
+                                                               (mask == 1 ? worker % 3 == 0 : worker % 3 != 0);
             ASSERT_TRUE(fixture.refresh(worker));
             const auto &admission = fixture.admissions[worker];
             EXPECT_EQ(admission.current_task_ref, member ? 0 : SCHEDULER_TASK_REF_INVALID);
@@ -1147,10 +1150,10 @@ TEST(HbgAdmission, InvalidTopologyCannotFreezeMembership) {
 }
 
 TEST(HbgAdmission, FrozenTopologyCacheIsReusedForDifferentShapesButNotAcrossRuns) {
-    AdmissionFixture fixture({{2, 1}, {2, 2}, {2, 7}});
+    AdmissionFixture fixture({{2, 1}, {2, 2}, {2, 3}, {2, 5}, {2, 7}});
     auto &admission = fixture.admissions[0];
-    const uint64_t expected[] = {0x9, 0x36, 0x3f};
-    for (uint64_t task = 0; task < 3; ++task) {
+    const uint64_t expected[] = {0x9, 0x36, 0x1b, 0x2d, 0x3f};
+    for (uint64_t task = 0; task < 5; ++task) {
         SchedulerAdmissionRecord record{};
         record.flags = fixture.storage.metadata[task].flags;
         record.active_mask = fixture.storage.metadata[task].active_mask;
@@ -1165,14 +1168,21 @@ TEST(HbgAdmission, FrozenTopologyCacheIsReusedForDifferentShapesButNotAcrossRuns
         EXPECT_EQ(members, static_cast<uint32_t>(__builtin_popcountll(expected[task])));
         EXPECT_EQ(admission.topology_worker_count, 6u);
         EXPECT_EQ(admission.topology_cube_words[0], 0x9u);
+        EXPECT_EQ(admission.topology_vector0_words[0], 0x12u);
     }
     ASSERT_TRUE(scheduler_init_spmd_task_records(fixture.base(), fixture.storage.layout, 18));
     // A new run may publish a different compact-worker topology.
     std::swap(fixture.storage.contexts[0].core_type, fixture.storage.contexts[1].core_type);
+    for (uint32_t worker : {0u, 1u, 2u}) {
+        fixture.storage.contexts[worker].cluster_worker_ids[0] = 1;
+        fixture.storage.contexts[worker].cluster_worker_ids[1] = 0;
+        fixture.storage.contexts[worker].cluster_worker_ids[2] = 2;
+    }
     ASSERT_TRUE(scheduler_initialize_admission(fixture.base(), fixture.locals[0], &admission));
     EXPECT_EQ(admission.epoch, 18u);
     EXPECT_EQ(admission.topology_worker_count, 0u);
     EXPECT_EQ(admission.topology_cube_words[0], 0u);
+    EXPECT_EQ(admission.topology_vector0_words[0], 0u);
     SchedulerAdmissionRecord record{};
     record.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD;
     record.active_mask = 1;
@@ -1184,6 +1194,28 @@ TEST(HbgAdmission, FrozenTopologyCacheIsReusedForDifferentShapesButNotAcrossRuns
     );
     EXPECT_EQ(words[0], 0xau);
     EXPECT_EQ(members, 2u);
+    EXPECT_EQ(admission.topology_vector0_words[0], 0x11u);
+}
+
+TEST(HbgAdmission, InvalidClusterLaneMappingsCannotFreezeAResourceSubset) {
+    for (uint32_t corruption = 0; corruption < 5; ++corruption) {
+        SCOPED_TRACE(corruption);
+        AdmissionFixture fixture({{2, 3}});
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+        ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+        auto &peers = fixture.storage.contexts[0].cluster_worker_ids;
+        if (corruption == 0) peers[0] = 3;
+        else if (corruption == 1) peers[1] = 6;
+        else if (corruption == 2) peers[1] = 0;
+        else if (corruption == 3) peers[2] = peers[1];
+        else peers[1] = 4;
+        EXPECT_FALSE(fixture.prepare(0));
+        EXPECT_EQ(fixture.record(0)->member_count, 0u);
+        EXPECT_EQ(fixture.admissions[0].topology_worker_count, 0u);
+        EXPECT_EQ(fixture.admissions[0].topology_vector0_words[0], 0u);
+        EXPECT_EQ(scheduler_gm_fetch_add(fixture.control()->commit_tail, UINT64_C(0)), 0u);
+    }
 }
 
 TEST(HbgAdmission, CachedTopologyStillRejectsWrongMembersInALaterPublishedRecord) {

@@ -110,6 +110,7 @@ struct StartupFixture {
         }
         auto *run = storage.run_control;
         for (int64_t task = 0; task < 2; ++task) {
+            const uint8_t resources = scheduler_mix_resource_mask(storage.metadata[task].active_mask);
             ASSERT_EQ(
                 scheduler_route_task(graph_view, base(), &locals[0], run, task, nullptr),
                 SchedulerRouteResult::READY_TO_ENQUEUE
@@ -139,11 +140,14 @@ struct StartupFixture {
             ASSERT_TRUE(scheduler_gm_mix_publish(graph_view, base(), &locals[0], run));
             bool progress = false;
             for (uint32_t lane : {1u, 2u})
-                ASSERT_TRUE(scheduler_gm_mix_observe(graph_view, base(), &locals[lane], run, &progress));
+                if ((resources & (1U << lane)) != 0)
+                    ASSERT_TRUE(scheduler_gm_mix_observe(graph_view, base(), &locals[lane], run, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane)
-                ASSERT_TRUE(scheduler_gm_mix_arrive(graph_view, base(), &locals[lane], run, &progress));
+                if ((resources & (1U << lane)) != 0)
+                    ASSERT_TRUE(scheduler_gm_mix_arrive(graph_view, base(), &locals[lane], run, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane)
-                ASSERT_TRUE(scheduler_gm_mix_prepare_lane(graph_view, base(), &locals[lane], run, 0, &progress));
+                if ((resources & (1U << lane)) != 0)
+                    ASSERT_TRUE(scheduler_gm_mix_prepare_lane(graph_view, base(), &locals[lane], run, 0, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane) {
                 auto &local = locals[lane];
                 uint32_t slot = UINT32_MAX;
@@ -169,6 +173,7 @@ struct StartupFixture {
                 scheduler_complete_ordered_task(graph_view, base(), &locals[0], run, task, 0, nullptr, nullptr, nullptr)
             );
             for (uint32_t lane = 0; lane < 3; ++lane) {
+                if ((resources & (1U << lane)) == 0) continue;
                 bool closed = false;
                 ASSERT_TRUE(scheduler_gm_mix_close(graph_view, base(), &locals[lane], run, &closed));
                 ASSERT_TRUE(closed);

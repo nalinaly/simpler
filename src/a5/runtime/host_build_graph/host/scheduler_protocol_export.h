@@ -220,6 +220,7 @@ inline void lane(JsonObject &row, const SchedulerProtocolLaneTrace &record) {
     row.number("resource_mask", record.resource_mask);
     row.numbers("arrived_seq", record.arrived_seq, 3);
     row.numbers("lane_subtasks", record.lane_subtasks, 3);
+    row.numbers("previous_lane_seq", record.previous_lane_seq, 3);
 }
 
 inline void execution(JsonObject &row, const SchedulerProtocolExecutionTrace &record) {
@@ -342,8 +343,8 @@ inline std::string scheduler_export_protocol(
     std::ostringstream out;
     {
         JsonObject root(out);
-        // v7 preserves claim certificates and declares isolated close-seal cells.
-        root.string("schema", "hbg-native-protocol-v7");
+        // v8 records resource-scoped membership and each lane's predecessor.
+        root.string("schema", "hbg-native-protocol-v8");
         root.number("close_seal_stride", sizeof(SchedulerMixCloseSeal));
         root.string("producer", "aicore");
         root.number("run_epoch", epoch);

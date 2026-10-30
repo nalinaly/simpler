@@ -88,6 +88,28 @@ def test_nonparticipant_vector_can_run_while_cube_task_is_incomplete():
     assert model.oldest(1) == 1 and model.oldest(0) == 0
 
 
+@pytest.mark.parametrize("mask,unused", [(3, 2), (5, 1)])
+def test_unused_vector_runs_beside_single_vector_mix_but_cannot_skip_a_later_full_mix(mask, unused):
+    model = make_protocol(Task(0, 2, mask), Task(1, 1, 2), Task(2, 1, 7), Task(3, 1, 2))
+    for task in range(4):
+        model.admit(task)
+    a = model.claim(0, 0)
+    model.publish(a)
+    block = model.state(0).blocks[0]
+    assert unused not in block.resources
+    for worker in block.resources:
+        model.arrive(a, worker)
+    for worker in block.mapping.values():
+        model.start(a, worker, "mix")
+    b = model.claim(1, unused)
+    execute_block(model, b)
+    model.close(1, unused)
+    assert not model.state(0).done
+    assert model.oldest(unused) == 2
+    with pytest.raises(ContractViolation, match="ORDER"):
+        model.claim(3, unused)
+
+
 def test_partial_member_sets_use_projection_not_global_minimum_frontier():
     model = make_protocol(Task(0, 1, 2), Task(1, 1, 2))
     model.admit(0, (1, 2))
@@ -150,10 +172,11 @@ def test_mix_claim_before_publication_cannot_be_bypassed(mask):
     model.claim(0, 0)
     model.claim(0, 3)
     assert model.state(0).next_block == 2
+    vector = 5 if mask == 5 else 4
     with pytest.raises(ContractViolation, match="CLUSTER_NOT_CLOSED"):
-        model.close(0, 4)
+        model.close(0, vector)
     with pytest.raises(ContractViolation, match="ORDER"):
-        model.claim(1, 4)
+        model.claim(1, vector)
     assert not model.running
 
 
@@ -165,7 +188,7 @@ def test_local_mix_group_completion_does_not_wait_other_clusters(mask):
     local, remote = model.claim(0, 0), model.claim(0, 3)
     execute_block(model, local, "mix")
     model.close_cluster(0, 0)
-    for worker in (0, 1, 2):
+    for worker in model.state(0).spec.resource_lanes:
         model.close(0, worker)
     b = model.claim(1, 1)
     execute_block(model, b)
@@ -178,7 +201,7 @@ def test_mix_requires_every_local_resource_lane_to_arrive(mask):
     model.admit(0)
     lease = model.claim(0, 0)
     model.publish(lease)
-    for worker in (0, 1):
+    for worker in model.state(0).spec.resource_lanes[:-1]:
         model.arrive(lease, worker)
     first_executor = next(iter(model._block(lease)[1].mapping.values()))
     with pytest.raises(ContractViolation, match="RESOURCE_NOT_READY"):

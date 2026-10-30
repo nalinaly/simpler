@@ -130,12 +130,14 @@ inline __aicore__ bool scheduler_ordered_poll_may_progress(
         const auto *record = scheduler_admission_record_at(base, &admission, admission.current_task_ref);
         auto *seals = scheduler_state_at<SchedulerMixCloseSeal>(base, record->mix_close_seals_offset);
         return scheduler_gm_query(seals[group.cluster_index].value) != 0 ||
-               scheduler_gm_query(mailbox->published_seq) > group.group_seq;
+               scheduler_gm_query(mailbox->lanes[local->config.self_lane].assigned_seq) > group.group_seq;
     }
     const bool releases = group.phase == SchedulerGmMixPhase::RELEASED && local->is_mix_coordinator();
     if (group.phase == SchedulerGmMixPhase::ARRIVED || releases) {
         if (group.group_seq == 0 || group.group_seq == UINT64_MAX) return true;
+        const uint8_t resources = scheduler_mix_resource_mask(admission.current_active_mask);
         for (uint32_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
+            if ((resources & (1U << lane)) == 0) continue;
             auto &ack = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
             if (scheduler_gm_query(ack) < group.group_seq) return false;
         }

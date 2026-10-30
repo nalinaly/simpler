@@ -87,7 +87,7 @@ inline constexpr bool scheduler_resident_worker_demand_checked(
     if (sync_start) {
         const bool mix = __builtin_popcount(active_mask) > 1;
         required.aic = (mix || active_mask == 1) ? blocks : 0;
-        required.aiv = mix ? blocks * PLATFORM_AIV_CORES_PER_BLOCKDIM : (active_mask == 1 ? 0 : blocks);
+        required.aiv = mix ? blocks * required.aiv : (active_mask == 1 ? 0 : blocks);
     }
     const uint64_t clusters = workers / PLATFORM_CORES_PER_BLOCKDIM;
     if (required.aic > clusters || required.aiv > clusters * PLATFORM_AIV_CORES_PER_BLOCKDIM) return false;

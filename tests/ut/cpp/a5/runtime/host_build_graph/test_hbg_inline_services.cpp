@@ -22,18 +22,18 @@
 namespace {
 
 struct InlineFixture {
-    explicit InlineFixture(bool ordered = true, bool mix = false, bool protocol = false) :
+    explicit InlineFixture(bool ordered = true, bool mix = false, bool protocol = false, uint8_t mix_mask = 3) :
         storage(3, 3, 4, SchedulerSpmdRequirements{3, 1, 1, mix ? 1u : 0u}, protocol) {
-        graph.mixed(0, mix ? 3 : 2);
+        graph.mixed(0, mix ? mix_mask : 2);
         graph.executable(2, 1);
         for (uint32_t task = 0; task < 3; ++task) {
             auto &metadata = storage.metadata[task];
-            metadata.active_mask = task == 0 && mix ? 3 : 2;
+            metadata.active_mask = task == 0 && mix ? mix_mask : 2;
             metadata.logical_block_num = task == 0 ? 2 : 1;
             metadata.flags = SCHEDULER_TASK_EXECUTABLE;
             if (task == 0) metadata.flags |= SCHEDULER_TASK_SPMD | (mix ? SCHEDULER_TASK_MIX : 0);
             if (task == 1) metadata.flags |= SCHEDULER_TASK_INLINE;
-            metadata.trace_index_base = task == 0 ? 0 : (mix ? 4 : 2);
+            metadata.trace_index_base = task == 0 ? 0 : (mix ? 2 * __builtin_popcount(mix_mask) : 2);
             metadata.timing_slot = -1;
             for (uint32_t lane = 0; lane < 3; ++lane)
                 metadata.kernel_ids[lane] = task != 1 && (metadata.active_mask & (1U << lane)) ? 1 : UINT16_MAX;
@@ -150,7 +150,7 @@ TEST_P(HbgInlineDispatch, CompletesWithoutPayloadSlotGenerationOrKernelTrace) {
 INSTANTIATE_TEST_SUITE_P(OrdinaryAndOrdered, HbgInlineDispatch, ::testing::Bool());
 
 TEST(HbgInlineService, ProgressesWhileAnUnrelatedMixWaitsForAnotherLane) {
-    InlineFixture fixture(true, true);
+    InlineFixture fixture(true, true, false, 7);
     ASSERT_TRUE(fixture.enqueue(0, 0));
     ASSERT_TRUE(fixture.fill(0));
     ASSERT_TRUE(fixture.enqueue(1));

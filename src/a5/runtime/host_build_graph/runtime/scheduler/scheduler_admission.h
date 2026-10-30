@@ -177,6 +177,7 @@ inline __aicore__ bool scheduler_admission_expected_members(
         return false;
     if (admission->topology_worker_count == 0) {
         uint64_t cube_words[(SCHEDULER_WORKER_CAPACITY + 63) / 64]{};
+        uint64_t vector_words[2][(SCHEDULER_WORKER_CAPACITY + 63) / 64]{};
         uint64_t observed_cubes = 0;
         for (uint64_t worker = 0; worker < workers; ++worker) {
             auto *context = scheduler_worker_context_at(base, local, worker);
@@ -189,11 +190,30 @@ inline __aicore__ bool scheduler_admission_expected_members(
             if (type == static_cast<int32_t>(CoreType::AIC)) {
                 ++observed_cubes;
                 cube_words[worker / 64] |= UINT64_C(1) << (worker % 64);
+                scheduler_invalidate_cache_line(&context->cluster_worker_ids[0]);
+                scheduler_invalidate_cache_line(&context->cluster_worker_ids[2]);
+                scheduler_cache_barrier();
+                if (context->cluster_worker_ids[0] != worker) return false;
+                for (uint32_t lane = 1; lane < 3; ++lane) {
+                    const uint64_t peer = context->cluster_worker_ids[lane];
+                    if (peer >= workers || peer == worker) return false;
+                    const uint64_t bit = UINT64_C(1) << (peer % 64);
+                    if (((vector_words[0][peer / 64] | vector_words[1][peer / 64]) & bit) != 0) return false;
+                    vector_words[lane - 1][peer / 64] |= bit;
+                }
             }
         }
         if (observed_cubes != cubes) return false;
-        for (uint64_t word = 0; word < admission->member_word_count; ++word)
+        for (uint64_t word = 0; word < admission->member_word_count; ++word) {
+            const uint64_t remaining = workers - word * 64;
+            const uint64_t valid = remaining >= 64 ? UINT64_MAX : (UINT64_C(1) << remaining) - 1;
+            const uint64_t vectors = vector_words[0][word] | vector_words[1][word];
+            if ((vectors & cube_words[word]) != 0 || (vectors | cube_words[word]) != valid) return false;
+        }
+        for (uint64_t word = 0; word < admission->member_word_count; ++word) {
             admission->topology_cube_words[word] = cube_words[word];
+            admission->topology_vector0_words[word] = vector_words[0][word];
+        }
         admission->topology_worker_count = workers;
     } else if (admission->topology_worker_count != workers) {
         return false;
@@ -204,9 +224,19 @@ inline __aicore__ bool scheduler_admission_expected_members(
         const uint64_t remaining = workers - word * 64;
         const uint64_t valid = remaining >= 64 ? UINT64_MAX : (UINT64_C(1) << remaining) - 1;
         const uint64_t cube_word = admission->topology_cube_words[word];
-        words[word] |= mix ? valid : (cube_task ? cube_word : (valid & ~cube_word));
+        if (mix) {
+            const uint8_t resources = scheduler_mix_resource_mask(record->active_mask);
+            words[word] |= cube_word;
+            if ((resources & 2U) != 0) words[word] |= admission->topology_vector0_words[word];
+            if ((resources & 4U) != 0) words[word] |= valid & ~(cube_word | admission->topology_vector0_words[word]);
+        } else {
+            words[word] |= cube_task ? cube_word : (valid & ~cube_word);
+        }
     }
-    *member_count = static_cast<uint32_t>(mix ? workers : (cube_task ? cubes : workers - cubes));
+    *member_count = static_cast<uint32_t>(
+        mix ? cubes * __builtin_popcount(scheduler_mix_resource_mask(record->active_mask)) :
+              (cube_task ? cubes : workers - cubes)
+    );
     const uint32_t positions = mix ? cubes : *member_count;
     return *member_count != 0 &&
            (!scheduler_task_requires_sync_start(record->flags) || record->logical_block_num <= positions);

@@ -111,29 +111,42 @@ AIC 领取 b 后发布 task_ref、order_key、block_idx、mask、物理组、run
 每个 cluster 首版任意时刻只保留一个执行中的 Mix 组，包括不同 task 之间。
 AIV 读取 AIC 发布的同一个组身份，自行装配自己的 LocalContext 与参数；
 不能因为 task_ref 相同就默认配对，也不能独立领取恰好不同的 block。
-全局 block 编号不要求在每个 cluster 连续，局部组序号则必须连续。
+全局 block 编号不要求在每个 cluster 连续，C 的局部组序号必须连续。
+单个 V 可以跳过不需要自己的组；descriptor 保存每 lane 的上一参与组序号，
+接收方必须核对自己的前驱，不能仅因新序号较大就接受。
 
 本版保留 kernel 通信端点的固定映射：mask 3 的 AIV0 在物理 AIV0，
 mask 5 的 AIV1 在物理 AIV1，mask 6/7 各在对应物理 lane。
 NO_SPLIT/SingleModeVec0 的硬件搬运目标不能由 payload.sub_block_id 改写，
 因此不按 block 奇偶轮换单 AIV；逻辑执行身份与物理身份仍分别记录和校验。
 
-记录分离 AIC 发布字段与各 lane 的到达／完成字段；每个 lane 只写自己的 token。
+记录分离 AIC 发布字段与各 lane 的到达／完成字段；每个 lane 只写自己的到达／释放 token。
+AIC 写回完整 descriptor 后，只更新实际参与 V 的 assigned_seq。
+V 先读取自己的通知，再 acquire descriptor；未被通知的 V 不读可能被反复复用的共享 descriptor。
 多核不能用普通 store 合写一个 mask，需聚合时使用明确 owner 或已验证的原子。
 调度代码中的 SSBUF 指针检查、初始化、发布和完成读取一起迁移，不只替换一处通知。
 
 ### 本地资源的进入和退出
 
-TPipe 等机制可能使用同组缓冲和事件；执行 mask 不等于完整资源依赖。
-当前每个已领取 block 的资源握手覆盖其所属 cluster 的三个 lane，包括不执行 kernel 的 lane；
-这不代表其他 cluster 也要参加这一次组内 barrier，也不给纯 AIC 任务附加无关 AIV 义务。
+TPipe 等机制可能使用同组缓冲和事件；执行 mask 本身不能证明硬件资源独立。
+2026-10-30 的已确认合同是按经验证的实际资源范围协调。当前支持的固定放置如下：
 
-需要区分 block 的局部资源域和 task 的候选成员集合。当前所有 cluster 的 AIC 都可能动态领取
-同一个 Mix task，因此其准入成员覆盖全芯片 AIC/AIV；即使 N 很小、某个 cluster 最终没有工作，
-也必须观察并关闭该 task，不能预先跳过。若只把 AIC 列入成员，AIV 可以越过 Mix 进入后序
-sync_start 的阻塞 kernel，随后被前序 Mix 选中的 AIC 将等不到它到达。
-这是当前动态领取与三 lane 合同的约束，不是 TPipe 硬件资源覆盖全芯片的证明。
-候选 cluster 收窄需要在准入前统一冻结范围、同步限制实际领取者并重新证明活性，不属于当前实现。
+| 执行 mask | 资源 lane | 未参与 lane |
+| --------- | --------- | ----------- |
+| 3：C＋V0 | C、V0 | V1 |
+| 5：C＋V1 | C、V1 | V0 |
+| 6：V0＋V1 | C、V0、V1，C 仅协调 | 无 |
+| 7：C＋V0＋V1 | C、V0、V1 | 无 |
+
+当前资源 mask 为 active_mask｜1；固定放置与 kernel 通信资源合同必须一致。
+CSA 的已固定 PTO NO_SPLIT 路径使用 SingleModeVec0，不把这一结论外推到任意自定义通信 kernel。
+新增 kernel 若占用未声明的伙伴事件／缓冲，须先验证资源范围，不能靠减少参与者规避等待。
+
+所有 cluster 的 AIC 都继续参与动态领取，成员集合是这些 cluster 各自所需资源 lane 的并集。
+即使 N 很小、某个 cluster 最终没有工作，其资源成员也必须观察并关闭该任务。
+未参与的 V 可以执行独立任务，但不能越过后续需要自己的协同义务。
+不能只留下 AIC、遗漏必需 V，否则该 V 可能阻塞于后序 sync_start，导致前序 Mix 无法到齐。
+本次不预选 cluster、不限制合法领取者，也不改变 sync_start 的每位置一次或必要 lane 到齐条件。
 
 ~~~text
 AIC 发布本 block 组身份

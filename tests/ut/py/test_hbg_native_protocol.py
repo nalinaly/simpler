@@ -150,9 +150,10 @@ def test_legacy_protocol_does_not_silently_accept_v5_claim_lock(version):
 
 
 @pytest.mark.parametrize("stride", (None, 0, 8, 64, 127, 129, 256, True, 128.0, "128", -1, 1 << 64))
-def test_v7_requires_typed_exact_close_stride_even_without_mix(stride):
+@pytest.mark.parametrize("version", (7, 8))
+def test_isolated_close_versions_require_typed_exact_stride_even_without_mix(stride, version):
     raw = capture()
-    raw.update(schema="hbg-native-protocol-v7", close_seal_stride=128)
+    raw.update(schema=f"hbg-native-protocol-v{version}", close_seal_stride=128)
     raw["task_controls"][0].update(claim_tickets=0, admission_claim_lock=0, claim_seal=0)
     assert read_native_protocol(raw) == raw
     if stride is None:

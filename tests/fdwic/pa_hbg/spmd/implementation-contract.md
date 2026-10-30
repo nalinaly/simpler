@@ -7,7 +7,8 @@ GM Mix 也已接入，原样 CSA 的数值与严格 resident L4 门禁已通过�
 首错误身份、退出冷日志及显式 block/slot 身份已接线，原样 CSA 身份审计通过；
 L4 原生协议采集、因果审计和原样 CSA 严格门禁已通过；N>1 的 sync_start 已接线，
 仿真／A5 各 47 项及原生审计通过；N=1 公共请求已确认保留归一化，详见下文两层合同。
-当前先做边界验收，性能优化按用户要求留待后续，不以性能完成代替正确性验收。
+边界验收与性能迭代分别记录，不以性能收益代替正确性验收；当前性能目标见
+[低于 1.5ms 的实施计划](csa-sub2ms-optimization-plan.md)。
 初次同卡无完整插桩对照中，固定 CSA 的 Device 中位数约为 AICPU 设计基线的 11.41 倍。
 后续 GM service 按本核阶段跳过无进展调用，相对同批 resident 对照降低 Device 中位数 6.58%，
 关键错误检查保留；整体回退尚未消除，不能将功能通过写成已经达到设计基线性能。
@@ -29,17 +30,18 @@ device 沿用完成驱动的 wake-list、ready inbox、直接后继候选和每�
 | ---- | -------------- | ---------------- |
 | 现有 TaskMetadata | 原 N、mask、函数、参数、trace base | Host 初始化，本轮只读 |
 | 现有 TaskControl 的原子区 | next_block、claim_tickets、completed_blocks、admission_claim_lock | 领取者／完成者；只能原子访问 |
-| TaskControl 的阶段信号区 | admission_state，独占 128B | 唯一准入者发布；禁止 AICore RMW 或 cached writeback |
+| TaskControl 的阶段信号区 | admission_state、claim_seal，共用隔离的 128B 区域 | 各字段由唯一发布者写入；禁止 AICore RMW 或 cached writeback |
 | AdmissionRecord | epoch、task_ref、order_key、成员位图、形状／策略、Mix seal offset | 唯一准入者准备；发布后只读 |
 | AdmissionLog | 长度为可协同准入 task 数的 task_ref 数组；commit_tail、短提交锁 | 任意合法发布者；一次提交一个引用 |
 | 本核本地状态 | scan_cursor、current_obligation、两个候选身份、当前 lease、sync_claimed | 仅本核修改，不增每核全图表 |
-| 每 cluster 一个 GM GroupMailbox | 当前组 descriptor、published_seq、3 个 lane ack | AIC 写组身份，各 lane 写自己的 ack |
+| 每 cluster 一个 GM GroupMailbox | descriptor、published_seq、3 个 lane 控制区 | AIC 写组身份和各 V 的 assigned_seq；各 lane 写自己的 ack |
 | MixCloseSeal | 每 Mix task、每候选 cluster 一个 64 位结束 token | 本 cluster AIC 单次发布，直到本轮退出不复用 |
 
 TaskControl 为 512B：state/wake_list_head/next_waiter 仍在第一条 64B line，admission_claim_lock 的 offset 为 40；
 offset 24 的 claim_tickets 复用原 padding，offset 32–39 为零 padding；第二条普通写回 line 仍从 offset 64 开始。
 next_block、completed_blocks 分别独占 offset 128、256 起的 128B 区域，均只能原子访问。
-admission_state 独占 offset384 起的 128B 区域，由 st_dev＋DSB 发布、ld_dev 读取，
+admission_state 与 claim_seal 位于 offset384 起的 128B 隔离信号区域，分别由各自唯一发布者
+用 st_dev＋DSB 发布、由 ld_dev 读取，
 整条信号 line 不与原子字、cached store 或 dirty writeback 混用。
 保持 sizeof、offsetof、alignment、POD 静态断言，Host 初始化／上传与所有访问步长从 sizeof 推导。
 AdmissionRecord 的位图按紧凑 worker index 编码，按实际 worker 数规划 word 数，
@@ -53,8 +55,10 @@ GraphSummary 的现有 padding 承载协议 offset／容量／Host run_epoch，�
 AdmissionControl 的 lock/tail 各占 128B；GroupMailbox 为 descriptor 128B、
 published_seq 独占 128B、三个 lane ack 各 128B，共 640B。
 
-`SchedulerAdmissionLocalState` 为 256B，含两个各 48B 的候选、40B 组状态、sync_claimed，
-以及本轮不变拓扑的 AIC 位图与有效 worker 数缓存；缓存随每轮初始化重置。
+`SchedulerAdmissionLocalState` 为 288B，含两个各 48B 的候选、56B 组状态、sync_claimed，
+以及本轮不变拓扑的 AIC／V0 位图与有效 worker 数缓存；缓存随每轮初始化重置。
+组状态保留各 V 的最后参与序号。descriptor 的 previous_lane_seq 和 lane 控制区的 assigned_seq
+使用已有 padding，descriptor 仍为 128B，mailbox 仍为 640B。
 `SchedulerLocalSlotState` 为 24B，含 block 身份和 predicate 缓存，
 `SchedulerLocalState` 为 504B。候选只保留 task 所有权与重建所需状态，
 不会增加物理并发容量，也不保存每核全图或全部 block 历史。
@@ -63,7 +67,8 @@ AdmissionLog 只存引用，记录按 task_ref 定位；不按 block 数扩大�
 紧凑 log 单元在提交锁保护下由唯一发布者用 st_dev＋DSB 写入，发布后不可变，由 ld_dev 读取；
 commit_tail 同样使用隔离的 bypass 信号区。close seal 仍使用原子读写。
 这些紧凑数组都不能普通写单元再 dcci 整行；短锁不会自动消除不同发布者缓存中的旧行副本。
-MixCloseSeal 为 8 × Mix task 数 × 候选 cluster 数字节，避免复用 mailbox 后丢失前任务关闭通知。
+MixCloseSeal 为 128 × Mix task 数 × 候选 cluster 数字节；每单元包含一个 8B token，
+避免复用 mailbox 后丢失前任务关闭通知，并隔离不同 cluster 的原子热点。
 它不是第二套依赖图；所有大小都由 Host 按实际图分配，并做乘积／对齐溢出检查。
 参考模型为了审计保存所有 block 历史，生产路径不必为每 block 常驻完整模型对象。
 
@@ -87,7 +92,7 @@ MixCloseSeal 为 8 × Mix task 数 × 候选 cluster 数字节，避免复用 ma
 
 普通多 block 只要求有相应类型的执行位置，不要求 N 个位置同时空闲。
 sync_start 的 N 必须不超过本轮冻结成员中不同执行位置数：C 按 AIC，V 按 AIV，
-Mix 按完整 cluster；两个 pending slots 不是两个执行位置。
+Mix 按不同候选 cluster 及实际资源 lane；两个 pending slots 不是两个执行位置。
 先开放普通 C/V、GM Mix、原样 CSA，再开放 sync_start。
 多 block／Mix predicate 保留 Host 拒绝，Graph body 保留整图回退，不顺手删除形状门禁。
 异步返回未开放：resident payload 的 task token 无效、completion 三指针为空、capacity=0，
@@ -100,14 +105,15 @@ SDMA adapter 的 event.Wait 分支是独立的同步等待合同，不等于本�
 仍检查 N×active_subtasks≤32767；纯多 block 与 Mix 可以同图，不再设置组合隔离门禁。
 所有 Mix 包括 N=1 均走 GM，生产 resident 调度不使用 SSBUF。
 `scheduler_resident_worker_demand_checked` 对 sync_start 检查实际完整拓扑和不同位置容量；
-Mix 按每 block 一 AIC、两 AIV 的资源需求计数，不把 inactive lane 当作可让出的资源。
+Mix 按每 block 一协调 AIC、实际一或两 AIV 的资源需求计数；mask 6 的协调 AIC 不能让出。
+实际启动拓扑仍完整发现并启动所有 C/V；按资源成员协调不等于屏蔽某些 cluster 的竞争资格。
 准入准备再次核验冻结拓扑与容量。多 block／Mix predicate 仍沿用 Host 明确拒绝。
 
 N=1 的边界分为两层，用户已确认保留现有公共归一化行为：
 
 - 公共 LaunchSpec 接受 N=1、require_sync_start=true，但生成的 TaskAttrs 不设置 SYNC_START。
   请求对象、原 N、kernel 身份、参数和依赖不因此改变；独立的纯 AIV1→AIV0 归一化仍保留。
-- Mix 仍是单逻辑 block 的 Mix，继续共同准入、GM 组配对、三条资源 lane 握手和完成聚合。
+- Mix 仍是单逻辑 block 的 Mix，继续共同准入、GM 配对、实际资源 lane 握手和完成聚合。
   不得把“不带多 block 同步属性”解释成“一个执行核”或“取消组内协调”。
 - 绕过公共提交而直接制造 N=1 且显式带 SYNC 标志的设备 metadata，仍属于畸形输入并拒绝。
   CPU 模型 Task.sync_start 表示这一存储层标志，不是公共 LaunchSpec 的原始请求。
@@ -136,7 +142,7 @@ PREPARED／ADMITTED 由同一准入 owner 发布；扫描者仍核验阶段、�
 `scheduler_ordered_can_enter_slot` 在实际执行前校验许可；完成路径的 direct 候选
 进入同一个持久候选池。GM Mix 使用本核 own slot，入口再核对组、block、slot 和 generation。
 
-满足三 lane release 后，同一次服务可退役当前组并领取／发布下一组；
+满足本组全部资源 lane release 后，同一次服务可退役当前组并领取／发布下一组；
 本地 close 后可继续观察下一义务，每次 fill 最多连续处理两个已关闭义务。
 等待伙伴时立即返回，不以连续推进替代错误检查、执行许可或全员 release 确认。
 完成服务可能在本轮 discovery 之后产生 direct 候选；其中 inline 服务和多 block／Mix 候选
@@ -260,13 +266,15 @@ EMPTY → CLAIMED → DESCRIPTOR_PUBLISHED → LOCAL_RESOURCES_READY
 ~~~
 
 1. AIC 领取前检查其最早义务；领取后立即负有发布责任，不能再进入后序阻塞 kernel。
-2. descriptor 是独立只读发布区；包含完整组身份与 slot→物理 lane 映射。
-   写回 descriptor 后发布 group_seq，各 lane 观察序号后失效并读取 descriptor。
+2. descriptor 包含完整组身份、slot→物理 lane 映射和每 lane 的上一参与序号。
+   C 写回完整 descriptor 后，仅通知实际参与 V 的 assigned_seq；接收方 acquire 后验证完整身份和自身前驱。
+   未被通知的 V 不得读取可能正在复用的 descriptor；C 的组序号连续，V 可跳过非参与组。
 3. 每 lane 用自己的原子 ack 区发布 arrived_seq、released_seq，比较必须带当前 group_seq。
    不用重复清零的裸 done bit 区分代次；迟到旧 ack 不能满足新组。
 4. 需要本地共享资源的 lane 全部交出旧义务并到达后，才调用该组 kernel；
    这是局部资源检查，不是全 task 或全芯片到齐。
-5. inactive lane 只履行资源义务；mask 6 的 AIC 只协调，不增加 kernel 或 subtask 完成数。
+5. 1C1V 只协调 C 和固定 V；未参与 V 无到达／释放义务。1C2V 继续三 lane。
+   mask 6 的 AIC 只协调，不增加 kernel 或 subtask 完成数，但不能省略其资源义务。
 6. 各 lane 发布 released_seq 前完成输出、通信、trace 收尾，之后不再读取旧 descriptor/payload。
    AIC 观察全部必要 release 后，唯一地完成该 block，再允许写下一组 descriptor。
 
@@ -319,15 +327,15 @@ predicate 跳过保留 executed=false，不冒充 kernel 执行。N/block 来自
 completion 的既有 valid 最后发布；L0 不写身份。读端拒绝缺字段、错绑、重复执行及槽代次。
 CSA 严格门禁按冻结图核对完整 task/block/slot 集合；历史无身份 capture 保持未验证。
 执行身份对象本身不提供 LocalDone、共同准入发布和 GM 组释放事件。
-L4 另以 `aicore_protocol` 对象导出这些真实记录，当前生产 schema 为 `hbg-native-protocol-v7`，
+L4 另以 `aicore_protocol` 对象导出这些真实记录，资源范围协议 schema 为 `hbg-native-protocol-v8`，
 同时保留 Host 冻结图和设备终态。统一读端在 `simpler_setup/tools/hbg/native_protocol.py`；
 它校验 schema 与逐核序号完整性，`native_causality.py`、`native_mix_audit.py` 与
 `native_order.py` 进一步检查冻结图／成员、两槽生命周期、实际完成票号、组握手与关闭、
 TaskDone 和依赖，并与独立入口身份逐字段连接。
-v2–v7 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
-v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v7 为 N>1，N1／sync_start 均不取号。
-v5–v7 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
-v6/v7 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
+v2–v8 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
+v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v8 为 N>1，N1／sync_start 均不取号。
+v5–v8 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
+v6–v8 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
 每个协同 block 的 claim 记录保存有效确认计数，其集合严格为 1…N；
 只有实际令有效 next_block 达到 N 的确认者可以记录 seal=N 的发布前后事件，不能用最后票号替代。
 使用 seal 的成员关闭必须记录 claim_seal_seen==claim_cursor_seen==closed_cursor==N，
@@ -335,11 +343,14 @@ v6/v7 要求每个 task control 的 claim_seal 字段，成功终态协同任务
 Mix 的代管 V 不伪造 cursor 读取，仍通过原 cluster close-seal 关闭；sync_start 的提前局部关闭继续支持 cursor<N。
 claim_seal 不表示 kernel 完成；next_block==completed_blocks==N 的有效 block 条件保持原样。
 历史生产 v6 的 cluster close-seal 按 8B 排列，不包含关闭区步长变更。
-当前 v7 必填整数 close_seal_stride=128，没有 Mix 的图也必须声明，
+v7/v8 必填整数 close_seal_stride=128，没有 Mix 的图也必须声明，
 同时保留所有 v6 claim_seal 证书和关闭见证，不改变成员集合或入口/完成条件。
 v7 按完整 128B 单元校验每 task 的 seal 行范围、对齐和连续绑定；
 v1–v6 仍按各自历史 8B 语义处理且拒绝新字段。
-读端继续严格支持 v1–v6 生产历史记录，
+v8 按 active_mask｜1 验证成员和 lane 集合；未参与 lane 不产生组事件，ACK 数组对应项必须为零。
+这里的零表示本次未观察该项，不表示清零了真实 mailbox 中可能保留的历史 ACK。
+每个参与 lane 记录 previous_lane_seq[3]，审计跨组历史，拒绝丢组或把未参与组当作参与前驱。
+读端继续严格支持 v1–v7 生产历史记录，其 Mix 仍按原三 lane 合同审计，
 不为缺失字段补默认值，也不接受 v1 混入票数字段或在同一 schema 下改变阈值语义。
 失败记录保留原始票数，不能仅靠 wire 解析宣称终态正确。
 既有泳道 `core_id` 使用紧凑 worker 编号；协议拓扑 `workers[].core_id` 保存硬件核号，

@@ -75,6 +75,10 @@ class Task:
     def mixed(self):
         return len(self.slots) > 1
 
+    @property
+    def resource_lanes(self):
+        return tuple(lane for lane in range(3) if (self.mask | 1) & (1 << lane))
+
 
 class Topology:
     def __init__(self, workers):
@@ -108,15 +112,16 @@ class Topology:
             return frozenset(w.worker_id for w in self.workers if w.kind == kind)
         clusters = {w.cluster for w in self.workers}
         require(all((c, lane) in self.by_position for c in clusters for lane in range(3)), "INCOMPLETE_CLUSTER")
-        return frozenset(self.by_id)
+        return frozenset(w.worker_id for w in self.workers if w.lane in task.resource_lanes)
 
     def validate_members(self, task, members):
         require(all(type(worker) is int for worker in members), "MEMBERS")
         require(bool(members) and set(members) <= self.by_id.keys(), "MEMBERS")
         if task.mixed:
             clusters = {self.by_id[w].cluster for w in members}
+            require(all(self.by_id[w].lane in task.resource_lanes for w in members), "RESOURCE_MEMBER")
             require(
-                all(self.by_position.get((c, lane)) in members for c in clusters for lane in range(3)),
+                all(self.by_position.get((c, lane)) in members for c in clusters for lane in task.resource_lanes),
                 "INCOMPLETE_CLUSTER",
             )
             capacity = len(clusters)
@@ -138,7 +143,7 @@ class Topology:
         if not task.mixed:
             return frozenset((owner,))
         cluster = self.by_id[owner].cluster
-        return frozenset(self.by_position[(cluster, lane)] for lane in range(3))
+        return frozenset(self.by_position[(cluster, lane)] for lane in task.resource_lanes)
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,8 @@ inline __aicore__ bool scheduler_gm_mix_context_valid(
     if (!scheduler_task_ref_valid(graph, admission->current_task_ref) ||
         !scheduler_task_is_mix(admission->current_flags) || admission->gm_mix.mailbox_offset == 0 ||
         admission->gm_mix.cluster_index >= local->config.cluster_count ||
-        local->config.self_lane >= PLATFORM_CORES_PER_BLOCKDIM)
+        local->config.self_lane >= PLATFORM_CORES_PER_BLOCKDIM ||
+        (scheduler_mix_resource_mask(admission->current_active_mask) & (1U << local->config.self_lane)) == 0)
         return scheduler_admission_fail(
             graph, local, run, admission->current_task_ref, SchedulerErrorSite::GROUP_INVALID_STATE
         );
@@ -35,26 +36,32 @@ scheduler_gm_mix_mailbox(__gm__ void *base, const SchedulerLocalState *local) {
     return scheduler_state_at<SchedulerGroupMailbox>(base, local->admission->gm_mix.mailbox_offset);
 }
 
-inline __aicore__ bool scheduler_gm_mix_descriptor_valid(
-    const SchedulerLocalState *local, __gm__ const SchedulerGroupDescriptor *descriptor, uint64_t seq
-) {
-    const auto &admission = *local->admission;
-    if (descriptor->run_epoch != admission.epoch || descriptor->task_ref != admission.current_task_ref ||
-        descriptor->order_key != admission.scan_cursor || descriptor->group_seq != seq ||
-        descriptor->block_idx >= admission.current_block_num ||
-        descriptor->logical_block_num != admission.current_block_num ||
-        descriptor->cluster_index != admission.gm_mix.cluster_index ||
-        descriptor->active_mask != admission.current_active_mask || descriptor->resource_mask != 7 ||
-        descriptor->flags != admission.current_flags)
+inline __aicore__ bool
+scheduler_gm_mix_descriptor_mapping_valid(__gm__ const SchedulerGroupDescriptor *descriptor, uint64_t seq) {
+    if (seq == 0 || seq == UINT64_MAX || descriptor->group_seq != seq || descriptor->previous_lane_seq[0] != seq - 1 ||
+        descriptor->resource_mask != scheduler_mix_resource_mask(descriptor->active_mask))
         return false;
     uint8_t mapped = 0;
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
+        if (descriptor->previous_lane_seq[lane] >= seq) return false;
         const uint8_t subtask = descriptor->lane_subtasks[lane];
         if (subtask == UINT8_MAX) continue;
         if (subtask >= 3 || lane != subtask || (mapped & (1U << subtask)) != 0) return false;
         mapped |= 1U << subtask;
     }
     return mapped == descriptor->active_mask;
+}
+
+inline __aicore__ bool scheduler_gm_mix_descriptor_valid(
+    const SchedulerLocalState *local, __gm__ const SchedulerGroupDescriptor *descriptor, uint64_t seq
+) {
+    const auto &admission = *local->admission;
+    return descriptor->run_epoch == admission.epoch && descriptor->task_ref == admission.current_task_ref &&
+           descriptor->order_key == admission.scan_cursor && descriptor->block_idx < admission.current_block_num &&
+           descriptor->logical_block_num == admission.current_block_num &&
+           descriptor->cluster_index == admission.gm_mix.cluster_index &&
+           descriptor->active_mask == admission.current_active_mask && descriptor->flags == admission.current_flags &&
+           scheduler_gm_mix_descriptor_mapping_valid(descriptor, seq);
 }
 
 inline __aicore__ bool scheduler_gm_mix_close(
@@ -197,17 +204,30 @@ inline __aicore__ bool scheduler_gm_mix_publish(
     descriptor->logical_block_num = admission.current_block_num;
     descriptor->cluster_index = group.cluster_index;
     descriptor->active_mask = admission.current_active_mask;
-    descriptor->resource_mask = 7;
+    descriptor->resource_mask = scheduler_mix_resource_mask(admission.current_active_mask);
     descriptor->flags = admission.current_flags;
-    // Mix lane identities also select physical communication endpoints.
-    // Inactive peers still participate in the cluster resource handshake.
-    for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane)
+    // Physical communication endpoints retain their logical lane identities.
+    // Per-lane predecessors exclude groups that never used that lane.
+    for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
         descriptor->lane_subtasks[lane] = (admission.current_active_mask & (1U << lane)) != 0 ? lane : UINT8_MAX;
+        const uint64_t previous = lane == 0 ? group.group_seq - 1 : group.vector_last_published_seq[lane - 1];
+        if (previous >= group.group_seq)
+            return scheduler_admission_fail(
+                graph, local, run, admission.current_task_ref, SchedulerErrorSite::GROUP_INVALID_STATE
+            );
+        descriptor->previous_lane_seq[lane] = previous;
+    }
     group.subtask_slot = descriptor->lane_subtasks[0];
     for (uint32_t offset = 0; offset < sizeof(*descriptor); offset += 64)
         scheduler_writeback_cache_line(reinterpret_cast<__gm__ uint8_t *>(descriptor) + offset);
     scheduler_cache_barrier();
     scheduler_gm_store(mailbox->published_seq, group.group_seq);
+    for (uint8_t lane = 1; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
+        if ((descriptor->resource_mask & (1U << lane)) != 0) {
+            scheduler_gm_store(mailbox->lanes[lane].assigned_seq, group.group_seq);
+            group.vector_last_published_seq[lane - 1] = group.group_seq;
+        }
+    }
     scheduler_protocol_group_publish(base, local, false);
     group.task_last_seq = group.group_seq;
     group.phase = SchedulerGmMixPhase::PUBLISHED;
@@ -228,8 +248,11 @@ inline __aicore__ bool scheduler_gm_mix_observe(
         (group.phase != SchedulerGmMixPhase::IDLE && group.phase != SchedulerGmMixPhase::RELEASED))
         return true;
     auto *mailbox = scheduler_gm_mix_mailbox(base, local);
-    if (scheduler_gm_query(mailbox->published_seq) <= group.group_seq) return true;
-    const uint64_t seq = scheduler_gm_fetch_add(mailbox->published_seq, UINT64_C(0));
+    // Only an assigned lane holds the descriptor stable through its release.
+    // Unassigned lanes must not read the mailbox while its owner can reuse it.
+    auto &assigned = mailbox->lanes[local->config.self_lane].assigned_seq;
+    if (scheduler_gm_query(assigned) <= group.group_seq) return true;
+    const uint64_t seq = scheduler_gm_fetch_add(assigned, UINT64_C(0));
     if (seq <= group.group_seq) return true;
     auto *descriptor = &mailbox->descriptor;
     for (uint32_t offset = 0; offset < sizeof(*descriptor); offset += 64)
@@ -249,7 +272,8 @@ inline __aicore__ bool scheduler_gm_mix_observe(
             }
         }
     }
-    if (seq != group.group_seq + 1 || seq == UINT64_MAX || !scheduler_gm_mix_descriptor_valid(local, descriptor, seq))
+    if (seq == UINT64_MAX || descriptor->previous_lane_seq[local->config.self_lane] != group.group_seq ||
+        !scheduler_gm_mix_descriptor_valid(local, descriptor, seq))
         return scheduler_admission_fail(
             graph, local, run, admission.current_task_ref, SchedulerErrorSite::GROUP_INVALID_DESCRIPTOR
         );
@@ -294,8 +318,10 @@ inline __aicore__ bool scheduler_gm_mix_check_acks(
     auto *mailbox = scheduler_gm_mix_mailbox(base, local);
     const uint64_t seq = local->admission->gm_mix.group_seq;
     const bool record = scheduler_protocol_enabled(local);
-    uint64_t observations[PLATFORM_CORES_PER_BLOCKDIM];
+    uint64_t observations[PLATFORM_CORES_PER_BLOCKDIM]{};
+    const uint8_t resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
+        if ((resources & (1U << lane)) == 0) continue;
         auto &value = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
         // A reused positive poll skips only duplicate weak reads. Even a stale
         // hint still reaches every authoritative atomic check in lane order.

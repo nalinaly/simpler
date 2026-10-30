@@ -124,6 +124,7 @@ struct alignas(128) SchedulerProtocolLaneTrace {
     uint32_t resource_mask;
     uint8_t lane_subtasks[3];
     uint8_t reserved[5];
+    uint64_t previous_lane_seq[3];
 };
 
 struct alignas(64) SchedulerProtocolClaimTrace {

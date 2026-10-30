@@ -93,8 +93,8 @@ def test_two_sparse_attention_branches_must_both_release_dummy_and_eight_consume
     tasks = [Task(0, 12, 3), Task(1, 12, 3), Task(2, 1, 0, deps=(0, 1), service=True)]
     tasks += [Task(i, 8, 2, deps=(0, 1)) for i in range(3, 11)]
     model = make_protocol(*tasks, clusters=24)
-    model.admit(0, range(36))
-    model.admit(1, range(36, 72))
+    model.admit(0, (worker for worker in range(36) if worker % 3 != 2))
+    model.admit(1, (worker for worker in range(36, 72) if worker % 3 != 2))
     a = [model.claim(0, 3 * i) for i in range(12)]
     b = [model.claim(1, 3 * i) for i in range(12, 24)]
     for lease in b:

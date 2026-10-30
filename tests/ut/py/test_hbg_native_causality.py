@@ -15,7 +15,12 @@ from _capture_builder import Capture
 from _native_protocol_builder import ProtocolBuilder
 
 from simpler_setup.tools.hbg.native_causality import MIX, SPMD, SYNC, audit_native_protocol
-from simpler_setup.tools.hbg.native_protocol import STAMPS, _event_records, audit_protocol_sequences
+from simpler_setup.tools.hbg.native_protocol import (
+    STAMPS,
+    _event_records,
+    audit_protocol_sequences,
+    read_native_protocol,
+)
 from simpler_setup.tools.swimlane_converter import generate_chrome_trace_json, read_perf_data
 
 
@@ -88,6 +93,69 @@ def _isolated_close_seals(raw):
         base = mixed[0]["close_seals_offset"]
         for index, row in enumerate(mixed):
             row["close_seals_offset"] = base + index * raw["cluster_count"] * 128
+
+
+def _resource_scoped_capture(masks=(3, 5, 3, 7, 6), clusters=2, blocks=3):
+    raw, identities = ProtocolBuilder(
+        [(mask, blocks, ()) for mask in masks], clusters=clusters, resource_scoped=True
+    ).run()
+    _add_claim_seal_certificates(raw, identities)
+    _isolated_close_seals(raw)
+    raw["schema"] = "hbg-native-protocol-v8"
+    return raw, identities
+
+
+@pytest.mark.parametrize("clusters", (1, 2, 22, 32))
+@pytest.mark.parametrize("blocks", (1, 2, 3, 8))
+@pytest.mark.parametrize("masks", ((3,), (5,), (7,), (6,), (3, 5, 3, 7, 6)))
+def test_v8_resource_scope_preserves_all_clusters_and_lane_predecessors(clusters, blocks, masks):
+    raw, identities = _resource_scoped_capture(masks, clusters, blocks)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+
+
+@pytest.mark.parametrize("value", (None, [], [0, 0], [0, 0, 0, 0], [True, 0, 0], [-1, 0, 0], [1 << 64, 0, 0]))
+def test_v8_requires_exact_typed_lane_predecessors(value):
+    raw, _ = _resource_scoped_capture((3,))
+    assert read_native_protocol(raw) == raw
+    lane = raw["blocks"][0]["lanes"][0]
+    if value is None:
+        del lane["previous_lane_seq"]
+    else:
+        lane["previous_lane_seq"] = value
+    with pytest.raises(ValueError, match="protocol"):
+        read_native_protocol(raw)
+
+
+def test_v7_does_not_silently_accept_resource_scoped_lane_fields():
+    raw, _ = _claim_seal_capture(7, 2)
+    _isolated_close_seals(raw)
+    assert read_native_protocol(raw) == raw
+    raw["blocks"][0]["lanes"][0]["previous_lane_seq"] = [0, 0, 0]
+    with pytest.raises(ValueError, match="unknown fields"):
+        read_native_protocol(raw)
+
+
+@pytest.mark.parametrize("mutation", ("missing_lane", "extra_lane", "wrong_resources", "stale_ack", "wrong_previous"))
+def test_v8_resource_scope_rejects_wrong_membership_and_stale_group_proof(mutation):
+    raw, identities = _resource_scoped_capture()
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+    group = next(row for row in raw["blocks"] if row["owner"]["task_ref"] == 3)
+    lane = group["lanes"][1]
+    if mutation == "missing_lane":
+        group["lanes"].pop()
+    elif mutation == "extra_lane":
+        first = raw["blocks"][0]
+        extra = copy.deepcopy(first["lanes"][1])
+        extra["index"] = extra["lane"] = 2
+        first["lanes"].append(extra)
+    elif mutation == "wrong_resources":
+        lane["resource_mask"] = 3
+    elif mutation == "stale_ack":
+        lane["arrived_seq"][2] -= 1
+    else:
+        lane["previous_lane_seq"][1] -= 1
+    with pytest.raises(ValueError):
+        audit_native_protocol(raw, identities)
 
 
 @pytest.mark.parametrize("mask", (1, 2, 4, 3, 5, 6, 7))

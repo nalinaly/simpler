@@ -28,7 +28,7 @@ _KERNELS = _ROOT / "tests/fdwic/pa_hbg/spmd/kernels"
 _STALL_MS = 2500
 _TIMEOUT_MS = 2000
 _SHAPES = [(mask, lane) for mask in (1, 2, 4, 3, 5, 6, 7) for lane in range(3) if mask & (1 << lane)]
-_TICKET_SHAPES = ((1, 0), (2, 1), (4, 2), (6, 1), (7, 0), (7, 1), (7, 2))
+_TICKET_SHAPES = ((1, 0), (2, 1), (4, 2), (3, 0), (3, 1), (5, 0), (5, 2), (6, 1), (7, 0), (7, 1), (7, 2))
 
 pytestmark = [
     pytest.mark.platforms(["a5sim", "a5"]),
@@ -188,17 +188,23 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
         "hbg-native-protocol-v5",
         "hbg-native-protocol-v6",
         "hbg-native-protocol-v7",
+        "hbg-native-protocol-v8",
     )
-    if protocol["schema"] == "hbg-native-protocol-v7":
+    if protocol["schema"] in ("hbg-native-protocol-v7", "hbg-native-protocol-v8"):
         assert type(protocol.get("close_seal_stride")) is int and protocol["close_seal_stride"] == 128
     else:
         assert "close_seal_stride" not in protocol
-    if protocol["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+    if protocol["schema"] in (
+        "hbg-native-protocol-v5",
+        "hbg-native-protocol-v6",
+        "hbg-native-protocol-v7",
+        "hbg-native-protocol-v8",
+    ):
         assert all(
             type(control.get("admission_claim_lock")) is int and control["admission_claim_lock"] == 0
             for control in control_rows
         )
-    if protocol["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+    if protocol["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
         for task in protocol["tasks"]:
             control = controls[task["task_ref"]]
             seal = control.get("claim_seal")
@@ -208,7 +214,13 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False):
     minimum_blocks = (
         2
         if protocol["schema"]
-        in ("hbg-native-protocol-v4", "hbg-native-protocol-v5", "hbg-native-protocol-v6", "hbg-native-protocol-v7")
+        in (
+            "hbg-native-protocol-v4",
+            "hbg-native-protocol-v5",
+            "hbg-native-protocol-v6",
+            "hbg-native-protocol-v7",
+            "hbg-native-protocol-v8",
+        )
         else positions * 2 + (1 if protocol["schema"] == "hbg-native-protocol-v2" else 0)
     )
     uses_tickets = blocks >= minimum_blocks
@@ -261,6 +273,7 @@ def _check_two_wave_topology(protocol, blocks, mask, required):
         "hbg-native-protocol-v5",
         "hbg-native-protocol-v6",
         "hbg-native-protocol-v7",
+        "hbg-native-protocol-v8",
     )
     positions = protocol["cluster_count"] * (2 if mask in (2, 4) else 1)
     assert blocks == positions * 2, "two-wave fault must use the actual device topology"
@@ -339,7 +352,7 @@ def _exercise_failure(st_platform, st_device_ids, mask, lane, blocks, monkeypatc
                         worker.copy_from(value, buffer)
                     _check_output(values, blocks, mask, failed=failed)
                 path, raw = _capture(prefix)
-                assert raw["aicore_protocol"]["schema"] == "hbg-native-protocol-v7"
+                assert raw["aicore_protocol"]["schema"] == "hbg-native-protocol-v8"
                 _check_two_wave_topology(raw["aicore_protocol"], blocks, mask, two_wave)
                 if failed:
                     assert raw["aicore_protocol"]["run_epoch"] > evidence[-1]["run_epoch"]

@@ -34,6 +34,7 @@ def point(record, field):
 class NativeAudit:
     def __init__(self, section, identities):
         self.raw = section
+        self.resource_scoped = section["schema"] == "hbg-native-protocol-v8"
         self.sequence_result = audit_protocol_sequences(section)
         self.causal = CausalOrder(section)
         self.before = self.causal.before
@@ -178,7 +179,11 @@ class NativeAudit:
             members = {
                 index
                 for index, worker in self.workers.items()
-                if task["flags"] & MIX or (worker["core_type"] == 0) == bool(task["active_mask"] & 1)
+                if (
+                    bool((task["active_mask"] | 1) & (1 << self.positions[index][1]))
+                    if task["flags"] & MIX and self.resource_scoped
+                    else task["flags"] & MIX or (worker["core_type"] == 0) == bool(task["active_mask"] & 1)
+                )
             }
             words = [0] * ((len(self.workers) + 63) // 64)
             for member in members:
@@ -226,7 +231,11 @@ class NativeAudit:
                 )
         if seals:
             require(seals[0] > 0 and seals[0] % 128 == 0, "invalid close seal base")
-            seal_stride = self.raw["close_seal_stride"] if self.raw["schema"] == "hbg-native-protocol-v7" else 8
+            seal_stride = (
+                self.raw["close_seal_stride"]
+                if self.raw["schema"] in ("hbg-native-protocol-v7", "hbg-native-protocol-v8")
+                else 8
+            )
             require(
                 seals == [seals[0] + index * self.raw["cluster_count"] * seal_stride for index in range(len(seals))],
                 "aliased or wrong task close seals",
@@ -521,7 +530,7 @@ class NativeAudit:
                 "duplicate or missing block completion ticket",
             )
             self.ordered_intervals([b["owner"] for b in by_ticket], "completion_before", "completion_after")
-            if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+            if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
                 self.claim_certificates(ref, blocks)
             owned = defaultdict(list)
             for block in blocks:
@@ -530,7 +539,11 @@ class NativeAudit:
                 require(all(len(indices) == 1 for indices in owned.values()), "sync_start reused an execution position")
             for worker in self.task_members[ref]:
                 if self.tasks[ref]["flags"] & MIX and self.positions[worker][1]:
-                    if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+                    if self.raw["schema"] in (
+                        "hbg-native-protocol-v6",
+                        "hbg-native-protocol-v7",
+                        "hbg-native-protocol-v8",
+                    ):
                         member = self.member(ref, worker)
                         require(
                             member["claim_seal_seen"] == member["claim_cursor_seen"] == 0,
@@ -617,7 +630,7 @@ class NativeAudit:
         self.close_reads[(ref, worker)] = read
         self.causal.add(("event", worker, closed[2] - 1), read)
         self.causal.add(read, closed)
-        if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+        if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
             self.causal.add(self.confirm_points[(ref, cursor)], read)
             if cursor < blocks:
                 self.causal.add(read, self.confirm_points[(ref, cursor + 1)])
@@ -644,9 +657,14 @@ class NativeAudit:
                 control["next_block"] == control["completed_blocks"] == (task["block_num"] if cooperative else 0),
                 "terminal block counters mismatch",
             )
-            if self.raw["schema"] in ("hbg-native-protocol-v5", "hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+            if self.raw["schema"] in (
+                "hbg-native-protocol-v5",
+                "hbg-native-protocol-v6",
+                "hbg-native-protocol-v7",
+                "hbg-native-protocol-v8",
+            ):
                 require(control["admission_claim_lock"] == 0, "invalid terminal admission claim lock")
-            if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+            if self.raw["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
                 require(
                     control["claim_seal"] == (task["block_num"] if cooperative else 0), "invalid terminal claim seal"
                 )
@@ -660,6 +678,7 @@ class NativeAudit:
                         "hbg-native-protocol-v5",
                         "hbg-native-protocol-v6",
                         "hbg-native-protocol-v7",
+                        "hbg-native-protocol-v8",
                     )
                     else positions * 2 + (1 if self.raw["schema"] == "hbg-native-protocol-v2" else 0)
                 )

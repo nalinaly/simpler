@@ -25,7 +25,7 @@ else:
     from test_ordered_execution import _case
 
 _MASKS = (3, 5, 6, 7)
-_PAIRS = ((3, 7), (7, 3), (6, 1), (1, 6), (5, 2), (2, 5), (6, 6), (7, 7))
+_PAIRS = ((3, 7), (7, 3), (3, 5), (5, 3), (5, 7), (7, 5), (6, 1), (1, 6), (5, 2), (2, 5), (6, 6), (7, 7))
 
 
 @scene_test(level=2, runtime="host_build_graph")

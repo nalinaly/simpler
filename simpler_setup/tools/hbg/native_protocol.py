@@ -101,10 +101,10 @@ def _array(value, path, count=None, *, signed=False):
         _number(item, f"{path}[{index}]", signed=signed)
 
 
-def _record(record, kind, path, extra_numbers=()):
+def _record(record, kind, path, extra_numbers=(), extra_arrays=None):
     numbers = NUMBERS[kind].split() + list(extra_numbers)
     stamps = STAMPS.get(kind, "").split()
-    arrays = ARRAYS.get(kind, {})
+    arrays = ARRAYS.get(kind, {}) | (extra_arrays or {})
     _object(record, {*numbers, *stamps, *arrays}, path)
     for name in numbers:
         _number(record[name], f"{path}.{name}", signed=name in SIGNED_FIELDS)
@@ -131,7 +131,9 @@ def _indices(rows, count, path, *, key="index", dense=False):
 def read_native_protocol(section):
     """Validate the wire schema; preserve incomplete/error records for diagnosis."""
     schema = section.get("schema") if isinstance(section, dict) else None
-    root_numbers = ROOT_NUMBERS | ({"close_seal_stride"} if schema == "hbg-native-protocol-v7" else set())
+    root_numbers = ROOT_NUMBERS | (
+        {"close_seal_stride"} if schema in ("hbg-native-protocol-v7", "hbg-native-protocol-v8") else set()
+    )
     _object(section, root_numbers | ROOT_TABLES | {"schema", "producer", "first_error"}, "root")
     if (
         section["schema"]
@@ -143,14 +145,15 @@ def read_native_protocol(section):
             "hbg-native-protocol-v5",
             "hbg-native-protocol-v6",
             "hbg-native-protocol-v7",
+            "hbg-native-protocol-v8",
         )
         or section["producer"] != "aicore"
     ):
         _error("unknown schema or producer")
     for field in root_numbers:
         _number(section[field], field)
-    if schema == "hbg-native-protocol-v7" and section["close_seal_stride"] != 128:
-        _error("close_seal_stride must be 128 for v7")
+    if schema in ("hbg-native-protocol-v7", "hbg-native-protocol-v8") and section["close_seal_stride"] != 128:
+        _error("close_seal_stride must be 128 for v7/v8")
     _object(section["first_error"], ERROR_NUMBERS, "first_error")
     for field in ERROR_NUMBERS:
         _number(section["first_error"][field], f"first_error.{field}")
@@ -170,9 +173,14 @@ def read_native_protocol(section):
                 "hbg-native-protocol-v5",
                 "hbg-native-protocol-v6",
                 "hbg-native-protocol-v7",
+                "hbg-native-protocol-v8",
             ):
                 extra += ("admission_claim_lock",)
-            if kind == "control" and section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+            if kind == "control" and section["schema"] in (
+                "hbg-native-protocol-v6",
+                "hbg-native-protocol-v7",
+                "hbg-native-protocol-v8",
+            ):
                 extra += ("claim_seal",)
             _record(row, kind, f"{table}[{row[key]}]", extra)
     for row in section["admissions"]:
@@ -188,7 +196,8 @@ def read_native_protocol(section):
         for row in section[table]:
             extra = (
                 ("claim_seal_seen", "claim_cursor_seen")
-                if kind == "member" and section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7")
+                if kind == "member"
+                and section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8")
                 else ()
             )
             _record(row, kind, f"{table}[{row['index']}]", extra)
@@ -206,16 +215,20 @@ def _read_nested_events(section):
     _indices(section["blocks"], section["trace_count"], "blocks")
     for row in section["blocks"]:
         fields = {"index", "owner", "lanes"}
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8"):
             fields.add("claim")
         _object(row, fields, "block row")
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7") and row["claim"] is not None:
+        if (
+            section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8")
+            and row["claim"] is not None
+        ):
             _record(row["claim"], "claim", f"blocks[{row['index']}].claim")
         if row["owner"] is not None:
             _record(row["owner"], "owner", f"blocks[{row['index']}].owner")
         _indices(row["lanes"], 3, "block lanes")
         for lane in row["lanes"]:
-            _record(lane, "lane", f"blocks[{row['index']}].lanes[{lane['index']}]")
+            extra = {"previous_lane_seq": 3} if section["schema"] == "hbg-native-protocol-v8" else None
+            _record(lane, "lane", f"blocks[{row['index']}].lanes[{lane['index']}]", extra_arrays=extra)
 
 
 def _event_records(section):
@@ -224,7 +237,10 @@ def _event_records(section):
             if row[name] is not None:
                 yield row[name], "actor", f"task_events[{row['index']}].{name}"
     for row in section["blocks"]:
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7") and row["claim"] is not None:
+        if (
+            section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7", "hbg-native-protocol-v8")
+            and row["claim"] is not None
+        ):
             yield row["claim"], "claim", f"blocks[{row['index']}].claim"
         if row["owner"] is not None:
             yield row["owner"], "owner", f"blocks[{row['index']}].owner"

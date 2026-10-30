@@ -111,7 +111,7 @@ TEST(AicoreSchedulerState, ResidentSyncStartShapeRequiresMultipleBlocksAndSepara
     }
 }
 
-TEST(AicoreSchedulerState, SyncDemandCountsDistinctCoresOrCompleteResourceClusters) {
+TEST(AicoreSchedulerState, SyncDemandCountsDistinctCoresInTheDeclaredResourceScope) {
     for (uint64_t workers : {3U, 6U, 9U, 96U, 108U}) {
         for (uint8_t mask : {1U, 2U, 4U, 3U, 5U, 6U, 7U}) {
             SCOPED_TRACE(workers);
@@ -125,7 +125,7 @@ TEST(AicoreSchedulerState, SyncDemandCountsDistinctCoresOrCompleteResourceCluste
                 if (valid) {
                     const bool mix = __builtin_popcount(mask) > 1;
                     EXPECT_EQ(demand.aic, (mix || mask == 1) ? blocks : 0u);
-                    EXPECT_EQ(demand.aiv, mix ? blocks * 2 : (mask == 1 ? 0 : blocks));
+                    EXPECT_EQ(demand.aiv, mix ? blocks * __builtin_popcount(mask & 6U) : (mask == 1 ? 0 : blocks));
                 }
             }
             SchedulerMinimumWorkerDemand ordinary{};

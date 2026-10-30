@@ -844,6 +844,9 @@ inline __aicore__ bool scheduler_task_has_fanin(uint8_t flags) { return (flags &
 
 inline __aicore__ bool scheduler_task_is_mix(uint8_t flags) { return (flags & SCHEDULER_TASK_MIX) != 0; }
 
+// The coordinator is a resource participant even for a Vector-only Mix.
+inline __aicore__ uint8_t scheduler_mix_resource_mask(uint8_t active_mask) { return active_mask | UINT8_C(1); }
+
 inline __aicore__ bool scheduler_task_is_spmd(uint8_t flags) { return (flags & SCHEDULER_TASK_SPMD) != 0; }
 
 inline __aicore__ bool scheduler_task_requires_sync_start(uint8_t flags) {
@@ -960,13 +963,15 @@ struct alignas(128) SchedulerGroupDescriptor {
     uint8_t resource_mask;
     uint8_t lane_subtasks[3];
     uint8_t flags;
-    uint8_t reserved[78];
+    uint64_t previous_lane_seq[3];
+    uint8_t reserved[48];
 };
 
 struct alignas(128) SchedulerGroupLaneAck {
     volatile uint64_t arrived_seq;
     volatile uint64_t released_seq;
-    uint8_t reserved[112];
+    volatile uint64_t assigned_seq;
+    uint8_t reserved[104];
 };
 
 struct alignas(128) SchedulerGroupMailbox {
@@ -1736,7 +1741,7 @@ scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout,
             record->order_key = UINT64_MAX;
             record->member_words_offset = offset + sizeof(SchedulerAdmissionRecord);
         }
-        // Log elements use bypass stores; packed close seals use atomics.
+        // Log elements use bypass stores; isolated close seals use atomics.
         // Neither region permits device cached stores or dirty writeback.
         auto *log = scheduler_state_at<int64_t>(base, layout.admission_log_offset);
         for (uint64_t index = 0; index < layout.spmd.cooperative_task_count; ++index)

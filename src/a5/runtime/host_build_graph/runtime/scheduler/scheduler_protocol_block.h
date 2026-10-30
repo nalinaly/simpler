@@ -163,8 +163,10 @@ inline __aicore__ void scheduler_protocol_group_descriptor(
     lane->flags = descriptor->flags;
     lane->logical_block_num = descriptor->logical_block_num;
     lane->resource_mask = descriptor->resource_mask;
-    for (uint32_t peer = 0; peer < 3; ++peer)
+    for (uint32_t peer = 0; peer < 3; ++peer) {
         lane->lane_subtasks[peer] = descriptor->lane_subtasks[peer];
+        lane->previous_lane_seq[peer] = descriptor->previous_lane_seq[peer];
+    }
     scheduler_protocol_publish_record(lane);
 }
 
@@ -211,8 +213,10 @@ inline __aicore__ void scheduler_protocol_group_acks(
     }
     auto *stamp = releases ? &record->owner.releases_observed : &lane->arrivals_observed;
     auto *values = releases ? record->owner.released_seq : lane->arrived_seq;
+    const uint8_t resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
     for (uint32_t peer = 0; peer < 3; ++peer) {
-        if (observed[peer] != group.group_seq || (stamp->sequence != 0 && values[peer] != observed[peer])) {
+        const uint64_t expected = (resources & (1U << peer)) != 0 ? group.group_seq : 0;
+        if (observed[peer] != expected || (stamp->sequence != 0 && values[peer] != observed[peer])) {
             scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
             return;
         }

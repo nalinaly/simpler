@@ -6,6 +6,13 @@
 本页维护测试入口与覆盖边界，不以历史红灯描述当前已修复路径。
 **模型通过不等于生产 SPMD 已实现；原生验收中的红灯必须保留，不能用回退或 skip 消掉。**
 
+2026-10-30 的资源范围修订允许 1C1V 使用两 lane，1C2V／mask 6 保留三 lane，
+全部 cluster 的公平竞争范围不变。GM 原生矩阵扩为 76 场景／单轮 92 次调用，新增
+C/V0↔C/V1、C/V1↔三 lane 的独立交叠与依赖链；大 N 及 N=2P 故障分别补齐 mask 3/5。
+CPU 覆盖未使用 V 持有普通槽、跳过组后重新参与、未通知 V 不读复用 descriptor、
+逐 lane 前驱跳号、拓扑错配及 v8／历史协议隔离。逐项实测见
+[资源范围改造记录](csa-idle-optimization-20261028.md#按实际资源范围协调-mix2026-10-30)。
+
 真实 HBG CSA 另有 [业务 TDD 入口](../csa/test_csa_business.py)，保留 54 个原 kernel 与七项 golden。
 覆盖范围、A5 实跑记录和独立 resident 红灯见 [CSA 中文说明](../../../../examples/a5/host_build_graph/deepseek_v4_pro_csa/README.zh-CN.md)。
 
@@ -15,7 +22,7 @@
 GM Mix 已接入且可与纯多 block 同图：六种 mask 矩阵在仿真／A5 各 270 次通过，
 新 44 个 GM 事件场景各 180 次通过。原样 CSA 七项 golden 和严格 resident L4 门禁已通过。
 以上保留接线时计数。2026-10-27 小 N 取号实验后，纯有序场景扩为 44 项、GM 场景扩为 68 项；
-连同其余边界和发布／错误探针，当前两平台各 651 项、10 个场景类通过，另各 24 项 N1/N2 真实故障通过。
+连同其余边界和发布／错误探针，当时两平台各 651 项、10 个场景类通过，另各 24 项 N1/N2 真实故障通过。
 准入阶段发布版及保留的 ACK 边界回归合计 C++ 为 21 目标、1121 项，Python 为 3335 项；
 两波版的各七项 N=2P 故障结果作为历史证据保留，不冒充当前最终全矩阵。
 最终版本仍须补完整旧故障矩阵及全 HBG 回归，逐轮验收范围以实现记录为准。
@@ -480,7 +487,7 @@ tick 是适配格式内的因果事件序号，不是已经验证过的跨核统
 
 新增 runtime helper 后，把其可控交错接入 C++ fixture，与参考合同逐项对照；
 模型的策略开关只用于测试错误协议，不是生产 feature flag。
-普通旁路 entry permit、GM descriptor/ack/seal、inactive lane 释放和物理 Mix 配对
+普通旁路 entry permit、GM descriptor/ack/seal、协调 lane 释放和物理 Mix 配对
 已有 helper、原生探针及因果审计的分层检查；正常退出也有 drain／seal 验证。
 这些检查不替代任意物理故障下的静止和回收证明。
 原样 CSA 的七项 golden、完整执行集合与来源门禁已通过，后续修改继续保持这些门禁。

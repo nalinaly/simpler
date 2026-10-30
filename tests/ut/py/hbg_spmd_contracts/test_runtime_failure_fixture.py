@@ -109,7 +109,7 @@ def _large_ticket_capture(mask, lane, blocks=257):
 
 
 @pytest.mark.parametrize("mask,lane", ((1, 0), (2, 1), (4, 2), (6, 1), (7, 0), (7, 1), (7, 2)))
-@pytest.mark.parametrize("version", (2, 3, 4, 5, 6, 7))
+@pytest.mark.parametrize("version", (2, 3, 4, 5, 6, 7, 8))
 @pytest.mark.parametrize("blocks", (1, 2, 3))
 @pytest.mark.parametrize("tail", (False, True))
 def test_small_fault_capture_requires_the_versioned_claim_policy(native, mask, lane, version, blocks, tail):
@@ -120,7 +120,7 @@ def test_small_fault_capture_requires_the_versioned_claim_policy(native, mask, l
     protocol["workers"] = [{"worker_index": worker, "finished": 2, "error_flags": 0} for worker in range(6)]
     positions = 4 if mask in (2, 4) else 2
     uses_tickets = version >= 4 and blocks > 1
-    if version == 7:
+    if version >= 7:
         protocol["close_seal_stride"] = 128
     if version >= 5:
         for control in protocol["task_controls"]:
@@ -142,7 +142,7 @@ def test_two_wave_fault_uses_platform_claimant_population(native, platform, clus
 
 @pytest.mark.parametrize("mask", (1, 2, 4, 6, 7))
 @pytest.mark.parametrize("fault", ("schema", "clusters", "blocks"))
-@pytest.mark.parametrize("version", (3, 4, 5, 6, 7))
+@pytest.mark.parametrize("version", (3, 4, 5, 6, 7, 8))
 def test_two_wave_fault_cannot_silently_run_with_a_different_topology(native, mask, fault, version):
     protocol = {"schema": f"hbg-native-protocol-v{version}", "cluster_count": 32}
     blocks = 128 if mask in (2, 4) else 64
@@ -158,14 +158,14 @@ def test_two_wave_fault_cannot_silently_run_with_a_different_topology(native, ma
 
 
 @pytest.mark.parametrize("mask,lane", ((1, 0), (2, 1), (4, 2), (6, 1), (7, 0), (7, 1), (7, 2)))
-@pytest.mark.parametrize("version", (2, 3, 4, 5, 6, 7))
+@pytest.mark.parametrize("version", (2, 3, 4, 5, 6, 7, 8))
 def test_fault_capture_keeps_versioned_two_wave_claim_policy(native, mask, lane, version):
     positions = 2 if mask in (2, 4) else 1
     blocks = positions * 2
     raw = _large_ticket_capture(mask, lane, blocks)
     protocol = raw["aicore_protocol"]
     protocol["schema"] = f"hbg-native-protocol-v{version}"
-    if version == 7:
+    if version >= 7:
         protocol["close_seal_stride"] = 128
     if version >= 5:
         for control in protocol["task_controls"]:
@@ -181,12 +181,12 @@ def test_fault_capture_keeps_versioned_two_wave_claim_policy(native, mask, lane,
 
 @pytest.mark.parametrize("task", (0, 1))
 @pytest.mark.parametrize("value", (None, False, True, 1, -1, (1 << 64) - 1))
-@pytest.mark.parametrize("version", (5, 6, 7))
+@pytest.mark.parametrize("version", (5, 6, 7, 8))
 def test_versioned_kernel_timeout_cannot_hide_a_held_or_missing_admission_claim_lock(native, task, value, version):
     raw = _large_ticket_capture(7, 0)
     protocol = raw["aicore_protocol"]
     protocol["schema"] = f"hbg-native-protocol-v{version}"
-    if version == 7:
+    if version >= 7:
         protocol["close_seal_stride"] = 128
     for control in protocol["task_controls"]:
         control["admission_claim_lock"] = 0
@@ -203,12 +203,12 @@ def test_versioned_kernel_timeout_cannot_hide_a_held_or_missing_admission_claim_
 
 @pytest.mark.parametrize("task", (0, 1))
 @pytest.mark.parametrize("value", (None, False, True, -1, 1 << 32, (1 << 64) - 1))
-@pytest.mark.parametrize("version", (6, 7))
+@pytest.mark.parametrize("version", (6, 7, 8))
 def test_versioned_kernel_timeout_does_not_hide_invalid_claim_seal(native, task, value, version):
     raw = _large_ticket_capture(7, 0)
     protocol = raw["aicore_protocol"]
     protocol["schema"] = f"hbg-native-protocol-v{version}"
-    if version == 7:
+    if version >= 7:
         protocol["close_seal_stride"] = 128
     for control in protocol["task_controls"]:
         control.update(admission_claim_lock=0, claim_seal=0)
