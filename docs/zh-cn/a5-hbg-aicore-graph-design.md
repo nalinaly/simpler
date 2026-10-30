@@ -1,6 +1,6 @@
 # A5 HBG AICore resident Graph 支持设计
 
-日期：2026-10-30。状态：**实施中；多 block、Mix、sync-start、单 block predicate、原生 Graph L4、有界设备故障回收及相邻实例参数发布已通过 A5sim/A5 验证，完整性能/资源验收尚未完成**。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)。
+日期：2026-10-30。状态：**设计范围内的首版已实现并通过 A5sim/A5 验证；原生 Graph L4、故障回收、参数发布、同负载性能及资源报告已交付**。不宣称所有场景更快：2D Device 有小幅回退，部分 Graph 的 Host 发布成本增加，CSA Host 存在未归因的批间波动。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)，完整数据见[性能/资源报告](a5-hbg-aicore-graph-p4-performance.md)。
 
 开发基线：`02335c0f46d6f12a0fd0adaeccf4869b1164ff64`，来自 `feat/fully_distributed_within_core`；独立分支 `feat/a5-hbg-aicore-graph`，工作目录 `simpler-aicore-graph`。不包含其他工作目录的未跟踪文件，不以旧精简 PR 的版本代替当前基线。
 
@@ -152,10 +152,12 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 | Definition、映射、实例地址 | Host → Scalar | launch 前完整上传，本轮只读，run-owned，不读 AICPU 参数包 |
 | 子任务 descriptor/payload/参数池 | 唯一物化 owner → 执行/调度 worker | 完整写回和 barrier 在物化完成信号之前；消费者 acquire 后失效相应缓存再读 |
 | 物化 owner、remaining、唯一 EXIT 发布权 | 竞争者/完成者 → 同组读者 | 使用现有原子所有权原语；布局隔离，不被 cached 写回覆盖 |
-| 物化完成信号 | 单 owner → 其他 worker | 可评估复用 bypass signal，但须满足整条缓存行不混 atomic/cached 写回的前提 |
+| 物化完成信号 | 最后一个完成物化的 owner → 其他 worker | 复用 bypass signal，独占 128B 行；整行不混 atomic/cached 写回；看到信号后仍 atomic 确认 remaining 为零 |
 | ready/wake、claim/ack/seal | 原调度器参与者 | 复用基线协议，包括 claim_seal、ACK 原子强确认与 128B close seal |
 
 以上是需要实现和真机验证的发布链，不因使用 C++ acquire/release 就自动成立。首版优先复用已验证原语，不以“都是 GM”取消 DCCI/barrier，不把 `ld_dev` 预筛当成原子所有权证明。
+
+初轮 L0/L2/L3 实测发现物化启动长尾，单纯复用本地退避不足以解决。当前构造控制由 128B 扩为 256B，把发布信号与 RMW 计数隔离；每轮有 Graph 才增加这 128B，实例控制仍为 128B，无 Graph 分配不变。最后一个 `remaining_instances` 递减观察到旧值 1 的 owner 唯一发布，错误路径不发布成功。具体反例、试验和验收状态见[性能与资源记录](a5-hbg-aicore-graph-p4-performance.md)。
 
 每个并发 writer 的物化范围按实际 DCache 写回粒度隔离；尤其检查相邻实例 heap 尾部、scalar pool 边界和控制字，避免整行写回覆盖其他 writer 的字节。
 

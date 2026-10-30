@@ -513,6 +513,7 @@ __aicore__ bool bootstrap_graph_instances(
         if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, true);
         scheduler_gm_store(control->materialize_state, UINT64_C(2));
         const uint64_t prior = scheduler_gm_fetch_add(build->remaining_instances, UINT64_MAX);
+        if (prior == 1) scheduler_publish_signal(build->materialized, UINT64_C(1));
         if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, false, prior);
         if (prior == 0 || prior > build->instance_count) return false;
     }
@@ -520,19 +521,24 @@ __aicore__ bool bootstrap_graph_instances(
     if constexpr (WithProfiling) wait = scheduler_graph_protocol_wait_begin(base, local, build);
     uint64_t polls = 0;
     uint64_t remaining = 0;
+    uint32_t barrier_backoff = kInitialBackoffIterations;
     for (;;) {
-        remaining = scheduler_gm_fetch_add(build->remaining_instances, UINT64_C(0));
         if constexpr (WithProfiling) {
             if (wait != nullptr) ++polls;
         }
-        if (remaining == 0) break;
+        if (scheduler_gm_query(build->materialized) == 1) {
+            remaining = scheduler_gm_fetch_add(build->remaining_instances, UINT64_C(0));
+            if (remaining == 0) break;
+        }
         const uint64_t error = scheduler_read_error(run);
         if (error != 0) {
+            remaining = scheduler_gm_fetch_add(build->remaining_instances, UINT64_C(0));
             if constexpr (WithProfiling)
                 scheduler_graph_protocol_wait_end(base, local, wait, polls, remaining, static_cast<uint32_t>(error));
             return false;
         }
         if (scheduler_watchdog_expired(start, get_sys_cnt_aicore(), timeout_cycles)) {
+            remaining = scheduler_gm_fetch_add(build->remaining_instances, UINT64_C(0));
             scheduler_record_error(
                 run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::TIMEOUT, &graph, context,
                 SchedulerErrorSite::GRAPH_MATERIALIZE_TIMEOUT
@@ -543,7 +549,10 @@ __aicore__ bool bootstrap_graph_instances(
                 );
             return false;
         }
-        SPIN_WAIT_HINT();
+        // Use the same bounded local wait as the Ready bootstrap barrier;
+        // success still requires the counter's atomic zero observation.
+        local_backoff(barrier_backoff);
+        if (barrier_backoff < kMaximumBackoffIterations) barrier_backoff <<= 1;
     }
     scheduler_observe_data_cache(reinterpret_cast<__gm__ void *>(graph.node_map_address));
     if constexpr (WithProfiling)

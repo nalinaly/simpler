@@ -11,6 +11,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
@@ -98,11 +99,15 @@ struct alignas(128) SchedulerGraphBuildControl {
     uint64_t protocol_instances_address;
     uint64_t protocol_contributions_address;
     uint64_t protocol_workers_address;
+    // The last atomic contributor is the only signal writer. This line has
+    // no atomic RMW or cached device stores, including diagnostic stores.
+    alignas(128) volatile uint64_t materialized;
 };
 static_assert(
     std::is_standard_layout_v<SchedulerGraphBuildControl> && std::is_trivially_copyable_v<SchedulerGraphBuildControl>
 );
-static_assert(sizeof(SchedulerGraphBuildControl) == 128);
+static_assert(sizeof(SchedulerGraphBuildControl) == 256);
+static_assert(offsetof(SchedulerGraphBuildControl, materialized) == 128);
 
 struct SchedulerGraphStorageLayout {
     uint64_t nodes_offset;

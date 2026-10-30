@@ -84,6 +84,8 @@ that ...".
 
 Newest first.
 
+- [2026-10 — Graph materialization RMW polling with bounded backoff](../zh-cn/investigations/2026-10-a5-graph-rmw-poll-backoff.md): rejected as a standalone fix; Mix still reached 3.04 s, and L3 located the stall before ready bootstrap. The isolated publication-signal candidate is tracked in the Graph performance report.
+
 - [2026-10 — CSA Mix completion aggregation](../zh-cn/investigations/2026-10-csa-batched-completion.md): 2029.265 / 2000.475 us screening pair; runtime candidate withdrawn, 120 strategy-independent multi-wave guards retained.
 
 - [2026-10 — CSA fair-competition diagnostics](../zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md): payload pre-preparation withdrawn after a 2024.819 / 2005.381 us screening pair; independent baseline PMU and static-frame evidence, with attribution limits.

@@ -190,6 +190,6 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 
 真机先做架构/空闲检查、设置独立 CANN 日志目录，然后改为 `a5`、设备 `0`；本机无 task-submit，未获得队列锁。故障套件必须独占顺序运行，不与性能测量并行。上述 raw、日志和泳道图均不提交 Git。
 
-### 尚未完成的验收
+### 性能报告与覆盖边界
 
-完整内存预算、同负载 legacy/native 和无 Graph 固定 CSA 性能对照仍在进行，未获得数据前不宣称 Graph 性能收益。原生 v8、父子泳道和严格 L4 功能矩阵见[协议与泳道记录](a5-hbg-aicore-graph-p4-protocol.md)。有界故障矩阵不穷尽任意硬件异常；后续扩展真实不可返回 kernel、额外故障交错时仍须单独验证。
+完整内存预算、同负载 legacy/native 和无 Graph 固定 CSA/PA 对照已记录在[性能/资源报告](a5-hbg-aicore-graph-p4-performance.md)，不从功能通过推断性能收益。原生 v8、父子泳道和严格 L4 功能矩阵见[协议与泳道记录](a5-hbg-aicore-graph-p4-protocol.md)。有界故障矩阵不穷尽任意硬件异常；后续扩展真实不可返回 kernel、额外故障交错时仍须单独验证。

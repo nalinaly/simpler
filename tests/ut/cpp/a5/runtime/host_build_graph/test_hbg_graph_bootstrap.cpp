@@ -126,6 +126,7 @@ TEST(HbgGraphBootstrap, SharedDefinitionPublishesEveryInstanceBeforeReturn) {
     BootstrapFixture f;
     ASSERT_TRUE(f.execute());
     EXPECT_EQ(f.build.remaining_instances, 0u);
+    EXPECT_EQ(f.build.materialized, 1u);
     EXPECT_EQ(f.build.public_completed, 0u);
     for (int32_t index = 0; index < 2; ++index) {
         EXPECT_EQ(f.payloads[index].control.materialize_owner, 2u);
@@ -181,6 +182,7 @@ TEST(HbgGraphBootstrap, FailedOwnerWakesOtherWorkersWithoutDecrementingTheBuildC
     EXPECT_EQ(f.payloads[0].control.materialize_state, 3u);
     EXPECT_EQ(f.build.remaining_instances, 2u);
     EXPECT_NE(scheduler_read_error(&f.run), 0u);
+    EXPECT_EQ(f.build.materialized, 0u);
     EXPECT_FALSE(f.execute(2));
     EXPECT_EQ(f.build.public_completed, 0u);
 }
@@ -220,10 +222,32 @@ TEST(HbgGraphBootstrap, WaitingWorkerCannotPassAPausedOwner) {
         scheduler_gm_store(f.payloads[index].control.materialize_state, UINT64_C(2));
         scheduler_gm_fetch_add(f.build.remaining_instances, UINT64_MAX);
     }
+    EXPECT_FALSE(returned.load(std::memory_order_acquire));
+    scheduler_publish_signal(f.build.materialized, UINT64_C(1));
     waiter.join();
     EXPECT_TRUE(success);
     EXPECT_TRUE(returned.load(std::memory_order_acquire));
     EXPECT_EQ(f.payloads[1].output.scalars[0], 97u);
+}
+
+TEST(HbgGraphBootstrap, SignalDoesNotReplaceAtomicCounterConfirmation) {
+    BootstrapFixture f;
+    f.build.next_instance = 2;
+    f.build.materialized = 1;
+    EXPECT_FALSE(f.execute(1, PLATFORM_PROF_SYS_CNT_FREQ / 1000));
+    EXPECT_EQ(scheduler_read_error(&f.run), static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT));
+    EXPECT_EQ(f.build.remaining_instances, 2u);
+    EXPECT_EQ(f.build.public_completed, 0u);
+}
+
+TEST(HbgGraphBootstrap, ZeroCounterDoesNotInventItsPublicationSignal) {
+    BootstrapFixture f;
+    f.build.next_instance = 2;
+    f.build.remaining_instances = 0;
+    EXPECT_FALSE(f.execute(1, PLATFORM_PROF_SYS_CNT_FREQ / 1000));
+    EXPECT_EQ(f.build.materialized, 0u);
+    EXPECT_EQ(scheduler_read_error(&f.run), static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT));
+    EXPECT_EQ(f.build.public_completed, 0u);
 }
 
 TEST(HbgGraphBootstrap, AbandonedOwnerTimesOutWithoutPublicSuccess) {

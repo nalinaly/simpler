@@ -4,16 +4,16 @@
 
 ## 实施状态
 
-用户于 2026-10-30 要求实现设计并记录过程。目标仍为完整 resident Graph 支持及设计中的验证，不以测试模型通过或局部子集代替最终交付；P5 优化依实测决定。本文件记录已发生的工作，不把计划写成结果。
+用户于 2026-10-30 要求实现设计并记录过程。设计范围内的首版已经实现，功能、协议、资源和同负载性能报告已交付；首版仍为单层 Graph、启动前完成全部物化，不新增嵌套 Graph/deferred completion 或多 block predicate。P5 只合入有证据的启动长尾修复，不承诺普遍性能提升。本文件记录已发生的工作，不把计划写成结果。
 
 | 阶段 | 当前状态 | 完成证据 |
 | ---- | -------- | -------- |
-| P0 合同/来源门禁 | 基础门禁已验证 | 基线数值通过而 resident 来源失败；当前 22 项门禁单测通过，包含逐轮独立采集与原生 L4 强制审计 |
-| P1 数据/引用/布局 | 最小路径已接线验证 | GM 载体、实例/引用布局、Scalar 物化和启动发布已接线；framing 跨编译器差异已修复，A5 复测通过 |
-| P2 最小 native Graph | 最小纯 C/V 场景已通过 | 原样 1D、2D、AIC+AIV Graph 在 A5sim/A5 上通过；真机各 3 轮，数值与 fresh resident 来源均通过；完整边界矩阵仍继续补齐 |
+| P0 合同/来源门禁 | 已完成 | 基线数值通过而 resident 来源失败；当前 22 项门禁单测通过，包含逐轮独立采集与原生 L4 强制审计 |
+| P1 数据/引用/布局 | 已完成 | GM 载体、实例/引用布局、Scalar 物化和启动发布已接线；framing 跨编译器差异已修复，A5 复测通过 |
+| P2 最小 native Graph | 已完成 | 原样 1D、2D、AIC+AIV Graph 在 A5sim/A5 上通过；真机各 3 轮，数值与 fresh resident 来源均通过；扩展边界见 P3 |
 | P3 能力与故障矩阵 | 核心功能、有界设备故障及参数发布边界已验证 | 188 场景/宽 fanin、epoch/owner、双 slot；新增每平台 11 个实际故障/恢复用例和 48 轮参数/alias；详见[专项记录](a5-hbg-aicore-graph-p3-validation.md) |
-| P4 协议/泳道/性能资源 | 原生 L4 已通过，性能/资源验收未完成 | v8、父子身份、物化/聚合因果、9 类场景在 A5sim/A5 各 27 份独立捕获通过；详见[协议记录](a5-hbg-aicore-graph-p4-protocol.md) |
-| P5 有证据的优化 | 未开始 | 先获得功能与计时基线 |
+| P4 协议/泳道/性能资源 | 已交付，测量限制明确保留 | v8、父子身份及原生 L4；3150 次最终 A/B、150 次 CSA 短批复核、PA 真机及精确 GM 预算；详见[性能/资源记录](a5-hbg-aicore-graph-p4-performance.md) |
+| P5 有证据的优化 | 独立发布信号修复通过 | 启动热轮询与 atomic 计数分离，保留原子最终确认；最终 900 个原生 Graph 稳定态样本未复现 >5ms 长尾；不继续扩展增量物化 |
 
 ## 2026-10-30：隔离构建与原样门禁
 
@@ -208,4 +208,20 @@ libhost_runtime.so a51d5fb5fccd02c78188aaeb364c5b87f63aa26cf72ece6a35a02134129bf
 
 AIC/AIV × 16/65 个相邻实例 × 1/7/9/15 scalar 的 16 场景，各平台均 48 轮通过完整数值/alias 与 v8 审计。真机观察到 16/65 个不同物化 owner、共享一份 Definition、写回范围互不交叠。完整 A5sim HBG 回归增至 139 passed。详细口径、启动前退出与正常退出的区别、故障回收耗时和日志见[专项记录](a5-hbg-aicore-graph-p3-validation.md)。
 
-性能对照采用开发前 `02335c0f` 的隔离 detached worktree，独立 venv 和 runtime 构建；不改现有工作分支、不复制其他 session 的二进制。P4 的完整性能/资源报告仍未完成，不能从上述功能通过推断性能收益。
+性能对照采用开发前 `02335c0f` 的隔离 detached worktree，独立 venv 和 runtime 构建；不改现有工作分支、不复制其他 session 的二进制。当时 P4 的完整性能/资源报告尚未完成，不能从上述功能通过推断性能收益；后续结果见下节。
+
+### 初轮性能资源对照与长尾
+
+已完成三组 Graph 和冻结 CSA 的三批交替 A/B，共 2520 次原样数值验证；同一计算 kernel 的实际大小/hash 一致。无 Graph CSA 稳定态 Device 中位数约 1.946/1.951ms，GM 差仅 callable image 的 64B；Graph 的新增 GM 与实际 scheduler-state 预算完全对上。
+
+但原生 AIC/AIV、Mix 微图有严重长尾，不能按中位数宣布完成。L2 抓到 782ms 中有 782.27ms 位于启动等待，真正任务执行约 37µs。仅增加既有本地退避未解决 Mix 长尾，继续细分启动阶段。全部初轮数据、未通过项、计算口径和实验记录见[性能/资源与启动长尾调查](a5-hbg-aicore-graph-p4-performance.md)。
+
+### 最终启动发布修复与交付
+
+L3 进一步把长尾限制到物化发布/等待阶段。采用独占 128B 行的单 writer bypass 信号，最后一个 atomic 递减者发布，所有等待者看到信号后仍 atomic 确认零计数；错误路径不发布成功。每个有 Graph 的 run 增加 128B，无 Graph 不增加分配，不改计算 kernel、N 或公平领取资格。
+
+最终三批原样 A/B 共 3150 次数值和后端来源通过。Graph 2D、AIC/AIV、Mix 的 Device P50 为 227.6/183.6/349.4µs，相对 legacy 为 +2.95%/−5.83%/−15.30%，900 个原生 Graph 稳定态样本没有 >5ms 长尾；Host 发布成本和尾分位数并非都改善。无 Graph CSA Device 约 1.946/1.949ms，ordinary/Mix 约 263.2/261.7µs，原 PA 约 1.389/1.402ms。CSA Host 两版都有约 80–140ms 批间波动，额外 150 次短批复核也不能建立稳定的 Host 差异，明确保留此测量限制。
+
+完整 A5sim HBG 为 139 passed；23 个相关 C++ 测试程序、7560 个 Python 单测通过。最终信号版本的 A5 原 Graph/L4、48 轮参数边界、188 场景调度矩阵、宽 fan-in、双 slot 和 11 个实际故障恢复场景通过。独立性能/泳道、版本摘要、GM 对账和复现入口集中在[最终报告](a5-hbg-aicore-graph-p4-performance.md)。
+
+尚未实现的嵌套 Graph、deferred completion、多 block/Mix predicate 和增量物化属于设计明确排除/后续范围；不把 legacy fallback 算作 resident 成功，也不将有界 timeout 测试写成全部硬件 trap 的证明。未主动 push。

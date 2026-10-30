@@ -1,6 +1,6 @@
 # A5 HBG AICore Graph：原生协议与泳道验证
 
-日期：2026-10-30。依据：[设计文档](a5-hbg-aicore-graph-design.md)、[实现过程](a5-hbg-aicore-graph-implementation.md)。本次以 `b22cbd89a` 的已验证能力为起点；本页记录 L4 接入，不宣称完整故障矩阵或性能验收已经完成。
+日期：2026-10-30。依据：[设计文档](a5-hbg-aicore-graph-design.md)、[实现过程](a5-hbg-aicore-graph-implementation.md)。本页记录以 `b22cbd89a` 为起点的 L4 接入及后续信号兼容约定；最终故障和性能结论分别见[专项验证](a5-hbg-aicore-graph-p3-validation.md)及[性能/资源报告](a5-hbg-aicore-graph-p4-performance.md)，不从 L4 的带插桩时间推断 L0 性能。
 
 ## 1. 实现与证据口径
 
@@ -21,7 +21,9 @@
 | 子任务完成贡献 | 唯一完成者；`remaining_children` 递减前后与旧值 | 证明全部子任务终态汇总到唯一 EXIT |
 | ENTER/EXIT/Dummy | 复用已有无 kernel TaskDone 记录 | 不生成伪 kernel 执行记录 |
 
-记录使用原 worker 私有的事件序号；没有新增全局 trace atomic。新事件区只在 Graph + L4 时分配，三种 record 均为独立 128B 行，不与调度控制字混写。L0 不分配这些区、不写这些记录；实例和构造控制结构仍为 128B。
+记录使用原 worker 私有的事件序号；没有新增全局 trace atomic。新事件区只在 Graph + L4 时分配，三种 record 均为独立 128B 行，不与调度控制字混写。L0 不分配这些区、不写这些记录。实例控制为 128B；构造控制现为 256B，其中独立 128B 行保存功能性的物化发布信号，不属于 trace。
+
+启动等待先读取隔离行的 bypass 信号，再以 atomic 确认 `remaining_instances==0`；`remaining_observed` 仍来自实际 atomic，因果证明与旧 v8 一致。`poll_count` 是等待循环的探测次数，不等于 atomic 指令次数。最后完成者的发布 before/after 包含计数递减和发布信号，未增加逐次轮询事件。
 
 设实例数为 I、展开节点数为 R、worker 数为 W，新增 Graph 事件区为 `128 × (I + R + W)` 字节，不随轮询次数增长。2 个 1024-child 实例在 A5 上为 I=2、R=2052、W=96，对应 275,200B；**这只是新增事件区，不是完整 scheduler/heap/retained 分配的总占用**。
 
@@ -123,7 +125,7 @@ A5 矩阵日志目录：`outputs/aicore-graph-p4-matrix-a5.hvs3jw/`。每个 cas
 
 最大 Dummy 场景的 A5 raw 为 2,629,471B，约 2.51 MiB；其 8400 个有效序号包含控制服务和有界 Graph 事件，没有逐次 poll 展开。这不是完整运行内存占用。
 
-## 5. 版本与剩余工作
+## 5. 版本与后续验证
 
 本次 A5 验证二进制 SHA256：
 
@@ -133,4 +135,4 @@ libaicpu_kernel.so  396de9b49313372adc2183e45edc19ab288b099300f31a04ea6bdbaba0da
 libhost_runtime.so d936ac420b06b4930a082ec0b75382132352f528425dc902ff0e9630dba098ae
 ```
 
-尚未完成：真实设备错误/回收与相邻参数 cacheline/alias 专项；同负载 legacy/native 的 Host bind、完整 Device RunWall、Host 总时间、冷/热样本统计；完整 GM/retained 容量清单；无 Graph 固定 CSA 性能回归。当前只证明原生 L4 功能和捕获矩阵，不宣称 Graph 的端到端性能收益，也不把 P4 整体或用户目标标记完成。仅允许阶段性本地 commit，不主动 push。
+本页初次接入 L4 时，真实故障、参数边界和完整性能资源仍未验收；后续已完成设计范围内的专项与对照，结果见页首两个链接。L4 只证明协议和捕获矩阵，不自动证明端到端性能收益；最终报告仍保留首版启动成本、Host 回退及测量限制。仅作阶段性本地 commit，不主动 push。
