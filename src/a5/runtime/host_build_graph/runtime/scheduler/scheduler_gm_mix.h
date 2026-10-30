@@ -67,8 +67,8 @@ inline __aicore__ bool scheduler_gm_mix_close(
     auto &admission = *local->admission;
     auto &group = admission.gm_mix;
     const auto *record = scheduler_admission_record_at(base, &admission, admission.current_task_ref);
-    auto *seals = scheduler_state_at<uint64_t>(base, record->mix_close_seals_offset);
-    auto &seal = seals[group.cluster_index];
+    auto *seals = scheduler_state_at<SchedulerMixCloseSeal>(base, record->mix_close_seals_offset);
+    auto &seal = seals[group.cluster_index].value;
     uint64_t closed_cursor = UINT64_MAX;
     uint64_t close_seal = 0;
     bool used_claim_seal = false;
@@ -239,8 +239,8 @@ inline __aicore__ bool scheduler_gm_mix_observe(
         // A released lane may still be consuming A's retained seal while its
         // coordinator has already published B into the reusable mailbox.
         const auto *record = scheduler_admission_record_at(base, &admission, admission.current_task_ref);
-        auto *seals = scheduler_state_at<uint64_t>(base, record->mix_close_seals_offset);
-        if (scheduler_gm_fetch_add(seals[group.cluster_index], UINT64_C(0)) != 0) {
+        auto *seals = scheduler_state_at<SchedulerMixCloseSeal>(base, record->mix_close_seals_offset);
+        if (scheduler_gm_fetch_add(seals[group.cluster_index].value, UINT64_C(0)) != 0) {
             bool closed = false;
             if (!scheduler_gm_mix_close(graph, base, local, run, &closed, true)) return false;
             if (closed) {

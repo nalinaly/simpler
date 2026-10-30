@@ -118,11 +118,11 @@ struct GmMixFixture {
     SchedulerGroupMailbox *mailbox(uint32_t cluster) const {
         return scheduler_state_at<SchedulerGroupMailbox>(base(), storage.layout.group_mailboxes_offset) + cluster;
     }
-    uint64_t &seal(uint64_t task, uint32_t cluster) const {
+    volatile uint64_t &seal(uint64_t task, uint32_t cluster) const {
         const auto *record = scheduler_state_at<SchedulerAdmissionRecord>(
             base(), storage.layout.admission_records_offset + task * storage.layout.admission_record_stride
         );
-        return scheduler_state_at<uint64_t>(base(), record->mix_close_seals_offset)[cluster];
+        return scheduler_state_at<SchedulerMixCloseSeal>(base(), record->mix_close_seals_offset)[cluster].value;
     }
     bool enqueue(uint64_t task, uint32_t worker = 0) {
         auto *local = locals[worker];

@@ -292,15 +292,19 @@ inline void admissions(JsonObject &root, const Image &image, const AicoreSchedul
         const auto &record = *image.array<SchedulerAdmissionRecord>(offset, 1);
         if (record.member_words_offset != offset + sizeof(SchedulerAdmissionRecord))
             throw std::invalid_argument("protocol member bitmap outside its task record");
-        const uint64_t *seals = nullptr;
+        std::vector<uint64_t> seals;
         if (record.mix_close_seals_offset != 0) {
             const uint64_t first = layout.mix_close_seals_offset;
-            const uint64_t stride = layout.spmd.cluster_count * sizeof(uint64_t);
+            const uint64_t stride = layout.spmd.cluster_count * sizeof(SchedulerMixCloseSeal);
             if (stride == 0 || record.mix_close_seals_offset < first ||
                 (record.mix_close_seals_offset - first) % stride != 0 ||
                 (record.mix_close_seals_offset - first) / stride >= layout.spmd.mix_task_count)
                 throw std::invalid_argument("protocol close seal outside Host planned region");
-            seals = image.array<uint64_t>(record.mix_close_seals_offset, layout.spmd.cluster_count);
+            const auto *cells =
+                image.array<SchedulerMixCloseSeal>(record.mix_close_seals_offset, layout.spmd.cluster_count);
+            seals.reserve(static_cast<size_t>(layout.spmd.cluster_count));
+            for (uint64_t cluster = 0; cluster < layout.spmd.cluster_count; ++cluster)
+                seals.push_back(static_cast<uint64_t>(cells[cluster].value));
         }
         if (task != 0) out << ',';
         JsonObject row(out);
@@ -318,7 +322,7 @@ inline void admissions(JsonObject &root, const Image &image, const AicoreSchedul
             "member_words", image.array<uint64_t>(record.member_words_offset, layout.admission_member_word_count),
             layout.admission_member_word_count
         );
-        row.numbers("close_seals", seals, seals == nullptr ? 0 : layout.spmd.cluster_count);
+        row.numbers("close_seals", seals.data(), seals.size());
     }
     out << ']';
 }
@@ -338,8 +342,9 @@ inline std::string scheduler_export_protocol(
     std::ostringstream out;
     {
         JsonObject root(out);
-        // v6 records valid-count confirmation and the exhaustion publication.
-        root.string("schema", "hbg-native-protocol-v6");
+        // v7 preserves claim certificates and declares isolated close-seal cells.
+        root.string("schema", "hbg-native-protocol-v7");
+        root.number("close_seal_stride", sizeof(SchedulerMixCloseSeal));
         root.string("producer", "aicore");
         root.number("run_epoch", epoch);
         root.number("task_count", plan.task_count);

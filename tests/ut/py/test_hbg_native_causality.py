@@ -14,13 +14,17 @@ import pytest
 from _capture_builder import Capture
 from _native_protocol_builder import ProtocolBuilder
 
-from simpler_setup.tools.hbg.native_causality import audit_native_protocol
+from simpler_setup.tools.hbg.native_causality import MIX, SPMD, SYNC, audit_native_protocol
 from simpler_setup.tools.hbg.native_protocol import STAMPS, _event_records, audit_protocol_sequences
 from simpler_setup.tools.swimlane_converter import generate_chrome_trace_json, read_perf_data
 
 
 def _claim_seal_capture(mask, blocks, *, sync=False, sealed=True):
     raw, identities = ProtocolBuilder([(mask, blocks, ())], sync_tasks=(0,) if sync else ()).run()
+    return _add_claim_seal_certificates(raw, identities, sealed=sealed)
+
+
+def _add_claim_seal_certificates(raw, identities, *, sealed=True):
     original = [
         record[name] for record, kind, _ in _event_records(raw) for name in STAMPS[kind].split() if record[name][1]
     ]
@@ -30,12 +34,14 @@ def _claim_seal_capture(mask, blocks, *, sync=False, sealed=True):
             record[name] for name in STAMPS[kind].split() if record[name][1]
         )
     raw["schema"] = "hbg-native-protocol-v6"
-    cooperative = bool(raw["cooperative_task_count"])
-    raw["task_controls"][0].update(
-        claim_tickets=blocks if blocks > 1 and not sync else 0,
-        admission_claim_lock=0,
-        claim_seal=blocks if cooperative else 0,
-    )
+    tasks = {task["task_ref"]: task for task in raw["tasks"]}
+    for control in raw["task_controls"]:
+        task = tasks[control["task_ref"]]
+        control.update(
+            claim_tickets=task["block_num"] if task["flags"] & SPMD and not task["flags"] & SYNC else 0,
+            admission_claim_lock=0,
+            claim_seal=task["block_num"] if task["flags"] & (MIX | SPMD) else 0,
+        )
     insertion = {}
     for block in raw["blocks"]:
         owner = block["owner"]
@@ -50,9 +56,11 @@ def _claim_seal_capture(mask, blocks, *, sync=False, sealed=True):
             published_after=[0, 0],
         )
         block["claim"] = certificate
+        blocks = tasks[owner["task_ref"]]["block_num"]
         if certificate["confirmed_count"] == blocks:
             certificate["seal_value"] = blocks
-            certificate["published_before"][0] = certificate["published_after"][0] = owner["claim_after"][0]
+            certificate["published_before"] = [owner["claim_after"][0], 0]
+            certificate["published_after"] = [owner["claim_after"][0], 0]
             insertion[id(owner["claim_after"])] = [certificate["published_before"], certificate["published_after"]]
     for worker in raw["workers"]:
         events = sorted(per_worker.get(worker["index"], []), key=lambda stamp: stamp[1])
@@ -63,12 +71,81 @@ def _claim_seal_capture(mask, blocks, *, sync=False, sealed=True):
         for ordinal, stamp in enumerate(expanded, 1):
             stamp[1] = ordinal
         worker["next_sequence"] = len(expanded)
-    assert len(original) + 2 * int(cooperative) == sum(row["next_sequence"] for row in raw["workers"])
+    assert len(original) + 2 * raw["cooperative_task_count"] == sum(row["next_sequence"] for row in raw["workers"])
     for member in raw["members"]:
-        cursor_reader = not (mask.bit_count() > 1 and member["worker_index"] % 3)
+        task = tasks[member["task_ref"]]
+        blocks = task["block_num"]
+        cursor_reader = not (task["flags"] & MIX and member["worker_index"] % 3)
         use = sealed and cursor_reader and member["closed_cursor"] == blocks
         member.update(claim_seal_seen=blocks if use else 0, claim_cursor_seen=blocks if use else 0)
     return raw, identities
+
+
+def _isolated_close_seals(raw):
+    raw.update(schema="hbg-native-protocol-v7", close_seal_stride=128)
+    mixed = [row for row in raw["admissions"] if row["close_seals"]]
+    if mixed:
+        base = mixed[0]["close_seals_offset"]
+        for index, row in enumerate(mixed):
+            row["close_seals_offset"] = base + index * raw["cluster_count"] * 128
+
+
+@pytest.mark.parametrize("mask", (1, 2, 4, 3, 5, 6, 7))
+@pytest.mark.parametrize("blocks,sync", ((1, False), (2, False), (16, False), (2, True)))
+@pytest.mark.parametrize("sealed", (False, True))
+def test_v7_close_layout_preserves_claim_seal_and_sync_start_proof(mask, blocks, sync, sealed):
+    raw, identities = _claim_seal_capture(mask, blocks, sync=sync, sealed=sealed)
+    _isolated_close_seals(raw)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+
+
+@pytest.mark.parametrize("version", (1, 2, 3, 4, 5, 6, 7))
+@pytest.mark.parametrize("clusters", (1, 2, 22))
+def test_close_seal_rows_follow_each_production_version_without_aliasing(version, clusters):
+    raw, identities = ProtocolBuilder([(3, 1, ()), (2, 1, ()), (6, 1, ()), (7, 1, ())], clusters=clusters).run()
+    if version >= 6:
+        raw, identities = _add_claim_seal_certificates(raw, identities)
+    else:
+        raw["schema"] = f"hbg-native-protocol-v{version}"
+        for control in raw["task_controls"]:
+            if version > 1:
+                control["claim_tickets"] = 0
+            if version == 5:
+                control["admission_claim_lock"] = 0
+    if version == 7:
+        _isolated_close_seals(raw)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+    mixed = [row for row in raw["admissions"] if row["close_seals"]]
+    mixed[1]["close_seals_offset"] = mixed[0]["close_seals_offset"] + clusters * (8 if version == 7 else 128)
+    with pytest.raises(ValueError, match="aliased or wrong task close seals"):
+        audit_native_protocol(raw, identities)
+
+
+@pytest.mark.parametrize("fault", ("alias", "interior", "swap", "unaligned", "gap", "claim_seal"))
+def test_v7_close_seal_rows_and_claim_seal_evidence_are_both_mandatory(fault):
+    raw, identities = ProtocolBuilder([(3, 1, ()), (6, 1, ()), (7, 1, ())]).run()
+    raw, identities = _add_claim_seal_certificates(raw, identities)
+    _isolated_close_seals(raw)
+    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+    mixed = [row for row in raw["admissions"] if row["close_seals"]]
+    if fault == "alias":
+        mixed[1]["close_seals_offset"] = mixed[0]["close_seals_offset"]
+    elif fault == "interior":
+        mixed[1]["close_seals_offset"] = mixed[0]["close_seals_offset"] + 128
+    elif fault == "swap":
+        mixed[1]["close_seals_offset"], mixed[2]["close_seals_offset"] = (
+            mixed[2]["close_seals_offset"],
+            mixed[1]["close_seals_offset"],
+        )
+    elif fault == "unaligned":
+        for row in mixed:
+            row["close_seals_offset"] += 8
+    elif fault == "gap":
+        mixed[2]["close_seals_offset"] += 128
+    else:
+        raw["task_controls"][0]["claim_seal"] = 0
+    with pytest.raises(ValueError, match="native protocol"):
+        audit_native_protocol(raw, identities)
 
 
 @pytest.mark.parametrize("mask", (1, 2, 3, 5, 6, 7))

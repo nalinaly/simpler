@@ -128,8 +128,8 @@ inline __aicore__ bool scheduler_ordered_poll_may_progress(
     if (!local->is_mix_coordinator() &&
         (group.phase == SchedulerGmMixPhase::IDLE || group.phase == SchedulerGmMixPhase::RELEASED)) {
         const auto *record = scheduler_admission_record_at(base, &admission, admission.current_task_ref);
-        auto *seals = scheduler_state_at<uint64_t>(base, record->mix_close_seals_offset);
-        return scheduler_gm_query(seals[group.cluster_index]) != 0 ||
+        auto *seals = scheduler_state_at<SchedulerMixCloseSeal>(base, record->mix_close_seals_offset);
+        return scheduler_gm_query(seals[group.cluster_index].value) != 0 ||
                scheduler_gm_query(mailbox->published_seq) > group.group_seq;
     }
     const bool releases = group.phase == SchedulerGmMixPhase::RELEASED && local->is_mix_coordinator();

@@ -999,6 +999,21 @@ void corrupt_record(AdmissionFixture &fixture, RecordCorruption corruption, bool
 
 class HbgAdmissionPreparedCorruption : public ::testing::TestWithParam<RecordCorruption> {};
 
+TEST(HbgAdmission, MixCloseSealOffsetMustNameACompleteTaskRowNotAnInteriorCell) {
+    for (uint64_t delta : {UINT64_C(1), UINT64_C(8), UINT64_C(16), UINT64_C(128), UINT64_C(512)}) {
+        SCOPED_TRACE(delta);
+        AdmissionFixture fixture({{1, 3}, {1, 7}}, 6);
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+        ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+        fixture.record(0)->mix_close_seals_offset = fixture.storage.layout.mix_close_seals_offset + delta;
+        EXPECT_FALSE(fixture.prepare(0));
+        EXPECT_EQ(scheduler_gm_query(fixture.control()->commit_tail), 0u);
+        EXPECT_EQ(fixture.admissions[0].pending_task_ref, 0);
+        EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::ADMISSION_INVALID_RECORD));
+    }
+}
+
 TEST_P(HbgAdmissionPreparedCorruption, CorruptPreparedRecordCannotAdvanceCommitTail) {
     AdmissionFixture fixture({{3, 1}});
     SchedulerReadyClaim ready{};

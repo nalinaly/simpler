@@ -319,23 +319,27 @@ predicate 跳过保留 executed=false，不冒充 kernel 执行。N/block 来自
 completion 的既有 valid 最后发布；L0 不写身份。读端拒绝缺字段、错绑、重复执行及槽代次。
 CSA 严格门禁按冻结图核对完整 task/block/slot 集合；历史无身份 capture 保持未验证。
 执行身份对象本身不提供 LocalDone、共同准入发布和 GM 组释放事件。
-L4 另以 `aicore_protocol` 对象导出这些真实记录，当前 schema 为 `hbg-native-protocol-v6`，
+L4 另以 `aicore_protocol` 对象导出这些真实记录，当前生产 schema 为 `hbg-native-protocol-v7`，
 同时保留 Host 冻结图和设备终态。统一读端在 `simpler_setup/tools/hbg/native_protocol.py`；
 它校验 schema 与逐核序号完整性，`native_causality.py`、`native_mix_audit.py` 与
 `native_order.py` 进一步检查冻结图／成员、两槽生命周期、实际完成票号、组握手与关闭、
 TaskDone 和依赖，并与独立入口身份逐字段连接。
-v2–v6 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
-v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v6 为 N>1，N1／sync_start 均不取号。
-v5/v6 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
-v6 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
+v2–v7 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
+v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v7 为 N>1，N1／sync_start 均不取号。
+v5–v7 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
+v6/v7 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
 每个协同 block 的 claim 记录保存有效确认计数，其集合严格为 1…N；
 只有实际令有效 next_block 达到 N 的确认者可以记录 seal=N 的发布前后事件，不能用最后票号替代。
 使用 seal 的成员关闭必须记录 claim_seal_seen==claim_cursor_seen==closed_cursor==N，
 并具有从唯一发布到关闭读点的因果边；强读回退的两个 seen 字段为零。
 Mix 的代管 V 不伪造 cursor 读取，仍通过原 cluster close-seal 关闭；sync_start 的提前局部关闭继续支持 cursor<N。
 claim_seal 不表示 kernel 完成；next_block==completed_blocks==N 的有效 block 条件保持原样。
-当前 v6 的 cluster close-seal 仍按 8B 排列，不包含关闭区步长变更。
-读端继续严格支持 v1–v5 生产历史记录，
+历史生产 v6 的 cluster close-seal 按 8B 排列，不包含关闭区步长变更。
+当前 v7 必填整数 close_seal_stride=128，没有 Mix 的图也必须声明，
+同时保留所有 v6 claim_seal 证书和关闭见证，不改变成员集合或入口/完成条件。
+v7 按完整 128B 单元校验每 task 的 seal 行范围、对齐和连续绑定；
+v1–v6 仍按各自历史 8B 语义处理且拒绝新字段。
+读端继续严格支持 v1–v6 生产历史记录，
 不为缺失字段补默认值，也不接受 v1 混入票数字段或在同一 schema 下改变阈值语义。
 失败记录保留原始票数，不能仅靠 wire 解析宣称终态正确。
 既有泳道 `core_id` 使用紧凑 worker 编号；协议拓扑 `workers[].core_id` 保存硬件核号，

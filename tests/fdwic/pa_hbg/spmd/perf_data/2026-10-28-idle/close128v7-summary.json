@@ -1,0 +1,1414 @@
+{
+  "schema": "csa-close128-v7-paired-v1",
+  "date": "2026-10-29",
+  "base_commit": "b83e85b6b",
+  "decision": "完成全部回归后保留局部布局收益；低于 1.5ms 的目标仍未达成。",
+  "mechanism": "独立 task/cluster 的关闭 seal 由 8B 密排改为 128B 单元，保留全部 FAA0/store/barrier 与三 lane 关闭义务。",
+  "invariants": [
+    "不预选 cluster，不缩小合法竞争者",
+    "领取、准入顺序、sync_start 与本核义务不变",
+    "v7 保留 v6 claim_seal 证书；v1-v6 生产历史语义保持不变",
+    "CSA kernel、输入、N、ABI 和七项 golden 不变"
+  ],
+  "layout": {
+    "cluster_count": 32,
+    "mix_tasks": 26,
+    "close_seals": 832,
+    "old_stride": 8,
+    "new_stride": 128,
+    "state_size_increase_bytes": 99840,
+    "scalar_dynamic_heap": false
+  },
+  "benchmarks": [
+    {
+      "label": "idle-close128v7-after-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-after-a/result.json",
+      "result_sha256": "b784e72e1310dd874560acf1b0e2209107876fa1c559c9b110c51a827675720d",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "068d46542cc37e8fa0db5545f680998e4a4b8d76aa81855000ba2633ce6ce364",
+        "runtime_sha256": {
+          "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af",
+          "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+          "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1919.544,
+          "median": 1955.3235,
+          "mean": 1958.7712099999999,
+          "max": 2150.131,
+          "p90": 1978.4006,
+          "p99": 2068.3124500000004,
+          "samples": [
+            1962.686,
+            1945.58,
+            1971.437,
+            1947.407,
+            1925.918,
+            1956.879,
+            1944.019,
+            1973.428,
+            2012.233,
+            1999.711,
+            1932.417,
+            1954.949,
+            1978.235,
+            1953.327,
+            1955.31,
+            1950.836,
+            1963.578,
+            1964.305,
+            2014.335,
+            1977.072,
+            1930.226,
+            1984.185,
+            1958.062,
+            1966.706,
+            1941.274,
+            1956.937,
+            1959.124,
+            1949.856,
+            1948.005,
+            1981.207,
+            2067.486,
+            1956.709,
+            1947.22,
+            1939.207,
+            1941.626,
+            1968.361,
+            2150.131,
+            1958.42,
+            1956.858,
+            1934.846,
+            1959.901,
+            1941.918,
+            1928.667,
+            1972.848,
+            1968.4,
+            1955.873,
+            1934.463,
+            1951.918,
+            1936.084,
+            1974.995,
+            1968.807,
+            1965.758,
+            1939.374,
+            1952.346,
+            1962.984,
+            1955.075,
+            1963.593,
+            1937.678,
+            1919.544,
+            1951.155,
+            1940.637,
+            1978.273,
+            1951.995,
+            1979.549,
+            1984.862,
+            1941.048,
+            1955.337,
+            1974.559,
+            1954.37,
+            1945.62,
+            1956.305,
+            1956.194,
+            1936.762,
+            1938.688,
+            1936.692,
+            1950.015,
+            1947.671,
+            1962.527,
+            1998.373,
+            1958.263,
+            1977.033,
+            1951.344,
+            1928.101,
+            1958.956,
+            1957.561,
+            1944.46,
+            1978.031,
+            1945.621,
+            1937.982,
+            1958.534,
+            1961.395,
+            1953.875,
+            1928.52,
+            1942.206,
+            1955.421,
+            1949.619,
+            1935.523,
+            1926.523,
+            1974.22,
+            1942.967
+          ]
+        },
+        "host_us": {
+          "min": 77728.442,
+          "median": 78556.5255,
+          "mean": 80627.79438,
+          "max": 94726.772,
+          "p90": 87130.1289,
+          "p99": 89310.06323000003
+        }
+      },
+      "arm": "candidate"
+    },
+    {
+      "label": "idle-close128v7-before-a",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-before-a/result.json",
+      "result_sha256": "7be1932d3a540eeec88bb3e1a077322a49afb7b56944a58ada059e9a2210f529",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3",
+          "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+          "aicore_kernel.o": "161591427b96f4f95ea2fbd9d9abdbf9a9c5d4159483a896c6330e03d5432e8c"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1929.373,
+          "median": 1964.799,
+          "mean": 1968.63386,
+          "max": 2043.862,
+          "p90": 1995.8665,
+          "p99": 2028.26455,
+          "samples": [
+            1963.028,
+            1997.104,
+            1979.584,
+            1967.922,
+            1965.242,
+            1997.702,
+            1969.481,
+            1966.182,
+            1969.695,
+            1971.379,
+            1952.998,
+            1940.335,
+            1942.049,
+            1989.674,
+            1995.729,
+            1956.704,
+            1945.452,
+            1949.276,
+            2015.578,
+            1961.535,
+            1991.131,
+            1964.356,
+            1981.488,
+            1955.321,
+            2017.853,
+            1948.101,
+            1975.515,
+            1979.825,
+            2008.139,
+            1969.227,
+            1942.792,
+            1959.063,
+            1989.297,
+            2005.381,
+            1951.824,
+            1975.414,
+            1957.401,
+            1978.37,
+            1954.043,
+            1970.339,
+            1952.613,
+            1956.462,
+            1981.065,
+            1949.836,
+            1961.992,
+            1957.854,
+            1966.302,
+            1945.186,
+            1995.4,
+            1966.491,
+            2028.107,
+            1962.052,
+            1968.273,
+            1957.941,
+            1993.181,
+            1964.024,
+            1977.792,
+            1953.353,
+            1953.519,
+            1971.899,
+            1952.634,
+            1967.251,
+            1970.455,
+            1985.853,
+            1974.005,
+            1972.195,
+            1944.393,
+            1963.255,
+            1990.485,
+            1929.373,
+            1970.41,
+            1954.143,
+            1958.38,
+            1975.614,
+            1990.918,
+            1938.314,
+            1952.229,
+            1957.65,
+            1960.389,
+            1982.331,
+            1948.645,
+            1946.431,
+            1934.659,
+            1984.933,
+            1936.869,
+            1957.92,
+            1970.017,
+            1958.604,
+            2043.862,
+            1945.256,
+            1961.813,
+            2011.508,
+            1982.603,
+            1942.534,
+            2014.149,
+            1961.899,
+            1950.46,
+            1948.559,
+            1943.01,
+            1994.507
+          ]
+        },
+        "host_us": {
+          "min": 133401.415,
+          "median": 142400.811,
+          "mean": 143084.01633,
+          "max": 163156.829,
+          "p90": 148822.3899,
+          "p99": 160608.13934
+        }
+      },
+      "arm": "baseline"
+    },
+    {
+      "label": "idle-close128v7-before-b",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-before-b/result.json",
+      "result_sha256": "65992066767179713cc4658c10c1e6eb01a8dc7b5bc2e013ac6fdceb9ba8603a",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "10d03c5b6032da63f837759f3367268edeac4a91a91c247c8f6bb684fe9f35f3",
+          "libaicpu_kernel.so": "7836a9fc3894a1f2c6f80a4fbda05539e21169b2f8c9b76fdaebbf4873c1149e",
+          "aicore_kernel.o": "161591427b96f4f95ea2fbd9d9abdbf9a9c5d4159483a896c6330e03d5432e8c"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1941.636,
+          "median": 1979.5104999999999,
+          "mean": 1984.05238,
+          "max": 2200.402,
+          "p90": 2012.5928,
+          "p99": 2081.646550000001,
+          "samples": [
+            1987.207,
+            1966.82,
+            2070.749,
+            1971.922,
+            1944.641,
+            2012.789,
+            1982.035,
+            1958.957,
+            1986.019,
+            1971.408,
+            1966.249,
+            1970.331,
+            1968.824,
+            1961.651,
+            1977.117,
+            1953.427,
+            1988.399,
+            1970.046,
+            2012.571,
+            1951.92,
+            1996.917,
+            1964.024,
+            1962.39,
+            2029.107,
+            1950.418,
+            1995.998,
+            2033.481,
+            2036.088,
+            1958.088,
+            1964.885,
+            1993.36,
+            1941.718,
+            1982.668,
+            1979.12,
+            1984.025,
+            1943.079,
+            1974.389,
+            2080.447,
+            1967.328,
+            1989.089,
+            1975.218,
+            1982.718,
+            1974.332,
+            1962.475,
+            1982.905,
+            1993.411,
+            1995.308,
+            1983.033,
+            1979.5,
+            1997.257,
+            2000.333,
+            1971.72,
+            1962.134,
+            1991.025,
+            2014.229,
+            1997.498,
+            2021.342,
+            1963.089,
+            1949.072,
+            1977.713,
+            1985.185,
+            1981.437,
+            1993.068,
+            1997.314,
+            1960.897,
+            1946.528,
+            1979.521,
+            1941.636,
+            1991.328,
+            1976.853,
+            1998.582,
+            1984.689,
+            1978.906,
+            1992.851,
+            1997.137,
+            1970.064,
+            2014.048,
+            1978.381,
+            1965.016,
+            2006.141,
+            1994.22,
+            1955.26,
+            1952.58,
+            1993.008,
+            1972.561,
+            1967.412,
+            1977.538,
+            1989.256,
+            1967.36,
+            2200.402,
+            1994.52,
+            1990.056,
+            1956.495,
+            2004.708,
+            1971.449,
+            1961.07,
+            1969.161,
+            1983.82,
+            1995.312,
+            1995.455
+          ]
+        },
+        "host_us": {
+          "min": 77897.916,
+          "median": 78405.1725,
+          "mean": 78623.62378,
+          "max": 87072.014,
+          "p90": 79399.616,
+          "p99": 81921.37664000003
+        }
+      },
+      "arm": "baseline"
+    },
+    {
+      "label": "idle-close128v7-after-b",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-after-b/result.json",
+      "result_sha256": "42f0175c0838726811f875733302f8db28ea1239dc07304bd10bbe9dcb264aee",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "068d46542cc37e8fa0db5545f680998e4a4b8d76aa81855000ba2633ce6ce364",
+        "runtime_sha256": {
+          "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af",
+          "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+          "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1916.467,
+          "median": 1952.5295,
+          "mean": 1956.62463,
+          "max": 2060.098,
+          "p90": 1984.2105999999999,
+          "p99": 2028.1764400000002,
+          "samples": [
+            2027.854,
+            1960.847,
+            1960.528,
+            1937.327,
+            1935.55,
+            1964.872,
+            2001.653,
+            1967.502,
+            1932.658,
+            2014.866,
+            2007.414,
+            1952.65,
+            1947.622,
+            1968.792,
+            1969.839,
+            1926.348,
+            1948.237,
+            1949.331,
+            1931.641,
+            1959.984,
+            1956.377,
+            1977.371,
+            1935.478,
+            1968.379,
+            1945.265,
+            1962.523,
+            2024.644,
+            1953.826,
+            1926.564,
+            1946.035,
+            1994.208,
+            1964.802,
+            1952.727,
+            1963.111,
+            1973.156,
+            1946.305,
+            1941.165,
+            1918.213,
+            1980.473,
+            1960.353,
+            1943.054,
+            1939.91,
+            1936.365,
+            2060.098,
+            1999.841,
+            1950.278,
+            1951.021,
+            1935.605,
+            1968.474,
+            1970.468,
+            1970.412,
+            1943.924,
+            1925.796,
+            1952.609,
+            1953.168,
+            1983.495,
+            1921.582,
+            1923.655,
+            1937.959,
+            1966.322,
+            1967.533,
+            1960.217,
+            1948.517,
+            1944.07,
+            1959.02,
+            1945.345,
+            1969.583,
+            1925.794,
+            1962.12,
+            1940.172,
+            1940.143,
+            1938.754,
+            1961.654,
+            1947.479,
+            1944.991,
+            1926.432,
+            1955.466,
+            1990.651,
+            1948.719,
+            1945.289,
+            1941.86,
+            1955.044,
+            1946.476,
+            1941.812,
+            1976.187,
+            1972.057,
+            1931.779,
+            1951.548,
+            1931.741,
+            1952.45,
+            1956.383,
+            1968.594,
+            1950.376,
+            1996.795,
+            1977.074,
+            1978.426,
+            1916.467,
+            1938.939,
+            1934.73,
+            1931.25
+          ]
+        },
+        "host_us": {
+          "min": 78390.897,
+          "median": 80813.715,
+          "mean": 80955.88924,
+          "max": 87615.32,
+          "p90": 84140.4667,
+          "p99": 87479.13263
+        }
+      },
+      "arm": "candidate"
+    }
+  ],
+  "pooled_median_us": {
+    "baseline": 1971.4285,
+    "candidate": 1953.8505
+  },
+  "reduction_percent": 0.8916377134651333,
+  "macro": {
+    "label": "l3-close128v7",
+    "raw": "../reports/csa_macro_l3_20261029.W2dr2E/l3-close128v7/evidence/L3/chip_swimlane_records.json",
+    "raw_sha256": "44986b4901a64548946a6d790872c1a9ddfb49991d91b07145c23816b4380fa5",
+    "audit": {
+      "protocol_verified": false,
+      "execution_epoch": 1,
+      "per_kind_executions": {
+        "aiv": 1444,
+        "aic": 864
+      },
+      "dependency_edges_checked": 133,
+      "block_identity_verified": true,
+      "dependency_order_source": "kernel_timestamps",
+      "dependency_timing_guard": true
+    },
+    "identity": {
+      "runtime": "host_build_graph",
+      "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+      "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+      "torch": "2.12.0+cpu",
+      "simpler_commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+      "simpler_branch": "feat/fully_distributed_within_core",
+      "tracked_diff_sha256": "068d46542cc37e8fa0db5545f680998e4a4b8d76aa81855000ba2633ce6ce364",
+      "runtime_sha256": {
+        "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af",
+        "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+        "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b"
+      },
+      "case_sources_match_baseline": true,
+      "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+      "host_only_arguments": [
+        "hc_attn_scale"
+      ]
+    },
+    "kernel_window_us": 1857.4600000000003,
+    "global_gap_us": 540.1190000000005,
+    "global_gap_count": 53,
+    "regions": [
+      {
+        "name": "前处理至t23首块",
+        "start_us": 0,
+        "end_us": 236.60800000000003,
+        "span_us": 236.60800000000003,
+        "global_gap_us": 101.13099999999994,
+        "aic_core_us": 476.20799999999986,
+        "aiv_core_us": 616.8670000000004
+      },
+      {
+        "name": "t23大投影",
+        "start_us": 236.60800000000003,
+        "end_us": 614.864,
+        "span_us": 378.256,
+        "global_gap_us": 13.836999999999989,
+        "aic_core_us": 3180.609999999999,
+        "aiv_core_us": 3468.1170000000016
+      },
+      {
+        "name": "t23结束至t56结束",
+        "start_us": 614.864,
+        "end_us": 1321.1200000000001,
+        "span_us": 706.2560000000001,
+        "global_gap_us": 314.78400000000033,
+        "aic_core_us": 1681.5209999999975,
+        "aiv_core_us": 2907.0809999999988
+      },
+      {
+        "name": "t56结束至16路pack结束",
+        "start_us": 1321.1200000000001,
+        "end_us": 1606.747,
+        "span_us": 285.62699999999995,
+        "global_gap_us": 52.380000000000564,
+        "aic_core_us": 2027.3660000000004,
+        "aiv_core_us": 2246.5750000000007
+      },
+      {
+        "name": "最终投影及后处理",
+        "start_us": 1606.747,
+        "end_us": 1857.4600000000003,
+        "span_us": 250.7130000000002,
+        "global_gap_us": 57.986999999999625,
+        "aic_core_us": 4471.723,
+        "aiv_core_us": 4582.919000000002
+      }
+    ],
+    "t23": {
+      "span_us": 378.256,
+      "calls_per_used_core": {
+        "n": 64,
+        "min": 15,
+        "median": 16,
+        "mean": 16,
+        "max": 17
+      },
+      "group_kernel_envelope_us": {
+        "n": 512,
+        "min": 5.5090000000000146,
+        "median": 6.726500000000044,
+        "mean": 6.997617187500003,
+        "max": 12.029999999999973
+      },
+      "same_cluster_group_gap_us": {
+        "n": 480,
+        "min": 13.513000000000034,
+        "median": 16.71249999999995,
+        "mean": 16.80038958333333,
+        "max": 21.959000000000003
+      },
+      "same_cluster_group_period_us": {
+        "n": 480,
+        "min": 19.468000000000075,
+        "median": 23.503999999999962,
+        "mean": 23.825100000000003,
+        "max": 33.829999999999984
+      },
+      "last_finishing_cluster": {
+        "cluster": 7,
+        "groups": 17,
+        "head_wait_us": 1.2489999999999668,
+        "kernel_envelopes_us": 116.05100000000016,
+        "between_groups_us": 260.95599999999985
+      }
+    },
+    "output_fanout": {
+      "all_projections_kernel_ready_at": 56,
+      "first_projection_start_after_t56_us": 32.08400000000006,
+      "last_projection_first_start_after_t56_us": 213.41100000000006,
+      "projection_first_start_spread_us": 181.327,
+      "last_projection_return_after_t56_us": 240.4659999999999,
+      "all_pack_done_after_t56_us": 285.62699999999995,
+      "projection_span_us": {
+        "n": 16,
+        "min": 18.033999999999878,
+        "median": 22.212499999999977,
+        "mean": 24.657312500000003,
+        "max": 34.59700000000021
+      },
+      "pack_span_us": {
+        "n": 16,
+        "min": 1.9260000000001583,
+        "median": 2.9820000000000846,
+        "mean": 2.8650624999999934,
+        "max": 3.9670000000000982
+      },
+      "pack_parent_return_to_start_us": {
+        "n": 16,
+        "min": 42.47600000000011,
+        "median": 105.46550000000002,
+        "mean": 103.7200625,
+        "max": 164.88400000000001
+      },
+      "per_branch": [
+        {
+          "projection": 58,
+          "pack": 59,
+          "parent_return_to_pack_start_us": 109.68000000000006,
+          "pack_span_us": 3.2819999999999254
+        },
+        {
+          "projection": 61,
+          "pack": 62,
+          "parent_return_to_pack_start_us": 86.73399999999992,
+          "pack_span_us": 1.9260000000001583
+        },
+        {
+          "projection": 64,
+          "pack": 65,
+          "parent_return_to_pack_start_us": 58.81700000000001,
+          "pack_span_us": 2.3810000000000855
+        },
+        {
+          "projection": 67,
+          "pack": 68,
+          "parent_return_to_pack_start_us": 101.25099999999998,
+          "pack_span_us": 3.1979999999998654
+        },
+        {
+          "projection": 70,
+          "pack": 71,
+          "parent_return_to_pack_start_us": 60.299999999999955,
+          "pack_span_us": 2.4449999999999363
+        },
+        {
+          "projection": 73,
+          "pack": 74,
+          "parent_return_to_pack_start_us": 80.85400000000004,
+          "pack_span_us": 2.2769999999998163
+        },
+        {
+          "projection": 76,
+          "pack": 77,
+          "parent_return_to_pack_start_us": 148.5719999999999,
+          "pack_span_us": 2.977000000000089
+        },
+        {
+          "projection": 79,
+          "pack": 80,
+          "parent_return_to_pack_start_us": 164.88400000000001,
+          "pack_span_us": 3.247000000000071
+        },
+        {
+          "projection": 82,
+          "pack": 83,
+          "parent_return_to_pack_start_us": 118.35199999999986,
+          "pack_span_us": 3.9670000000000982
+        },
+        {
+          "projection": 85,
+          "pack": 86,
+          "parent_return_to_pack_start_us": 90.30700000000002,
+          "pack_span_us": 2.7189999999998236
+        },
+        {
+          "projection": 88,
+          "pack": 89,
+          "parent_return_to_pack_start_us": 77.75,
+          "pack_span_us": 3.094000000000051
+        },
+        {
+          "projection": 91,
+          "pack": 92,
+          "parent_return_to_pack_start_us": 42.47600000000011,
+          "pack_span_us": 2.6849999999999454
+        },
+        {
+          "projection": 94,
+          "pack": 95,
+          "parent_return_to_pack_start_us": 114.63400000000001,
+          "pack_span_us": 2.992999999999938
+        },
+        {
+          "projection": 97,
+          "pack": 98,
+          "parent_return_to_pack_start_us": 143.846,
+          "pack_span_us": 2.98700000000008
+        },
+        {
+          "projection": 100,
+          "pack": 101,
+          "parent_return_to_pack_start_us": 131.63200000000006,
+          "pack_span_us": 2.990000000000009
+        },
+        {
+          "projection": 103,
+          "pack": 104,
+          "parent_return_to_pack_start_us": 129.43200000000002,
+          "pack_span_us": 2.673000000000002
+        }
+      ],
+      "same_cluster_between_projection_groups_us": {
+        "n": 96,
+        "min": 22.125,
+        "median": 29.576000000000022,
+        "mean": 31.217968749999994,
+        "max": 60.7829999999999
+      }
+    },
+    "t105_last_finishing_cluster": {
+      "cluster": 3,
+      "groups": 2,
+      "head_wait_us": 3.9809999999999945,
+      "kernel_envelopes_us": 161.52600000000007,
+      "between_groups_us": 21.336000000000013
+    }
+  },
+  "group_turnover": {
+    "label": "l3-close128v7",
+    "raw_sha256": "44986b4901a64548946a6d790872c1a9ddfb49991d91b07145c23816b4380fa5",
+    "task": 23,
+    "transitions": 480,
+    "gap_us": {
+      "n": 480,
+      "min": 13.513000000000034,
+      "median": 16.71249999999995,
+      "mean": 16.80038958333333,
+      "max": 21.959000000000003
+    },
+    "parts_us": {
+      "kernel_end_to_last_complete_start": {
+        "n": 480,
+        "min": 0.22000000000002728,
+        "median": 0.25699999999994816,
+        "mean": 0.2733583333333307,
+        "max": 0.8700000000000045
+      },
+      "last_complete_start_to_last_complete_end": {
+        "n": 480,
+        "min": 0.5029999999999859,
+        "median": 0.6299999999999955,
+        "mean": 0.6354083333333345,
+        "max": 0.7509999999999764
+      },
+      "last_complete_end_to_next_first_prepare": {
+        "n": 480,
+        "min": 9.190999999999917,
+        "median": 12.298499999999933,
+        "mean": 12.292462499999997,
+        "max": 17.040999999999997
+      },
+      "next_first_prepare_to_kernel": {
+        "n": 480,
+        "min": 2.520999999999958,
+        "median": 3.620999999999981,
+        "mean": 3.5991604166666673,
+        "max": 5.222000000000094
+      }
+    },
+    "caveat": "Complete.end precedes trace writeback and lane release. The residual also includes ACK polling, group retirement/claim/publication and arrival; it is not a measured single helper or pure idle. Each row reconciles exactly; medians of separate pieces need not sum to the gap median."
+  },
+  "l4": {
+    "result": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-after-l4/result.json",
+      "sha256": "2275dd5b1b43a7cf4c743d1cc7e62cd292de2a7d9eaacac68a409679e738b494"
+    },
+    "raw": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-close128v7-after-l4/chip_swimlane_records.json",
+      "sha256": "eab194308c5edf32353a76648446b82f2373e25b4b3c5783a5497069ccc3674b"
+    },
+    "schema": "hbg-native-protocol-v7",
+    "trace": {
+      "logical_tasks": 79,
+      "physical_tasks": 2308,
+      "clock_freq_hz": 1000000000,
+      "level": 4,
+      "sequence_integrity_verified": true,
+      "event_count": 46855,
+      "worker_count": 96,
+      "protocol_verified": true,
+      "device_logical_tasks": 81,
+      "executions": 2308,
+      "cooperative_tasks": 61,
+      "member_obligations": 4640,
+      "blocks": 1457,
+      "execution_epoch": 1,
+      "per_kind_executions": {
+        "aiv": 1444,
+        "aic": 864
+      },
+      "dependency_edges_checked": 133,
+      "block_identity_verified": true,
+      "dependency_order_source": "native_protocol",
+      "dependency_timing_guard": true,
+      "runtime": "host_build_graph",
+      "scheduler_producer": "aicore",
+      "distributed_scheduler_verified": true,
+      "require_aicore_scheduler": true,
+      "host_capture": {
+        "status": "complete",
+        "expected_records": 107,
+        "recorded_records": 107,
+        "pool_records": 117,
+        "dropped_records": 0,
+        "error": null
+      },
+      "clock_alignment_status": "bounded",
+      "cross_domain_latency_available": true
+    },
+    "correctness": {
+      "rounds": 2,
+      "outputs_per_round": 7,
+      "passed": true
+    }
+  },
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "regressions": {
+    "close128v7-a5-r1": {
+      "result": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/regressions/close128v7-a5-r1/result.json",
+        "sha256": "423d66b75c0fe35c71773198ce3bd07f020e43e3e4ff3f0b1557426a93c64ac1"
+      },
+      "args": [
+        "--import-mode=importlib",
+        "--import-mode=importlib",
+        "-q",
+        "-p",
+        "no:xdist",
+        "examples/a5/host_build_graph",
+        "tests/st/a5/host_build_graph",
+        "tests/fdwic/pa_hbg/spmd",
+        "--ignore=tests/st/a5/host_build_graph/resident_failure",
+        "--runtime",
+        "host_build_graph",
+        "--platform",
+        "a5",
+        "--device",
+        "0",
+        "--exclude-level",
+        "4",
+        "--manual",
+        "exclude",
+        "--require-pto-isa",
+        "--pto-session-timeout",
+        "1200"
+      ],
+      "identity": {
+        "commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "production_diff_sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746",
+        "binaries": {
+          "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b",
+          "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+          "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af"
+        }
+      }
+    },
+    "close128v7-a5-faults-r1": {
+      "result": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/regressions/close128v7-a5-faults-r1/result.json",
+        "sha256": "097f0bbfd9ca5c13aae7f19a10c5f6a5ce9b0bf30a27a1cc8ea6296f47771777"
+      },
+      "args": [
+        "--import-mode=importlib",
+        "--import-mode=importlib",
+        "-q",
+        "-p",
+        "no:xdist",
+        "tests/st/a5/host_build_graph/resident_failure/test_resident_failure.py",
+        "--platform",
+        "a5",
+        "--device",
+        "0",
+        "--manual",
+        "exclude",
+        "--require-pto-isa",
+        "--pto-session-timeout",
+        "1200"
+      ],
+      "identity": {
+        "commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "production_diff_sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746",
+        "binaries": {
+          "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b",
+          "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+          "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af"
+        }
+      }
+    },
+    "close128v7-spmd-a5-r1": {
+      "result": {
+        "path": "../reports/csa_poursoul_20261027.Osnaam/regressions/close128v7-spmd-a5-r1/result.json",
+        "sha256": "263bc70581ec6457f9651c81cecc0887e7a7e0237d73bedf332b9aaab1cf01ee"
+      },
+      "args": [
+        "--import-mode=importlib",
+        "--import-mode=importlib",
+        "-q",
+        "-p",
+        "no:xdist",
+        "tests/fdwic/pa_hbg/spmd/test_spmd_contract.py",
+        "--runtime",
+        "host_build_graph",
+        "--platform",
+        "a5",
+        "--device",
+        "0",
+        "--manual",
+        "exclude",
+        "--require-pto-isa",
+        "--pto-session-timeout",
+        "1200"
+      ],
+      "identity": {
+        "commit": "b83e85b6b30fc09bb8386bf29bb06962670917e1",
+        "production_diff_sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746",
+        "binaries": {
+          "aicore_kernel.o": "d4b041bc876a37d2d8239c8f4d943f94f7f307d9acd576a913d908b87ae6530b",
+          "libaicpu_kernel.so": "cf880ec97971c5c69985d63b7bc71b3f050cf1fc0f797247028f29338d038fff",
+          "libhost_runtime.so": "e3862db4dc263bb533ae5d886c5fed928ccac9934ca1d7b29a18e99bf386b0af"
+        }
+      }
+    }
+  },
+  "validation": {
+    "new_cpp_cases": 7,
+    "new_python_cases": 249,
+    "cpp_targets": 21,
+    "python_passed": 3985,
+    "a5_passed": 88,
+    "a5_skipped": 4,
+    "a5_deselected": 4,
+    "a5_faults_passed": 50,
+    "sim_passed": 67,
+    "sim_deselected": 29,
+    "sim_faults_passed": 38,
+    "sim_nonreturning_deselected": 12,
+    "logs": {
+      "cpp": {
+        "path": "outputs/csa-close128v7-cpp.log",
+        "sha256": "3e0f4e281cb15ba26e49881ae45c562446deb67abf11b7899eb20f731bda9f29"
+      },
+      "python": {
+        "path": "outputs/csa-close128v7-python.log",
+        "sha256": "48b75b0e886e12e11dbc95c43ff873e222be01d2ed8a5db1a311ecf0764eef92"
+      },
+      "python-red": {
+        "path": "outputs/csa-close128v7-python-red.log",
+        "sha256": "df0c70c4695a6278258d659f2b71421b32a968c5ca7fceac839668eb9ea2e653"
+      },
+      "red": {
+        "path": "outputs/csa-close128v7-red.log",
+        "sha256": "423ce53af5632579b0b1f99254ab37e2f67269bc197da245a1671872491688cd"
+      },
+      "fault-oracle": {
+        "path": "outputs/csa-close128v7-fault-oracle.log",
+        "sha256": "5c963e55cbf805aa400580eb9049a9fa027a1ba48a12e0b770835c6a34c87da5"
+      },
+      "history-reader": {
+        "path": "outputs/csa-close128v7-history-reader.log",
+        "sha256": "75705d683c1f95b16b9d2ea59765180fc39d03092bf09a148fa09ef949021bdb"
+      },
+      "a5-regression": {
+        "path": "outputs/csa-close128v7-a5-regression.log",
+        "sha256": "24b068b69696e7aa9a32cd57cb7a69d1aecc74b83027d23767b57f52a4cd4cf7"
+      },
+      "sim-regression": {
+        "path": "outputs/csa-close128v7-sim-regression.log",
+        "sha256": "9c2199eb040972d1781c756751cb46f5f9f2b70ee58d82c1724c74886492f5ec"
+      },
+      "spmd-a5": {
+        "path": "outputs/csa-close128v7-spmd-a5.log",
+        "sha256": "bc79241debc7c218ac9a5f13be08997fa89eb1f7d09d8d19dbeb31074b0e2cc6"
+      },
+      "spmd-sim": {
+        "path": "outputs/csa-close128v7-spmd-sim.log",
+        "sha256": "df11251256640a92208170ed4e395888d9cb316e6f12aa441b199be660df8a68"
+      },
+      "a5-faults": {
+        "path": "outputs/csa-close128v7-a5-faults.log",
+        "sha256": "17b9f7de3eef4e07d5accc1da13931dae4291e44472068d0e8d9c2918d3ff9d9",
+        "unique_resource_cases_passed": 50
+      },
+      "sim-faults": {
+        "path": "outputs/csa-close128v7-sim-faults.log",
+        "sha256": "d5fba8fbae906c1ceaf8ccdfda42d083fe7a552a7ff454fb3fb469155e3a2d17",
+        "unique_resource_cases_passed": 38
+      },
+      "postlint_python": {
+        "path": "outputs/csa-close128v7-postlint-python.log",
+        "sha256": "c0b3aa0e66682e71ca2b12aa36ae531a235581dd9377974d027c87a71175b598"
+      },
+      "precommit": {
+        "path": "outputs/csa-close128v7-precommit.log",
+        "sha256": "d00a3539e86a18159e51aa04010e77daeca55576eaeb7699a9f21843824a5d08"
+      }
+    },
+    "postlint_protocol_python_passed": 850,
+    "precommit": "全部适用 hooks 通过；测试证书构造改用独立列表赋值以通过 pyright，不改变证据内容，850 项读端检查重跑通过。"
+  },
+  "archives": {
+    "production": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-close128v7-production.patch",
+      "sha256": "64b47e2e6d52db21cc149737693d969272719672aa84ca71c141a4c057396746"
+    },
+    "tests": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-close128v7-tests.patch",
+      "sha256": "cf1e00496df103a6187255b38083f9e63e4ecc64cd669b29639c76bbe9933634"
+    },
+    "runtime": "../reports/csa_poursoul_20261027.Osnaam/runtime-idle-close128v7"
+  },
+  "caveats": [
+    "局部四批对照不是最终五批低于 1500us 的验收。",
+    "Host 明显波动，不宣称 Host 收益。CLI 观察为空不等于系统级独占证明。",
+    "独立 L3 中扇出区间缩短，但全员无 kernel 空窗未整体下降，不能把差值全部归因于 bank 冲突。",
+    "C++ 行间距 RED 是新布局目标不满足，不表示原 8B 方案本身存在正确性错误。"
+  ]
+}

@@ -81,7 +81,8 @@ scheduler_initialize_admission(__gm__ void *base, const SchedulerLocalState *loc
             ) ||
             mailbox_end > summary->mix_close_seals_offset ||
             !scheduler_admission_range_end(
-                summary->mix_close_seals_offset, summary->mix_task_count * clusters, sizeof(uint64_t), &seals_end
+                summary->mix_close_seals_offset, summary->mix_task_count * clusters, sizeof(SchedulerMixCloseSeal),
+                &seals_end
             ) ||
             seals_end > UINT64_MAX - reinterpret_cast<uintptr_t>(base))
             return false;
@@ -154,7 +155,7 @@ inline __aicore__ bool scheduler_admission_static_record_valid(
         return false;
     if (!scheduler_task_is_mix(meta.flags)) return record->mix_close_seals_offset == 0;
     const auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, local->config.graph_summary_offset);
-    const uint64_t row_bytes = static_cast<uint64_t>(local->config.cluster_count) * sizeof(uint64_t);
+    const uint64_t row_bytes = static_cast<uint64_t>(local->config.cluster_count) * sizeof(SchedulerMixCloseSeal);
     if (row_bytes == 0 || summary->mix_close_seals_offset == 0 ||
         record->mix_close_seals_offset < summary->mix_close_seals_offset)
         return false;

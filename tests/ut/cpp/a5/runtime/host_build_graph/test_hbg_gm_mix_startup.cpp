@@ -89,11 +89,11 @@ struct StartupFixture {
     SchedulerTaskControl *control(uint64_t task) const {
         return scheduler_state_at<SchedulerTaskControl>(base(), storage.layout.task_controls_offset) + task;
     }
-    uint64_t &seal(uint64_t task, uint32_t cluster) const {
+    volatile uint64_t &seal(uint64_t task, uint32_t cluster) const {
         const auto *record = scheduler_state_at<SchedulerAdmissionRecord>(
             base(), storage.layout.admission_records_offset + task * storage.layout.admission_record_stride
         );
-        return scheduler_state_at<uint64_t>(base(), record->mix_close_seals_offset)[cluster];
+        return scheduler_state_at<SchedulerMixCloseSeal>(base(), record->mix_close_seals_offset)[cluster].value;
     }
 
     void finish_both_tasks_on_cluster_zero() {

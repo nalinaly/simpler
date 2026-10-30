@@ -934,6 +934,11 @@ struct alignas(64) SchedulerAdmissionRecord {
     uint8_t reserved[14];
 };
 
+// Each cluster's retained close seal occupies an independent atomic region.
+struct alignas(128) SchedulerMixCloseSeal {
+    volatile uint64_t value;
+};
+
 struct alignas(128) SchedulerAdmissionControl {
     // Only the lock uses atomics. Tail publishers are serialized by the lock
     // and complete their bypass store before releasing it.
@@ -1364,6 +1369,10 @@ static_assert(
 );
 static_assert(offsetof(SchedulerTaskControl, claim_seal) == 392, "claim seal must stay in the bypass region");
 static_assert(sizeof(SchedulerAdmissionRecord) == 64, "admission header must occupy one cache line");
+static_assert(sizeof(SchedulerMixCloseSeal) == 128, "close seals require independent atomic regions");
+static_assert(alignof(SchedulerMixCloseSeal) == 128, "close seals require isolated alignment");
+static_assert(offsetof(SchedulerMixCloseSeal, value) == 0, "close seal value must lead its region");
+static_assert(std::is_standard_layout_v<SchedulerMixCloseSeal> && std::is_trivially_copyable_v<SchedulerMixCloseSeal>);
 static_assert(sizeof(SchedulerAdmissionControl) == 256, "admission control layout changed");
 static_assert(alignof(SchedulerAdmissionControl) == 128, "admission control requires isolated atomic regions");
 static_assert(offsetof(SchedulerAdmissionControl, commit_tail) == 128, "tail must not share the lock's atomic region");
@@ -1564,7 +1573,7 @@ inline bool scheduler_plan_spmd_storage(uint64_t *cursor, AicoreSchedulerLayout 
         !scheduler_layout_checked_mul(
             layout->spmd.mix_task_count, layout->spmd.cluster_count, &layout->mix_close_seal_count
         ) ||
-        !scheduler_layout_checked_mul(layout->mix_close_seal_count, sizeof(uint64_t), &bytes) ||
+        !scheduler_layout_checked_mul(layout->mix_close_seal_count, sizeof(SchedulerMixCloseSeal), &bytes) ||
         !scheduler_layout_reserve(cursor, bytes, SCHEDULER_STATE_ALIGNMENT, &layout->mix_close_seals_offset))
         return false;
     return true;
@@ -1794,7 +1803,7 @@ inline bool scheduler_init_spmd_task_records(void *base, const AicoreSchedulerLa
         record->flags = meta.flags;
         if (scheduler_task_is_mix(meta.flags)) {
             record->mix_close_seals_offset =
-                layout.mix_close_seals_offset + mix_index * layout.spmd.cluster_count * sizeof(uint64_t);
+                layout.mix_close_seals_offset + mix_index * layout.spmd.cluster_count * sizeof(SchedulerMixCloseSeal);
             ++mix_index;
         }
     }
