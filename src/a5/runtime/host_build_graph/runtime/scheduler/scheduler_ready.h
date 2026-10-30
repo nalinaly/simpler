@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "scheduler_protocol.h"
+#include "scheduler_graph_protocol.h"
 #include "scheduler_graph.h"
 #include "scheduler_error.h"
 #include "scheduler_ssbuf.h"
@@ -1699,7 +1699,9 @@ inline __aicore__ bool scheduler_graph_child_completed(
         );
         return false;
     }
+    auto *contribution = scheduler_graph_protocol_contribution_begin(base, local, graph, instance, task_ref);
     const uint64_t prior = scheduler_gm_fetch_add(instance->remaining_children, UINT64_MAX);
+    scheduler_graph_protocol_contribution_end(base, local, contribution, prior);
     if (prior == 0 || prior > static_cast<uint64_t>(instance->child_count)) {
         scheduler_record_error(
             run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,

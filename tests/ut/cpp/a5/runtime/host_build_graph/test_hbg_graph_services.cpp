@@ -28,13 +28,14 @@ namespace {
 using Kind = SchedulerGraphNodeKind;
 
 struct GraphServices {
-    explicit GraphServices(const std::vector<SchedulerGraphPlanShape> &shapes) :
+    explicit GraphServices(const std::vector<SchedulerGraphPlanShape> &shapes, bool protocol = false) :
         plan(*SchedulerGraphPlan::build(shapes)),
-        storage(plan.node_count(), 3),
+        storage(plan.node_count(), 3, 1, {3, 1, 0, 0}, protocol),
         tasks(plan.node_count()),
         nodes(plan.node_count()),
         deps(plan.node_count()),
-        instances(plan.instance_count()) {
+        instances(plan.instance_count()),
+        contributions(protocol ? plan.node_count() : 0) {
         for (int32_t ref = 0; ref < plan.node_count(); ++ref) {
             const auto node = *plan.node_at(ref);
             auto &mapped = nodes[ref];
@@ -52,6 +53,7 @@ struct GraphServices {
                 instance.child_count = range.children;
                 instance.exit_ref = range.end - 1;
                 instance.remaining_children = range.children;
+                instance.instance_index = node.instance_index;
                 if (node.kind == Kind::CHILD) dependency(ref, range.begin);
             }
             auto &metadata = storage.metadata[ref];
@@ -63,9 +65,17 @@ struct GraphServices {
                 kernel = UINT16_MAX;
         }
         view = {0, 0, nodes.size(), nodes.size() - 1, reinterpret_cast<uint64_t>(nodes.data())};
+        if (protocol) {
+            build.instance_count = instances.size();
+            build.public_task_count = plan.ranges().size();
+            build.protocol_contributions_address = reinterpret_cast<uint64_t>(contributions.data());
+            view.build_control_address = reinterpret_cast<uint64_t>(&build);
+            EXPECT_TRUE(scheduler_init_spmd_task_records(base(), storage.layout, 0));
+        }
         for (uint32_t worker = 0; worker < 3; ++worker) {
             storage.test_graphs[worker] = view;
             locals[worker] = storage.local_context(&storage.contexts[worker]);
+            if (protocol) EXPECT_TRUE(scheduler_protocol_bind(base(), locals[worker]));
         }
     }
 
@@ -98,6 +108,8 @@ struct GraphServices {
     std::vector<SchedulerGraphNode> nodes;
     std::vector<std::vector<int32_t>> deps;
     std::vector<SchedulerGraphInstanceControl> instances;
+    std::vector<SchedulerGraphProtocolContribution> contributions;
+    SchedulerGraphBuildControl build{};
     SchedulerGraphView view{};
     std::array<SchedulerLocalState *, 3> locals{};
     uint64_t cursor{0};
@@ -172,6 +184,52 @@ TEST(HbgGraphServices, DuplicateChildCompletionDoesNotDecrementTheInstanceTwice)
     EXPECT_EQ(scheduler_gm_query(f.instances[0].remaining_children), 1u);
     EXPECT_NE(scheduler_read_error(f.run()), 0u);
     EXPECT_EQ(f.pop(), SCHEDULER_TASK_REF_INVALID);
+}
+
+TEST(HbgGraphServices, ProtocolContributionsFollowChildDoneAndPrecedeParentDone) {
+    GraphServices f({{true, 2}}, true);
+    ASSERT_TRUE(f.complete(1, 1));
+    ASSERT_TRUE(f.complete(2, 2));
+    for (uint32_t child = 1; child <= 2; ++child) {
+        const auto &contribution = f.contributions[child];
+        const auto *events =
+            scheduler_state_at<SchedulerProtocolTaskTrace>(f.base(), f.storage.layout.protocol.tasks_offset);
+        EXPECT_EQ(contribution.worker_index, child);
+        EXPECT_EQ(contribution.instance_index, 0u);
+        EXPECT_EQ(contribution.task_ref, child);
+        EXPECT_EQ(contribution.remaining_before, 3 - child);
+        EXPECT_GT(contribution.before.sequence, events[child].completion.after.sequence);
+        EXPECT_GT(contribution.after.sequence, contribution.before.sequence);
+    }
+    ASSERT_EQ(f.pop(2), 3);
+    ASSERT_TRUE(f.complete(3, 2));
+    const auto *events =
+        scheduler_state_at<SchedulerProtocolTaskTrace>(f.base(), f.storage.layout.protocol.tasks_offset);
+    EXPECT_GT(events[3].completion.before.sequence, f.contributions[2].after.sequence);
+    EXPECT_EQ(f.build.public_completed, 1u);
+    EXPECT_EQ(f.contributions[0].before.sequence, 0u);
+    EXPECT_EQ(f.contributions[3].before.sequence, 0u);
+    const auto *workers =
+        scheduler_state_at<SchedulerProtocolWorkerTrace>(f.base(), f.storage.layout.protocol.workers_offset);
+    EXPECT_EQ(workers[1].error_flags, 0u);
+    EXPECT_EQ(workers[2].error_flags, 0u);
+    const uint64_t sequence = workers[2].next_sequence;
+    EXPECT_FALSE(f.complete(2, 2));
+    EXPECT_EQ(workers[2].next_sequence, sequence);
+    EXPECT_EQ(f.instances[0].remaining_children, 0u);
+}
+
+TEST(HbgGraphServices, ProtocolRejectsAContributionCompletedByAnotherWorker) {
+    GraphServices f({{true, 2}}, true);
+    auto *record = scheduler_graph_protocol_contribution_begin(f.base(), f.locals[1], f.view, &f.instances[0], 1);
+    ASSERT_NE(record, nullptr);
+    scheduler_graph_protocol_contribution_end(f.base(), f.locals[2], record, 2);
+    EXPECT_EQ(record->after.sequence, 0u);
+    const auto *workers =
+        scheduler_state_at<SchedulerProtocolWorkerTrace>(f.base(), f.storage.layout.protocol.workers_offset);
+    EXPECT_EQ(workers[1].next_sequence, 1u);
+    EXPECT_EQ(workers[2].next_sequence, 0u);
+    EXPECT_EQ(workers[2].error_flags, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
 }
 
 TEST(HbgGraphServices, OldInstanceEpochCannotContributeToTheCurrentRun) {

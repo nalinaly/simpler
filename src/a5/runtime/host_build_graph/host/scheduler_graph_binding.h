@@ -13,13 +13,15 @@
 
 #include <cstring>
 #include <optional>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "host_build_graph/graph_image_view.h"
 #include "host_build_graph/shared_memory.h"
-#include "scheduler_graph_plan.h"
+#include "scheduler_graph_capture.h"
 #include "scheduler/scheduler_graph_materialize.h"
+#include "scheduler/scheduler_graph_protocol_types.h"
 
 static_assert(sizeof(simpler::hbg::TensorData) == SCHEDULER_GRAPH_TENSOR_BYTES);
 static_assert(offsetof(simpler::hbg::TensorData, owner_task_id) == SCHEDULER_GRAPH_TENSOR_OWNER_OFFSET);
@@ -94,6 +96,64 @@ public:
 
     const SchedulerGraphPlan &plan() const { return plan_; }
     bool supported() const { return supported_; }
+
+    SchedulerGraphCapture freeze_protocol(const std::vector<SchedulerTaskMetadata> &metadata) const {
+        if (metadata.size() != static_cast<size_t>(plan_.node_count()))
+            throw std::invalid_argument("expanded protocol graph task count mismatch");
+        SchedulerGraphCapture capture;
+        capture.manifest.ranges = plan_.ranges();
+        capture.manifest.instance_definitions.resize(plan_.instance_count());
+        std::unordered_map<const GraphDefinition *, uint32_t> distinct;
+        for (size_t parent = 0; parent < definitions_.size(); ++parent) {
+            const auto *definition = definitions_[parent];
+            if (definition == nullptr) continue;
+            const auto [found, inserted] = distinct.emplace(definition, static_cast<uint32_t>(distinct.size()));
+            capture.manifest.instance_definitions[plan_.ranges()[parent].instance_index] = found->second;
+            if (inserted) {
+                SchedulerGraphDefinitionCapture saved;
+                saved.header = *definition;
+                saved.image_offset = static_cast<uint32_t>(reinterpret_cast<const std::byte *>(definition) - section_);
+                saved.tasks =
+                    freeze_array<SubTaskDefinition>(*definition, definition->off_sub_tasks, definition->task_count);
+                saved.fanin_rows =
+                    freeze_array<int32_t>(*definition, definition->off_fanin_offsets, definition->task_count + 1);
+                saved.fanin_indices =
+                    freeze_array<uint16_t>(*definition, definition->off_fanin_indices, definition->edge_count);
+                capture.manifest.definitions.push_back(std::move(saved));
+            }
+        }
+        capture.tasks.reserve(metadata.size());
+        for (int32_t ref = 0; ref < plan_.node_count(); ++ref) {
+            const auto node = plan_.node_at(ref);
+            if (!node) throw std::invalid_argument("invalid expanded protocol reference");
+            SchedulerProtocolTaskSpec spec{metadata[ref], {}};
+            auto append = [&](int32_t source) {
+                const auto dependency = plan_.dependency_ref(ref, source);
+                if (!dependency) throw std::invalid_argument("invalid expanded protocol dependency");
+                spec.dependencies.push_back(*dependency);
+            };
+            if (node->kind == SchedulerGraphNodeKind::ORDINARY || node->kind == SchedulerGraphNodeKind::ENTER) {
+                const auto &payload = tasks_->get_slot_state_by_task_id(node->outer_id).to_payload();
+                spec.dependencies.reserve(payload.fanin_count);
+                for (int32_t edge = 0; edge < payload.fanin_count; ++edge)
+                    append(payload.fanin_data()[edge]);
+            } else if (node->kind == SchedulerGraphNodeKind::CHILD) {
+                const auto &saved =
+                    capture.manifest.definitions[capture.manifest.instance_definitions[node->instance_index]];
+                const int32_t begin = saved.fanin_rows[node->child_index];
+                const int32_t end = saved.fanin_rows[node->child_index + 1];
+                if (begin == end) {
+                    spec.dependencies.push_back(plan_.ranges()[node->outer_id].begin);
+                } else {
+                    spec.dependencies.reserve(end - begin);
+                    for (int32_t edge = begin; edge < end; ++edge)
+                        append(saved.fanin_indices[edge]);
+                }
+            }
+            capture.tasks.push_back(std::move(spec));
+        }
+        return capture;
+    }
 
     SchedulerGraphSubmitState submission(int64_t ref, const SchedulerGraphView &ordinary) const {
         SchedulerGraphSubmitState result;
@@ -170,10 +230,23 @@ public:
                 1, sizeof(SchedulerGraphBuildControl), alignof(SchedulerGraphBuildControl), &out.build_control_offset
             ) ||
             !array(bytes_, 1, GRAPH_DEFINITION_OBJECT_ALIGN, &out.definitions_offset) ||
-            !array(external_fanins_, sizeof(int32_t), alignof(int32_t), &out.external_fanins_offset) ||
-            !scheduler_layout_checked_align(cursor, SCHEDULER_STATE_ALIGNMENT, &layout->total_size))
+            !array(external_fanins_, sizeof(int32_t), alignof(int32_t), &out.external_fanins_offset))
             return false;
-        return true;
+        if (layout->protocol_layout_offset != 0 &&
+            (!array(
+                 out.instance_count, sizeof(SchedulerGraphProtocolInstance), alignof(SchedulerGraphProtocolInstance),
+                 &out.protocol_instances_offset
+             ) ||
+             !array(
+                 plan_.node_count(), sizeof(SchedulerGraphProtocolContribution),
+                 alignof(SchedulerGraphProtocolContribution), &out.protocol_contributions_offset
+             ) ||
+             !array(
+                 layout->protocol.worker_count, sizeof(SchedulerGraphProtocolWorker),
+                 alignof(SchedulerGraphProtocolWorker), &out.protocol_workers_offset
+             )))
+            return false;
+        return scheduler_layout_checked_align(cursor, SCHEDULER_STATE_ALIGNMENT, &layout->total_size);
     }
 
     bool bind(
@@ -192,6 +265,11 @@ public:
         build->public_task_count = out.public_task_count;
         build->public_completed = already_complete;
         build->run_epoch = epoch;
+        if (layout.protocol_layout_offset != 0) {
+            build->protocol_instances_address = device + out.protocol_instances_offset;
+            build->protocol_contributions_address = device + out.protocol_contributions_offset;
+            build->protocol_workers_address = device + out.protocol_workers_offset;
+        }
         const auto *image = static_cast<const uint8_t *>(packed_image);
         const auto *packed_tasks = reinterpret_cast<const ChipTaskStorage *>(image + segments.storage);
         uint64_t external_cursor = 0;
@@ -238,6 +316,7 @@ public:
                 control.child_begin = range.begin + 1;
                 control.child_count = definition.task_count;
                 control.exit_ref = range.end - 1;
+                control.instance_index = static_cast<uint32_t>(source.instance_index);
                 auto &instance = instances[source.instance_index];
                 instance.definition_section_address = device + out.definitions_offset;
                 instance.definition_section_bytes = bytes_;
@@ -291,6 +370,14 @@ public:
     }
 
 private:
+    template <class T>
+    static std::vector<T> freeze_array(const GraphDefinition &definition, uint32_t offset, int32_t count) {
+        if (count == 0) return {};
+        const auto *array = graph_definition_array<T>(definition, offset, count);
+        if (array == nullptr) throw std::invalid_argument("invalid frozen Graph Definition section");
+        return {array, array + count};
+    }
+
     static bool validate_predicate(const GraphDefinition &definition, int32_t child, uint16_t slot) {
         const auto *predicates =
             graph_definition_array<GraphPredicate>(definition, definition.off_predicates, definition.predicate_count);

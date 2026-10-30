@@ -13,6 +13,10 @@ Sequence integrity proves lossless local event streams, not scheduler causality,
 execution coverage, membership, dependency ordering or Mix resource correctness.
 """
 
+from . import native_graph_protocol
+
+SCHEMAS = tuple(f"hbg-native-protocol-v{version}" for version in range(1, 9))
+
 ROOT_NUMBERS = frozenset(
     """
 run_epoch task_count worker_count trace_count member_count cooperative_task_count
@@ -77,6 +81,15 @@ ARRAYS = {
     "lane": {"arrived_seq": 3, "lane_subtasks": 3},
 }
 SIGNED_FIELDS = frozenset(("task_ref", "core_id", "core_type", "state"))
+SIGNED_FIELDS |= frozenset(("instance_index", "fanin_ref_base"))
+NUMBERS.update(native_graph_protocol.NUMBERS)
+STAMPS.update(native_graph_protocol.STAMPS)
+ARRAYS.update(native_graph_protocol.ARRAYS)
+
+
+def protocol_version(section):
+    schema = section.get("schema") if isinstance(section, dict) else None
+    return SCHEMAS.index(schema) + 1 if schema in SCHEMAS else 0
 
 
 def _error(message):
@@ -111,7 +124,12 @@ def _record(record, kind, path, extra_numbers=()):
     for name in stamps:
         _array(record[name], f"{path}.{name}", 2)
     for name, count in arrays.items():
-        _array(record[name], f"{path}.{name}", count, signed=name == "dependencies")
+        _array(
+            record[name],
+            f"{path}.{name}",
+            count,
+            signed=name == "dependencies" or (kind == "graph_definition_task" and name == "kernel_ids"),
+        )
 
 
 def _indices(rows, count, path, *, key="index", dense=False):
@@ -130,29 +148,19 @@ def _indices(rows, count, path, *, key="index", dense=False):
 
 def read_native_protocol(section):
     """Validate the wire schema; preserve incomplete/error records for diagnosis."""
-    schema = section.get("schema") if isinstance(section, dict) else None
-    root_numbers = ROOT_NUMBERS | ({"close_seal_stride"} if schema == "hbg-native-protocol-v7" else set())
-    _object(section, root_numbers | ROOT_TABLES | {"schema", "producer", "first_error"}, "root")
-    if (
-        section["schema"]
-        not in (
-            "hbg-native-protocol-v1",
-            "hbg-native-protocol-v2",
-            "hbg-native-protocol-v3",
-            "hbg-native-protocol-v4",
-            "hbg-native-protocol-v5",
-            "hbg-native-protocol-v6",
-            "hbg-native-protocol-v7",
-        )
-        or section["producer"] != "aicore"
-    ):
+    version = protocol_version(section)
+    root_numbers = ROOT_NUMBERS | ({"close_seal_stride"} if version >= 7 else set())
+    graph_fields = {"graph"} if version == 8 else set()
+    _object(section, root_numbers | ROOT_TABLES | {"schema", "producer", "first_error"} | graph_fields, "root")
+    if not version or section["producer"] != "aicore":
         _error("unknown schema or producer")
     for field in root_numbers:
         _number(section[field], field)
-    if schema == "hbg-native-protocol-v7" and section["close_seal_stride"] != 128:
-        _error("close_seal_stride must be 128 for v7")
-    _object(section["first_error"], ERROR_NUMBERS, "first_error")
-    for field in ERROR_NUMBERS:
+    if version >= 7 and section["close_seal_stride"] != 128:
+        _error("close_seal_stride must be 128 for v7/v8")
+    error_numbers = ERROR_NUMBERS + (["public_task_id", "sub_task_id"] if version == 8 else [])
+    _object(section["first_error"], error_numbers, "first_error")
+    for field in error_numbers:
         _number(section["first_error"][field], f"first_error.{field}")
     if section["member_count"] != section["worker_count"] * section["cooperative_task_count"]:
         _error("member region capacity disagrees with task/worker counts")
@@ -165,14 +173,10 @@ def read_native_protocol(section):
     ):
         _indices(section[table], count, table, key=key, dense=True)
         for row in section[table]:
-            extra = ("claim_tickets",) if kind == "control" and section["schema"] != "hbg-native-protocol-v1" else ()
-            if kind == "control" and section["schema"] in (
-                "hbg-native-protocol-v5",
-                "hbg-native-protocol-v6",
-                "hbg-native-protocol-v7",
-            ):
+            extra = ("claim_tickets",) if kind == "control" and version >= 2 else ()
+            if kind == "control" and version >= 5:
                 extra += ("admission_claim_lock",)
-            if kind == "control" and section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+            if kind == "control" and version >= 6:
                 extra += ("claim_seal",)
             _record(row, kind, f"{table}[{row[key]}]", extra)
     for row in section["admissions"]:
@@ -186,13 +190,11 @@ def read_native_protocol(section):
     ):
         _indices(section[table], count, table)
         for row in section[table]:
-            extra = (
-                ("claim_seal_seen", "claim_cursor_seen")
-                if kind == "member" and section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7")
-                else ()
-            )
+            extra = ("claim_seal_seen", "claim_cursor_seen") if kind == "member" and version >= 6 else ()
             _record(row, kind, f"{table}[{row['index']}]", extra)
     _read_nested_events(section)
+    if version == 8:
+        native_graph_protocol.read_graph_protocol(section)
     return section
 
 
@@ -206,10 +208,10 @@ def _read_nested_events(section):
     _indices(section["blocks"], section["trace_count"], "blocks")
     for row in section["blocks"]:
         fields = {"index", "owner", "lanes"}
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7"):
+        if protocol_version(section) >= 6:
             fields.add("claim")
         _object(row, fields, "block row")
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7") and row["claim"] is not None:
+        if protocol_version(section) >= 6 and row["claim"] is not None:
             _record(row["claim"], "claim", f"blocks[{row['index']}].claim")
         if row["owner"] is not None:
             _record(row["owner"], "owner", f"blocks[{row['index']}].owner")
@@ -224,7 +226,7 @@ def _event_records(section):
             if row[name] is not None:
                 yield row[name], "actor", f"task_events[{row['index']}].{name}"
     for row in section["blocks"]:
-        if section["schema"] in ("hbg-native-protocol-v6", "hbg-native-protocol-v7") and row["claim"] is not None:
+        if protocol_version(section) >= 6 and row["claim"] is not None:
             yield row["claim"], "claim", f"blocks[{row['index']}].claim"
         if row["owner"] is not None:
             yield row["owner"], "owner", f"blocks[{row['index']}].owner"
@@ -233,6 +235,8 @@ def _event_records(section):
     for table, kind in (("members", "member"), ("executions", "execution")):
         for row in section[table]:
             yield row, kind, f"{table}[{row['index']}]"
+    if protocol_version(section) == 8:
+        yield from native_graph_protocol.graph_event_records(section)
 
 
 def audit_protocol_sequences(section):

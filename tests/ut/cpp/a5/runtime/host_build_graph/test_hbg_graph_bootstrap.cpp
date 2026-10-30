@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "hbg_graph_test_support.h"
+#include "scheduler/scheduler_graph_protocol_types.h"
 #include "aicore/aicore_executor.cpp"
 
 namespace {
@@ -27,6 +28,12 @@ struct BootstrapFixture {
     struct State {
         std::array<uint8_t, 128> padding{};
         SchedulerGraphSummary summary{};
+        SchedulerProtocolLayout protocol{};
+        std::array<SchedulerProtocolTaskTrace, 8> tasks{};
+        std::array<SchedulerProtocolWorkerTrace, 3> workers{};
+        std::array<SchedulerGraphProtocolInstance, 2> graph_instances{};
+        std::array<SchedulerGraphProtocolContribution, 8> contributions{};
+        std::array<SchedulerGraphProtocolWorker, 3> graph_workers{};
     } state;
     std::array<MaterializeFixture, 2> payloads;
     std::array<SchedulerGraphInstance, 2> instances{};
@@ -35,6 +42,8 @@ struct BootstrapFixture {
     SchedulerWorkerContext context{};
     SchedulerRunControl run{};
     SchedulerGraphView graph{};
+    SchedulerLocalProfilingState profile{};
+    SchedulerLocalState local{};
 
     BootstrapFixture() {
         state.summary.run_epoch = build.run_epoch = 7;
@@ -46,6 +55,7 @@ struct BootstrapFixture {
             control.enter_ref = index * 4;
             control.child_begin = index * 4 + 1;
             control.exit_ref = index * 4 + 3;
+            control.instance_index = index;
             instances[index] = payload.instance;
             instances[index].parent_id = index;
             instances[index].definition_section_address = reinterpret_cast<uint64_t>(&payloads[0].object);
@@ -81,6 +91,34 @@ struct BootstrapFixture {
         auto current = context;
         current.worker_index = worker;
         return bootstrap_graph_instances(graph, &current, &run, timeout);
+    }
+
+    void enable_protocol(uint32_t worker = 1) {
+        auto &wire = state.protocol;
+        wire.magic = SCHEDULER_PROTOCOL_MAGIC;
+        wire.run_epoch = 7;
+        wire.task_count = nodes.size();
+        wire.worker_count = state.workers.size();
+        wire.tasks_offset = offsetof(State, tasks);
+        wire.members_offset = wire.blocks_offset = wire.executions_offset = wire.workers_offset =
+            offsetof(State, workers);
+        wire.storage_end_offset = wire.workers_offset + sizeof(state.workers);
+        state.summary.protocol_layout_offset = offsetof(State, protocol);
+        for (uint32_t index = 0; index < state.workers.size(); ++index) {
+            state.workers[index].run_epoch = 7;
+            state.workers[index].worker_index = index;
+        }
+        build.protocol_instances_address = reinterpret_cast<uint64_t>(state.graph_instances.data());
+        build.protocol_contributions_address = reinterpret_cast<uint64_t>(state.contributions.data());
+        build.protocol_workers_address = reinterpret_cast<uint64_t>(state.graph_workers.data());
+        local.profiling = &profile;
+        local.config.graph = &graph;
+        local.config.graph_summary_offset = offsetof(State, summary);
+        local.config.runtime_worker_count = 3;
+        local.config.worker_ids[0] = worker;
+        local.config.self_lane = 0;
+        context.worker_index = worker;
+        ASSERT_TRUE(scheduler_protocol_bind(&state, &local));
     }
 };
 
@@ -180,6 +218,76 @@ TEST(HbgGraphBootstrap, AbandonedOwnerTimesOutWithoutPublicSuccess) {
     EXPECT_EQ(f.run.error_site, static_cast<uint64_t>(SchedulerErrorSite::GRAPH_MATERIALIZE_TIMEOUT));
     EXPECT_EQ(f.build.remaining_instances, 2u);
     EXPECT_EQ(f.build.public_completed, 0u);
+}
+
+TEST(HbgGraphBootstrap, ProtocolCapturesMaterializationPublicationAndObservedZeroInOneWorkerStream) {
+    BootstrapFixture f;
+    ASSERT_NO_FATAL_FAILURE(f.enable_protocol());
+    ASSERT_TRUE(bootstrap_graph_instances<true>(f.graph, &f.context, &f.run, PLATFORM_PROF_SYS_CNT_FREQ, &f.local));
+    for (uint32_t index = 0; index < 2; ++index) {
+        const auto &record = f.state.graph_instances[index];
+        EXPECT_EQ(record.instance_index, index);
+        EXPECT_EQ(record.parent_id, index);
+        EXPECT_EQ(record.definition_key, 17u);
+        EXPECT_EQ(record.run_epoch, 7u);
+        EXPECT_EQ(record.worker_index, 1u);
+        EXPECT_EQ(record.child_count, 2u);
+        EXPECT_EQ(record.status, 0u);
+        EXPECT_EQ(record.materialize_before.sequence, index * 4 + 1);
+        EXPECT_EQ(record.materialize_after.sequence, index * 4 + 2);
+        EXPECT_EQ(record.publish_before.sequence, index * 4 + 3);
+        EXPECT_EQ(record.publish_after.sequence, index * 4 + 4);
+        EXPECT_EQ(record.remaining_before, 2 - index);
+    }
+    const auto &wait = f.state.graph_workers[1];
+    EXPECT_EQ(wait.before.sequence, 9u);
+    EXPECT_EQ(wait.after.sequence, 10u);
+    EXPECT_EQ(wait.remaining_observed, 0u);
+    EXPECT_EQ(wait.poll_count, 1u);
+    EXPECT_EQ(wait.run_epoch, 7u);
+    EXPECT_EQ(wait.status, 0u);
+    EXPECT_EQ(f.state.workers[1].next_sequence, 10u);
+    EXPECT_EQ(f.state.workers[1].error_flags, 0u);
+}
+
+TEST(HbgGraphBootstrap, L0DoesNotTouchProtocolRecordsEvenWhenStorageIsPresent) {
+    BootstrapFixture f;
+    ASSERT_NO_FATAL_FAILURE(f.enable_protocol());
+    ASSERT_TRUE(f.execute());
+    EXPECT_EQ(f.state.workers[1].next_sequence, 0u);
+    EXPECT_EQ(f.state.graph_instances[0].materialize_before.sequence, 0u);
+    EXPECT_EQ(f.state.graph_workers[1].before.sequence, 0u);
+}
+
+TEST(HbgGraphBootstrap, FailedMaterializationKeepsItsFailureWithoutInventingPublication) {
+    BootstrapFixture f;
+    ASSERT_NO_FATAL_FAILURE(f.enable_protocol());
+    f.payloads[0].object.header.magic = 0;
+    EXPECT_FALSE(bootstrap_graph_instances<true>(f.graph, &f.context, &f.run, PLATFORM_PROF_SYS_CNT_FREQ, &f.local));
+    const auto &record = f.state.graph_instances[0];
+    EXPECT_EQ(record.materialize_before.sequence, 1u);
+    EXPECT_EQ(record.materialize_after.sequence, 2u);
+    EXPECT_NE(record.status, 0u);
+    EXPECT_EQ(record.publish_before.sequence, 0u);
+    EXPECT_EQ(record.publish_after.sequence, 0u);
+    EXPECT_EQ(f.state.graph_workers[1].after.sequence, 0u);
+    EXPECT_EQ(f.build.remaining_instances, 2u);
+}
+
+TEST(HbgGraphBootstrap, AbandonedOwnerTraceIsABoundedWaitWithTheObservedCounter) {
+    BootstrapFixture f;
+    ASSERT_NO_FATAL_FAILURE(f.enable_protocol());
+    f.build.next_instance = 2;
+    EXPECT_FALSE(
+        bootstrap_graph_instances<true>(f.graph, &f.context, &f.run, PLATFORM_PROF_SYS_CNT_FREQ / 1000, &f.local)
+    );
+    const auto &wait = f.state.graph_workers[1];
+    EXPECT_EQ(wait.before.sequence, 1u);
+    EXPECT_EQ(wait.after.sequence, 2u);
+    EXPECT_EQ(wait.remaining_observed, 2u);
+    EXPECT_GT(wait.poll_count, 0u);
+    EXPECT_EQ(wait.status, static_cast<uint32_t>(SchedulerGraphResult::TIMEOUT));
+    EXPECT_EQ(f.state.workers[1].next_sequence, 2u);
 }
 
 }  // namespace

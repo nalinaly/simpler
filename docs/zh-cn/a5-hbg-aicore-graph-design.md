@@ -1,6 +1,6 @@
 # A5 HBG AICore resident Graph 支持设计
 
-日期：2026-10-30。状态：**实施中；多 block、Mix、sync-start 和单 block predicate 已通过 A5sim/A5 功能验证，完整故障矩阵与原生 L4/性能验收尚未完成**。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)。
+日期：2026-10-30。状态：**实施中；多 block、Mix、sync-start、单 block predicate 及原生 Graph L4 已通过 A5sim/A5 功能验证，完整故障矩阵与性能/资源验收尚未完成**。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)。
 
 开发基线：`02335c0f46d6f12a0fd0adaeccf4869b1164ff64`，来自 `feat/fully_distributed_within_core`；独立分支 `feat/a5-hbg-aicore-graph`，工作目录 `simpler-aicore-graph`。不包含其他工作目录的未跟踪文件，不以旧精简 PR 的版本代替当前基线。
 
@@ -94,7 +94,7 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 
 **内部 CSR 与顶层 fanin 的容量不同**：顶层内联 fanin 上限为 128，Graph 的单个子任务可依赖此前全部子任务，合法上限为 1023。访问器、Host 能力检查和 trace 导出都必须按节点类型处理；“EXIT 不存超长 fanin”并不能替代对内部宽 fanin 的支持。
 
-必须同步修改 `scheduler_classify_task_shape` 中“descriptor.task_id 等于 task_ref”的假设：比较公共身份与映射声明，而不是把 descriptor 内的公共 TaskId 改成稠密序号。`TaskId::raw` 不直接塞进两个 int32 的队列端点；不放宽原有越界/重复/非法边校验。
+必须同步修改 `scheduler_classify_task_shape` 中“descriptor.task_id 等于 task_ref”的假设：比较公共身份与映射声明，而不是把 descriptor 内的公共 TaskId 改成稠密序号。`TaskId` 的 64 位公共编码不直接塞进两个 int32 的队列端点；不放宽原有越界/重复/非法边校验。
 
 ### 2.4 实例状态与存储预算
 
@@ -212,7 +212,7 @@ pytest 与 standalone 都需逐轮检查 `scheduler_mode_publish_count` 增加�
 - 增加物化起止、ENTER、子任务终态、EXIT 的有界事件，分别对照 Host 冻结 Definition/实例清单；不能从最终 kernel 数量反推构造协议正确。
 - Graph 父区间展示生命周期；真实子任务仍落在对应 AIC/AIV 的 Scalar/kernel 轨道。ENTER/EXIT/Dummy 不产生伪 kernel span。
 - Scalar 等待按未满足外部依赖、内部依赖、协同准入和 Mix 资源区分；连续 poll 合并为区间并保留次数，不逐轮膨胀原始记录。
-- 当前 v7 的 schema 语义不改写。新增父子映射和控制事件时制定下一版协议，旧 v1-v7 捕获仍按原规则读取；没有 Graph 证据的旧 capture 不标为 Graph verified。
+- Graph run 使用 v8 保存父子映射与控制事件；无 Graph run 保持 v7。旧 v1-v7 捕获仍按原规则读取；没有 Graph 证据的旧 capture 不标为 Graph verified。原生 L4 的实际证据见[协议与泳道验证](a5-hbg-aicore-graph-p4-protocol.md)。
 - 功能阶段使用现有有界 trace 和严格完整性检查；L0 不增加逐操作探针。保存唯一输出目录，泳道图/raw 默认不进入 Git。
 
 ### 4.4 性能与资源验收

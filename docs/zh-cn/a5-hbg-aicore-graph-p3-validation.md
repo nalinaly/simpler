@@ -8,7 +8,7 @@
 - Graph 子任务的多 block/Mix/sync-start 元数据接入既有 resident 执行器，不新增领取/协同机制。Host binding 的 mask/N/sync 矩阵先失败，开放后转绿；设备容量约束仍由原 runtime maker 检查。
 - Scalar 为 predicate 复用普通 tensor 的边界/内部 heap 重绑定计算，只写入本实例 payload 的既有 `DispatchPredicate`。Host 对每个不同 Definition 检查 operand 来源、dtype/宽度、比较操作和引用范围；Scalar 检查本次实例的地址/偏移/缓冲区范围，拒绝自身或未来任务的输出。没有额外 GM scratch，也没有把整份 TensorMap/Graph 搬进栈。
 - predicate 仍只开放单 block、单 lane；合法但超出该范围的组合保持整轮回退。非法 Definition 不作为“合法回退”接受。新增 predicate 地址/操作/宽度/溢出反例先失败，修复后通过；同一 Definition 的原 AICPU materializer 与新 Scalar materializer 的参数、predicate 字段一致。
-- 原 A5 Mix、sync-start、predicate 用例在 A5sim 和 A5 上各 3 轮通过后，才把对应默认 pytest marker 改为 resident。Graph 的 L4 仍回退，不冒称已有原生协议证据。
+- 原 A5 Mix、sync-start、predicate 用例在 A5sim 和 A5 上各 3 轮通过后，才把对应默认 pytest marker 改为 resident。本节能力开放版本的 Graph L4 当时仍回退；后续接入情况见[原生协议记录](a5-hbg-aicore-graph-p4-protocol.md)。
 
 ## 有真实阻塞的执行矩阵
 
@@ -128,5 +128,5 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 \
 
 1. 设备实际故障下的退出收敛与失败回收；不能拿 CPU 注入或 Host 预提交拒绝替代全部设备错误场景。
 2. 相邻实例参数写回/alias 的专项边界测试；已有多实例结果与原 view/predicate 测试不能宣称穷尽所有交错。
-3. Graph 原生协议新版、父子泳道、严格 L4、内存预算与完整端到端数据；目前 Graph L4 仍回退。
+3. 完整内存预算与端到端数据。原生 v8、父子泳道和严格 L4 功能矩阵已在后续通过，见[协议与泳道记录](a5-hbg-aicore-graph-p4-protocol.md)。
 4. 同负载 legacy/native 和无 Graph 固定 CSA 的性能对照。未获得数据前不宣称 Graph 性能收益。

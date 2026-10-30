@@ -52,6 +52,7 @@ struct alignas(128) SchedulerGraphInstanceControl {
     int32_t child_begin;
     int32_t child_count;
     int32_t exit_ref;
+    uint32_t instance_index;
 };
 
 static_assert(
@@ -94,6 +95,9 @@ struct alignas(128) SchedulerGraphBuildControl {
     uint64_t instance_count;
     uint64_t public_task_count;
     uint64_t run_epoch;
+    uint64_t protocol_instances_address;
+    uint64_t protocol_contributions_address;
+    uint64_t protocol_workers_address;
 };
 static_assert(
     std::is_standard_layout_v<SchedulerGraphBuildControl> && std::is_trivially_copyable_v<SchedulerGraphBuildControl>
@@ -111,4 +115,7 @@ struct SchedulerGraphStorageLayout {
     uint64_t external_fanin_count;
     uint64_t instance_count;
     uint64_t public_task_count;
+    uint64_t protocol_instances_offset;
+    uint64_t protocol_contributions_offset;
+    uint64_t protocol_workers_offset;
 };

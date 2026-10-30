@@ -455,6 +455,7 @@ struct SchedulerStateOwner {
     AicoreSchedulerLayout layout;
     const HostApi *api;
     std::vector<SchedulerProtocolTaskSpec> protocol_tasks;
+    std::shared_ptr<const SchedulerGraphManifest> graph_manifest;
 };
 
 std::mutex scheduler_state_owners_mutex;
@@ -507,7 +508,7 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
         try {
             const auto payload = scheduler_export_protocol(
                 host_base, static_cast<size_t>(owner.layout.total_size), owner.layout, api->run_epoch(),
-                owner.protocol_tasks
+                owner.protocol_tasks, owner.graph_manifest.get(), reinterpret_cast<uint64_t>(owner.state_base)
             );
             if (!api->publish_chip_swimlane_extension(
                     ChipSwimlaneExtensionSection::AicoreProtocol, payload.c_str(), payload.size()
@@ -524,6 +525,13 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
     const auto *contexts = scheduler_state_at<SchedulerWorkerContext>(host_base, owner.layout.worker_contexts_offset);
     const auto *traces = scheduler_state_at<SchedulerTaskTrace>(host_base, owner.layout.trace_cells_offset);
     const auto *controls = scheduler_state_at<SchedulerTaskControl>(host_base, owner.layout.task_controls_offset);
+    const auto *graph_nodes = owner.layout.graph.instance_count == 0 ?
+                                  nullptr :
+                                  scheduler_state_at<SchedulerGraphNode>(host_base, owner.layout.graph.nodes_offset);
+    const auto public_task_id = [&](uint64_t ref) {
+        if (ref >= owner.layout.task_count) throw std::invalid_argument("swimlane task reference out of bounds");
+        return graph_nodes == nullptr ? ref : TaskId::to_uint64(graph_nodes[ref].public_task_id);
+    };
 
     const bool need_scheduler_timing = level >= static_cast<uint32_t>(ChipSwimlaneLevel::SCHEDULE_TIMING);
 
@@ -568,7 +576,7 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
                 trace.kernel_start_cycles - trace.ready_observe_cycles :
                 0;
         if (!first_task) tasks_json << ",";
-        tasks_json << "\n    [" << trace.worker_id << ", " << task_ref << ", " << trace_index << ", "
+        tasks_json << "\n    [" << trace.worker_id << ", " << public_task_id(task_ref) << ", " << trace_index << ", "
                    << trace.kernel_start_cycles << ", " << trace.kernel_end_cycles << ", " << receive_to_start << ", "
                    << swimlane_run_epoch << "]";
         first_task = false;
@@ -597,7 +605,7 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
         if (!first_identity) identities_json << ",";
         first_identity = false;
         identities_json << "\n{\"run_epoch\":" << trace.execution_run_epoch << ",\"core_id\":" << trace.worker_id
-                        << ",\"reg_task_id\":" << trace_index << ",\"task_id\":" << trace.task_ref
+                        << ",\"reg_task_id\":" << trace_index << ",\"task_id\":" << public_task_id(trace.task_ref)
                         << ",\"block_idx\":" << trace.execution_block_idx
                         << ",\"block_num\":" << trace.execution_block_num
                         << ",\"subtask_slot\":" << trace.execution_subtask_slot
@@ -799,7 +807,7 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
                            << ", \"loop_iter\": " << record.loop_iter << ", \"kind\": \""
                            << sched_phase_kind_name(record.kind)
                            << "\", \"tasks_processed\": " << record.tasks_processed << ", " << kSchedulerJsonTaskKey;
-            if (record.has_task) scheduler_json << record.task_ref;
+            if (record.has_task) scheduler_json << public_task_id(record.task_ref);
             else scheduler_json << "null";
             scheduler_json << "}";
         }
@@ -1157,8 +1165,7 @@ bool create_scheduler_state(
             LOG_ERROR("A5 HBG: invalid resident Graph definition or dependency map");
             return false;
         }
-        if (!graph_binding->supported() ||
-            api->chip_swimlane_level() >= static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES)) {
+        if (!graph_binding->supported()) {
             select_legacy_scheduler(runtime, api, SCHEDULER_RUNTIME_MODE_LEGACY_GRAPH);
             LOG_INFO("A5 HBG: retaining AICPU Graph scheduling for a combination without native acceptance");
             return true;
@@ -1382,9 +1389,16 @@ bool create_scheduler_state(
     };
     const bool protocol_profiling = api->chip_swimlane_level() >= static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES);
     std::vector<SchedulerProtocolTaskSpec> protocol_tasks;
+    std::shared_ptr<const SchedulerGraphManifest> graph_manifest;
     if (protocol_profiling) {
         try {
-            protocol_tasks = scheduler_protocol_freeze_graph(host_graph, task_metadata);
+            if (graph_binding) {
+                auto capture = graph_binding->freeze_protocol(task_metadata);
+                protocol_tasks = std::move(capture.tasks);
+                graph_manifest = std::make_shared<const SchedulerGraphManifest>(std::move(capture.manifest));
+            } else {
+                protocol_tasks = scheduler_protocol_freeze_graph(host_graph, task_metadata);
+            }
         } catch (const std::exception &error) {
             LOG_ERROR("A5 HBG: failed to freeze protocol graph: %s", error.what());
             return false;
@@ -1528,8 +1542,10 @@ bool create_scheduler_state(
     {
         std::scoped_lock lock(scheduler_state_owners_mutex);
         scheduler_state_owners.emplace(
-            runtime,
-            SchedulerStateOwner{reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks)}
+            runtime, SchedulerStateOwner{
+                         reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks),
+                         std::move(graph_manifest)
+                     }
         );
     }
     runtime->add_pending_metadata(

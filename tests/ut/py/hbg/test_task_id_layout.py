@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from _cpp_constant_parser import parse_constexpr_values, parse_enum_class_members
 
 from simpler_setup.tools.hbg import Space, TaskId
@@ -47,3 +48,10 @@ def test_space_enum_matches_the_cpp_header():
 
     assert members, f"expected to find `enum class Space` in {_HEADER_PATH}"
     assert members == {space.name: space.value for space in Space}
+
+
+@pytest.mark.parametrize("handle", (TaskId.make_global(4), TaskId.make_sub_task(7, 9), TaskId.make_param(3)))
+def test_canonical_public_ids_do_not_carry_reserved_bits(handle):
+    assert handle.is_canonical()
+    assert not TaskId(handle.raw | (1 << (TaskId.PARENT_SHIFT + TaskId.PARENT_BITS))).is_canonical()
+    assert not TaskId((1 << 64) - 1).is_canonical()

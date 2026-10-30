@@ -101,6 +101,45 @@ def test_runner_preserves_three_rounds_and_captures_initial_publication(native, 
     assert scene._graph_worker is worker and scene._graph_publish_count == 21
 
 
+def test_each_diagnostic_round_gets_a_distinct_output_prefix(native, monkeypatch, tmp_path):
+    paths = []
+
+    def run(scene, worker, callable_obj, case, **options):
+        for _ in range(options["rounds"]):
+            scene._build_config({}, enable_chip_swimlane=4, output_prefix=options["output_prefix"])
+
+    monkeypatch.setattr(native._OriginalGraph, "_run_and_validate", run)
+    monkeypatch.setattr(
+        native._OriginalGraph,
+        "_build_config",
+        lambda self, *args, **kwargs: paths.append(Path(kwargs["output_prefix"])),
+    )
+    scene = native.TestGraphExecutionResident()
+    scene._run_and_validate(
+        SimpleNamespace(scheduler_mode_publish_count=0),
+        object(),
+        {},
+        enable_chip_swimlane=4,
+        output_prefix=str(tmp_path),
+        rounds=1,
+    )
+    assert len(paths) == len(set(paths)) == 3
+    assert paths[-1] == tmp_path
+    assert all(path.parent == tmp_path for path in paths[:-1])
+
+
+@pytest.mark.parametrize("audit", ({}, {"protocol_verified": True}, {"graph_verified": False}))
+def test_l4_numeric_and_resident_success_cannot_replace_a_verified_graph_capture(native, monkeypatch, tmp_path, audit):
+    monkeypatch.setattr(native._OriginalGraph, "compare_outputs", lambda *args: None)
+    monkeypatch.setattr(native, "read_perf_data", lambda path: {"protocol_audit": audit}, raising=False)
+    scene = native.TestGraphExecutionResident()
+    scene._graph_worker = SimpleNamespace(scheduler_runtime_mode=2, scheduler_mode_publish_count=2)
+    scene._graph_publish_count = 1
+    scene._graph_l4_capture = tmp_path / "capture.json"
+    with pytest.raises(AssertionError, match="native Graph L4"):
+        scene.compare_outputs(None, None, [], {})
+
+
 @pytest.mark.parametrize(
     "scene_name,original_name,directory",
     [

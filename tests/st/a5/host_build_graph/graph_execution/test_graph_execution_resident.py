@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from simpler_setup import Scalar, SceneTestCase, TaskArgsBuilder, scene_test
+from simpler_setup.tools.swimlane_converter import read_perf_data
 
 if __package__:
     from .test_graph_execution import TestGraphExecutionHostBuildGraphA5 as _OriginalGraph
@@ -64,7 +65,25 @@ class _ResidentGraphChecks(SceneTestCase):
         self._graph_worker = worker
         self._graph_publish_count = worker.scheduler_mode_publish_count
         kwargs["rounds"] = max(3, kwargs.get("rounds", 1))
+        self._graph_total_rounds = kwargs["rounds"]
+        self._graph_diagnostic_round = 0
+        self._graph_l4_capture = None
         return super()._run_and_validate(worker, callable_obj, case, *args, **kwargs)
+
+    def _build_config(self, *args, **kwargs):
+        level = kwargs.get("enable_chip_swimlane", 0)
+        if level:
+            assert kwargs.get("output_prefix"), "Graph diagnostics require an explicit output prefix"
+            root = Path(kwargs["output_prefix"])
+            ordinal = self._graph_diagnostic_round
+            self._graph_diagnostic_round += 1
+            prefix = root if ordinal == self._graph_total_rounds - 1 else root / f"validation-round-{ordinal + 1}"
+            capture = prefix / "chip_swimlane_records.json"
+            assert not capture.exists(), f"Graph diagnostics must not overwrite an existing capture: {capture}"
+            prefix.mkdir(parents=True, exist_ok=True)
+            kwargs["output_prefix"] = str(prefix)
+            self._graph_l4_capture = capture if level == 4 else None
+        return super()._build_config(*args, **kwargs)
 
     def compare_outputs(self, test_args, golden_args, output_names, params):
         super().compare_outputs(test_args, golden_args, output_names, params)
@@ -73,6 +92,10 @@ class _ResidentGraphChecks(SceneTestCase):
         assert count > self._graph_publish_count, "resident Graph requires a fresh scheduler publication"
         assert mode in (1, 2), f"resident Graph required; invocation mode={mode} (3/4 are AICPU fallback)"
         self._graph_publish_count = count
+        capture = getattr(self, "_graph_l4_capture", None)
+        if capture is not None:
+            audit = read_perf_data(capture).get("protocol_audit", {})
+            assert audit.get("graph_verified") is True, "native Graph L4 requires complete verified protocol evidence"
 
 
 @scene_test(level=2, runtime="host_build_graph")
