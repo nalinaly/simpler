@@ -18,6 +18,7 @@
 #include <map>
 #include <set>
 #include <tuple>
+#include <type_traits>
 #include <vector>
 
 #include "hbg_scheduler_test_support.h"
@@ -201,9 +202,10 @@ struct GmMixFixture {
     bool close(uint32_t worker, bool *closed) {
         return scheduler_gm_mix_close(graph.graph(), base(), locals[worker], run(), closed);
     }
+    template <bool RecordProtocol = true>
     bool fill(uint32_t worker) {
         bool failed = false;
-        scheduler_fill_own_slots(
+        scheduler_fill_own_slots<RecordProtocol>(
             graph.graph(), base(), locals[worker], run(), cursors[worker].data(), nullptr, 0, 0, &failed, nullptr
         );
         return !failed;
@@ -234,10 +236,11 @@ struct GmMixFixture {
         };
         return true;
     }
+    template <bool RecordProtocol = true>
     bool complete(const GmExecution &execution) {
         auto *local = locals[execution.worker];
         local->local_completed_generations[execution.slot] = execution.generation;
-        return scheduler_service_cluster_completions(
+        return scheduler_service_cluster_completions<RecordProtocol>(
             graph.graph(), base(), local, run(), nullptr, nullptr, nullptr, 0, nullptr, nullptr
         );
     }
@@ -705,6 +708,7 @@ TEST_P(HbgGmMixSyncStart, IdlePollRequiresAllArrivalAndReleaseAcknowledgements) 
 struct GmServiceCase {
     uint32_t worker;
     SchedulerGmMixPhase phase;
+    bool record_protocol{true};
 };
 
 void prepare_service_phase(GmMixFixture &fixture, const GmServiceCase &scenario) {
@@ -734,6 +738,9 @@ class HbgGmMixServiceError : public ::testing::TestWithParam<GmServiceCase> {};
 TEST_P(HbgGmMixServiceError, ServiceRejectsPublishedErrorBeforeAnyStateSpecificWork) {
     GmMixFixture fixture({{2, 7}});
     const auto scenario = GetParam();
+    if (!scenario.record_protocol)
+        for (auto *local : fixture.locals)
+            local->profiling = nullptr;
     ASSERT_NO_FATAL_FAILURE(prepare_service_phase(fixture, scenario));
     ASSERT_EQ(fixture.admissions[scenario.worker].gm_mix.phase, scenario.phase);
     const auto before = fixture.admissions[scenario.worker].gm_mix;
@@ -745,10 +752,13 @@ TEST_P(HbgGmMixServiceError, ServiceRejectsPublishedErrorBeforeAnyStateSpecificW
         SchedulerErrorSite::ORDERED_EXIT_TIMEOUT
     );
     bool progress = true;
-    EXPECT_FALSE(scheduler_service_gm_mix(
-        fixture.graph.graph(), fixture.base(), fixture.locals[scenario.worker], fixture.run(), 0, nullptr, nullptr,
-        nullptr, &progress
-    ));
+    const auto service = [&](auto record) {
+        return scheduler_service_gm_mix<decltype(record)::value>(
+            fixture.graph.graph(), fixture.base(), fixture.locals[scenario.worker], fixture.run(), 0, nullptr, nullptr,
+            nullptr, &progress
+        );
+    };
+    EXPECT_FALSE(scenario.record_protocol ? service(std::true_type{}) : service(std::false_type{}));
     EXPECT_FALSE(progress);
     EXPECT_EQ(fixture.admissions[scenario.worker].gm_mix.phase, before.phase);
     EXPECT_EQ(fixture.admissions[scenario.worker].gm_mix.group_seq, before.group_seq);
@@ -762,17 +772,24 @@ TEST_P(HbgGmMixServiceError, ServiceRejectsPublishedErrorBeforeAnyStateSpecificW
     EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::ORDERED_EXIT_TIMEOUT));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    CoordinatorAndVectorPhases, HbgGmMixServiceError,
-    ::testing::Values(
-        GmServiceCase{0, SchedulerGmMixPhase::IDLE}, GmServiceCase{0, SchedulerGmMixPhase::CLAIMED},
+std::vector<GmServiceCase> gm_service_cases() {
+    std::vector<GmServiceCase> cases{
+        GmServiceCase{0, SchedulerGmMixPhase::IDLE},      GmServiceCase{0, SchedulerGmMixPhase::CLAIMED},
         GmServiceCase{0, SchedulerGmMixPhase::PUBLISHED}, GmServiceCase{0, SchedulerGmMixPhase::ARRIVED},
-        GmServiceCase{0, SchedulerGmMixPhase::RUNNING}, GmServiceCase{0, SchedulerGmMixPhase::RELEASED},
-        GmServiceCase{1, SchedulerGmMixPhase::IDLE}, GmServiceCase{1, SchedulerGmMixPhase::PUBLISHED},
-        GmServiceCase{1, SchedulerGmMixPhase::ARRIVED}, GmServiceCase{1, SchedulerGmMixPhase::RUNNING},
+        GmServiceCase{0, SchedulerGmMixPhase::RUNNING},   GmServiceCase{0, SchedulerGmMixPhase::RELEASED},
+        GmServiceCase{1, SchedulerGmMixPhase::IDLE},      GmServiceCase{1, SchedulerGmMixPhase::PUBLISHED},
+        GmServiceCase{1, SchedulerGmMixPhase::ARRIVED},   GmServiceCase{1, SchedulerGmMixPhase::RUNNING},
         GmServiceCase{1, SchedulerGmMixPhase::RELEASED}
-    )
-);
+    };
+    const auto recorded = cases;
+    for (auto scenario : recorded) {
+        scenario.record_protocol = false;
+        cases.push_back(scenario);
+    }
+    return cases;
+}
+
+INSTANTIATE_TEST_SUITE_P(CoordinatorAndVectorPhases, HbgGmMixServiceError, ::testing::ValuesIn(gm_service_cases()));
 
 TEST(HbgGmMix, ServiceCarriesNewPublicationThroughArrivalWithoutAnExtraPoll) {
     for (uint8_t mask : {3, 5, 6, 7}) {
@@ -846,22 +863,34 @@ TEST(HbgGmMix, ServiceRetiresOnlyAfterAllReleasesAndPublishesTheNextGroupWithout
     EXPECT_EQ(fixture.mailbox(0)->published_seq, 2u);
 }
 
-class HbgGmMixServiceProfiling : public ::testing::TestWithParam<std::tuple<uint8_t, uint64_t, bool>> {};
+using GmServiceProfilingCase = std::tuple<uint8_t, uint64_t, bool, bool>;
+class HbgGmMixServiceProfiling : public ::testing::TestWithParam<GmServiceProfilingCase> {};
 
 TEST_P(HbgGmMixServiceProfiling, ResourceArrivalAndReleaseGuardsHoldAcrossTwoWaves) {
-    const auto [mask, level, with_stats] = GetParam();
+    const auto [mask, level, with_stats, record_protocol] = GetParam();
     GmMixFixture fixture({{2, mask}}, level == 4, 1);
+    if (!record_protocol) {
+        ASSERT_EQ(level, 0u);
+        for (auto *local : fixture.locals)
+            local->profiling = nullptr;
+    }
     ASSERT_TRUE(fixture.admit(0));
     ASSERT_TRUE(fixture.refresh_all());
     SchedulerWakeStats wake_stats{};
     SchedulerReadyStats ready_stats{};
     SchedulerCompletionStats completion_stats{};
     const auto service = [&](uint32_t worker, bool *progress) {
-        return scheduler_service_gm_mix(
-            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), level,
-            with_stats ? &wake_stats : nullptr, with_stats ? &ready_stats : nullptr,
-            with_stats ? &completion_stats : nullptr, progress
-        );
+        const auto invoke = [&](auto record) {
+            return scheduler_service_gm_mix<decltype(record)::value>(
+                fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), level,
+                with_stats ? &wake_stats : nullptr, with_stats ? &ready_stats : nullptr,
+                with_stats ? &completion_stats : nullptr, progress
+            );
+        };
+        return record_protocol ? invoke(std::true_type{}) : invoke(std::false_type{});
+    };
+    const auto complete = [&](const GmExecution &execution) {
+        return record_protocol ? fixture.complete<true>(execution) : fixture.complete<false>(execution);
     };
     bool progress = false;
     ASSERT_TRUE(service(0, &progress));
@@ -895,13 +924,13 @@ TEST_P(HbgGmMixServiceProfiling, ResourceArrivalAndReleaseGuardsHoldAcrossTwoWav
             EXPECT_EQ(execution.subtask, worker);
             EXPECT_TRUE(identities.emplace(block, execution.subtask).second);
             if (worker == ((mask & 4U) != 0 ? 2u : 1u)) last = execution;
-            else ASSERT_TRUE(fixture.complete(execution));
+            else ASSERT_TRUE(complete(execution));
         }
         ASSERT_TRUE(service(0, &progress));
         EXPECT_FALSE(progress);
         EXPECT_EQ(fixture.control(0)->completed_blocks, block);
         EXPECT_EQ(fixture.mailbox(0)->published_seq, block + 1);
-        ASSERT_TRUE(fixture.complete(last));
+        ASSERT_TRUE(complete(last));
         ASSERT_TRUE(service(0, &progress));
         EXPECT_TRUE(progress);
         EXPECT_EQ(fixture.control(0)->completed_blocks, block + 1);
@@ -924,12 +953,75 @@ TEST_P(HbgGmMixServiceProfiling, ResourceArrivalAndReleaseGuardsHoldAcrossTwoWav
     EXPECT_EQ(fixture.run()->scheduler_error, 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    MasksAndLevels, HbgGmMixServiceProfiling,
-    ::testing::Combine(
-        ::testing::Values<uint8_t>(3, 5, 6, 7), ::testing::Values<uint64_t>(0, 1, 2, 3, 4), ::testing::Bool()
-    )
-);
+std::vector<GmServiceProfilingCase> gm_service_profiling_cases() {
+    std::vector<GmServiceProfilingCase> cases;
+    for (uint8_t mask : {3, 5, 6, 7})
+        for (uint64_t level = 0; level <= 4; ++level)
+            for (bool with_stats : {false, true}) {
+                cases.emplace_back(mask, level, with_stats, true);
+                if (level == 0) cases.emplace_back(mask, level, with_stats, false);
+            }
+    return cases;
+}
+
+INSTANTIATE_TEST_SUITE_P(MasksAndLevels, HbgGmMixServiceProfiling, ::testing::ValuesIn(gm_service_profiling_cases()));
+
+using GmNoRecordAckCase = std::tuple<uint8_t, bool, uint32_t, uint32_t>;
+class HbgGmMixNoRecordAck : public ::testing::TestWithParam<GmNoRecordAckCase> {};
+
+TEST_P(HbgGmMixNoRecordAck, FutureAckCannotPermitEntryOrMailboxReuse) {
+    const auto [mask, releases, actor, corrupt_lane] = GetParam();
+    GmMixFixture fixture({{2, mask}}, false, 1);
+    for (auto *local : fixture.locals)
+        local->profiling = nullptr;
+    ASSERT_TRUE(fixture.admit(0));
+    ASSERT_TRUE(fixture.refresh_all());
+    ASSERT_EQ(fixture.claim(0), SchedulerBlockClaimResult::CLAIMED);
+    ASSERT_TRUE(fixture.publish(0));
+    bool progress = false;
+    if (releases) {
+        ASSERT_TRUE(fixture.rendezvous(0));
+        ASSERT_TRUE(fixture.finish_lanes(0));
+    } else {
+        for (uint32_t lane = 0; lane < 3; ++lane) {
+            if (!fixture.participant(lane)) continue;
+            if (lane != 0) ASSERT_TRUE(fixture.observe(lane, &progress));
+            ASSERT_TRUE(fixture.arrive(lane, &progress));
+        }
+    }
+    auto &ack = releases ? fixture.mailbox(0)->lanes[corrupt_lane].released_seq :
+                           fixture.mailbox(0)->lanes[corrupt_lane].arrived_seq;
+    ASSERT_EQ(ack, 1u);
+    ack = 2;
+    const auto before = fixture.admissions[actor].gm_mix;
+    EXPECT_FALSE(fixture.fill<false>(actor));
+    EXPECT_EQ(fixture.admissions[actor].gm_mix.phase, before.phase);
+    EXPECT_EQ(fixture.admissions[actor].gm_mix.group_seq, before.group_seq);
+    EXPECT_EQ(fixture.control(0)->next_block, 1u);
+    EXPECT_EQ(fixture.control(0)->completed_blocks, 0u);
+    EXPECT_EQ(fixture.mailbox(0)->published_seq, 1u);
+    EXPECT_EQ(fixture.seal(0, 0), 0u);
+    EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+    EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::GROUP_ACK_INVALID));
+    for (auto *local : fixture.locals)
+        EXPECT_EQ(local->local_ready_mask, 0u);
+}
+
+std::vector<GmNoRecordAckCase> gm_no_record_ack_cases() {
+    std::vector<GmNoRecordAckCase> cases;
+    for (uint8_t mask : {3, 5, 6, 7}) {
+        const uint8_t resources = scheduler_mix_resource_mask(mask);
+        for (uint32_t corrupt_lane = 0; corrupt_lane < 3; ++corrupt_lane) {
+            if ((resources & (1U << corrupt_lane)) == 0) continue;
+            cases.emplace_back(mask, true, 0, corrupt_lane);
+            for (uint32_t actor = 0; actor < 3; ++actor)
+                if ((resources & (1U << actor)) != 0) cases.emplace_back(mask, false, actor, corrupt_lane);
+        }
+    }
+    return cases;
+}
+
+INSTANTIATE_TEST_SUITE_P(RequiredResources, HbgGmMixNoRecordAck, ::testing::ValuesIn(gm_no_record_ack_cases()));
 
 TEST(HbgGmMix, PublishedRunErrorRejectsNewClaimAndDescriptorPublication) {
     for (uint8_t mask : {3, 5, 6, 7}) {

@@ -584,7 +584,8 @@ inline __aicore__ bool scheduler_read_claim_cursor(
 
 // Called only by the successful FAA/CAS that confirms valid count N, never by
 // an observer of exhaustion or an overshooting reservation ticket.
-inline __aicore__ bool scheduler_publish_claim_seal(
+template <bool RecordProtocol = true>
+static inline __aicore__ bool scheduler_publish_claim_seal(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     uint32_t block
 ) {
@@ -595,14 +596,16 @@ inline __aicore__ bool scheduler_publish_claim_seal(
         return scheduler_admission_fail(
             graph, local, run, admission->current_task_ref, SchedulerErrorSite::BLOCK_CURSOR_INVALID
         );
-    scheduler_protocol_claim_seal(base, local, block, true, admission->current_block_num);
+    if constexpr (RecordProtocol) scheduler_protocol_claim_seal(base, local, block, true, admission->current_block_num);
     scheduler_cache_barrier();
     scheduler_publish_signal(control->claim_seal, static_cast<uint64_t>(admission->current_block_num));
-    scheduler_protocol_claim_seal(base, local, block, false, admission->current_block_num);
+    if constexpr (RecordProtocol)
+        scheduler_protocol_claim_seal(base, local, block, false, admission->current_block_num);
     return true;
 }
 
-inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
+template <bool RecordProtocol = true>
+static inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     uint32_t *block_idx
 ) {
@@ -648,7 +651,7 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
             );
             return SchedulerBlockClaimResult::ERROR;
         }
-        const uint64_t claim_start = scheduler_protocol_cycles(local);
+        const uint64_t claim_start = RecordProtocol ? scheduler_protocol_cycles(local) : 0;
         const uint64_t ticket = scheduler_gm_fetch_add(control->claim_tickets, UINT64_C(1));
         if (ticket >= count) {
             admission->ticket_exhausted = true;
@@ -670,10 +673,11 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
             return SchedulerBlockClaimResult::ERROR;
         }
         *block_idx = static_cast<uint32_t>(ticket);
-        scheduler_protocol_block_claim(
-            base, local, *block_idx, claim_start, scheduler_protocol_cycles(local), previous + 1
-        );
-        if (previous + 1 == count && !scheduler_publish_claim_seal(graph, base, local, run, *block_idx))
+        if constexpr (RecordProtocol)
+            scheduler_protocol_block_claim(
+                base, local, *block_idx, claim_start, scheduler_protocol_cycles(local), previous + 1
+            );
+        if (previous + 1 == count && !scheduler_publish_claim_seal<RecordProtocol>(graph, base, local, run, *block_idx))
             return SchedulerBlockClaimResult::ERROR;
         return SchedulerBlockClaimResult::CLAIMED;
     }
@@ -691,16 +695,17 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
                 return SchedulerBlockClaimResult::ERROR;
             }
         }
-        const uint64_t claim_start = scheduler_protocol_cycles(local);
+        const uint64_t claim_start = RecordProtocol ? scheduler_protocol_cycles(local) : 0;
         const uint64_t previous = scheduler_gm_compare_exchange(control->next_block, observed, observed + 1);
         if (previous == observed) {
             *block_idx = static_cast<uint32_t>(observed);
             admission->sync_claimed = scheduler_task_requires_sync_start(admission->current_flags);
-            scheduler_protocol_block_claim(
-                base, local, *block_idx, claim_start, scheduler_protocol_cycles(local), observed + 1
-            );
+            if constexpr (RecordProtocol)
+                scheduler_protocol_block_claim(
+                    base, local, *block_idx, claim_start, scheduler_protocol_cycles(local), observed + 1
+                );
             if (observed + 1 == admission->current_block_num &&
-                !scheduler_publish_claim_seal(graph, base, local, run, *block_idx))
+                !scheduler_publish_claim_seal<RecordProtocol>(graph, base, local, run, *block_idx))
                 return SchedulerBlockClaimResult::ERROR;
             return SchedulerBlockClaimResult::CLAIMED;
         }
@@ -710,7 +715,8 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_cursor(
     return SchedulerBlockClaimResult::RETRY;
 }
 
-inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_block(
+template <bool RecordProtocol = true>
+static inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_block(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     uint32_t slot_index
 ) {
@@ -728,7 +734,7 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_block(
         return SchedulerBlockClaimResult::ERROR;
     }
     uint32_t block = 0;
-    const auto result = scheduler_claim_ordered_cursor(graph, base, local, run, &block);
+    const auto result = scheduler_claim_ordered_cursor<RecordProtocol>(graph, base, local, run, &block);
     if (result != SchedulerBlockClaimResult::CLAIMED) return result;
     auto &slot = local->slots[slot_index];
     slot.task_ref = task;
@@ -743,7 +749,8 @@ inline __aicore__ SchedulerBlockClaimResult scheduler_claim_ordered_block(
     return SchedulerBlockClaimResult::CLAIMED;
 }
 
-inline __aicore__ SchedulerBlockFinishResult scheduler_contribute_ordered_block(
+template <bool RecordProtocol = true>
+static inline __aicore__ SchedulerBlockFinishResult scheduler_contribute_ordered_block(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     const SchedulerLocalSlotState *slot = nullptr
 ) {
@@ -759,10 +766,10 @@ inline __aicore__ SchedulerBlockFinishResult scheduler_contribute_ordered_block(
     const uint32_t block = slot != nullptr                                 ? slot->block_idx :
                            scheduler_task_is_mix(admission->current_flags) ? admission->gm_mix.block_idx :
                                                                              UINT32_MAX;
-    scheduler_protocol_block_complete(base, local, block, true, UINT64_MAX);
+    if constexpr (RecordProtocol) scheduler_protocol_block_complete(base, local, block, true, UINT64_MAX);
     scheduler_cache_barrier();
     const uint64_t previous = scheduler_gm_fetch_add(control->completed_blocks, UINT64_C(1));
-    scheduler_protocol_block_complete(base, local, block, false, previous);
+    if constexpr (RecordProtocol) scheduler_protocol_block_complete(base, local, block, false, previous);
     if (previous >= admission->current_block_num) {
         scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::BLOCK_COMPLETION_INVALID, slot);
         return SchedulerBlockFinishResult::ERROR;
@@ -773,7 +780,8 @@ inline __aicore__ SchedulerBlockFinishResult scheduler_contribute_ordered_block(
 
 // Generation consumption belongs to the completion caller. Its successful
 // generation check makes this contribution unique; an error terminates the run.
-inline __aicore__ SchedulerBlockFinishResult scheduler_finish_ordered_block(
+template <bool RecordProtocol = true>
+static inline __aicore__ SchedulerBlockFinishResult scheduler_finish_ordered_block(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     uint32_t slot_index
 ) {
@@ -794,10 +802,11 @@ inline __aicore__ SchedulerBlockFinishResult scheduler_finish_ordered_block(
         scheduler_admission_fail(graph, local, run, slot.task_ref, SchedulerErrorSite::BLOCK_COMPLETION_INVALID, &slot);
         return SchedulerBlockFinishResult::ERROR;
     }
-    return scheduler_contribute_ordered_block(graph, base, local, run, &slot);
+    return scheduler_contribute_ordered_block<RecordProtocol>(graph, base, local, run, &slot);
 }
 
-inline __aicore__ bool scheduler_close_ordered_obligation(
+template <bool RecordProtocol = true>
+static inline __aicore__ bool scheduler_close_ordered_obligation(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     bool *closed
 ) {
@@ -818,7 +827,8 @@ inline __aicore__ bool scheduler_close_ordered_obligation(
     if (cursor > admission->current_block_num || (admission->sync_claimed && cursor == 0) ||
         admission->scan_cursor >= admission->capacity)
         return scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::BLOCK_CURSOR_INVALID);
-    scheduler_protocol_member_closed(base, local, admission, cursor, 0, 0, used_claim_seal);
+    if constexpr (RecordProtocol)
+        scheduler_protocol_member_closed(base, local, admission, cursor, 0, 0, used_claim_seal);
     ++admission->scan_cursor;
     admission->current_task_ref = SCHEDULER_TASK_REF_INVALID;
     admission->current_block_num = 0;

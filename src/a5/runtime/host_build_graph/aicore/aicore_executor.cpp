@@ -307,14 +307,14 @@ __aicore__ bool run_ready_dispatch_loop(
         }
         {
             uint64_t direct_refilled_slot_mask = 0;
-            const bool completion_progress = scheduler_service_cluster_completions(
+            const bool completion_progress = scheduler_service_cluster_completions<WithProfiling>(
                 graph, scheduler_state_base, context, run_control, phase_timing_enabled ? &stats->wake : nullptr,
                 phase_timing_enabled ? &stats->ready : nullptr, phase_timing_enabled ? &stats->completion : nullptr,
                 profiling_level, &direct_refilled_slot_mask, nullptr
             );
             scheduler_progress = completion_progress;
             bool fill_failed = false;
-            const bool dispatch_progress = scheduler_fill_own_slots(
+            const bool dispatch_progress = scheduler_fill_own_slots<WithProfiling>(
                 graph, scheduler_state_base, context, run_control, ready_victim_cursors,
                 phase_timing_enabled ? &stats->ready : nullptr, profiling_level, direct_refilled_slot_mask,
                 &fill_failed, nullptr, phase_timing_enabled ? &stats->wake : nullptr,
