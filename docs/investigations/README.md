@@ -84,6 +84,8 @@ that ...".
 
 Newest first.
 
+- [2026-10-csa-idle-loop-codegen](../zh-cn/investigations/2026-10-csa-idle-loop-codegen.md)
+
 - [2026-10-csa-bounded-ready-probe](../zh-cn/investigations/2026-10-csa-bounded-ready-probe.md)
 
 - [2026-10-csa-static-membership](../zh-cn/investigations/2026-10-csa-static-membership.md)

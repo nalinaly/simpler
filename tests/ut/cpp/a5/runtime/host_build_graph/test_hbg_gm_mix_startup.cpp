@@ -15,7 +15,9 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <tuple>
+#include <utility>
 
 #include "hbg_scheduler_test_support.h"
 
@@ -25,11 +27,30 @@
 namespace {
 
 thread_local volatile uint8_t *startup_reg_base = nullptr;
+thread_local std::function<void()> startup_register_observer;
+thread_local bool startup_observing_register = false;
 uint64_t startup_kernel_calls = 0;
 uint64_t startup_ssbuf_calls = 0;
 DispatchPayload *identity_test_payload = nullptr;
 
 void count_kernel_entry(__gm__ int64_t *) { ++startup_kernel_calls; }
+
+void idle_ready_kernel(__gm__ int64_t *) {
+    ++startup_kernel_calls;
+    write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+}
+
+class ScopedStartupRegisterObserver {
+public:
+    explicit ScopedStartupRegisterObserver(std::function<void()> observer) {
+        startup_register_observer = std::move(observer);
+    }
+    ~ScopedStartupRegisterObserver() {
+        startup_register_observer = {};
+        startup_observing_register = false;
+        startup_reg_base = nullptr;
+    }
+};
 
 void protocol_chain_kernel(__gm__ int64_t *) {
     if (++startup_kernel_calls == 2) write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
@@ -442,7 +463,110 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
 
 INSTANTIATE_TEST_SUITE_P(
     LanesAndProfilingLevels, HbgExecutionIdentityEntry,
-    ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Values<uint64_t>(0, 1, 2, 4), ::testing::Bool())
+    ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Values<uint64_t>(0, 1, 2, 3, 4), ::testing::Bool())
+);
+
+enum class IdleDispatchArrival : uint8_t { READY, EXIT, ERROR };
+
+class HbgIdleDispatchArrival
+    : public ::testing::TestWithParam<std::tuple<uint32_t, uint64_t, bool, IdleDispatchArrival>> {};
+
+TEST_P(HbgIdleDispatchArrival, EmptyPollsObserveNewWorkAndTerminationWithoutSpuriousOwnership) {
+    const auto [worker, level, ordered, arrival] = GetParam();
+    scheduler_test::FixtureStorage storage(
+        2, 3, 3, SchedulerSpmdRequirements{3, 1, ordered ? 1u : 0u, ordered ? 1u : 0u}, level == 4
+    );
+    scheduler_test::BasicGraphBuffer<2> graph(2);
+    graph.executable(0, worker == 0 ? 0 : 1);
+    auto &metadata = storage.metadata[0];
+    metadata.active_mask = worker == 0 ? 1 : 2;
+    metadata.kernel_ids[0] = worker == 0 ? 1 : UINT16_MAX;
+    metadata.kernel_ids[1] = worker == 0 ? UINT16_MAX : 1;
+    metadata.kernel_ids[2] = UINT16_MAX;
+    metadata.timing_slot = -1;
+    if (ordered) {
+        graph.mixed(1, 7);
+        storage.metadata[1].active_mask = 7;
+        storage.metadata[1].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX;
+        for (auto &kernel : storage.metadata[1].kernel_ids)
+            kernel = 1;
+    } else {
+        graph.executable(1, 0);
+    }
+    auto *base = storage.scheduler_state->base();
+    ASSERT_TRUE(scheduler_init_spmd_task_records(base, storage.layout, 83));
+    storage.callable_addresses[1] = reinterpret_cast<uint64_t>(&idle_ready_kernel);
+    storage.test_graphs[worker] = graph.graph();
+    for (uint32_t member = 0; member < 3; ++member)
+        for (uint32_t lane = 0; lane < 3; ++lane)
+            storage.contexts[member].cluster_worker_ids[lane] = lane;
+    auto *local = storage.local_context(&storage.contexts[worker]);
+    local->config.scheduler_count = 3;
+    if (level == 0) local->profiling = nullptr;
+    ASSERT_TRUE(scheduler_protocol_bind(base, local));
+    SchedulerAdmissionLocalState admission{};
+    if (ordered) {
+        ASSERT_TRUE(scheduler_initialize_admission(base, local, &admission));
+        local->admission = &admission;
+    }
+    auto *run = storage.run_control;
+    run->expected_task_count = 2;
+    std::array<uint8_t, 64> registers{};
+    startup_reg_base = registers.data();
+    startup_kernel_calls = 0;
+    write_reg(RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
+    uint32_t observations = 0;
+    bool queued = false;
+    ScopedStartupRegisterObserver observer([&] {
+        ++observations;
+        if (observations == 5) {
+            if (arrival == IdleDispatchArrival::READY) {
+                SchedulerReadyBatch batch{};
+                queued = scheduler_ready_batch_append(base, local, 0, &batch, nullptr) &&
+                         scheduler_ready_batch_push(base, local, worker == 0 ? 0 : 1, &batch, nullptr);
+                if (!queued) write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+            } else if (arrival == IdleDispatchArrival::EXIT) {
+                write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+            } else {
+                scheduler_record_error(
+                    run, 0, SchedulerGraphResult::INVALID_ARGUMENTS, nullptr, local,
+                    SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
+                );
+            }
+        }
+        if (observations == 128) write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+    });
+    SchedulerWorkerStats stats{};
+    const bool result = level == 0 ? run_ready_dispatch_loop<false>(graph.graph(), base, local, run, &stats, level) :
+                                     run_ready_dispatch_loop<true>(graph.graph(), base, local, run, &stats, level);
+    EXPECT_EQ(result, arrival != IdleDispatchArrival::ERROR);
+    EXPECT_LT(observations, 128u);
+    EXPECT_GE(observations, 5u);
+    EXPECT_EQ(startup_kernel_calls, arrival == IdleDispatchArrival::READY ? 1u : 0u);
+    EXPECT_EQ(queued, arrival == IdleDispatchArrival::READY);
+    if (level >= 3) EXPECT_GE(stats.idle_iteration_count, 4u);
+    else EXPECT_EQ(stats.idle_iteration_count, 0u);
+    if (ordered) {
+        EXPECT_EQ(admission.scan_cursor, 0u);
+        EXPECT_EQ(admission.current_task_ref, SCHEDULER_TASK_REF_INVALID);
+        auto *control = scheduler_task_control_at(base, local, 1);
+        EXPECT_EQ(control->next_block, 0u);
+        EXPECT_EQ(control->completed_blocks, 0u);
+        EXPECT_EQ(control->admission_state, static_cast<uint64_t>(SchedulerAdmissionState::UNCLAIMED));
+    }
+    if (arrival == IdleDispatchArrival::ERROR) {
+        EXPECT_EQ(run->error_site, static_cast<uint64_t>(SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT));
+    } else {
+        EXPECT_EQ(scheduler_read_error(run), 0u);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    LanesLevelsAdmissionAndArrival, HbgIdleDispatchArrival,
+    ::testing::Combine(
+        ::testing::Values(0u, 1u, 2u), ::testing::Values<uint64_t>(0, 1, 2, 3, 4), ::testing::Bool(),
+        ::testing::Values(IdleDispatchArrival::READY, IdleDispatchArrival::EXIT, IdleDispatchArrival::ERROR)
+    )
 );
 
 TEST(HbgProtocolExecution, DirectRefillKeepsTheCompletedGenerationSeparateFromItsSuccessor) {
@@ -494,7 +618,14 @@ TEST(HbgProtocolExecution, DirectRefillKeepsTheCompletedGenerationSeparateFromIt
 
 }  // namespace
 
-volatile uint8_t *sim_get_reg_base() { return startup_reg_base; }
+volatile uint8_t *sim_get_reg_base() {
+    if (startup_register_observer && !startup_observing_register) {
+        startup_observing_register = true;
+        startup_register_observer();
+        startup_observing_register = false;
+    }
+    return startup_reg_base;
+}
 uint32_t sim_get_physical_core_id() { return 3; }
 uint64_t platform_ssbuf_hardware_base_address() {
     ++startup_ssbuf_calls;

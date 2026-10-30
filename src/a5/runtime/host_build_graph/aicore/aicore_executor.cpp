@@ -370,7 +370,8 @@ __aicore__ bool run_ready_dispatch_loop(
                 scheduler_state_base, context->dispatch_payload_offset(context->config.self_lane, slot_index)
             );
             const bool commit_scheduler_trace = task_timing_enabled;
-            const bool commit_task_timing = timing_slot >= 0 && timing_slot < SCHEDULER_TASK_TIMING_SLOT_COUNT;
+            const bool commit_task_timing =
+                WithProfiling && timing_slot >= 0 && timing_slot < SCHEDULER_TASK_TIMING_SLOT_COUNT;
             const bool commit_executor_trace = commit_scheduler_trace || commit_task_timing;
             uint64_t ready_observe = commit_executor_trace || phase_timing_enabled ? get_sys_cnt_aicore() : 0;
             if (phase_timing_enabled && idle_active) {
@@ -401,7 +402,7 @@ __aicore__ bool run_ready_dispatch_loop(
                 );
             OUT_OF_ORDER_STORE_BARRIER();
             uint64_t kernel_start = commit_executor_trace || phase_timing_enabled ? get_sys_cnt_aicore() : 0;
-            if (scheduler_protocol_enabled(context))
+            if (WithProfiling && scheduler_protocol_enabled(context))
                 scheduler_execute_protocol_task(scheduler_state_base, context, slot_index, payload);
             else execute_task(payload);
             uint64_t kernel_end = commit_executor_trace || phase_timing_enabled ? get_sys_cnt_aicore() : 0;
@@ -428,9 +429,9 @@ __aicore__ bool run_ready_dispatch_loop(
         }
         scheduler_flush_completions(run_control, context);
         if (phase_timing_enabled) ++stats->idle_iteration_count;
-        uint64_t backoff_start = get_sys_cnt_aicore();
+        uint64_t backoff_start = phase_timing_enabled ? get_sys_cnt_aicore() : 0;
         local_backoff(backoff_iterations);
-        uint64_t backoff_end = get_sys_cnt_aicore();
+        uint64_t backoff_end = phase_timing_enabled ? get_sys_cnt_aicore() : 0;
         if (phase_timing_enabled) stats->backoff_cycles += backoff_end - backoff_start;
         if (phase_timing_enabled) {
             if (!idle_active) {
