@@ -110,7 +110,16 @@ def _resource_scoped_capture(masks=(3, 5, 3, 7, 6), clusters=2, blocks=3):
 @pytest.mark.parametrize("masks", ((3,), (5,), (7,), (6,), (3, 5, 3, 7, 6)))
 def test_v8_resource_scope_preserves_all_clusters_and_lane_predecessors(clusters, blocks, masks):
     raw, identities = _resource_scoped_capture(masks, clusters, blocks)
-    assert audit_native_protocol(raw, identities)["protocol_verified"] is True
+    result = audit_native_protocol(raw, identities)
+    assert result["protocol_verified"] is True
+    assert "graph_verified" not in result
+
+
+def test_v9_requires_graph_evidence_in_addition_to_resource_scoped_mix():
+    raw, _ = _resource_scoped_capture((3,))
+    raw["schema"] = "hbg-native-protocol-v9"
+    with pytest.raises(ValueError, match="missing or unknown fields"):
+        read_native_protocol(raw)
 
 
 @pytest.mark.parametrize("value", (None, [], [0, 0], [0, 0, 0, 0], [True, 0, 0], [-1, 0, 0], [1 << 64, 0, 0]))

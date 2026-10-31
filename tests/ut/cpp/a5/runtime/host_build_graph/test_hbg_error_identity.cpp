@@ -197,6 +197,51 @@ TEST(HbgErrorIdentity, InitializationAndRetainedResetUseUnknownInsteadOfValidZer
     EXPECT_EQ(read_identity(*fixture.run()), kUnknown);
     EXPECT_EQ(fixture.run()->error_claimed, 0u);
     EXPECT_EQ(fixture.run()->scheduler_error, 0u);
+    EXPECT_EQ(fixture.run()->error_public_task_id, UINT32_MAX);
+    EXPECT_EQ(fixture.run()->error_sub_task_id, UINT32_MAX);
+}
+
+TEST(HbgErrorIdentity, GraphChildCapturesPublicParentAndLocalIdInsteadOfDenseReference) {
+    ErrorFixture fixture;
+    std::array<SchedulerGraphNode, 2> nodes{};
+    nodes[0].kind = nodes[1].kind = SchedulerGraphNodeKind::CHILD;
+    nodes[0].public_task_id = TaskId::make_sub_task(73, 0);
+    nodes[1].public_task_id = TaskId::make_sub_task(74, 0);
+    auto graph = fixture.graph.graph();
+    graph.node_map_address = reinterpret_cast<uint64_t>(nodes.data());
+    scheduler_record_error(
+        fixture.run(), 1, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, fixture.locals[1],
+        SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+    );
+    EXPECT_EQ(fixture.run()->error_task_ref, 1u);
+    EXPECT_EQ(fixture.run()->error_public_task_id, 74u);
+    EXPECT_EQ(fixture.run()->error_sub_task_id, 0u);
+    EXPECT_NE(fixture.run()->error_identity_fields & SCHEDULER_ERROR_HAS_PUBLIC_TASK, 0u);
+    scheduler_record_error(
+        fixture.run(), 0, SchedulerGraphResult::TIMEOUT, &graph, fixture.locals[0],
+        SchedulerErrorSite::EXECUTION_PROGRESS_TIMEOUT
+    );
+    EXPECT_EQ(fixture.run()->error_public_task_id, 74u);
+    testing::internal::CaptureStderr();
+    log_aicore_scheduler_error_identity(fixture.run(), "terminal");
+    const auto message = testing::internal::GetCapturedStderr();
+    EXPECT_NE(message.find("public_task=74 sub_task=0"), std::string::npos);
+}
+
+TEST(HbgErrorIdentity, GraphBoundaryNamesPublicTaskWithoutInventingAChild) {
+    ErrorFixture fixture;
+    std::array<SchedulerGraphNode, 2> nodes{};
+    nodes[1].kind = SchedulerGraphNodeKind::EXIT;
+    nodes[1].public_task_id = TaskId::make_global(73);
+    auto graph = fixture.graph.graph();
+    graph.node_map_address = reinterpret_cast<uint64_t>(nodes.data());
+    scheduler_record_error(
+        fixture.run(), 1, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, fixture.locals[1],
+        SchedulerErrorSite::GRAPH_CHILD_COUNT_INVALID
+    );
+    EXPECT_EQ(fixture.run()->error_public_task_id, 73u);
+    EXPECT_EQ(fixture.run()->error_sub_task_id, UINT32_MAX);
+    EXPECT_NE(fixture.run()->error_identity_fields & SCHEDULER_ERROR_HAS_PUBLIC_TASK, 0u);
 }
 
 TEST(HbgErrorIdentity, EpochZeroIsKnownWhenTheAdmissionContextWasInitialized) {

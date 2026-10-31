@@ -88,6 +88,19 @@ class TaskId:
     def is_valid(self):
         return self.raw != self._INVALID_RAW
 
+    def is_canonical(self):
+        """Whether the encoded space and reserved bits are valid, independent of a run's bounds."""
+        if not 0 <= self.raw < 1 << 64 or not self.is_valid():
+            return False
+        try:
+            space = self.space()
+        except ValueError:
+            return False
+        payload = self.raw & ((1 << self.SPACE_SHIFT) - 1)
+        if space is Space.SUB_TASK:
+            return payload >> (self.PARENT_SHIFT + self.PARENT_BITS) == 0
+        return payload == self.local_id()
+
     def space(self):
         """This id's Space, read from the same field ``TaskId::space()`` reads.
 

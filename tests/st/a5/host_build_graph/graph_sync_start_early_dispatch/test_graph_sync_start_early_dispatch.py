@@ -7,31 +7,15 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""A sync_start root inside a Graph body reaches early dispatch end to end (hbg).
+"""A Graph external producer gates a full-capacity sync-start child and its tail.
 
-An early-released Graph shell stages its body's roots, so a root carrying
-`require_sync_start` reaches `early_sync_start_queue` and the rendezvous through
-the same code a top-level candidate uses. On a5 `host_build_graph` carries no
-other sync-start early-dispatch scene at all, in a body or at top level -- the
-`spmd_sync_start_*` family lives under `tensormap_and_ringbuffer` only. What
-`../graph_execution/` puts in a body is a `sync_start` task under a shell with
-no producer, so that shell never qualifies as an early-dispatch candidate and
-never stages a root.
+The cohort width comes from the Host's independent capacity report in `layout`.
+Every output starts at a sentinel, so a missing block cannot shrink the golden
+to match a partial execution. The tail consumes the complete cohort output.
 
-The tail task carries one half of the assertion. It writes `output` after the
-cohort does, so a cohort that never rang surfaces as a scheduler timeout rather
-than as a silently wrong pass.
-
-The other half is the oracle. The cohort's width is reported through `layout`
-from the same `rt_available_cluster_count()` call the body launches with, and
-`output` starts at a sentinel no kernel writes, so a block that did not run is
-distinguishable from one that wrote zero and a short cohort fails instead of
-narrowing the expectation to match itself.
-
-The body carries exactly one gated-stageable root. One shell release stages every
-qualifying root at once, so a second, ordinary root holds gated cores until its
-own doorbell rings; the sync cohort then cannot fit and enters the global drain,
-which parks the scheduler threads that would have rung the sibling (#2256).
+This fixture has one Graph root. Native multi-root, cross-Graph overlap and
+kernel-side blocking rendezvous are covered by the Graph ordered-execution
+fixtures under tests/fdwic/pa_hbg/spmd.
 """
 
 import pytest
@@ -61,7 +45,7 @@ TMR_TWIN = "../../tensormap_and_ringbuffer"
 GRAPH_TWIN = "../graph_execution"
 
 
-@pytest.mark.scheduler_mode("legacy")
+@pytest.mark.scheduler_mode("resident")
 @scene_test(level=2, runtime="host_build_graph")
 class TestGraphSyncStartEarlyDispatchHbg(SceneTestCase):
     RTOL = 0

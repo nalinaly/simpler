@@ -108,6 +108,10 @@ def _collect_instances(tasks, scheduler_phases, task_slice_start_us):
             }
         )
 
+    return assign_instance_lanes(instances)
+
+
+def assign_instance_lanes(instances):
     instances.sort(key=lambda instance: instance["prepare_start_us"])
     lane_finish_us = []
     for instance_idx, instance in enumerate(instances):
@@ -122,16 +126,7 @@ def _collect_instances(tasks, scheduler_phases, task_slice_start_us):
     return instances
 
 
-def contribute_events(tasks, scheduler_phases, ctx):
-    """Trace events for this runtime's own lane, empty when the capture has none.
-
-    Every pid and tid here comes from ``ctx``; see LaneContext for why a
-    contributor must not number its own lanes.
-    """
-    instances = _collect_instances(tasks, scheduler_phases, ctx.task_slice_start_us)
-    if not instances:
-        return []
-
+def graph_lane_metadata(instances, ctx):
     events = [
         {"args": {"name": "Graph Execution"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": ctx.pid},
         {"args": {"sort_index": 1}, "cat": "__metadata", "name": "process_sort_index", "ph": "M", "pid": ctx.pid},
@@ -147,6 +142,19 @@ def contribute_events(tasks, scheduler_phases, ctx):
                 "tid": ctx.tid_base + lane_idx,
             }
         )
+    return events
+
+
+def contribute_events(tasks, scheduler_phases, ctx):
+    """Trace events for this runtime's own lane, empty when the capture has none.
+
+    Every pid and tid here comes from ``ctx``; see LaneContext for why a
+    contributor must not number its own lanes.
+    """
+    instances = _collect_instances(tasks, scheduler_phases, ctx.task_slice_start_us)
+    if not instances:
+        return []
+    events = graph_lane_metadata(instances, ctx)
     for instance in instances:
         outer_display = ctx.display(instance["outer_task_id"])
         task_indices = instance["visible_task_indices"]

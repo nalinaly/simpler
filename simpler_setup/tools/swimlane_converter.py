@@ -48,6 +48,7 @@ from simpler_setup.tools._runtime_dispatch import (
     normalize_task_id_int,
     resolve_runtime,
 )
+from simpler_setup.tools.hbg.native_protocol import has_graph_protocol
 from simpler_setup.tools.strace_timing import host_process_lanes, parse_spans, span_family
 
 
@@ -72,9 +73,8 @@ def _task_display_name(func_id, func_id_to_name, tdisp, *, spmd=False):
     """Build the swimlane event label for a task.
 
     Naming, in priority order:
-      - ``func_id < 0`` (unresolved): ``task(<task-id>)``. This is the no-deps.json
-        case — without a dep_gen capture the host never carries func_id, so
-        every lane is an anonymous ``task(...)`` distinguished only by id.
+      - ``func_id < 0`` (unresolved): ``task(<task-id>)``. Neither a dep_gen
+        mapping nor an audited native Graph specification supplied the kernel id.
       - a name mapping exists for the func_id: ``<name>(<task-id>)``.
       - otherwise: ``func_<letter>(<task-id>)`` (resolved id, but no name map entry).
 
@@ -903,6 +903,21 @@ def _decode_perf_data(data, *, timeline_origin_ns=None, placement=None, source=N
         for field in lifecycle_cycle_fields:
             _track(int(record.get(field, 0)))
 
+    protocol_section = data.get("aicore_protocol")
+    if has_graph_protocol(protocol_section):
+        from simpler_setup.tools.hbg.native_protocol import (  # noqa: PLC0415
+            STAMPS,
+            _event_records,
+            read_native_protocol,
+        )
+
+        read_native_protocol(data["aicore_protocol"])
+        for record, kind, _ in _event_records(data["aicore_protocol"]):
+            for field in STAMPS[kind].split():
+                cycles, sequence = record[field]
+                if sequence and (base_time_cycles is None or cycles < base_time_cycles):
+                    base_time_cycles = cycles
+
     if base_time_cycles is None:
         base_time_cycles = 0
 
@@ -921,8 +936,8 @@ def _decode_perf_data(data, *, timeline_origin_ns=None, placement=None, source=N
 
     cycles_to_us_factor = 1_000_000.0 / float(clock_freq_hz)
 
-    def _to_us(cycles):
-        if cycles <= 0:
+    def _to_us(cycles, *, allow_zero=False):
+        if cycles < 0 or (cycles == 0 and not allow_zero):
             return 0.0
         if placement is not None:
             return (placement.map_cycles_to_host_ns(cycles) - host_origin_ns) / 1000.0
@@ -1190,17 +1205,24 @@ def _decode_perf_data(data, *, timeline_origin_ns=None, placement=None, source=N
         out["native_protocol"] = data["aicore_protocol"]
         out["protocol_audit"] = protocol_audit
         out.setdefault("timeline_metadata", {})["hbg_protocol_audit"] = protocol_audit
+        if protocol_audit.get("graph_verified"):
+            from simpler_setup.tools.hbg.native_graph_lane import decode_graph_lane  # noqa: PLC0415
+
+            out["native_graph"] = decode_graph_lane(
+                data["aicore_protocol"], tasks, lambda cycles: _to_us(cycles, allow_zero=True)
+            )
     return out
 
 
 def load_deps_json(deps_path):
     """Load a dep_gen replay output (``deps.json``).
 
-    deps.json is the sole source of truth for the task graph in this tool:
+    deps.json is the source of the replayed task-dependency arrows:
     the device hot path no longer records per-task fanout (see PR #863). The
     typical workflow is a dep_gen run once per topology (``--enable-dep-gen``)
     to produce ``deps.json``, then any number of ``--enable-chip-swimlane`` runs
     that join their per-task timing against that captured graph.
+    Native Graph boundary flows instead use the audited v8 control records.
 
     Returns:
         dict[int, list[int]] mapping ``pred_raw → [succ_raw, ...]``, or
@@ -1379,6 +1401,9 @@ def _with_run_epoch(args, row):
 
 def _with_execution_identity(args, row):
     _with_run_epoch(args, row)
+    for field in ("task_ref", "public_task_id", "sub_task_id", "task_id_hex"):
+        if field in row:
+            args[field] = row[field]
     if "block_idx" in row:
         for field in (
             "reg_task_id",
@@ -2057,6 +2082,7 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     emit_overhead=False,
     host_device_uploads=None,
     aicpu_lifecycle_records=None,
+    native_graph=None,
 ):
     """Generate Chrome Trace Event Format JSON from task data.
 
@@ -2214,19 +2240,31 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
     # The lane this runtime draws for itself, if it draws one. pid 5 and the tid
     # block above 5000 are reserved here rather than in the contributor, so the
     # numbering of the whole trace stays owned by one place.
-    events.extend(
-        runtime.contribute_events(
-            tasks,
-            scheduler_phases,
-            LaneContext(
-                pid=5,
-                tid_base=5000,
-                display=task_display,
-                with_run_epoch=_with_run_epoch,
-                task_slice_start_us=_task_slice_start_us,
-            ),
-        )
+    graph_ctx = LaneContext(
+        pid=5,
+        tid_base=5000,
+        display=task_display,
+        with_run_epoch=_with_run_epoch,
+        task_slice_start_us=_task_slice_start_us,
     )
+    graph_scalar_workers: dict[int, int] = {
+        stream["worker_id"]: index
+        for index, stream in enumerate(scheduler_streams or [])
+        if stream.get("producer") == "aicore" and "worker_id" in stream
+    }
+
+    def graph_scalar_tid(worker: int) -> int:
+        index = graph_scalar_workers.get(worker, len(scheduler_streams or []) + worker)
+        return 30000 + index * 10 + 2
+
+    if native_graph is not None:
+        from simpler_setup.tools.hbg.native_graph_lane import contribute_graph_events  # noqa: PLC0415
+
+        if runtime_name != "host_build_graph":
+            raise ValueError("native Graph is only defined for host_build_graph")
+        events.extend(contribute_graph_events(native_graph, graph_ctx, scalar_pid=2, scalar_tid=graph_scalar_tid))
+    else:
+        events.extend(runtime.contribute_events(tasks, scheduler_phases, graph_ctx))
 
     events.append({"args": {"name": "Worker View"}, "cat": "__metadata", "name": "process_name", "ph": "M", "pid": 4})
     events.append({"args": {"sort_index": 4}, "cat": "__metadata", "name": "process_sort_index", "ph": "M", "pid": 4})
@@ -2330,12 +2368,13 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
         ts = _task_slice_start_us(task)
         dur = task["end_time_us"] - ts
 
-        # func_id is already resolved (level=1 records recovered from
-        # dep_gen's kernel_ids up front; see the pre-pass above). Without a
-        # deps.json the id stays -1 and the lane is named task(<task-id>).
+        # Kernel ids come from the replay map or an audited native Graph.
         func_id = task["func_id"]
         tdisp = task_display(task["task_id"])
         task_name = _task_display_name(func_id, func_id_to_name, tdisp, spmd=task["task_id"] in spmd_task_ids)
+        predicate_skipped = task.get("executed") is False
+        if predicate_skipped:
+            task_name = f"predicate_skip({tdisp})"
 
         # fanout (consumers) / fanin (producers) hints from deps.json — the device
         # hot path no longer carries them. Each leads with the degree (count) so
@@ -2353,20 +2392,21 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
                         "fanout-hint": fanout_str,
                         "fanin-hint": fanin_str,
                         "duration-us": dur,
-                        "kernel-duration-us": task["duration_us"],
+                        "kernel-duration-us": 0 if predicate_skipped else task["duration_us"],
+                        **({"dispatch-wrapper-duration-us": task["duration_us"]} if predicate_skipped else {}),
                         "local_setup_us": local_setup_us,
                         "taskId": task["task_id"],
                     },
                     task,
                 ),
-                "cat": "event",
+                "cat": "predicate_skip" if predicate_skipped else "event",
                 "id": event_id,
                 "name": task_name,
-                "ph": "X",
+                "ph": "i" if predicate_skipped else "X",
                 "pid": 4,
                 "tid": tid,
-                "ts": ts,
-                "dur": dur,
+                "ts": task["start_time_us"] if predicate_skipped else ts,
+                **({"s": "t"} if predicate_skipped else {"dur": dur}),
             }
         )
 
@@ -2456,6 +2496,8 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             func_id = task["func_id"]
             tdisp = task_display(task["task_id"])
             task_name = _task_display_name(func_id, func_id_to_name, tdisp, spmd=task["task_id"] in spmd_task_ids)
+            if task.get("executed") is False:
+                task_name = f"predicate_skip({tdisp})"
 
             events.append(
                 {
@@ -2483,6 +2525,19 @@ def generate_chrome_trace_json(  # noqa: PLR0912, PLR0913, PLR0915
             event_id += 1
 
     flow_id = 0
+    if native_graph is not None:
+        from simpler_setup.tools.hbg.native_graph_lane import contribute_graph_flows  # noqa: PLC0415
+
+        graph_flows, flow_id = contribute_graph_flows(
+            native_graph,
+            graph_ctx,
+            scalar_pid=2,
+            scalar_tid=graph_scalar_tid,
+            kernel_pid=4,
+            kernel_tid=core_to_tid,
+            flow_id=flow_id,
+        )
+        events.extend(graph_flows)
     hb_violation_count = 0
     deps_flow_count = 0
     edges_by_pred = deps_edges or {}
@@ -3588,7 +3643,7 @@ Examples:
         "--deps-json",
         help=(
             "Path to a dep_gen replay deps.json (defaults to sibling of the perf JSON). "
-            "Without one the trace has no dependency arrows — re-run with --enable-dep-gen first."
+            "Full task-dependency arrows require this replay; audited native Graph boundary flows do not."
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
@@ -4912,6 +4967,7 @@ def _generate_l3_trace(args, root):  # noqa: PLR0912
             core_to_thread=data.get("core_to_thread"),
             host_device_uploads=data.get("host_device_uploads"),
             aicpu_lifecycle_records=data.get("aicpu_lifecycle_records"),
+            native_graph=data.get("native_graph"),
             deps_edges=artifacts["deps_edges"],
             deps_kernel_map=artifacts["deps_kernel_map"],
             deps_block_map=artifacts["deps_block_map"],
@@ -5042,8 +5098,13 @@ def main():
                 if deps_kernel_map is not None:
                     print(f"  Using deps.json kernel_ids for {len(deps_kernel_map)} tasks (level=1 name recovery)")
         else:
+            arrow_note = (
+                "audited native Graph boundary flows remain available. "
+                if data.get("native_graph") is not None
+                else "Perfetto trace will have no dependency arrows. "
+            )
             print(
-                f"Warning: no usable deps.json at {deps_path}; Perfetto trace will have no dependency arrows. "
+                f"Warning: no usable deps.json at {deps_path}; {arrow_note}"
                 f"Run a dep_gen capture (--enable-dep-gen) and pass --deps-json <path> to add them.",
                 file=sys.stderr,
             )
@@ -5063,6 +5124,7 @@ def main():
             core_to_thread=data.get("core_to_thread"),
             host_device_uploads=data.get("host_device_uploads"),
             aicpu_lifecycle_records=data.get("aicpu_lifecycle_records"),
+            native_graph=data.get("native_graph"),
             deps_edges=deps_edges,
             deps_kernel_map=deps_kernel_map,
             deps_block_map=deps_block_map,

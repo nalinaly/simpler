@@ -52,6 +52,8 @@ inline bool record_aicore_scheduler_runtime_error(
         ))
         return false;
     __atomic_store_n(&run_control->error_task_ref, UINT64_MAX, __ATOMIC_RELAXED);
+    __atomic_store_n(&run_control->error_public_task_id, UINT32_MAX, __ATOMIC_RELAXED);
+    __atomic_store_n(&run_control->error_sub_task_id, UINT32_MAX, __ATOMIC_RELAXED);
     __atomic_store_n(&run_control->error_core_id, UINT64_MAX, __ATOMIC_RELAXED);
     __atomic_store_n(&run_control->error_core_type, UINT64_MAX, __ATOMIC_RELAXED);
     __atomic_store_n(&run_control->error_run_epoch, UINT64_MAX, __ATOMIC_RELAXED);
@@ -88,10 +90,10 @@ inline void log_aicore_scheduler_error_identity(SchedulerRunControl *run, const 
     LOG_ERROR(
         "A5 HBG scheduler identity: phase=%s task=%" PRIu64 " status=%" PRIu64 " core=%" PRIu64 " type=%" PRIu64
         " site=%" PRIu64 " epoch=%" PRIu64 " order=%" PRIu64 " block=%" PRIu64 " group_seq=%" PRIu64 " worker=%" PRIu64
-        " lane=%" PRIu32 " identity_fields=0x%" PRIx32,
+        " lane=%" PRIu32 " identity_fields=0x%" PRIx32 " public_task=%" PRIu32 " sub_task=%" PRIu32,
         phase, run->error_task_ref, status, run->error_core_id, run->error_core_type, run->error_site,
         run->error_run_epoch, run->error_order_key, run->error_block_idx, run->error_group_seq, run->error_worker_index,
-        run->error_cluster_lane, run->error_identity_fields
+        run->error_cluster_lane, run->error_identity_fields, run->error_public_task_id, run->error_sub_task_id
     );
 }
 

@@ -43,6 +43,8 @@ changing simpler's own internals.
 | [Buffer Memory Model](buffer-abi.md) | How L3+ tasks name data: canonical identity, backend descriptor, strided view |
 | [Orchestrator](orchestrator.md) | DAG submission: TensorMap, Scope, Ring, task state machine |
 | [Scheduler](scheduler.md) | DAG dispatch: wiring / ready / completion queues, dispatch loop |
+| [A5 HBG AICore Graph design (Chinese)](zh-cn/a5-hbg-aicore-graph-design.md) | Design proposal: recorded Graph support on the resident scheduler, identity, publication, completion and validation |
+| [A5 HBG AICore Graph implementation record (Chinese)](zh-cn/a5-hbg-aicore-graph-implementation.md) | Development evidence, stage status, tests and unresolved implementation work |
 | [`tensormap_and_ringbuffer`: A2/A3 vs A5](tensormap-and-ringbuffer-a2a3-vs-a5.md) | Per-file comparison split into hardware/PTO-ISA architecture differences and implementation differences |
 | [Worker Manager](worker-manager.md) | Worker pool, THREAD/PROCESS modes, fork + mailbox mechanics |
 | [hardware/](hardware/README.md) | Hardware substrate: chip architecture, cache coherency, MMIO performance, CANN source references |

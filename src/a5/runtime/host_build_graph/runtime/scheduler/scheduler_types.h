@@ -1093,6 +1093,11 @@ enum class SchedulerErrorSite : uint64_t {
     GROUP_CLOSE_INVALID = 124,
     ORDERED_EXIT_IN_FLIGHT = 125,
     ORDERED_EXIT_TIMEOUT = 126,
+    GRAPH_INSTANCE_INVALID = 130,
+    GRAPH_CHILD_COUNT_INVALID = 131,
+    GRAPH_MATERIALIZE_FAILED = 132,
+    GRAPH_MATERIALIZE_TIMEOUT = 133,
+    GRAPH_PUBLIC_COUNT_INVALID = 134,
 };
 
 enum SchedulerErrorIdentityField : uint32_t {
@@ -1102,6 +1107,7 @@ enum SchedulerErrorIdentityField : uint32_t {
     SCHEDULER_ERROR_HAS_GROUP = 1U << 3,
     SCHEDULER_ERROR_HAS_WORKER = 1U << 4,
     SCHEDULER_ERROR_HAS_LANE = 1U << 5,
+    SCHEDULER_ERROR_HAS_PUBLIC_TASK = 1U << 6,
 };
 
 struct alignas(128) SchedulerRunControl {
@@ -1143,7 +1149,8 @@ struct alignas(128) SchedulerRunControl {
     volatile uint64_t sampled_task_timing_enabled;
 
     volatile uint64_t error_claimed;
-    uint64_t error_status_padding;
+    volatile uint32_t error_public_task_id;
+    volatile uint32_t error_sub_task_id;
     volatile uint64_t error_task_ref;
     volatile uint64_t error_core_id;
     volatile uint64_t error_core_type;
@@ -1243,6 +1250,10 @@ struct alignas(128) SchedulerWorkerContext {
     volatile uint64_t mix_payloads_offset;
     volatile uint64_t mix_traces_offset;
     uint64_t topology_reserved[1];
+    uint64_t graph_nodes_address;
+    uint64_t graph_instances_address;
+    uint64_t graph_instance_count;
+    uint64_t graph_build_control_address;
 
     alignas(128) uint64_t bootstrap_task_count;
     uint64_t ready_enqueue_count;
@@ -1681,6 +1692,8 @@ scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout,
             workers[worker].worker_index = worker;
     }
     auto *run = scheduler_state_at<SchedulerRunControl>(base, layout.run_control_offset);
+    run->error_public_task_id = UINT32_MAX;
+    run->error_sub_task_id = UINT32_MAX;
     run->error_run_epoch = UINT64_MAX;
     run->error_order_key = UINT64_MAX;
     run->error_block_idx = UINT64_MAX;

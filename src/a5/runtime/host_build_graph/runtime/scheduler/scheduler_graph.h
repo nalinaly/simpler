@@ -17,6 +17,7 @@
 #include "common/core_type.h"
 #include "common/platform_config.h"
 #include "dispatch_payload.h"
+#include "scheduler_graph_nodes.h"
 
 #ifndef __gm__
 #define __gm__
@@ -99,15 +100,17 @@ struct SchedulerGraphView {
     // Base of the ChipTaskStorage array. One address, because a task's descriptor
     // and payload are members of one entry rather than peers in two arrays.
     uint64_t storage_address;
-    // Held so the view keeps its 32-byte wire size. A producer writes 0; the two
-    // entry points below reject a non-zero read, so a later field cannot be
-    // reintroduced over a value some earlier producer already put here.
+    // A producer writes zero; entry points reject any other value.
     uint64_t reserved;
     uint64_t task_count;
     // Kept in the wire view for diagnostics. HBG task refs directly index the
     // whole-graph-resident tables and never wrap, so this value must not be
     // used to mask a ref (the configured capacity need not be a power of two).
     uint64_t task_window_last_index;
+    // Zero selects the ordinary contiguous task table. Graph runs use dense
+    // references into an immutable map without changing public TaskIds.
+    uint64_t node_map_address{0};
+    uint64_t build_control_address{0};
 };
 
 // The three predicates every reader of a task ref goes through. They exist so
@@ -157,7 +160,7 @@ struct SchedulerDispatchPredicate {
     uint8_t op;
 };
 
-static_assert(sizeof(SchedulerGraphView) == 32, "read-only graph view layout changed");
+static_assert(sizeof(SchedulerGraphView) == 48, "read-only graph view layout changed");
 static_assert(offsetof(SchedulerGraphView, storage_address) == 0, "storage address offset changed");
 static_assert(sizeof(SchedulerTaskInfo) == 24, "root classification result layout changed");
 static_assert(sizeof(SchedulerTaskShape) == 24, "task shape result layout changed");
@@ -170,20 +173,75 @@ scheduler_dispatch_predicate_metadata_valid(uint64_t address, uint8_t element_si
     return operation <= 6 && valid_width && address != 0 && (address & (static_cast<uint64_t>(element_size) - 1)) == 0;
 }
 
+inline __aicore__ const __gm__ SchedulerGraphNode *
+scheduler_graph_node_at(const SchedulerGraphView &graph, int64_t task_ref) {
+    if (graph.node_map_address == 0 || !scheduler_task_ref_valid(graph, task_ref)) return nullptr;
+    return reinterpret_cast<const __gm__ SchedulerGraphNode *>(graph.node_map_address) + task_ref;
+}
+
+inline __aicore__ bool scheduler_graph_kind_is_leaf(SchedulerGraphNodeKind kind) {
+    return kind == SchedulerGraphNodeKind::ORDINARY || kind == SchedulerGraphNodeKind::CHILD;
+}
+
+inline __aicore__ bool scheduler_graph_is_exit(const SchedulerGraphView &graph, int64_t task_ref) {
+    const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+    return node != nullptr && node->kind == SchedulerGraphNodeKind::EXIT;
+}
+
 inline __aicore__ __gm__ uint8_t *scheduler_graph_storage(const SchedulerGraphView &graph, int64_t task_ref) {
+    if (graph.node_map_address != 0) {
+        const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+        return node == nullptr ? nullptr : reinterpret_cast<__gm__ uint8_t *>(node->storage_address);
+    }
+    if (graph.storage_address == 0) return nullptr;
     uint64_t slot = static_cast<uint64_t>(task_ref);
     return reinterpret_cast<__gm__ uint8_t *>(graph.storage_address) + slot * SCHEDULER_GRAPH_TASK_STORAGE_STRIDE;
 }
 inline __aicore__ __gm__ uint8_t *scheduler_graph_descriptor(const SchedulerGraphView &graph, int64_t task_ref) {
-    return scheduler_graph_storage(graph, task_ref) + SCHEDULER_GRAPH_DESCRIPTOR_OFFSET;
+    __gm__ uint8_t *storage = scheduler_graph_storage(graph, task_ref);
+    return storage == nullptr ? nullptr : storage + SCHEDULER_GRAPH_DESCRIPTOR_OFFSET;
 }
 inline __aicore__ __gm__ uint8_t *scheduler_graph_payload(const SchedulerGraphView &graph, int64_t task_ref) {
-    return scheduler_graph_storage(graph, task_ref) + SCHEDULER_GRAPH_PAYLOAD_OFFSET;
+    __gm__ uint8_t *storage = scheduler_graph_storage(graph, task_ref);
+    return storage == nullptr ? nullptr : storage + SCHEDULER_GRAPH_PAYLOAD_OFFSET;
+}
+
+inline __aicore__ int32_t scheduler_graph_fanin_count(const SchedulerGraphView &graph, int64_t task_ref) {
+    if (graph.node_map_address != 0) {
+        const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+        return node == nullptr ? -1 : node->fanin_count;
+    }
+    __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
+    return payload == nullptr ? -1 : *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
 }
 
 inline __aicore__ int32_t
 scheduler_graph_fanin_id(const SchedulerGraphView &graph, int64_t task_ref, int32_t fanin_index) {
+    if (graph.node_map_address != 0) {
+        const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+        if (node == nullptr || fanin_index < 0 || fanin_index >= node->fanin_count) return -1;
+        if (node->fanin_kind == SchedulerGraphFaninKind::ENTER_GATE) {
+            return node->kind == SchedulerGraphNodeKind::CHILD && node->fanin_count == 1 && node->fanin_address == 0 &&
+                           node->fanin_ref_base >= 0 ?
+                       node->fanin_ref_base :
+                       -1;
+        }
+        if (node->fanin_address == 0) return -1;
+        if (node->fanin_kind == SchedulerGraphFaninKind::DENSE) {
+            if (node->fanin_address % alignof(int32_t) != 0) return -1;
+            return reinterpret_cast<const __gm__ int32_t *>(node->fanin_address)[fanin_index];
+        }
+        if (node->fanin_kind == SchedulerGraphFaninKind::DEFINITION_CSR &&
+            node->kind == SchedulerGraphNodeKind::CHILD && node->fanin_ref_base >= 0 &&
+            node->fanin_address % alignof(uint16_t) == 0) {
+            const uint16_t child = reinterpret_cast<const __gm__ uint16_t *>(node->fanin_address)[fanin_index];
+            const uint64_t ref = static_cast<uint64_t>(node->fanin_ref_base) + child;
+            return ref <= INT32_MAX ? static_cast<int32_t>(ref) : -1;
+        }
+        return -1;
+    }
     __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
+    if (payload == nullptr) return -1;
     __gm__ uint8_t *field = payload + TASKPAYLOAD_FANIN_DELTA_OFFSET;
     int32_t delta = *reinterpret_cast<__gm__ int32_t *>(field);
     return reinterpret_cast<__gm__ int32_t *>(field + delta)[fanin_index];
@@ -200,21 +258,34 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_ref,
     };
     if (graph.task_count == 0) return SchedulerGraphResult::EMPTY;
     if (graph.reserved != 0) return SchedulerGraphResult::INVALID_ARGUMENTS;
-    if (graph.storage_address == 0 || !scheduler_task_ref_valid(graph, task_ref)) {
+    if ((graph.storage_address == 0 && graph.node_map_address == 0) || !scheduler_task_ref_valid(graph, task_ref)) {
         return SchedulerGraphResult::INVALID_TASK_COUNT;
     }
 
+    const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+    if (node != nullptr && static_cast<uint32_t>(node->kind) > static_cast<uint32_t>(SchedulerGraphNodeKind::EXIT))
+        return SchedulerGraphResult::INVALID_ARGUMENTS;
+    const bool leaf = node == nullptr || scheduler_graph_kind_is_leaf(node->kind);
     __gm__ uint8_t *descriptor = scheduler_graph_descriptor(graph, task_ref);
     __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
-    uint64_t stored_task_ref = *reinterpret_cast<__gm__ uint64_t *>(descriptor + SCHEDULER_GRAPH_TASK_ID_OFFSET);
-    if (stored_task_ref != static_cast<uint64_t>(task_ref)) return SchedulerGraphResult::INVALID_TASK_ID;
+    if (leaf) {
+        if (descriptor == nullptr) return SchedulerGraphResult::INVALID_ARGUMENTS;
+        const uint64_t expected_id =
+            node == nullptr ? static_cast<uint64_t>(task_ref) : TaskId::to_uint64(node->public_task_id);
+        const uint64_t stored_id = *reinterpret_cast<__gm__ uint64_t *>(descriptor + SCHEDULER_GRAPH_TASK_ID_OFFSET);
+        if (stored_id != expected_id) return SchedulerGraphResult::INVALID_TASK_ID;
+    }
 
-    int32_t fanin_count = *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
-    if (fanin_count < 0 || fanin_count > SCHEDULER_GRAPH_MAX_FANIN) {
+    const int32_t fanin_count = scheduler_graph_fanin_count(graph, task_ref);
+    const int32_t fanin_limit = node != nullptr && node->kind == SchedulerGraphNodeKind::CHILD ?
+                                    SCHEDULER_GRAPH_MAX_BODY_FANIN :
+                                    SCHEDULER_GRAPH_MAX_FANIN;
+    if (fanin_count < 0 || fanin_count > fanin_limit ||
+        (node != nullptr && node->kind == SchedulerGraphNodeKind::EXIT && fanin_count != 0)) {
         return SchedulerGraphResult::INVALID_FANIN_COUNT;
     }
-    __gm__ uint8_t *fanin_field = payload + TASKPAYLOAD_FANIN_DELTA_OFFSET;
-    if (fanin_count > 0 && *reinterpret_cast<__gm__ int32_t *>(fanin_field) == 0) {
+    if (fanin_count > 0 && node == nullptr &&
+        *reinterpret_cast<__gm__ int32_t *>(payload + TASKPAYLOAD_FANIN_DELTA_OFFSET) == 0) {
         return SchedulerGraphResult::INVALID_FANIN_ID;
     }
     for (int32_t i = 0; i < fanin_count; ++i) {
@@ -227,6 +298,7 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_ref,
         }
     }
 
+    if (!leaf) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
     __gm__ int32_t *kernel_ids = reinterpret_cast<__gm__ int32_t *>(descriptor + SCHEDULER_GRAPH_KERNEL_IDS_OFFSET);
     for (int32_t slot = 0; slot < 3; ++slot) {
         if (kernel_ids[slot] == SCHEDULER_GRAPH_INVALID_KERNEL_ID) continue;
@@ -252,10 +324,13 @@ inline __aicore__ SchedulerGraphResult scheduler_parse_task_payload_arguments(
 ) {
     if (arguments == nullptr) return SchedulerGraphResult::INVALID_ARGUMENTS;
     if (graph.reserved != 0) return SchedulerGraphResult::INVALID_ARGUMENTS;
-    if (graph.storage_address == 0 || !scheduler_task_ref_valid(graph, task_ref)) {
+    if ((graph.storage_address == 0 && graph.node_map_address == 0) || !scheduler_task_ref_valid(graph, task_ref)) {
         return SchedulerGraphResult::INVALID_TASK_COUNT;
     }
+    const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+    if (node != nullptr && !scheduler_graph_kind_is_leaf(node->kind)) return SchedulerGraphResult::INVALID_ARGUMENTS;
     __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
+    if (payload == nullptr) return SchedulerGraphResult::INVALID_ARGUMENTS;
     int32_t tensor_count = *reinterpret_cast<__gm__ int32_t *>(payload + TASKPAYLOAD_TENSOR_COUNT_OFFSET);
     int32_t scalar_count = *reinterpret_cast<__gm__ int32_t *>(payload + TASKPAYLOAD_SCALAR_COUNT_OFFSET);
     if (tensor_count < 0 || tensor_count > MAX_TENSOR_ARGS || scalar_count < 0 || scalar_count > MAX_SCALAR_ARGS ||

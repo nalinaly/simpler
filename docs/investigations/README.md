@@ -86,6 +86,8 @@ Newest first.
 
 - [2026-10-csa-fair-competition-diagnostics](../zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md)
 
+- [2026-10 — Graph materialization RMW polling with bounded backoff](../zh-cn/investigations/2026-10-a5-graph-rmw-poll-backoff.md): rejected as a standalone fix; Mix still reached 3.04 s, and L3 located the stall before ready bootstrap. The isolated publication-signal candidate is tracked in the Graph performance report.
+
 - [2026-10-csa-idle-loop-codegen](../zh-cn/investigations/2026-10-csa-idle-loop-codegen.md)
 
 - [2026-10-csa-bounded-ready-probe](../zh-cn/investigations/2026-10-csa-bounded-ready-probe.md)

@@ -46,11 +46,28 @@ static __aicore__ __attribute__((noinline)) void scheduler_record_error(
     if (run_control == nullptr || status == SchedulerGraphResult::OK) return;
     if (scheduler_gm_compare_exchange(run_control->error_claimed, UINT64_C(0), UINT64_C(1)) != 0) return;
     scheduler_gm_store(run_control->error_task_ref, static_cast<uint64_t>(task_ref));
+    uint32_t public_task = UINT32_MAX;
+    uint32_t sub_task = UINT32_MAX;
+    uint32_t public_identity_fields = 0;
     if (graph != nullptr) {
         scheduler_gm_store(run_control->error_graph_task_count, graph->task_count);
         scheduler_gm_store(run_control->error_storage_address, graph->storage_address);
         scheduler_gm_store(run_control->error_task_window_last_index, graph->task_window_last_index);
+        const auto *node = scheduler_graph_node_at(*graph, task_ref);
+        if (node != nullptr && TaskId::local_id_of(node->public_task_id) >= 0) {
+            const auto space = TaskId::space_of(node->public_task_id);
+            if (space == TaskId::Space::GLOBAL) {
+                public_task = static_cast<uint32_t>(TaskId::local_id_of(node->public_task_id));
+                public_identity_fields = SCHEDULER_ERROR_HAS_PUBLIC_TASK;
+            } else if (space == TaskId::Space::SUB_TASK) {
+                public_task = static_cast<uint32_t>(TaskId::parent_id_of(node->public_task_id));
+                sub_task = static_cast<uint32_t>(TaskId::local_id_of(node->public_task_id));
+                public_identity_fields = SCHEDULER_ERROR_HAS_PUBLIC_TASK;
+            }
+        }
     }
+    scheduler_gm_store(run_control->error_public_task_id, public_task);
+    scheduler_gm_store(run_control->error_sub_task_id, sub_task);
     scheduler_gm_store(
         run_control->error_core_id, context != nullptr ? static_cast<uint64_t>(context->physical_core_id) : UINT64_MAX
     );
@@ -77,7 +94,7 @@ static __aicore__ __attribute__((noinline)) void scheduler_record_error(
     scheduler_gm_store(run_control->error_group_seq, captured.group_seq);
     scheduler_gm_store(run_control->error_worker_index, captured.worker_index);
     scheduler_gm_store(run_control->error_cluster_lane, captured.cluster_lane);
-    scheduler_gm_store(run_control->error_identity_fields, captured.valid_fields);
+    scheduler_gm_store(run_control->error_identity_fields, captured.valid_fields | public_identity_fields);
     scheduler_gm_store(run_control->error_site, static_cast<uint64_t>(error_site));
     scheduler_cache_barrier();
     scheduler_publish_error(run_control, static_cast<uint64_t>(status));

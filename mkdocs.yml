@@ -114,6 +114,8 @@ nav:
       - Buffer Memory Model: buffer-abi.md
       - Orchestrator: orchestrator.md
       - Scheduler: scheduler.md
+      - A5 HBG AICore Graph design (Chinese): zh-cn/a5-hbg-aicore-graph-design.md
+      - A5 HBG AICore Graph implementation record (Chinese): zh-cn/a5-hbg-aicore-graph-implementation.md
       - TMR A2/A3 vs A5: tensormap-and-ringbuffer-a2a3-vs-a5.md
       - A5 AICPU core selection: design/a5-fg-pg-core-selection.en.md
       - Run completion fences: design/run-completion-fence.md

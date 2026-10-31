@@ -11,7 +11,7 @@
 
 #pragma once
 
-#include "scheduler_protocol.h"
+#include "scheduler_graph_protocol.h"
 #include "scheduler_graph.h"
 #include "scheduler_error.h"
 #include "scheduler_ssbuf.h"
@@ -833,8 +833,8 @@ inline __aicore__ SchedulerRouteResult scheduler_route_task(
         }
     }
 
-    __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
-    int32_t fanin_count = *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
+    if (scheduler_graph_is_exit(graph, task_ref)) return SchedulerRouteResult::WAITING;
+    int32_t fanin_count = scheduler_graph_fanin_count(graph, task_ref);
     int32_t next_fanin = control->next_fanin_index;
     if (fanin_count < 0 || next_fanin < 0 || next_fanin > fanin_count) {
         scheduler_record_error(run_control, task_ref, SchedulerGraphResult::INVALID_FANIN_ID, &graph, context);
@@ -893,8 +893,8 @@ inline __aicore__ SchedulerRouteResult scheduler_bootstrap_route_task(
         scheduler_record_error(run_control, task_ref, SchedulerGraphResult::INVALID_TASK_ID, &graph, context);
         return SchedulerRouteResult::ERROR;
     }
-    __gm__ uint8_t *payload = scheduler_graph_payload(graph, task_ref);
-    int32_t fanin_count = *reinterpret_cast<__gm__ int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
+    if (scheduler_graph_is_exit(graph, task_ref)) return SchedulerRouteResult::WAITING;
+    int32_t fanin_count = scheduler_graph_fanin_count(graph, task_ref);
     if (fanin_count < 0) {
         scheduler_record_error(run_control, task_ref, SchedulerGraphResult::INVALID_FANIN_ID, &graph, context);
         return SchedulerRouteResult::ERROR;
@@ -1670,6 +1670,70 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
     return true;
 }
 
+// The caller owns the child's detached wake list. This contribution follows
+// all of that child's internal releases, and only the final contributor
+// publishes EXIT through the ordinary bounded service queue.
+inline __aicore__ bool scheduler_graph_child_completed(
+    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
+    int64_t task_ref, SchedulerReadyStats *stats, uint64_t profiling_level
+) {
+    const __gm__ SchedulerGraphNode *node = scheduler_graph_node_at(graph, task_ref);
+    if (node == nullptr || node->kind != SchedulerGraphNodeKind::CHILD) return true;
+    if (node->instance_control_address == 0 ||
+        node->instance_control_address % alignof(SchedulerGraphInstanceControl) != 0) {
+        scheduler_record_error(
+            run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
+            SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+        );
+        return false;
+    }
+    auto *instance = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(node->instance_control_address);
+    const auto *exit_node = scheduler_graph_node_at(graph, instance->exit_ref);
+    const auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, local->config.graph_summary_offset);
+    if (instance->run_epoch != summary->run_epoch || instance->child_count <= 0 ||
+        instance->child_count > SCHEDULER_GRAPH_MAX_BODY_FANIN + 1 || instance->child_begin < 0 ||
+        task_ref < instance->child_begin || task_ref - instance->child_begin >= instance->child_count ||
+        exit_node == nullptr || exit_node->kind != SchedulerGraphNodeKind::EXIT ||
+        exit_node->instance_control_address != node->instance_control_address) {
+        scheduler_record_error(
+            run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
+            SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+        );
+        return false;
+    }
+    auto *contribution = scheduler_graph_protocol_contribution_begin(base, local, graph, instance, task_ref);
+    const uint64_t prior = scheduler_gm_fetch_add(instance->remaining_children, UINT64_MAX);
+    scheduler_graph_protocol_contribution_end(base, local, contribution, prior);
+    if (prior == 0 || prior > static_cast<uint64_t>(instance->child_count)) {
+        scheduler_record_error(
+            run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
+            SchedulerErrorSite::GRAPH_CHILD_COUNT_INVALID
+        );
+        return false;
+    }
+    if (prior != 1) return true;
+    const auto *metadata = scheduler_task_metadata_at(base, local, instance->exit_ref);
+    if (!scheduler_task_is_executable(metadata->flags) || !scheduler_task_is_inline(metadata->flags)) {
+        scheduler_record_error(
+            run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
+            SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+        );
+        return false;
+    }
+    SchedulerReadyBatch batch{};
+    if (!scheduler_ready_batch_append(base, local, instance->exit_ref, &batch, stats, profiling_level) ||
+        !scheduler_ready_batch_push(
+            base, local, scheduler_task_ready_queue(metadata->flags, metadata->active_mask), &batch, stats
+        )) {
+        scheduler_record_error(
+            run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
+            SchedulerErrorSite::COMPLETION_READY_PUBLISH_FAILED
+        );
+        return false;
+    }
+    return true;
+}
+
 inline __aicore__ bool scheduler_resolve_completion(
     const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, SchedulerLocalState *context,
     __gm__ SchedulerRunControl *run_control, int64_t task_ref, SchedulerWakeStats *wake_stats,
@@ -1716,9 +1780,7 @@ inline __aicore__ bool scheduler_resolve_completion(
         __gm__ SchedulerTaskControl *waiter_control = scheduler_task_control_at(scheduler_state_base, context, waiter);
         int64_t next = scheduler_observe_next_waiter(waiter_control);
         if (wake_stats != nullptr) ++wake_stats->wake_migrate_count;
-        __gm__ uint8_t *waiter_payload = scheduler_graph_payload(graph, waiter);
-        const int32_t fanin_count =
-            *reinterpret_cast<__gm__ int32_t *>(waiter_payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
+        const int32_t fanin_count = scheduler_graph_fanin_count(graph, waiter);
         const SchedulerRouteResult route =
             fanin_count == 1 ?
                 SchedulerRouteResult::READY_TO_ENQUEUE :
@@ -1808,6 +1870,26 @@ inline __aicore__ bool scheduler_resolve_completion(
                 SchedulerErrorSite::COMPLETION_READY_PUBLISH_FAILED
             );
             return false;
+        }
+    }
+    if (graph.node_map_address != 0 &&
+        !scheduler_graph_child_completed(
+            graph, scheduler_state_base, context, run_control, task_ref, ready_stats, profiling_level
+        ))
+        return false;
+    if (graph.build_control_address != 0) {
+        const auto *node = scheduler_graph_node_at(graph, task_ref);
+        if (node != nullptr &&
+            (node->kind == SchedulerGraphNodeKind::ORDINARY || node->kind == SchedulerGraphNodeKind::EXIT)) {
+            auto *build = reinterpret_cast<__gm__ SchedulerGraphBuildControl *>(graph.build_control_address);
+            const uint64_t previous = scheduler_gm_fetch_add(build->public_completed, UINT64_C(1));
+            if (previous >= build->public_task_count) {
+                scheduler_record_error(
+                    run_control, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                    SchedulerErrorSite::GRAPH_PUBLIC_COUNT_INVALID
+                );
+                return false;
+            }
         }
     }
     if (phase_timing_enabled) {
