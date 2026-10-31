@@ -225,3 +225,37 @@ L3 进一步把长尾限制到物化发布/等待阶段。采用独占 128B 行�
 完整 A5sim HBG 为 139 passed；23 个相关 C++ 测试程序、7560 个 Python 单测通过。最终信号版本的 A5 原 Graph/L4、48 轮参数边界、188 场景调度矩阵、宽 fan-in、双 slot 和 11 个实际故障恢复场景通过。独立性能/泳道、版本摘要、GM 对账和复现入口集中在[最终报告](a5-hbg-aicore-graph-p4-performance.md)。
 
 尚未实现的嵌套 Graph、deferred completion、多 block/Mix predicate 和增量物化属于设计明确排除/后续范围；不把 legacy fallback 算作 resident 成功，也不将有界 timeout 测试写成全部硬件 trap 的证明。未主动 push。
+
+### 主线用例兼容性复核（2026-10-31）
+
+用例来源核对到 `upstream/main@74ddf236d776d0b9194ed8ca4d3fa4d3bb102587`，运行实现为 `feat/a5-hbg-aicore-graph@9381db6b7ae03bc14a7cf642b0f40602ad1ff07b`，没有合并主线或改动运行时代码。18 个实际编排/计算 kernel 源文件与主线逐字节一致；5 个原始测试文件去除说明文字和额外 scheduler 来源标记后，AST 一致。沿用原参数、输入、golden、数值容差和核数，不把测试包装器的新增校验当作新的业务负载。
+
+| 用例 | A5 真机 | A5sim |
+| ---- | ------- | ----- |
+| 1D replay | 3/3 通过 | 3/3 通过 |
+| 2D replay | 3/3 通过 | 3/3 通过 |
+| AIC+AIV Graph | 3/3 通过 | 3/3 通过 |
+| Mix SPMD | 3/3 通过 | 3/3 通过 |
+| predicate 重绑定 | 3/3 通过 | 3/3 通过 |
+| sync_start | 3/3 通过 | 3/3 通过 |
+
+两个平台各 18 次、共 36 次调用全部通过原始数值比较、逐轮 fresh resident 来源检查及严格原生 L4 审计。每个平台日志均为 `5 passed`：这是 5 个 pytest 类节点，其中 `TestGraphExecutionResident` 包含 1D/2D 两个业务用例，不是少测一项。最终后端均为 mode 1，没有 mode 3/4 的 legacy 回退；36 份独立 raw 的 `graph_verified` 与 `protocol_verified` 均为真。
+
+首轮使用 `--case Class::` 筛选时，被排除的 `TestGraphNoBoundaryResident` 仍被收集并在运行时跳过，随后 scheduler-mode teardown 因零 publication 报错。改用明确的 pytest 类节点，只收集需要的用例，全部通过；没有关闭来源门禁或修改源码。该筛选/teardown 问题尚未修复，保留初轮失败日志。AIC+AIV 在 A5sim 上原本标记为 manual，本次用 `--manual include` 显式纳入，没有把默认 deselect 算作通过。
+
+复现命令如下；真机执行前仍须加载 CANN、进行架构/设备检查。本机缺少 task-submit，使用 ACL 确认 A5 和空闲后直接运行，未获得队列锁。A5sim 改为 `--platform a5sim --pto-session-timeout 600`；两个平台顺序运行，避免相同用例的秒级输出目录名称相撞。
+
+```bash
+graph_fixture=tests/st/a5/host_build_graph/graph_execution/test_graph_execution_resident.py
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 SIMPLER_REPORT_SCHEDULER_MODE=1 \
+  .venv/bin/python -m pytest \
+  "$graph_fixture::TestGraphExecutionResident" \
+  "$graph_fixture::TestGraphExecutionAicAivResident" \
+  "$graph_fixture::TestGraphMixResident" \
+  "$graph_fixture::TestGraphSyncResident" \
+  "$graph_fixture::TestGraphPredicateResident" \
+  --platform a5 --device 0 --max-parallel 1 --pto-session-timeout 1200 \
+  --manual include --enable-chip-swimlane 4 -v -s
+```
+
+本地证据目录为 `outputs/mainline-graph-check-20261031.ZDGeoY/`：`a5-selected.log`、`a5sim-selected.log` 是最终成功结果，`a5.log`、`a5sim.log` 保留筛选问题，`mainline-test-source.diff` 保存来源差异。成功日志列出每份泳道的独立路径。本次只是功能/协议复核，带 L4 的执行耗时不作性能结论；原始日志、泳道、构建产物均不提交 Git。
