@@ -23,6 +23,14 @@ static inline __aicore__ void error_identity_probe(__gm__ int64_t *args, uint32_
     const uint64_t epoch = static_cast<uint64_t>(args[4]);
     if (block >= blocks) return;
     static_assert(sizeof(SchedulerRunControl) == 64 * sizeof(uint64_t), "probe RunControl layout mismatch");
+    static_assert(
+        offsetof(SchedulerRunControl, error_public_task_id) == 33 * sizeof(uint64_t),
+        "probe public identity word mismatch"
+    );
+    static_assert(
+        offsetof(SchedulerRunControl, error_sub_task_id) == 33 * sizeof(uint64_t) + sizeof(uint32_t),
+        "probe subtask identity word mismatch"
+    );
     auto *run = reinterpret_cast<__gm__ SchedulerRunControl *>(tensor_data(args[0]) + (shared ? 0 : block) * 96);
     auto *checks = reinterpret_cast<__gm__ ExecutionRecord *>(tensor_data(args[1]));
     auto *check = &checks[block];

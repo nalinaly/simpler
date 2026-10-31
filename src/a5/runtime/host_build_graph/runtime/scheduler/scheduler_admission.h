@@ -104,15 +104,14 @@ inline __aicore__ bool scheduler_admission_fail(
     return false;
 }
 
-inline __aicore__ bool scheduler_admission_context_valid(
+namespace scheduler_admission_detail {
+
+// Configuration pointers are validated by the enclosing bounded operation.
+// Neither the error signal nor the current run's epoch is a reusable permit.
+inline __aicore__ bool active_run_valid(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     const SchedulerAdmissionLocalState *admission
 ) {
-    if (base == nullptr || local == nullptr || run == nullptr || admission == nullptr || !admission->initialized ||
-        local->config.graph == nullptr || graph.task_count != local->config.graph->task_count)
-        return scheduler_admission_fail(
-            graph, local, run, SCHEDULER_TASK_REF_INVALID, SchedulerErrorSite::ADMISSION_INVALID_CONFIG
-        );
     const uint64_t error = scheduler_read_error(run);
     if (error != 0) return false;
     // READY freezes the summary for this run. This is a cached configuration
@@ -123,6 +122,20 @@ inline __aicore__ bool scheduler_admission_context_valid(
             graph, local, run, admission->pending_task_ref, SchedulerErrorSite::ADMISSION_EPOCH_MISMATCH
         );
     return true;
+}
+
+}  // namespace scheduler_admission_detail
+
+inline __aicore__ bool scheduler_admission_context_valid(
+    const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
+    const SchedulerAdmissionLocalState *admission
+) {
+    if (base == nullptr || local == nullptr || run == nullptr || admission == nullptr || !admission->initialized ||
+        local->config.graph == nullptr || graph.task_count != local->config.graph->task_count)
+        return scheduler_admission_fail(
+            graph, local, run, SCHEDULER_TASK_REF_INVALID, SchedulerErrorSite::ADMISSION_INVALID_CONFIG
+        );
+    return scheduler_admission_detail::active_run_valid(graph, base, local, run, admission);
 }
 
 inline __aicore__ __gm__ SchedulerAdmissionRecord *

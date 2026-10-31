@@ -38,7 +38,7 @@ def expected_probe(params, winners=None):
     fields = (63, 52, 51, 48, 55, 63, 63, 63)[scenario]
     for index, winner in enumerate(winners):
         row = controls[index]
-        row[32:37] = torch.tensor([1, 0, winner, -1, -1])
+        row[32:37] = torch.tensor([1, -1, winner, -1, -1])
         row[48] = 7 if scenario == 1 else 6
         row[41:48] = torch.tensor(
             [

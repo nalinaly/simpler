@@ -40,6 +40,15 @@ def test_each_native_case_has_complete_golden_and_private_guards(native, case):
     native.validate_probe(args.controls, args.checks, params)
 
 
+@pytest.mark.parametrize("case", range(50))
+def test_graphless_error_identity_uses_unknown_public_and_subtask_ids(native, case):
+    params = native.TestHbgErrorIdentity.CASES[case]["params"]
+    controls, _ = native.expected_probe(params)
+    # The native probe passes no graph. Both uint32_t public identity fields
+    # contain UINT32_MAX, so their packed signed int64_t image equals -1.
+    assert controls.view(-1, 96)[:, 33].tolist() == [-1] * (1 if params["shared"] else params["blocks"])
+
+
 @pytest.mark.parametrize("shared", (0, 1))
 @pytest.mark.parametrize("word", range(96))
 def test_every_identity_and_guard_word_is_checked(native, shared, word):

@@ -37,7 +37,7 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
         assert chip is not None
         concurrent = bool(chip._impl.supports_concurrent_native_prepare)  # noqa: SLF001
         config = self._build_config(case.get("config", {}))
-        chip._register_callable_at_slot(0, callable_obj)  # noqa: SLF001
+        handle = worker.register(callable_obj)
         live = []
 
         def prepare(tasks, slot):
@@ -48,7 +48,9 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
             self.compute_golden(expected, params)
             before = chip.scheduler_mode_publish_count
             generation = getattr(self, "_graph_lease_generation", 0) + 1
-            token = chip._prepare_native_run_with_pipeline_lease(0, args, slot, generation, config=config)  # noqa: SLF001
+            token = chip._prepare_native_run_with_pipeline_lease(  # noqa: SLF001
+                callable_id, args, slot, generation, config=config
+            )
             self._graph_lease_generation = generation
             live.append(token)
             require_fresh_resident(chip, before)
@@ -63,6 +65,7 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
 
         first = None
         try:
+            callable_id = worker._resolve_handle(handle).slot_id  # noqa: SLF001 -- native-run seam needs the local slot
             for round_index, (large, small) in enumerate(((129, 1), (1, 1023), (1023, 129)), 1):
                 a = prepare(large, 0)
                 if first is None:
@@ -92,7 +95,7 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
             for token in reversed(live):
                 with suppress(RuntimeError):
                     chip._finalize_native_run(token)  # noqa: SLF001
-            chip._unregister_slot(0)  # noqa: SLF001
+            worker.unregister(handle)
 
 
 if __name__ == "__main__":

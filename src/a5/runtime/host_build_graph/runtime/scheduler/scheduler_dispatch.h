@@ -29,6 +29,8 @@ static inline __aicore__ bool scheduler_service_gm_mix(
     auto &admission = *local->admission;
     auto &group = admission.gm_mix;
     bool closed = false;
+    // Closing validates the full context. If it retains this obligation,
+    // subsequent stages share its task/resource binding until this return.
     if (!scheduler_gm_mix_close<RecordProtocol>(graph, base, local, run, &closed)) return false;
     if (closed) {
         *progress = true;
@@ -36,7 +38,7 @@ static inline __aicore__ bool scheduler_service_gm_mix(
     }
     if (local->is_mix_coordinator()) {
         if (group.phase == SchedulerGmMixPhase::RELEASED) {
-            const auto retired = scheduler_gm_mix_retire<RecordProtocol>(
+            const auto retired = scheduler_gm_mix_retire<RecordProtocol, true>(
                 graph, base, local, run, ack_prefilter_phase == SchedulerGmMixPhase::RELEASED
             );
             if (retired == SchedulerGmMixResult::ERROR) return false;
@@ -48,23 +50,23 @@ static inline __aicore__ bool scheduler_service_gm_mix(
                 return false;
             if (retired == SchedulerGmMixResult::PROGRESS || retired == SchedulerGmMixResult::TASK_LAST) {
                 *progress = true;
-                if (!scheduler_gm_mix_close<RecordProtocol>(graph, base, local, run, &closed)) return false;
+                if (!scheduler_gm_mix_close<RecordProtocol, true>(graph, base, local, run, &closed)) return false;
                 if (closed) return true;
             }
         }
         if (group.phase == SchedulerGmMixPhase::IDLE) {
-            const auto claimed = scheduler_gm_mix_claim<RecordProtocol>(graph, base, local, run);
+            const auto claimed = scheduler_gm_mix_claim<RecordProtocol, true>(graph, base, local, run);
             if (claimed == SchedulerBlockClaimResult::ERROR) return false;
             if (claimed != SchedulerBlockClaimResult::CLAIMED) return true;
             *progress = true;
         }
         if (group.phase == SchedulerGmMixPhase::CLAIMED) {
-            if (!scheduler_gm_mix_publish<RecordProtocol>(graph, base, local, run)) return false;
+            if (!scheduler_gm_mix_publish<RecordProtocol, true>(graph, base, local, run)) return false;
             *progress = true;
         }
     } else if (group.phase == SchedulerGmMixPhase::IDLE || group.phase == SchedulerGmMixPhase::RELEASED) {
         bool observed = false;
-        if (!scheduler_gm_mix_observe<RecordProtocol>(graph, base, local, run, &observed)) return false;
+        if (!scheduler_gm_mix_observe<RecordProtocol, true>(graph, base, local, run, &observed)) return false;
         *progress = observed;
         if (scheduler_task_ref_is_null(admission.current_task_ref)) return true;
     }
@@ -72,10 +74,10 @@ static inline __aicore__ bool scheduler_service_gm_mix(
     bool prepared = false;
     // Phase is core-local. Arrival may enable preparation in this same pass.
     if (group.phase == SchedulerGmMixPhase::PUBLISHED &&
-        !scheduler_gm_mix_arrive<RecordProtocol>(graph, base, local, run, &arrived))
+        !scheduler_gm_mix_arrive<RecordProtocol, true>(graph, base, local, run, &arrived))
         return false;
     if (group.phase == SchedulerGmMixPhase::ARRIVED &&
-        !scheduler_gm_mix_prepare_lane<RecordProtocol>(
+        !scheduler_gm_mix_prepare_lane<RecordProtocol, true>(
             graph, base, local, run, profiling_level, &prepared, ack_prefilter_phase == SchedulerGmMixPhase::ARRIVED
         ))
         return false;
