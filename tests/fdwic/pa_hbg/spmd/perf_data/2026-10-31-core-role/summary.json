@@ -1,0 +1,822 @@
+{
+  "schema": "csa-fixed-core-role-screen-v1",
+  "date": "2026-10-31",
+  "base_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+  "decision": "A/B 初筛未观察到收益；生产候选和候选专用测试均撤回，保留原始实验记录。",
+  "final_goal_gate_passed": false,
+  "experiment": [
+    "启动时从已验证的不可变拓扑选择内部 C/V 模板，再向填槽与 GM 服务传播",
+    "保持默认动态 helper；错误角色在轮询和所有权转移前拒绝",
+    "不在 WEAK aicore_execute 内使用架构预处理分支，不新增环境变量、宏或 CLI",
+    "公平竞争、实际资源两/三 lane、完整 ARRIVED/RELEASED、错误和身份检查、业务 ABI 均不变"
+  ],
+  "benchmarks": [
+    {
+      "label": "idle-core-role-a1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-core-role-a1/result.json",
+      "result_sha256": "1bab4538bc1d3d4c9622d9f786724e68ef126ef33acc3406e49877f359bf6a50",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "ea2d6009d99a10d6f7399b55a2a710e57e22d65ed2cce018fce8448f7ea2e738",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "371cc2670f855bfa369ad1c5a9add0bf5dad1563373aef44081f3e3e810379b1"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "728d4c14af33bdd31a4a32641e855ddcbb3f1791e09efdae0f2067fcd4f36784",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1856.777,
+          "median": 1891.69,
+          "mean": 1898.71523,
+          "max": 2061.798,
+          "p90": 1928.5117,
+          "p99": 2021.99307,
+          "samples": [
+            1880.588,
+            1856.777,
+            1894.012,
+            1918.214,
+            1896.634,
+            2021.591,
+            1891.677,
+            1873.635,
+            1904.873,
+            1884.116,
+            1886.744,
+            1886.773,
+            1904.63,
+            1890.24,
+            1942.939,
+            1919.308,
+            1876.862,
+            1876.454,
+            1874.054,
+            1863.59,
+            1900.232,
+            1888.776,
+            1970.65,
+            1889.988,
+            1890.192,
+            1905.503,
+            1864.665,
+            1904.058,
+            1896.049,
+            1915.285,
+            1863.676,
+            1868.606,
+            1871.153,
+            1866.246,
+            1906.633,
+            1879.543,
+            1920.915,
+            1896.125,
+            1878.435,
+            1882.646,
+            1937.394,
+            1909.47,
+            1883.083,
+            1876.682,
+            1878.916,
+            1899.576,
+            1889.61,
+            1898.915,
+            1876.779,
+            1885.205,
+            1902.649,
+            1891.918,
+            1890.355,
+            1930.174,
+            1882.829,
+            1885.998,
+            1927.834,
+            1890.408,
+            1938.636,
+            1891.703,
+            1873.167,
+            1902.087,
+            1921.193,
+            1928.327,
+            1920.105,
+            1911.08,
+            1860.556,
+            1870.35,
+            1886.639,
+            1889.833,
+            1896.583,
+            1904.178,
+            1904.287,
+            1883.676,
+            2061.798,
+            1903.97,
+            1955.55,
+            1865.234,
+            1879.824,
+            1881.369,
+            1912.447,
+            1900.936,
+            1879.549,
+            1910.482,
+            1879.51,
+            1887.897,
+            1883.178,
+            1885.365,
+            1914.327,
+            1891.984,
+            1952.08,
+            1939.315,
+            1894.319,
+            1899.387,
+            1893.181,
+            1886.092,
+            1886.415,
+            1886.073,
+            1911.739,
+            1906.22
+          ]
+        },
+        "host_us": {
+          "min": 77606.67,
+          "median": 78142.226,
+          "mean": 78923.7696,
+          "max": 95773.452,
+          "p90": 80165.3393,
+          "p99": 89929.99977000004
+        }
+      }
+    },
+    {
+      "label": "idle-core-role-b1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-core-role-b1/result.json",
+      "result_sha256": "3c6b9dee9c08f749b7b9c95cd37cb50d73c9c8800cf62dbeff9b32a4e3d7a6ef",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+          "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+          "aicore_kernel.o": "d51c2fcd0d19c0a5ccc6e5ac9807bc73c0235e38aa8c900f2a1e1a86a1555858"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1857.485,
+          "median": 1890.6909999999998,
+          "mean": 1895.06929,
+          "max": 1964.009,
+          "p90": 1920.5818000000002,
+          "p99": 1963.07444,
+          "samples": [
+            1875.331,
+            1864.976,
+            1888.826,
+            1911.778,
+            1898.331,
+            1876.79,
+            1880.877,
+            1887.372,
+            1878.792,
+            1884.342,
+            1887.819,
+            1887.419,
+            1872.013,
+            1895.867,
+            1889.073,
+            1886.97,
+            1895.363,
+            1885.577,
+            1860.607,
+            1882.101,
+            1906.67,
+            1894.372,
+            1898.049,
+            1923.226,
+            1890.657,
+            1899.89,
+            1884.314,
+            1893.353,
+            1935.73,
+            1880.183,
+            1863.234,
+            1890.543,
+            1907.136,
+            1874.315,
+            1919.817,
+            1883.266,
+            1914.379,
+            1902.436,
+            1878.944,
+            1877.537,
+            1945.387,
+            1894.91,
+            1893.417,
+            1963.065,
+            1890.631,
+            1897.289,
+            1896.564,
+            1890.725,
+            1912.363,
+            1904.506,
+            1954.155,
+            1896.263,
+            1865.228,
+            1866.925,
+            1911.843,
+            1881.002,
+            1884.937,
+            1899.206,
+            1964.009,
+            1914.974,
+            1884.627,
+            1912.478,
+            1894.83,
+            1920.288,
+            1871.444,
+            1942.894,
+            1929.485,
+            1904.276,
+            1884.142,
+            1897.688,
+            1907.894,
+            1897.232,
+            1881.508,
+            1881.162,
+            1897.243,
+            1887.761,
+            1886.445,
+            1891.109,
+            1892.773,
+            1896.904,
+            1857.485,
+            1885.787,
+            1877.223,
+            1883.689,
+            1923.906,
+            1893.767,
+            1889.213,
+            1883.307,
+            1887.918,
+            1861.261,
+            1878.687,
+            1895.72,
+            1876.435,
+            1876.447,
+            1893.46,
+            1919.652,
+            1894.152,
+            1890.369,
+            1954.103,
+            1886.491
+          ]
+        },
+        "host_us": {
+          "min": 77848.158,
+          "median": 78365.369,
+          "mean": 78879.95535,
+          "max": 95258.909,
+          "p90": 79008.5586,
+          "p99": 86451.21659000004
+        }
+      }
+    }
+  ],
+  "candidate_minus_baseline_us": 0.999000000000251,
+  "sampling": {
+    "order": "A/B 初筛",
+    "warmup_per_batch": 5,
+    "formal_per_batch": 100,
+    "sample_filtering": "不剔除样本",
+    "cli_overlap_observations": 0,
+    "metric": "完整 Device/RunWall，包括启动、调度、kernel 和退出",
+    "isolation": "无其他 A5 CLI 重叠观察；计时不并行本会话编译、测试或设备查询，不是系统级独占证明"
+  },
+  "l4": {
+    "result": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-core-role-after-l4/result.json",
+      "sha256": "fc14f386b823109159f479beb15e26eb11b2e6dc35409c2d7f1b486c45ce7c6c"
+    },
+    "raw": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/artifacts/idle-core-role-after-l4/chip_swimlane_records.json",
+      "sha256": "d7f15f9bf5667ea1de87aa3ce0d262dbd539843c59fe3c57910bea707ad334a1"
+    },
+    "identity": {
+      "runtime": "host_build_graph",
+      "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+      "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+      "torch": "2.12.0+cpu",
+      "simpler_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+      "simpler_branch": "feat/fully_distributed_within_core",
+      "tracked_diff_sha256": "ea2d6009d99a10d6f7399b55a2a710e57e22d65ed2cce018fce8448f7ea2e738",
+      "runtime_sha256": {
+        "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3",
+        "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+        "aicore_kernel.o": "371cc2670f855bfa369ad1c5a9add0bf5dad1563373aef44081f3e3e810379b1"
+      },
+      "case_sources_match_baseline": true,
+      "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+      "host_only_arguments": [
+        "hc_attn_scale"
+      ]
+    },
+    "trace": {
+      "logical_tasks": 79,
+      "physical_tasks": 2308,
+      "clock_freq_hz": 1000000000,
+      "level": 4,
+      "sequence_integrity_verified": true,
+      "event_count": 40193,
+      "worker_count": 96,
+      "protocol_verified": true,
+      "device_logical_tasks": 81,
+      "executions": 2308,
+      "cooperative_tasks": 61,
+      "member_obligations": 3808,
+      "blocks": 1457,
+      "execution_epoch": 1,
+      "per_kind_executions": {
+        "aiv": 1444,
+        "aic": 864
+      },
+      "dependency_edges_checked": 133,
+      "block_identity_verified": true,
+      "dependency_order_source": "native_protocol",
+      "dependency_timing_guard": true,
+      "runtime": "host_build_graph",
+      "scheduler_producer": "aicore",
+      "distributed_scheduler_verified": true,
+      "require_aicore_scheduler": true,
+      "host_capture": {
+        "status": "complete",
+        "expected_records": 107,
+        "recorded_records": 107,
+        "pool_records": 117,
+        "dropped_records": 0,
+        "error": null
+      },
+      "clock_alignment_status": "bounded",
+      "cross_domain_latency_available": true
+    },
+    "correctness": {
+      "rounds": 2,
+      "outputs_per_round": 7,
+      "passed": true
+    }
+  },
+  "codegen": [
+    {
+      "source": {
+        "path": "../reports/csa_codegen_20261030.cdOXtY/earlier-entry-loops/summary.json",
+        "sha256": "76339b2c03e9f0c8fea91d0e3e995447e0214bae51dc42e5c875f785f6c25522"
+      },
+      "schema": "csa-role-body-codegen-v1",
+      "elf_sha256": "d51c2fcd0d19c0a5ccc6e5ac9807bc73c0235e38aa8c900f2a1e1a86a1555858",
+      "decoder_sha256": "29835d2439d6dd464d34a212ad4bbd5c29af6a38465da09a6c273401d9a96dcb",
+      "reference_script_sha256": "4091251537a0405f83514d99fc6891300650a01cb61ac3b6c2291e899f7f0747",
+      "reproducer_sha256": "60b01280cb09880e5b6443085e7d51cb47074dd47f93fbb7ba91c7c85f3c1aaa",
+      "scope": "Complete selected Scalar loop bodies; not whole ELF coverage or dynamic costs.",
+      "role_scope": "Declared template role, not a claim about the physical core executing a PC; local names repeat across link inputs.",
+      "functions": [
+        {
+          "index": 0,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 462896,
+          "declared_role": "dynamic",
+          "bytes": 189388,
+          "instructions": 47347,
+          "body_sha256": "dbc2977f5a624645d1698fd314a3fa8c8175c96505ef6455a0595ebcb90c2ad5",
+          "static_sys_cnt_sites": 31
+        },
+        {
+          "index": 1,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 1121672,
+          "declared_role": "dynamic",
+          "bytes": 183840,
+          "instructions": 45960,
+          "body_sha256": "f98aa408cb17cc9ba9c6f80de82b3e2ce0e5a2c7605cfa1552b9889f67a12f5d",
+          "static_sys_cnt_sites": 30
+        }
+      ]
+    },
+    {
+      "source": {
+        "path": "../reports/csa_codegen_20261030.cdOXtY/core-role-loops/summary.json",
+        "sha256": "5aad62d9bb50734f294deec591d9a09ff62f65f3f7d5ebcdb6823c62403bd729"
+      },
+      "schema": "csa-role-body-codegen-v1",
+      "elf_sha256": "371cc2670f855bfa369ad1c5a9add0bf5dad1563373aef44081f3e3e810379b1",
+      "decoder_sha256": "29835d2439d6dd464d34a212ad4bbd5c29af6a38465da09a6c273401d9a96dcb",
+      "reference_script_sha256": "4091251537a0405f83514d99fc6891300650a01cb61ac3b6c2291e899f7f0747",
+      "reproducer_sha256": "60b01280cb09880e5b6443085e7d51cb47074dd47f93fbb7ba91c7c85f3c1aaa",
+      "scope": "Complete selected Scalar loop bodies; not whole ELF coverage or dynamic costs.",
+      "role_scope": "Declared template role, not a claim about the physical core executing a PC; local names repeat across link inputs.",
+      "functions": [
+        {
+          "index": 0,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EL17SchedulerCoreRole1EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false, (SchedulerCoreRole)1>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 671708,
+          "declared_role": "AIC",
+          "bytes": 187040,
+          "instructions": 46760,
+          "body_sha256": "85d6a725935be3e613c5993b89626a87c64d5845802eaab7ed18bfc58c0cefc3",
+          "static_sys_cnt_sites": 30
+        },
+        {
+          "index": 1,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EL17SchedulerCoreRole2EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false, (SchedulerCoreRole)2>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 858748,
+          "declared_role": "AIV",
+          "bytes": 177340,
+          "instructions": 44335,
+          "body_sha256": "15959664e3d22e22a1113a9bd0b1878b0bd07a31ad4861a0dbb6c2544c845705",
+          "static_sys_cnt_sites": 30
+        },
+        {
+          "index": 2,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EL17SchedulerCoreRole1EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false, (SchedulerCoreRole)1>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 1711100,
+          "declared_role": "AIC",
+          "bytes": 189664,
+          "instructions": 47416,
+          "body_sha256": "62582e51b4a4af98b0e872defa569a6dec2421aa62343daf8360a71f2c8c7f82",
+          "static_sys_cnt_sites": 31
+        },
+        {
+          "index": 3,
+          "symbol": "_ZN12_GLOBAL__N_123run_ready_dispatch_loopILb0EL17SchedulerCoreRole2EEEbRK18SchedulerGraphViewPU3AS1vP19SchedulerLocalStatePU3AS119SchedulerRunControlPNS_20SchedulerWorkerStatsEm",
+          "demangled": "bool (anonymous namespace)::run_ready_dispatch_loop<false, (SchedulerCoreRole)2>(SchedulerGraphView const&, void AS1*, SchedulerLocalState*, SchedulerRunControl AS1*, (anonymous namespace)::SchedulerWorkerStats*, unsigned long)",
+          "pc": 1900764,
+          "declared_role": "AIV",
+          "bytes": 177160,
+          "instructions": 44290,
+          "body_sha256": "ff476da9708c18ad6c872bc9bd20e3bdb8dd34829f5114b05574af41308f29cb",
+          "static_sys_cnt_sites": 31
+        }
+      ]
+    }
+  ],
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "validation": {
+    "cpp_targets": 21,
+    "startup_target": 261,
+    "gm_target": 1420,
+    "new_cases": 204,
+    "new_startup_cases": 132,
+    "new_gm_cases": 72,
+    "python_hbg": 3989,
+    "builds": [
+      "a5",
+      "a5sim"
+    ],
+    "native_full_regression": "未执行",
+    "native_full_fault_matrix": "未执行",
+    "sim_scene_regression": "未执行",
+    "candidate_l3": "未采集",
+    "restored_cpp_targets": 21,
+    "red_scope": "新模板接口不存在时不可编译，不是旧业务行为错误。"
+  },
+  "test_setup_corrections": {
+    "initial_cpp": {
+      "path": "outputs/csa-core-role-targets.log",
+      "sha256": "40f850de540afcc40aecb5323c74ccb7f721e1c8497b586c97dff43a9f2e16c1"
+    },
+    "resolved_count": "新正向区间的两臂都漏做 completion flush；32 项只在全局 resolved 计数断言失败。补 flush 后保留原计数断言。",
+    "topology": "新角色拒绝区间遗漏 cluster_worker_ids，产生并非预期的本地角色；一个区间进入空轮询。主动 SIGINT 自己的 GTest 子进程，初轮 ctest exit 8。补齐拓扑并加入有限轮询退出后通过。",
+    "initial_python": {
+      "path": "outputs/csa-core-role-python.log",
+      "sha256": "d8c7a90d8b430a7c8b93e54d88c204f3c1a8f1c2a0655c7c9caf5d47badfc0dc"
+    },
+    "initial_python_exit": 139,
+    "python": "首次命令漏设既有 TORCH_DEVICE_BACKEND_AUTOLOAD=0，自动加载不匹配的系统 torch_npu，8 个收集错误；其后退出 139。补回原环境后 3989 项通过，不声称已定位退出 139 的全部内部细节。"
+  },
+  "restored_state": {
+    "source": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/core-role-restored-state.json",
+      "sha256": "f3d3304b5c8888c69874c2efe95c00a003482a7e127b3359fb009f0ed920a62e"
+    },
+    "sim_restore_log": {
+      "path": "outputs/csa-core-role-restore-runtime.log",
+      "sha256": "1af2e5e72dee859ff7a97ab7245f1ecb9fd4c3470b03470412cb056601a36ba5"
+    },
+    "checked_at_utc": "2026-10-31T00:58:08.929630+00:00",
+    "commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+    "production_and_target_tests_diff_empty": true,
+    "source_sha256": {
+      "src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp": "39c9e7c18fc4b03c15cd1e001484f323fd5bdff07338c6f0ed8e4c12943601b6",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_ready.h": "01fb5ddf13078a7cb65c34e0496e7d22f283fdf4878df6d3e08c3edebc358342",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_gm_mix.h": "b720a12f848e043bca7e0c0a1589814f20da50ef1d21a2f867c08eaba1a64c1d",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_dispatch.h": "031474f3f3344118436fbdad3474f4d846233d121c52727b53e0d11dcecce387"
+    },
+    "native_binaries": {
+      "aicore_kernel.o": "d51c2fcd0d19c0a5ccc6e5ac9807bc73c0235e38aa8c900f2a1e1a86a1555858",
+      "libaicpu_kernel.so": "16d8b040d3f2f15e4fce21510b49d8d375fbf78d67176831ce6774e4091f33ca",
+      "libhost_runtime.so": "0de46e46d66135eecda2b60ac0dad1c27df590b9d78a1bb127781100d067a3d3"
+    },
+    "sim_binaries": {
+      "libaicore_kernel.so": "e92d3a3795e451ae77e34dd326ed453712ee4ee8daf8a580d9db967438dc878a",
+      "libaicpu_kernel.so": "1d51b08db832e72feb376cc2f0842b7546fd7a874bbb7aba4addc188f1c24610",
+      "libhost_runtime.so": "2b57edf807c872c10cec592b1be2d5ab57ba02fcced5e24badf83ffde83f895f"
+    }
+  },
+  "logs": {
+    "cpp": {
+      "path": "outputs/csa-core-role-cpp.log",
+      "sha256": "855fb94c49706102c5e02a22b738fc8e66b84b415c3963fdbac63ced307d14f1"
+    },
+    "restored-cpp": {
+      "path": "outputs/csa-core-role-restored-cpp.log",
+      "sha256": "cd6a0a77cc35d2a7636ff5b7a43847c11a944f38da30b6f0cff2677b2940c937"
+    },
+    "targets-r2": {
+      "path": "outputs/csa-core-role-targets-r2.log",
+      "sha256": "dc87c9192eab74dd7b7d7cbd68f07ed161d6c0ea7578da3fa3491fb5a43eb8d4"
+    },
+    "target-counts": {
+      "path": "outputs/csa-core-role-target-counts.log",
+      "sha256": "16e35c14fff5d66213616a73530a6aec4a65de7829566ad4363a7c4f6076e3eb"
+    },
+    "python-r2": {
+      "path": "outputs/csa-core-role-python-r2.log",
+      "sha256": "04f6156f3e6c0fc862815b112c5ddff72d2323f056a82f4615b129f6fa95385d"
+    },
+    "interface_red": {
+      "path": "outputs/csa-core-role-red.log",
+      "sha256": "f8ba081796c6b338eb805ae9810184bded64d16f4061bfaffd1ac554151d9ac5"
+    }
+  },
+  "archives": {
+    "idle-core-role-production.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-core-role-production.patch",
+      "sha256": "728d4c14af33bdd31a4a32641e855ddcbb3f1791e09efdae0f2067fcd4f36784"
+    },
+    "idle-core-role-tests.patch": {
+      "path": "../reports/csa_poursoul_20261027.Osnaam/idle-core-role-tests.patch",
+      "sha256": "fbfe872b8a0543193757619b265eadd38340c4d9a9f8ffd5d222bf6127f4b984"
+    }
+  },
+  "reproducer": {
+    "path": "../reports/csa_macro_l3_20261029.W2dr2E/summarize_core_role.py",
+    "sha256": "a72cf037bbf63e2c8faa402a4264c9d4500e0582741d6df254607c153e1b9158"
+  },
+  "caveats": [
+    "只有一对 A/B，差值不到 1us；不外推为所有角色特化都稳定变慢。",
+    "报告全部四个候选循环体，不只选择变小的版本。模板角色名称不是物理执行核的 PC 归属证明。",
+    "静态字节数和 SYS_CNT 位置不是动态次数、cache miss 或耗时。",
+    "严格解码仅覆盖选中的完整 Scalar 循环，不宣称全 ELF 解码。",
+    "未完成候选完整故障矩阵或最终五批性能验收，目标仍未达到。"
+  ]
+}

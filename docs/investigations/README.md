@@ -84,6 +84,8 @@ that ...".
 
 Newest first.
 
+- [2026-10-csa-fair-competition-diagnostics](../zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md)
+
 - [2026-10-csa-idle-loop-codegen](../zh-cn/investigations/2026-10-csa-idle-loop-codegen.md)
 
 - [2026-10-csa-bounded-ready-probe](../zh-cn/investigations/2026-10-csa-bounded-ready-probe.md)
@@ -91,8 +93,6 @@ Newest first.
 - [2026-10-csa-static-membership](../zh-cn/investigations/2026-10-csa-static-membership.md)
 
 - [2026-10 — CSA Mix completion aggregation](../zh-cn/investigations/2026-10-csa-batched-completion.md): 2029.265 / 2000.475 us screening pair; runtime candidate withdrawn, 120 strategy-independent multi-wave guards retained.
-
-- [2026-10 — CSA fair-competition diagnostics](../zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md): payload pre-preparation withdrawn after a 2024.819 / 2005.381 us screening pair; independent baseline PMU and static-frame evidence, with attribution limits.
 
 - [2026-10 — CSA L3 macro analysis and direct cooperative admission](../zh-cn/investigations/2026-10-csa-l3-direct-admission.md): A/B/A 2008.468 / 2003.344 / 2000.424 us; no repeatable benefit, candidate withdrawn.
 
