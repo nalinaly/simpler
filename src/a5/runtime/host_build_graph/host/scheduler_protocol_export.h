@@ -22,122 +22,11 @@
 #include <utility>
 #include <vector>
 
-#include "scheduler/scheduler_graph.h"
-#include "scheduler/scheduler_types.h"
-
-struct SchedulerProtocolTaskSpec {
-    SchedulerTaskMetadata metadata;
-    std::vector<int32_t> dependencies;
-};
-
-inline std::vector<SchedulerProtocolTaskSpec>
-scheduler_protocol_freeze_graph(const SchedulerGraphView &graph, const std::vector<SchedulerTaskMetadata> &metadata) {
-    if (graph.task_count != metadata.size()) throw std::invalid_argument("protocol graph task count mismatch");
-    std::vector<SchedulerProtocolTaskSpec> result;
-    result.reserve(metadata.size());
-    for (size_t task = 0; task < metadata.size(); ++task) {
-        SchedulerTaskShape shape{};
-        const auto status = scheduler_classify_task_shape(graph, static_cast<int64_t>(task), &shape);
-        if (status != SchedulerGraphResult::OK &&
-            !(status == SchedulerGraphResult::UNSUPPORTED_SHAPE &&
-              (metadata[task].active_mask == 0 || scheduler_task_is_inline(metadata[task].flags))))
-            throw std::invalid_argument("invalid frozen protocol graph");
-        const auto *payload = scheduler_graph_payload(graph, static_cast<int64_t>(task));
-        const auto count = *reinterpret_cast<const int32_t *>(payload + SCHEDULER_GRAPH_FANIN_COUNT_OFFSET);
-        SchedulerProtocolTaskSpec spec{metadata[task], {}};
-        spec.dependencies.reserve(static_cast<size_t>(count));
-        for (int32_t index = 0; index < count; ++index)
-            spec.dependencies.push_back(scheduler_graph_fanin_id(graph, static_cast<int64_t>(task), index));
-        result.push_back(std::move(spec));
-    }
-    return result;
-}
+#include "scheduler_protocol_graph.h"
+#include "scheduler_protocol_export_common.h"
+#include "scheduler_graph_protocol_export.h"
 
 namespace scheduler_protocol_export {
-
-// Field names and string values are schema literals. Device values are numeric only.
-class JsonObject {
-public:
-    explicit JsonObject(std::ostream &stream) :
-        stream_(stream) {
-        stream_ << '{';
-    }
-    ~JsonObject() { stream_ << '}'; }
-    JsonObject(const JsonObject &) = delete;
-    JsonObject &operator=(const JsonObject &) = delete;
-
-    std::ostream &field(const char *name) {
-        if (!first_) stream_ << ',';
-        first_ = false;
-        return stream_ << '"' << name << "\":";
-    }
-    template <class T>
-    void number(const char *name, T value) {
-        field(name) << +value;
-    }
-    void string(const char *name, const char *value) { field(name) << '"' << value << '"'; }
-    void stamp(const char *name, const SchedulerProtocolStamp &value) {
-        field(name) << '[' << value.cycles << ',' << value.sequence << ']';
-    }
-    template <class T>
-    void numbers(const char *name, const T *values, size_t count) {
-        field(name) << '[';
-        for (size_t index = 0; index < count; ++index) {
-            if (index != 0) stream_ << ',';
-            stream_ << +values[index];
-        }
-        stream_ << ']';
-    }
-
-private:
-    std::ostream &stream_;
-    bool first_{true};
-};
-
-class Image {
-public:
-    Image(const void *base, size_t size) :
-        base_(static_cast<const uint8_t *>(base)),
-        size_(size) {
-        if (base == nullptr || reinterpret_cast<uintptr_t>(base) % SCHEDULER_STATE_ALIGNMENT != 0)
-            throw std::invalid_argument("invalid protocol image base");
-    }
-    template <class T>
-    const T *array(uint64_t offset, uint64_t count) const {
-        if (count == 0) return nullptr;
-        if (offset % alignof(T) != 0 || offset > size_ || count > (size_ - offset) / sizeof(T))
-            throw std::invalid_argument("protocol image region out of bounds");
-        return reinterpret_cast<const T *>(base_ + offset);
-    }
-
-private:
-    const uint8_t *base_;
-    size_t size_;
-};
-
-template <class T>
-inline bool populated(const T &record) {
-    const auto *bytes = reinterpret_cast<const uint8_t *>(&record);
-    return std::any_of(bytes, bytes + sizeof(T), [](uint8_t value) {
-        return value != 0;
-    });
-}
-
-template <class T, class Emit>
-inline void sparse(JsonObject &root, const char *name, const T *records, uint64_t count, Emit emit) {
-    auto &out = root.field(name);
-    out << '[';
-    bool first = true;
-    for (uint64_t index = 0; index < count; ++index) {
-        if (!populated(records[index])) continue;
-        if (!first) out << ',';
-        first = false;
-        JsonObject row(out);
-        row.number("index", index);
-        emit(row, records[index]);
-    }
-    out << ']';
-}
 
 inline void actor(JsonObject &parent, const char *name, const SchedulerProtocolTaskActor &record) {
     auto &out = parent.field(name);
@@ -332,19 +221,22 @@ inline void admissions(JsonObject &root, const Image &image, const AicoreSchedul
 
 inline std::string scheduler_export_protocol(
     const void *base, size_t size, const AicoreSchedulerLayout &layout, uint64_t epoch,
-    const std::vector<SchedulerProtocolTaskSpec> &tasks
+    const std::vector<SchedulerProtocolTaskSpec> &tasks, const SchedulerGraphManifest *graph_manifest = nullptr,
+    uint64_t device_base = 0
 ) {
     using namespace scheduler_protocol_export;
     if (size != layout.total_size || tasks.size() != layout.task_count || layout.protocol_layout_offset == 0)
         throw std::invalid_argument("protocol image size or frozen task count mismatch");
+    if ((layout.graph.instance_count != 0) != (graph_manifest != nullptr))
+        throw std::invalid_argument("Graph protocol requires its frozen manifest");
     const Image image(base, size);
     validate_layout(image, layout, epoch);
     const auto &plan = layout.protocol;
     std::ostringstream out;
     {
         JsonObject root(out);
-        // v8 records resource-scoped membership and each lane's predecessor.
-        root.string("schema", "hbg-native-protocol-v8");
+        // v9 combines Graph evidence with resource-scoped Mix membership.
+        root.string("schema", graph_manifest == nullptr ? "hbg-native-protocol-v8" : "hbg-native-protocol-v9");
         root.number("close_seal_stride", sizeof(SchedulerMixCloseSeal));
         root.string("producer", "aicore");
         root.number("run_epoch", epoch);
@@ -377,6 +269,10 @@ inline std::string scheduler_export_protocol(
             error.number("worker_index", run.error_worker_index);
             error.number("cluster_lane", run.error_cluster_lane);
             error.number("identity_fields", run.error_identity_fields);
+            if (graph_manifest != nullptr) {
+                error.number("public_task_id", run.error_public_task_id);
+                error.number("sub_task_id", run.error_sub_task_id);
+            }
         }
         root.field("tasks") << '[';
         for (size_t index = 0; index < tasks.size(); ++index) {
@@ -467,6 +363,7 @@ inline std::string scheduler_export_protocol(
             root, "executions", image.array<SchedulerProtocolExecutionTrace>(plan.executions_offset, plan.trace_count),
             plan.trace_count, execution
         );
+        if (graph_manifest != nullptr) graph_protocol(root, image, layout, *graph_manifest, device_base);
     }
     return out.str();
 }

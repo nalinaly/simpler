@@ -141,6 +141,19 @@ def test_nonexecuting_predicate_is_marked_not_mistaken_for_a_kernel(tmp_path):
     assert read(tmp_path, raw)[0]["executed"] is False
 
 
+def test_predicate_skip_is_a_control_marker_not_a_worker_kernel_span(tmp_path):
+    raw = capture()
+    raw["aicore_execution_identities"]["records"][0]["executed"] = False
+    rows = read(tmp_path, raw)
+    trace = generate_chrome_trace_json(rows, None, runtime_name="host_build_graph")
+    skipped = [event for event in trace["traceEvents"] if event.get("args", {}).get("executed") is False]
+    worker = [event for event in skipped if event.get("pid") == 4]
+    assert len(worker) == 1 and worker[0]["ph"] == "i"
+    assert "predicate_skip" in worker[0]["name"]
+    assert "dur" not in worker[0] and worker[0]["args"]["kernel-duration-us"] == 0
+    assert all("predicate_skip" in event["name"] for event in skipped)
+
+
 @pytest.mark.parametrize("pid", (3, 4))
 def test_perfetto_task_views_preserve_explicit_identity(tmp_path, pid):
     rows = read(tmp_path, capture())

@@ -339,10 +339,14 @@ L4 另以 `aicore_protocol` 对象导出这些真实记录，资源范围协议 
 它校验 schema 与逐核序号完整性，`native_causality.py`、`native_mix_audit.py` 与
 `native_order.py` 进一步检查冻结图／成员、两槽生命周期、实际完成票号、组握手与关闭、
 TaskDone 和依赖，并与独立入口身份逐字段连接。
-v2–v8 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
-v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v8 为 N>1，N1／sync_start 均不取号。
-v5–v8 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
-v6–v8 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
+包含原生 Graph 的 run 使用 v9，同时携带上述资源范围协议和 Graph 父子/物化/完成证据。
+旧独立 Graph 分支的 v8 具有 `graph` 字段，使用完整三 lane 资源合同，不能与这里不含
+`graph` 的资源范围 v8 混读；两种旧记录和 v9 的区别见
+[Graph 协议说明](../../../../docs/zh-cn/a5-hbg-aicore-graph-p4-protocol.md)。
+v2–v9 要求每个 task control 的 claim_tickets 字段，终态取号任务必须在 [N,N+P]，其他任务必须为零；
+v2 的普通任务阈值严格为 N>2P，v3 为 N≥2P，v4–v9 为 N>1，N1／sync_start 均不取号。
+v5–v9 另要求 admission_claim_lock 原始字段，成功终态必须为零；失败 wire 记录保留实际值用于诊断。
+v6–v9 要求每个 task control 的 claim_seal 字段，成功终态协同任务必须为 N，非协同任务必须为零。
 每个协同 block 的 claim 记录保存有效确认计数，其集合严格为 1…N；
 只有实际令有效 next_block 达到 N 的确认者可以记录 seal=N 的发布前后事件，不能用最后票号替代。
 使用 seal 的成员关闭必须记录 claim_seal_seen==claim_cursor_seen==closed_cursor==N，

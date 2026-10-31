@@ -833,7 +833,7 @@ latch a fatal and name themselves in one log line; none falls back to submitting
 the body as ordinary tasks. A Graph that cannot be opened is a failure, not a
 slower path:
 
-- an empty Graph boundary, or one carrying more than `GRAPH_MAX_TENSOR_ARGS`
+- a Graph boundary carrying more than `GRAPH_MAX_TENSOR_ARGS`
   (128) Tensors or `GRAPH_MAX_SCALAR_ARGS` (64) scalars;
 - an explicit dependency declared on the boundary itself;
 - nested Graph submission;
