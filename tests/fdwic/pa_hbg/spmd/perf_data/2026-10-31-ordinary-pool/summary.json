@@ -1,0 +1,1202 @@
+{
+  "schema": "csa-ordinary-multiblock-pool-screen-v1",
+  "date": "2026-10-31",
+  "base_commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+  "permission": "允许单独实验，验证后再决定是否保留",
+  "scope": [
+    "纯 C/V、无 sync_start、非 Mix 的普通多 block 不进入共同准入日志",
+    "两类全局任务池均按 128B 隔离，所有同类型核均可竞争，不限制 cluster",
+    "保留完成驱动依赖、单 block 归属、入口前沿检查及 Mix/sync_start 两/三 lane 协议",
+    "最后票预留、有效确认、N 次完成分开；不把池头删除视为 TaskDone"
+  ],
+  "sampling": {
+    "order": "B/A/A/B",
+    "warmup_per_batch": 5,
+    "formal_per_batch": 100,
+    "metric": "完整 Device/RunWall，含启动、调度、kernel、退出",
+    "sample_filtering": "无",
+    "cli_overlap_observations": 0,
+    "isolation": "计时未并行本会话编译、测试、设备查询；CLI 观察不是系统级独占证明"
+  },
+  "benchmarks": [
+    {
+      "label": "ordinary-pool-graph-baseline-b1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/ordinary-pool-graph-baseline-b1/result.json",
+      "result_sha256": "94242a1c58798ecebd0d3273957bd5c2268765c1f88bd54f8a644fb47047d2ed",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5bd6811e65a9418a044bf30e8bdc14dcfd3a54bce7389838e585916a90b62581",
+          "libaicpu_kernel.so": "017e4b0271f327a891e7e3d0de929c5526f9eaf9c1f53000fd92479175855d0a",
+          "aicore_kernel.o": "be0e9ff5fd0d478a6e11994147c39b8441cdd9d7cc8538f391d2e2d4674ae049"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1863.176,
+          "median": 1900.434,
+          "mean": 1902.85959,
+          "max": 1988.251,
+          "p90": 1926.1601,
+          "p99": 1970.59435,
+          "samples": [
+            1889.319,
+            1913.014,
+            1874.9,
+            1884.252,
+            1914.969,
+            1893.411,
+            1928.518,
+            1886.843,
+            1903.078,
+            1893.117,
+            1903.266,
+            1881.515,
+            1909.157,
+            1888.051,
+            1919.411,
+            1899.675,
+            1903.095,
+            1902.538,
+            1896.453,
+            1934.904,
+            1896.09,
+            1888.975,
+            1914.734,
+            1884.255,
+            1890.577,
+            1888.97,
+            1927.457,
+            1870.798,
+            1882.937,
+            1916.716,
+            1880.202,
+            1909.691,
+            1906.543,
+            1900.524,
+            1899.647,
+            1970.416,
+            1949.079,
+            1890.409,
+            1905.317,
+            1895.006,
+            1911.835,
+            1988.251,
+            1874.508,
+            1916.17,
+            1885.387,
+            1903.494,
+            1912.329,
+            1889.493,
+            1924.403,
+            1904.252,
+            1893.819,
+            1863.176,
+            1886.89,
+            1926.016,
+            1889.347,
+            1914.176,
+            1938.911,
+            1923.732,
+            1893.299,
+            1879.77,
+            1898.408,
+            1878.075,
+            1914.558,
+            1900.555,
+            1892.153,
+            1879.129,
+            1900.653,
+            1933.128,
+            1907.861,
+            1872.11,
+            1903.081,
+            1901.179,
+            1897.205,
+            1961.93,
+            1910.493,
+            1917.397,
+            1899.045,
+            1941.836,
+            1894.925,
+            1899.101,
+            1891.869,
+            1889.354,
+            1891.139,
+            1879.187,
+            1888.451,
+            1895.567,
+            1894.023,
+            1900.344,
+            1897.745,
+            1910.414,
+            1908.088,
+            1892.194,
+            1907.326,
+            1914.127,
+            1902.607,
+            1880.727,
+            1916.575,
+            1909.149,
+            1902.094,
+            1905.07
+          ]
+        },
+        "host_us": {
+          "min": 74389.933,
+          "median": 75348.01800000001,
+          "mean": 75918.44045,
+          "max": 86321.826,
+          "p90": 77181.2623,
+          "p99": 85010.71059000002
+        }
+      }
+    },
+    {
+      "label": "ordinary-pool-prototype-a1",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/ordinary-pool-prototype-a1/result.json",
+      "result_sha256": "bea640e80d7c8070fecfb377ba84af251140cb51a3cf67efe6d5a21932ba7ca6",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "4d5685a7007a3148fdcadfbad9b3940cf1416a8628588bf5c6f2b8d1af182048",
+        "runtime_sha256": {
+          "libhost_runtime.so": "c85b7b75ff8cc9e4559919908b7cb3a0cd4844b449354e8ccf7a333273214bd0",
+          "libaicpu_kernel.so": "dc2a03936f71047369b8ab4f1b7ae97a5473ae3e58a0ee318fa55f3d33c576c0",
+          "aicore_kernel.o": "37b60a90f680366b0efcc6f3923453d1fd236ebaf72a7af1f24f6d1076041af4"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "8189d7084ac86bfb1aeac54dba4d4ad521b0b9315a36c4eb55d48d09ec2e5ebe",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1864.415,
+          "median": 1888.129,
+          "mean": 1893.58189,
+          "max": 1994.257,
+          "p90": 1920.0788,
+          "p99": 1990.4375799999998,
+          "samples": [
+            1883.637,
+            1898.78,
+            1920.033,
+            1891.284,
+            1877.12,
+            1876.165,
+            1887.528,
+            1883.017,
+            1887.97,
+            1896.618,
+            1874.301,
+            1900.742,
+            1994.257,
+            1885.497,
+            1880.79,
+            1900.639,
+            1876.105,
+            1905.761,
+            1869.857,
+            1883.447,
+            1877.488,
+            1896.273,
+            1914.745,
+            1913.521,
+            1909.455,
+            1877.393,
+            1883.117,
+            1908.727,
+            1928.732,
+            1920.491,
+            1901.358,
+            1869.759,
+            1899.292,
+            1903.906,
+            1888.104,
+            1900.365,
+            1906.085,
+            1891.139,
+            1923.512,
+            1881.831,
+            1872.083,
+            1868.438,
+            1875.883,
+            1903.986,
+            1990.399,
+            1913.528,
+            1869.592,
+            1882.318,
+            1880.059,
+            1892.686,
+            1884.499,
+            1894.092,
+            1893.884,
+            1903.472,
+            1886.004,
+            1882.659,
+            1872.165,
+            1883.618,
+            1876.864,
+            1873.503,
+            1867.256,
+            1876.436,
+            1905.839,
+            1890.638,
+            1929.338,
+            1878.365,
+            1874.674,
+            1894.321,
+            1901.017,
+            1872.032,
+            1891.696,
+            1915.903,
+            1875.466,
+            1892.988,
+            1906.493,
+            1884.723,
+            1923.887,
+            1885.908,
+            1868.734,
+            1902.081,
+            1957.553,
+            1878.664,
+            1879.938,
+            1871.033,
+            1926.421,
+            1911.787,
+            1864.415,
+            1888.498,
+            1875.529,
+            1933.701,
+            1887.686,
+            1867.345,
+            1889.389,
+            1880.17,
+            1870.603,
+            1888.154,
+            1903.813,
+            1909.337,
+            1878.878,
+            1888.907
+          ]
+        },
+        "host_us": {
+          "min": 132013.589,
+          "median": 143246.678,
+          "mean": 146993.67793,
+          "max": 205530.797,
+          "p90": 168272.57309999998,
+          "p99": 200729.21582
+        }
+      }
+    },
+    {
+      "label": "ordinary-pool-prototype-a2",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/ordinary-pool-prototype-a2/result.json",
+      "result_sha256": "1a36beafe39d512c61571ac37ae82c839720a0add1675837c3f831b80bb6fde7",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "4d5685a7007a3148fdcadfbad9b3940cf1416a8628588bf5c6f2b8d1af182048",
+        "runtime_sha256": {
+          "libhost_runtime.so": "c85b7b75ff8cc9e4559919908b7cb3a0cd4844b449354e8ccf7a333273214bd0",
+          "libaicpu_kernel.so": "dc2a03936f71047369b8ab4f1b7ae97a5473ae3e58a0ee318fa55f3d33c576c0",
+          "aicore_kernel.o": "37b60a90f680366b0efcc6f3923453d1fd236ebaf72a7af1f24f6d1076041af4"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "8189d7084ac86bfb1aeac54dba4d4ad521b0b9315a36c4eb55d48d09ec2e5ebe",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1859.289,
+          "median": 1895.9650000000001,
+          "mean": 1898.6672,
+          "max": 1998.765,
+          "p90": 1919.3689000000002,
+          "p99": 1980.8222400000002,
+          "samples": [
+            1895.211,
+            1898.943,
+            1900.845,
+            1900.589,
+            1908.702,
+            1938.745,
+            1874.072,
+            1972.822,
+            1998.765,
+            1877.765,
+            1898.062,
+            1874.286,
+            1905.407,
+            1895.736,
+            1900.016,
+            1915.981,
+            1888.2,
+            1870.368,
+            1888.812,
+            1888.764,
+            1886.1,
+            1903.898,
+            1892.688,
+            1911.275,
+            1881.79,
+            1915.302,
+            1889.658,
+            1878.872,
+            1917.055,
+            1923.105,
+            1916.043,
+            1888.259,
+            1883.361,
+            1906.45,
+            1911.376,
+            1883.031,
+            1898.575,
+            1919.123,
+            1877.349,
+            1859.289,
+            1875.906,
+            1871.843,
+            1941.869,
+            1900.564,
+            1894.743,
+            1889.676,
+            1902.524,
+            1877.996,
+            1879.78,
+            1896.463,
+            1886.775,
+            1900.362,
+            1881.675,
+            1900.814,
+            1921.582,
+            1893.68,
+            1881.419,
+            1911.333,
+            1941.155,
+            1891.44,
+            1894.199,
+            1930.344,
+            1904.585,
+            1901.619,
+            1908.84,
+            1889.709,
+            1902.372,
+            1874.372,
+            1884.808,
+            1882.638,
+            1954.431,
+            1878.048,
+            1886.367,
+            1899.003,
+            1907.656,
+            1980.641,
+            1907.51,
+            1911.928,
+            1911.252,
+            1889.373,
+            1871.08,
+            1899.551,
+            1907.409,
+            1887.407,
+            1875.595,
+            1890.886,
+            1886.741,
+            1876.664,
+            1882.996,
+            1879.052,
+            1917.289,
+            1871.96,
+            1878.695,
+            1911.181,
+            1902.629,
+            1875.039,
+            1868.45,
+            1906.808,
+            1896.194,
+            1905.11
+          ]
+        },
+        "host_us": {
+          "min": 76514.884,
+          "median": 81201.0005,
+          "mean": 105578.10398,
+          "max": 440475.331,
+          "p90": 141833.8665,
+          "p99": 214879.23544000115
+        }
+      }
+    },
+    {
+      "label": "ordinary-pool-graph-baseline-b2",
+      "result": "../reports/csa_poursoul_20261027.Osnaam/artifacts/ordinary-pool-graph-baseline-b2/result.json",
+      "result_sha256": "c2ba4ca0962c9cf64aad06ad3a0e372f704949b0ad3826bf3db3a13f7da3e917",
+      "identity": {
+        "runtime": "host_build_graph",
+        "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+        "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+        "torch": "2.12.0+cpu",
+        "simpler_commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+        "simpler_branch": "feat/fully_distributed_within_core",
+        "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "runtime_sha256": {
+          "libhost_runtime.so": "5bd6811e65a9418a044bf30e8bdc14dcfd3a54bce7389838e585916a90b62581",
+          "libaicpu_kernel.so": "017e4b0271f327a891e7e3d0de929c5526f9eaf9c1f53000fd92479175855d0a",
+          "aicore_kernel.o": "be0e9ff5fd0d478a6e11994147c39b8441cdd9d7cc8538f391d2e2d4674ae049"
+        },
+        "case_sources_match_baseline": true,
+        "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+        "host_only_arguments": [
+          "hc_attn_scale"
+        ]
+      },
+      "production_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "goldens": {
+        "rounds": 3,
+        "outputs_per_round": 7,
+        "passed": true
+      },
+      "metrics": {
+        "device_us": {
+          "min": 1868.607,
+          "median": 1899.7235,
+          "mean": 1905.77631,
+          "max": 2007.6,
+          "p90": 1944.5106,
+          "p99": 1998.3197400000001,
+          "samples": [
+            1902.686,
+            1900.826,
+            1883.3,
+            1899.053,
+            1877.676,
+            1955.543,
+            1962.499,
+            1898.168,
+            1898.853,
+            1885.43,
+            1884.906,
+            1904.41,
+            1887.977,
+            1888.186,
+            1898.254,
+            1890.306,
+            1884.687,
+            1883.284,
+            1902.719,
+            1881.712,
+            1886.057,
+            1902.818,
+            1949.079,
+            1881.529,
+            1908.234,
+            1916.347,
+            2007.6,
+            1887.829,
+            1901.0,
+            1880.473,
+            1890.665,
+            1902.675,
+            1929.618,
+            1893.972,
+            1893.511,
+            1886.715,
+            1922.636,
+            1882.137,
+            1887.032,
+            1943.789,
+            1948.315,
+            1938.722,
+            1876.744,
+            1888.86,
+            1965.896,
+            1887.486,
+            1933.077,
+            1917.095,
+            1998.226,
+            1905.743,
+            1906.149,
+            1878.805,
+            1923.014,
+            1900.422,
+            1881.383,
+            1884.225,
+            1899.543,
+            1906.362,
+            1898.913,
+            1921.672,
+            1870.808,
+            1892.195,
+            1944.387,
+            1937.838,
+            1868.607,
+            1903.82,
+            1885.276,
+            1907.12,
+            1896.665,
+            1910.475,
+            1891.658,
+            1881.319,
+            1889.704,
+            1945.623,
+            1923.39,
+            1899.904,
+            1909.311,
+            1891.549,
+            1934.046,
+            1894.791,
+            1909.754,
+            1967.709,
+            1879.943,
+            1878.447,
+            1975.151,
+            1887.838,
+            1908.741,
+            1901.731,
+            1878.75,
+            1932.331,
+            1904.139,
+            1902.932,
+            1912.883,
+            1904.68,
+            1908.517,
+            1911.411,
+            1875.747,
+            1892.053,
+            1894.283,
+            1887.262
+          ]
+        },
+        "host_us": {
+          "min": 77697.516,
+          "median": 78157.23000000001,
+          "mean": 78404.21324,
+          "max": 84691.335,
+          "p90": 78843.16279999999,
+          "p99": 82086.33810000001
+        }
+      }
+    }
+  ],
+  "pooled_candidate_us": 1891.362,
+  "pooled_baseline_us": 1900.124,
+  "pooled_improvement_us": 8.761999999999944,
+  "pooled_improvement_percent": 0.4611278000804128,
+  "l3": {
+    "graph-baseline": {
+      "raw": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-ordinary-pool-graph-baseline/evidence/L3/chip_swimlane_records.json",
+        "sha256": "2ec68df62c1f8746597c52101cea7b50f49e7775018e8f017695c28836af2a7e"
+      },
+      "deps": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-ordinary-pool-graph-baseline/evidence/L3/deps.json",
+        "sha256": "7b9eff8ea7d3d1c5817978e4c1084547285ed6ee25121c93109dba2a2807e2dc"
+      },
+      "golden_outputs_passed": 7,
+      "production_reader_passed": true,
+      "native_protocol_verified": false,
+      "frozen_csa_raw_identity_and_dependency_checks": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "kernel_window_us": 1815.046,
+      "global_no_kernel_us": 527.247,
+      "global_gap_count": 47,
+      "ordinary_no_log_tasks": {},
+      "regions": {
+        "before_t23": {
+          "window_us": 246.383,
+          "no_kernel_us": 109.10300000000001
+        },
+        "t23": {
+          "window_us": 372.19800000000004,
+          "no_kernel_us": 9.31
+        },
+        "t23_end_to_t56_end": {
+          "window_us": 687.364,
+          "no_kernel_us": 297.20300000000003
+        },
+        "after_t56": {
+          "window_us": 509.101,
+          "no_kernel_us": 111.631
+        }
+      },
+      "largest_gaps": [
+        {
+          "duration_us": 33.4,
+          "start_after_origin_us": 1137.066,
+          "first_tasks_at_end": [
+            48
+          ]
+        },
+        {
+          "duration_us": 31.148,
+          "start_after_origin_us": 1305.945,
+          "first_tasks_at_end": [
+            85
+          ]
+        },
+        {
+          "duration_us": 27.316,
+          "start_after_origin_us": 787.04,
+          "first_tasks_at_end": [
+            32
+          ]
+        },
+        {
+          "duration_us": 26.895,
+          "start_after_origin_us": 1776.911,
+          "first_tasks_at_end": [
+            106
+          ]
+        },
+        {
+          "duration_us": 26.811,
+          "start_after_origin_us": 91.404,
+          "first_tasks_at_end": [
+            25
+          ]
+        },
+        {
+          "duration_us": 26.437,
+          "start_after_origin_us": 855.3960000000001,
+          "first_tasks_at_end": [
+            36
+          ]
+        },
+        {
+          "duration_us": 25.272000000000002,
+          "start_after_origin_us": 1564.461,
+          "first_tasks_at_end": [
+            105
+          ]
+        },
+        {
+          "duration_us": 24.169,
+          "start_after_origin_us": 967.727,
+          "first_tasks_at_end": [
+            42
+          ]
+        }
+      ],
+      "scope": "基线原转换器通过；另按同一原始周期算法复算。"
+    },
+    "prototype": {
+      "raw": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-ordinary-pool-prototype/evidence/L3/chip_swimlane_records.json",
+        "sha256": "35fa5717b082884f59cfbbdfd18326c31684ae476f54724ffb6a7d63b6752d38"
+      },
+      "deps": {
+        "path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-ordinary-pool-prototype/evidence/L3/deps.json",
+        "sha256": "7b9eff8ea7d3d1c5817978e4c1084547285ed6ee25121c93109dba2a2807e2dc"
+      },
+      "golden_outputs_passed": 7,
+      "production_reader_passed": false,
+      "native_protocol_verified": false,
+      "frozen_csa_raw_identity_and_dependency_checks": {
+        "protocol_verified": false,
+        "execution_epoch": 1,
+        "per_kind_executions": {
+          "aiv": 1444,
+          "aic": 864
+        },
+        "dependency_edges_checked": 133,
+        "block_identity_verified": true,
+        "dependency_order_source": "kernel_timestamps",
+        "dependency_timing_guard": true
+      },
+      "kernel_window_us": 1836.549,
+      "global_no_kernel_us": 527.022,
+      "global_gap_count": 49,
+      "ordinary_no_log_tasks": {
+        "10": 7,
+        "13": 4,
+        "21": 6,
+        "22": 48,
+        "24": 128,
+        "29": 16,
+        "36": 7,
+        "38": 8,
+        "43": 8,
+        "48": 8,
+        "49": 8,
+        "50": 8,
+        "51": 8,
+        "52": 8,
+        "53": 8,
+        "54": 8,
+        "55": 8,
+        "56": 256,
+        "59": 4,
+        "62": 4,
+        "65": 4,
+        "68": 4,
+        "71": 4,
+        "74": 4,
+        "77": 4,
+        "80": 4,
+        "83": 4,
+        "86": 4,
+        "89": 4,
+        "92": 4,
+        "95": 4,
+        "98": 4,
+        "101": 4,
+        "104": 4,
+        "106": 8
+      },
+      "regions": {
+        "before_t23": {
+          "window_us": 248.826,
+          "no_kernel_us": 104.98400000000001
+        },
+        "t23": {
+          "window_us": 375.475,
+          "no_kernel_us": 11.731
+        },
+        "t23_end_to_t56_end": {
+          "window_us": 698.432,
+          "no_kernel_us": 301.594
+        },
+        "after_t56": {
+          "window_us": 513.816,
+          "no_kernel_us": 108.71300000000001
+        }
+      },
+      "largest_gaps": [
+        {
+          "duration_us": 30.665,
+          "start_after_origin_us": 1154.01,
+          "first_tasks_at_end": [
+            52
+          ]
+        },
+        {
+          "duration_us": 28.296,
+          "start_after_origin_us": 1322.733,
+          "first_tasks_at_end": [
+            58
+          ]
+        },
+        {
+          "duration_us": 28.018,
+          "start_after_origin_us": 1588.386,
+          "first_tasks_at_end": [
+            105
+          ]
+        },
+        {
+          "duration_us": 27.391000000000002,
+          "start_after_origin_us": 91.0,
+          "first_tasks_at_end": [
+            25
+          ]
+        },
+        {
+          "duration_us": 26.753,
+          "start_after_origin_us": 785.469,
+          "first_tasks_at_end": [
+            32
+          ]
+        },
+        {
+          "duration_us": 25.903000000000002,
+          "start_after_origin_us": 1073.676,
+          "first_tasks_at_end": [
+            46
+          ]
+        },
+        {
+          "duration_us": 25.788,
+          "start_after_origin_us": 223.038,
+          "first_tasks_at_end": [
+            23
+          ]
+        },
+        {
+          "duration_us": 24.253,
+          "start_after_origin_us": 991.7950000000001,
+          "first_tasks_at_end": [
+            42
+          ]
+        }
+      ],
+      "scope": "候选旧 v1 转换器仍拒绝；此处只对固定 CSA 原始行独立校验一一身份、类型、槽代数、依赖时间和时间区间。仅容许已批准的无 sync_start 单 lane 多 block 无序号，不修改/补造原始身份，不是 L4 协议验收。"
+    }
+  },
+  "kernel_fingerprints": {
+    "0": {
+      "bytes": 1920,
+      "fnv1a64": "0xc977e28d1be50594"
+    },
+    "1": {
+      "bytes": 1128,
+      "fnv1a64": "0xf83f45396c4d3032"
+    },
+    "2": {
+      "bytes": 72,
+      "fnv1a64": "0x3f88fe80a9bf096c"
+    },
+    "3": {
+      "bytes": 1840,
+      "fnv1a64": "0x713a851fd3ed9dd0"
+    },
+    "4": {
+      "bytes": 15032,
+      "fnv1a64": "0xc3e5873059fb872f"
+    },
+    "5": {
+      "bytes": 4424,
+      "fnv1a64": "0x8fc13602c18d8f13"
+    },
+    "6": {
+      "bytes": 2344,
+      "fnv1a64": "0x7ea4762c5e6d84e9"
+    },
+    "7": {
+      "bytes": 808,
+      "fnv1a64": "0x7f6de147a6fd7378"
+    },
+    "8": {
+      "bytes": 3656,
+      "fnv1a64": "0xe59fe3e9663e02f2"
+    },
+    "9": {
+      "bytes": 1000,
+      "fnv1a64": "0x3e92654216022e75"
+    },
+    "10": {
+      "bytes": 3640,
+      "fnv1a64": "0xa96ec483e1bb62f9"
+    },
+    "11": {
+      "bytes": 2376,
+      "fnv1a64": "0x7090c56f065b018"
+    },
+    "12": {
+      "bytes": 1888,
+      "fnv1a64": "0x17efec28f48e8039"
+    },
+    "13": {
+      "bytes": 2144,
+      "fnv1a64": "0xc3a318b74c637b9"
+    },
+    "14": {
+      "bytes": 2808,
+      "fnv1a64": "0x688eaf5422bfd252"
+    },
+    "15": {
+      "bytes": 2360,
+      "fnv1a64": "0xf9853d126dd53222"
+    },
+    "16": {
+      "bytes": 5192,
+      "fnv1a64": "0xee9b9093436cc113"
+    },
+    "17": {
+      "bytes": 1000,
+      "fnv1a64": "0xe94fae7d734b3fe9"
+    },
+    "18": {
+      "bytes": 3640,
+      "fnv1a64": "0x9f1424af88badf90"
+    },
+    "19": {
+      "bytes": 8520,
+      "fnv1a64": "0x1c5d8d88903ae24c"
+    },
+    "20": {
+      "bytes": 1032,
+      "fnv1a64": "0x8a5ec693f4c81d2d"
+    },
+    "21": {
+      "bytes": 1576,
+      "fnv1a64": "0xe6a60dc6d3dcc112"
+    },
+    "22": {
+      "bytes": 5424,
+      "fnv1a64": "0x472888f1d4dbaffa"
+    },
+    "23": {
+      "bytes": 9800,
+      "fnv1a64": "0x96155ff50aadec63"
+    },
+    "24": {
+      "bytes": 2808,
+      "fnv1a64": "0x5ddfc25df83b61e3"
+    },
+    "25": {
+      "bytes": 2360,
+      "fnv1a64": "0xaa2a3696386ca08a"
+    },
+    "26": {
+      "bytes": 3120,
+      "fnv1a64": "0x261c83f31bd30649"
+    },
+    "27": {
+      "bytes": 216,
+      "fnv1a64": "0xd9a84bc6042bb32e"
+    },
+    "28": {
+      "bytes": 248,
+      "fnv1a64": "0xe26e7d86da12bdce"
+    },
+    "29": {
+      "bytes": 6216,
+      "fnv1a64": "0x3a792d77ee54adc5"
+    },
+    "30": {
+      "bytes": 632,
+      "fnv1a64": "0xa99256f3b929702c"
+    },
+    "31": {
+      "bytes": 1120,
+      "fnv1a64": "0x8e1f1be0eecd3541"
+    },
+    "32": {
+      "bytes": 1176,
+      "fnv1a64": "0x721f39c10d83cc62"
+    },
+    "33": {
+      "bytes": 3168,
+      "fnv1a64": "0x49b13cc7a1e5cd5f"
+    },
+    "34": {
+      "bytes": 432,
+      "fnv1a64": "0x3d245de369b463d7"
+    },
+    "35": {
+      "bytes": 11592,
+      "fnv1a64": "0xda575b8623314273"
+    },
+    "36": {
+      "bytes": 3152,
+      "fnv1a64": "0x369b29e348c0f42d"
+    },
+    "37": {
+      "bytes": 9112,
+      "fnv1a64": "0xd40fe754923d5067"
+    },
+    "38": {
+      "bytes": 23088,
+      "fnv1a64": "0x247b5c4694ecc84d"
+    },
+    "39": {
+      "bytes": 2376,
+      "fnv1a64": "0xe36928ce5ee2c201"
+    },
+    "40": {
+      "bytes": 168,
+      "fnv1a64": "0xda20b85891ebc4e2"
+    },
+    "41": {
+      "bytes": 11096,
+      "fnv1a64": "0xd14502d1b8abc68c"
+    },
+    "42": {
+      "bytes": 4440,
+      "fnv1a64": "0x58da2d2aab8e09e6"
+    },
+    "43": {
+      "bytes": 4440,
+      "fnv1a64": "0x910bd520980ab464"
+    },
+    "44": {
+      "bytes": 2920,
+      "fnv1a64": "0xd24b39ec768f5630"
+    },
+    "45": {
+      "bytes": 7752,
+      "fnv1a64": "0x78846156e79e09fd"
+    },
+    "46": {
+      "bytes": 272,
+      "fnv1a64": "0xd54f2790ffab00c0"
+    },
+    "47": {
+      "bytes": 1000,
+      "fnv1a64": "0x4471da668742d644"
+    },
+    "48": {
+      "bytes": 3640,
+      "fnv1a64": "0xc1d6a13a9aae3331"
+    },
+    "49": {
+      "bytes": 320,
+      "fnv1a64": "0xb36ae26b3acca8a"
+    },
+    "50": {
+      "bytes": 1000,
+      "fnv1a64": "0xa5771367b18447a"
+    },
+    "51": {
+      "bytes": 3640,
+      "fnv1a64": "0xcac7e3e043c38e73"
+    },
+    "52": {
+      "bytes": 7752,
+      "fnv1a64": "0x3bb0f957aed7265d"
+    },
+    "53": {
+      "bytes": 4184,
+      "fnv1a64": "0xfd40003cedadb656"
+    }
+  },
+  "validation": {
+    "targeted_cpp": 190,
+    "builds": [
+      "a5",
+      "a5sim"
+    ],
+    "restored_cpp_targets": 29,
+    "native_full_regression": "未执行",
+    "native_full_fault_matrix": "未执行",
+    "native_l4": "未实现；候选明确拒绝，不称通过",
+    "candidate_l1_l3_standard_reader": "旧 v1 不允许 N>1 无序号；拒绝结果与原始记录保留",
+    "goal_final_five_batches_passed": false
+  },
+  "failure_evidence": {
+    "policy_red": {
+      "path": "outputs/csa-ordinary-pool-initial-red.log",
+      "sha256": "e581a7fb2d682181b86e855ca3f2baa85458ba69b85428f65afbe20a96a0a408"
+    },
+    "malformed_shape_red": {
+      "path": "outputs/csa-ordinary-pool-errors-red.log",
+      "sha256": "d72f674900eda7a09a5e1c5314c5577991e35f11b808c46f285da6dc0252fe43"
+    },
+    "mask4_red": {
+      "path": "outputs/csa-ordinary-pool-execution.log",
+      "sha256": "d8129fdbace141fefc705f46dd11c34b0e99882b28fe382813deccc3b9e3cbad"
+    },
+    "native_address_space_build": {
+      "path": "outputs/csa-ordinary-pool-runtime-build.log",
+      "sha256": "f8a9928326bc986af2d51a1d37a2ba65ec610557c8135ef16eeebfc634e04372"
+    }
+  },
+  "corrections": [
+    "候选拒绝超过 INT16_MAX 的块数和未知标志；没有放宽输入范围。",
+    "旧 single-subtask helper 缺 mask=4；26 个执行区间定位到 site=44。候选补齐后通过；随实验恢复，不声称该旧缺口已正式修复。",
+    "原生编译发现 GM 引用不能传入 Local 引用参数；分类 helper 改传标量值后 A5/A5sim 构建通过。"
+  ],
+  "archives": {
+    "prototype-production.patch": {
+      "path": "../reports/csa_ordinary_pool_20261031.uao3gM/prototype-production.patch",
+      "sha256": "0e09745c99b549afd87cfabeb3a7d7a8408cec1977bca4794a34224e998e063c"
+    },
+    "prototype-tests.patch": {
+      "path": "../reports/csa_ordinary_pool_20261031.uao3gM/prototype-tests.patch",
+      "sha256": "5cf67ae939faab235cac2c96621d5d37b6a25c646cec1c105a43774404ce4efd"
+    }
+  },
+  "logs": {
+    "final-primitives": {
+      "path": "outputs/csa-ordinary-pool-final-primitives.log",
+      "sha256": "0a6a0fc632fd55c3e3c9e766b8b6c84d10af494717afab55d17cc87902a9868b"
+    },
+    "final-execution": {
+      "path": "outputs/csa-ordinary-pool-final-execution.log",
+      "sha256": "f58eb3eca2f5dae49dc470d7280d3b5e48a3db70779ac3a078b722780b47e245"
+    },
+    "final-mix": {
+      "path": "outputs/csa-ordinary-pool-final-mix.log",
+      "sha256": "374b5c40bce8614d22b20072cc0d3515e07e741d46d7b6725a3d042cce47a35e"
+    }
+  },
+  "restored_state": {
+    "source": {
+      "path": "../reports/csa_ordinary_pool_20261031.uao3gM/restored-state.json",
+      "sha256": "6e779f2f336a787c5496c66e81c91e0afbf7187c8936f045a1162ebdf4a4d54b"
+    },
+    "commit": "47c55ec570a0a262a547d53c37f0d1b41a443db8",
+    "production_and_tests_diff_empty": true,
+    "source_sha256": {
+      "src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp": "4891df96bd0f8028598b97691b609f25c4ab70006ee34c1d97d78e19c6a9ce57",
+      "src/a5/runtime/host_build_graph/host/runtime_maker.cpp": "bf0eae8566590f8cf9273dca639758b8843a6facea7d9c8040df9263dd79f565",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_admission.h": "3f20a2e9e849e3bb3c53c433a20c5d724b951479e09b515b5945c03178be0382",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_completion.h": "53488565fbf60e4fe275e084f4f38a10ca96639909d66bd787f14c91874b94c2",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_dispatch.h": "031474f3f3344118436fbdad3474f4d846233d121c52727b53e0d11dcecce387",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_layout.h": "0bd744e10907e35fc0340cdbca3def2f1e73457fd66ee8115d7688515caeac96",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_ready.h": "f5fe08e0c3614822b94ee1eafa554dfdfdd4d28f8b10ee6e02d9ddf6ca6e2914",
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_types.h": "49736bc6c944bcc520beb45f85693b246c89fc4f9814aaac6dbe18f3fbb932da",
+      "tests/ut/cpp/a5/runtime/host_build_graph/CMakeLists.txt": "abba588ec1cdf13f9ff50eef0a4b76bbb9dfae652a05a4faa9540b44124c66ab",
+      "tests/ut/cpp/a5/runtime/host_build_graph/test_hbg_gm_mix.cpp": "c0a60c9d16cebe5dc6625ec832bffa6bcf2325f4d7ba5deaf9e563bb055594d9",
+      "tests/ut/cpp/a5/runtime/host_build_graph/test_hbg_ordered_execution.cpp": "ea2a095e1b6b15c5c2a4efd50732e00c6c351bd74df7b6b3473212fe67b5b8a8"
+    },
+    "removed_candidate_files": [
+      "src/a5/runtime/host_build_graph/runtime/scheduler/scheduler_ordinary_pool.h",
+      "tests/ut/cpp/a5/runtime/host_build_graph/test_hbg_ordinary_pool.cpp"
+    ],
+    "native_binaries": {
+      "aicore_kernel.o": "be0e9ff5fd0d478a6e11994147c39b8441cdd9d7cc8538f391d2e2d4674ae049",
+      "libaicpu_kernel.so": "017e4b0271f327a891e7e3d0de929c5526f9eaf9c1f53000fd92479175855d0a",
+      "libhost_runtime.so": "5bd6811e65a9418a044bf30e8bdc14dcfd3a54bce7389838e585916a90b62581"
+    },
+    "sim_binaries": {
+      "libaicore_kernel.so": "2a120bf0f7546530ffbef0d2eda5697b7bce45d4f4b2da8dbb118610b7a26f82",
+      "libaicpu_kernel.so": "6c047c85b3778fe40e4e81c52cd27cadbd88b20010224afdcd8adecc7a523c89",
+      "libhost_runtime.so": "c21075cd4c657b3c59c9218ff36db2166b34ecc32f7934d31a953d949e58bb82"
+    }
+  },
+  "reproducer": {
+    "path": "../reports/csa_ordinary_pool_20261031.uao3gM/summarize.py",
+    "sha256": "a45a06ea0af66ab5552753cc7f39a91898f78a280bee9755b327f49ba3d33a88"
+  },
+  "decision": "独立候选不保留，源码、测试和二进制恢复集成基线；完整样本、补丁及原始泳道留档。",
+  "caveats": [
+    "只有每版两批，不作为最终五批门禁或稳定尾分布证明。",
+    "候选原始 L3 的独立固定负载时间分析不等同于通用转换器通过或原生协议验收。",
+    "性能差值不精确全部归因于准入移除，不能相加到其他独立优化。",
+    "未迁移旧普通多 block 准入策略断言，未完成新原生协议及完整故障矩阵；不能将 190 项针对性测试称为全量回归。",
+    "1.5ms 目标未达成；本次只否定该候选作为当前主要优化方向，不证明所有普通任务池实现都无价值。"
+  ]
+}
