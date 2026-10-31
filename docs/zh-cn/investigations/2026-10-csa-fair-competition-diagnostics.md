@@ -197,6 +197,28 @@ mask=4 的 26 项执行测试暴露旧单-subtask helper 的遗漏，候选补�
 不声称已经正式修复。L4 新协议和完整故障矩阵未完成，候选明确拒绝这类 L4 捕获。
 恢复后 29 个 C++ 目标通过；这些结果不改变 1.5ms 目标或原 Mix 合同。
 
+### 普通 Ready 前缀早发：当前列为次级方向
+
+2026-10-31，基于已保留的 `77ae38ad5` 和对应 L3 复核，不修改 ARRIVED／RELEASED 协议。
+现有早发仅覆盖 Mix；纯 AIV 的入队目标由 batch 首任务的奇偶决定，直接拆批会改变目标 inbox。
+如果重新实验，需要保持原目标与 FIFO，不能让后缀经 direct 路径越过已发布前缀，
+也不能改写已发布链、缩小原有领取资格或复用旧的错误许可。
+
+在 79 个 kernel task 和两个 Dummy 的执行域内，对依赖边去重后，
+找到 9 个至少含两个普通直接后继的 Resolve。它们与 kernel 窗口内全员无 kernel 区间的
+**并集重叠为 32.443us**，约占该捕获 547.648us 空窗的 **5.924%**。
+其中 t46 的八路 AIV 扇出对应 13.967us，t32 的两个普通后继对应 7.508us。
+
+这是宽口径的候选覆盖，不是实际 Ready 滞留，也不是可直接节省的时间：
+部分后继可能尚未就绪或仅发生依赖迁移，Resolve 内还包含其他处理。
+它既不是完整 Device 收益的严格上界，也不包含 kernel 窗口外的启停。
+因此暂不为此小范围发布顺序启动新的硬件候选；不把它包装成覆盖约 390us 目标差距的大项。
+普通 Mix 提前进入 kernel 的规则仍待用户确认，没有据此放宽现有入口条件。
+
+[范围核对数据](../../../tests/fdwic/pa_hbg/spmd/perf_data/2026-10-31-bounded-context/ordinary-prefix-audit.json)
+保留原始数据摘要、依赖去重、逐 Resolve 覆盖和限制。复算脚本为工作区
+`../reports/csa_bounded_context_20261031.2qvC6S/ordinary-prefix-audit.py`，没有新增热路径计时。
+
 ## 可复算证据
 
 [公平竞争候选与基线 PMU 摘要](../../../tests/fdwic/pa_hbg/spmd/perf_data/2026-10-28-idle/prepare-arrival-pmu-summary.json)

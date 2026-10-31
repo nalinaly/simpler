@@ -1,0 +1,149 @@
+{
+  "schema": "csa-ordinary-prefix-scope-v1",
+  "date": "2026-10-31",
+  "production_commit": "77ae38ad5048d6563490317a8ec832e29b0755a9",
+  "raw_path": "../reports/csa_macro_l3_20261029.W2dr2E/l3-bounded-context/evidence/L3/chip_swimlane_records.json",
+  "raw_sha256": "06c16d7d822089c2cadc9d40ca02c4902a438c37b8f5b3e96869a4867b8d1c37",
+  "runtime_sha256": {
+    "libhost_runtime.so": "5bd6811e65a9418a044bf30e8bdc14dcfd3a54bce7389838e585916a90b62581",
+    "libaicpu_kernel.so": "017e4b0271f327a891e7e3d0de929c5526f9eaf9c1f53000fd92479175855d0a",
+    "aicore_kernel.o": "b08a719078f83106c4683f9c7f457cb8250d3639daa2224db906caaf87973e66"
+  },
+  "audit": {
+    "protocol_verified": false,
+    "execution_epoch": 1,
+    "per_kind_executions": {
+      "aiv": 1444,
+      "aic": 864
+    },
+    "dependency_edges_checked": 133,
+    "block_identity_verified": true,
+    "dependency_order_source": "kernel_timestamps",
+    "dependency_timing_guard": true
+  },
+  "logical_runtime_tasks": 81,
+  "inline_tasks": [
+    14,
+    27
+  ],
+  "original_dependency_edges": 338,
+  "deduplicated_dependency_edges": 272,
+  "candidate_resolves": [
+    {
+      "parent": 5,
+      "ordinary_children": [
+        8,
+        9,
+        10
+      ],
+      "resolve_us": 6.461000000000013,
+      "no_kernel_overlap_us": 0
+    },
+    {
+      "parent": 7,
+      "ordinary_children": [
+        8,
+        9,
+        10
+      ],
+      "resolve_us": 6.036000000000001,
+      "no_kernel_overlap_us": 4.985000000000014
+    },
+    {
+      "parent": 11,
+      "ordinary_children": [
+        24,
+        26,
+        33,
+        39,
+        47
+      ],
+      "resolve_us": 6.514999999999986,
+      "no_kernel_overlap_us": 0
+    },
+    {
+      "parent": 13,
+      "ordinary_children": [
+        14,
+        29,
+        36,
+        38
+      ],
+      "resolve_us": 0.9559999999999604,
+      "no_kernel_overlap_us": 0.9559999999999604
+    },
+    {
+      "parent": 20,
+      "ordinary_children": [
+        21,
+        22
+      ],
+      "resolve_us": 4.305000000000007,
+      "no_kernel_overlap_us": 3.3290000000000077
+    },
+    {
+      "parent": 26,
+      "ordinary_children": [
+        27,
+        28
+      ],
+      "resolve_us": 1.697999999999979,
+      "no_kernel_overlap_us": 1.697999999999979
+    },
+    {
+      "parent": 32,
+      "ordinary_children": [
+        36,
+        38
+      ],
+      "resolve_us": 7.508000000000038,
+      "no_kernel_overlap_us": 7.508000000000038
+    },
+    {
+      "parent": 46,
+      "ordinary_children": [
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55
+      ],
+      "resolve_us": 13.96699999999987,
+      "no_kernel_overlap_us": 13.96699999999987
+    },
+    {
+      "parent": 47,
+      "ordinary_children": [
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55
+      ],
+      "resolve_us": 0.575999999999965,
+      "no_kernel_overlap_us": 0.41399999999998727
+    }
+  ],
+  "union_no_kernel_overlap_us": 32.44299999999987,
+  "all_no_kernel_us": 547.6479999999997,
+  "overlap_percent": 5.92406071052937,
+  "source_sha256": "f5fe08e0c3614822b94ee1eafa554dfdfdd4d28f8b10ee6e02d9ddf6ca6e2914",
+  "decision": "降低普通Ready前缀早发的当前优先级；没有实施或宣称性能收益。",
+  "constraints": [
+    "普通AIV批次按首任务奇偶选择目标inbox；直接拆批会改变该选择。",
+    "若重新实验，需保留目标与FIFO、发布后链不可改写、唯一归属及错误门禁。",
+    "保持全部合法核竞争和全部必需ARRIVED/RELEASED；当前没有入口协议变更。"
+  ],
+  "caveats": [
+    "仅统计已有kernel窗口内的重叠，不包含其前后的设备启停。",
+    "候选按静态直接后继宽口径选择，包含尚未就绪/依赖迁移的后继，不证明存在同样长的Ready滞留。",
+    "Resolve区间包含多种处理；32.443us不是已测可节省值，也不是完整Device收益的严格上界。",
+    "仅一次有记录L3捕获，不与无插桩1.890006ms相减归因。"
+  ]
+}
