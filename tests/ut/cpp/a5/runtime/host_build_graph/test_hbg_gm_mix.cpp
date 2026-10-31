@@ -137,7 +137,7 @@ struct GmMixFixture {
                    base(), local, scheduler_task_ready_queue(metadata.flags, metadata.active_mask), &batch, nullptr
                );
     }
-    bool admit(uint64_t task, uint32_t worker = 0) {
+    bool claim_pending(uint64_t task, uint32_t worker = 0) {
         if (!enqueue(task, worker)) return false;
         auto *local = locals[worker];
         const auto &metadata = storage.metadata[task];
@@ -149,9 +149,12 @@ struct GmMixFixture {
                ) &&
                ready.task_ref == static_cast<int64_t>(task) &&
                scheduler_try_claim_admission(graph.graph(), base(), local, run(), &admissions[worker], ready) ==
-                   SchedulerAdmissionResult::PROGRESS &&
-               scheduler_prepare_admission_record(graph.graph(), base(), local, run(), &admissions[worker]) &&
-               scheduler_try_commit_admission(graph.graph(), base(), local, run(), &admissions[worker]) ==
+                   SchedulerAdmissionResult::PROGRESS;
+    }
+    bool admit(uint64_t task, uint32_t worker = 0) {
+        return claim_pending(task, worker) &&
+               scheduler_prepare_admission_record(graph.graph(), base(), locals[worker], run(), &admissions[worker]) &&
+               scheduler_try_commit_admission(graph.graph(), base(), locals[worker], run(), &admissions[worker]) ==
                    SchedulerAdmissionResult::PROGRESS;
     }
     bool refresh(uint32_t worker) {
@@ -1022,6 +1025,152 @@ std::vector<GmNoRecordAckCase> gm_no_record_ack_cases() {
 }
 
 INSTANTIATE_TEST_SUITE_P(RequiredResources, HbgGmMixNoRecordAck, ::testing::ValuesIn(gm_no_record_ack_cases()));
+
+struct GmPendingEntryCase {
+    GmShape shape;
+    uint32_t worker;
+    bool prepared;
+    bool protocol;
+    uint32_t failure{0};
+    bool reversed_task_ids{false};
+};
+
+void prepare_pending_mix_entry(GmMixFixture &fixture, const GmPendingEntryCase &scenario) {
+    if (!scenario.protocol)
+        for (auto *local : fixture.locals)
+            local->profiling = nullptr;
+    const uint32_t current_task = scenario.reversed_task_ids ? 1 : 0;
+    const uint32_t later_task = current_task ^ 1U;
+    ASSERT_TRUE(fixture.admit(current_task));
+    ASSERT_TRUE(fixture.refresh_all());
+    ASSERT_EQ(fixture.claim(0), SchedulerBlockClaimResult::CLAIMED);
+    ASSERT_TRUE(fixture.publish(0));
+    ASSERT_TRUE(fixture.rendezvous(0));
+    const uint32_t worker = scenario.worker;
+    ASSERT_TRUE(fixture.claim_pending(later_task, worker));
+    if (!scenario.prepared) return;
+    const uint32_t peer = worker + 3;
+    ASSERT_TRUE(scheduler_prepare_admission_record(
+        fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &fixture.admissions[worker]
+    ));
+    ASSERT_TRUE(fixture.claim_pending(2, peer));
+    ASSERT_TRUE(scheduler_prepare_admission_record(
+        fixture.graph.graph(), fixture.base(), fixture.locals[peer], fixture.run(), &fixture.admissions[peer]
+    ));
+    auto *shared =
+        scheduler_state_at<SchedulerAdmissionControl>(fixture.base(), fixture.storage.layout.admission_control_offset);
+    ASSERT_EQ(scheduler_gm_compare_exchange(shared->commit_lock, UINT64_C(0), static_cast<uint64_t>(peer + 1)), 0u);
+    ASSERT_EQ(
+        scheduler_try_commit_admission(
+            fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &fixture.admissions[worker]
+        ),
+        SchedulerAdmissionResult::RETRY
+    );
+    ASSERT_EQ(shared->commit_tail, 1u);
+}
+
+class HbgGmPendingEarlierEntry : public ::testing::TestWithParam<GmPendingEntryCase> {};
+
+TEST_P(HbgGmPendingEarlierEntry, CurrentGroupCanFinishWithoutPublishingItsLaterCandidate) {
+    const auto scenario = GetParam();
+    const uint8_t pending_mask = scenario.worker == 0 ? 7 : 2;
+    const uint32_t current_task = scenario.reversed_task_ids ? 1 : 0;
+    const uint32_t later_task = current_task ^ 1U;
+    std::vector<GmShape> shapes{{2, pending_mask}, {2, pending_mask}, {2, pending_mask}};
+    shapes[current_task] = scenario.shape;
+    GmMixFixture fixture(shapes, scenario.protocol);
+    ASSERT_NO_FATAL_FAILURE(prepare_pending_mix_entry(fixture, scenario));
+    auto *shared =
+        scheduler_state_at<SchedulerAdmissionControl>(fixture.base(), fixture.storage.layout.admission_control_offset);
+    std::set<uint8_t> executed;
+    for (uint32_t lane = 0; lane < 3; ++lane) {
+        if ((scenario.shape.mask & (1U << lane)) == 0) continue;
+        GmExecution execution{};
+        ASSERT_TRUE(fixture.begin(lane, &execution));
+        EXPECT_EQ(execution.task, current_task);
+        EXPECT_EQ(execution.block, 0u);
+        EXPECT_EQ(execution.blocks, scenario.shape.blocks);
+        EXPECT_EQ(execution.subtask, lane);
+        EXPECT_TRUE(executed.insert(execution.subtask).second);
+        ASSERT_TRUE(fixture.complete(execution));
+    }
+    const auto result = fixture.retire(0);
+    EXPECT_EQ(result, scenario.shape.blocks == 1 ? SchedulerGmMixResult::TASK_LAST : SchedulerGmMixResult::PROGRESS);
+    EXPECT_EQ(fixture.control(current_task)->completed_blocks, 1u);
+    EXPECT_EQ(fixture.control(later_task)->next_block, 0u);
+    EXPECT_EQ(fixture.control(2)->next_block, 0u);
+    EXPECT_EQ(fixture.control(later_task)->completed_blocks, 0u);
+    EXPECT_EQ(fixture.admissions[scenario.worker].pending_task_ref, later_task);
+    EXPECT_EQ(
+        fixture.control(later_task)->admission_state,
+        static_cast<uint64_t>(scenario.prepared ? SchedulerAdmissionState::PREPARED : SchedulerAdmissionState::CLAIMED)
+    );
+    EXPECT_EQ(shared->commit_tail, 1u);
+    EXPECT_EQ(shared->commit_lock, scenario.prepared ? scenario.worker + 4u : 0u);
+    EXPECT_EQ(executed.size(), static_cast<size_t>(__builtin_popcount(scenario.shape.mask)));
+    EXPECT_EQ(fixture.run()->scheduler_error, 0u);
+}
+
+class HbgGmPendingEntryGuard : public ::testing::TestWithParam<GmPendingEntryCase> {};
+
+TEST_P(HbgGmPendingEntryGuard, PendingCandidateDoesNotBypassErrorEpochOrGroupIdentity) {
+    const auto scenario = GetParam();
+    const uint8_t pending_mask = scenario.worker == 0 ? 7 : 2;
+    GmMixFixture fixture({scenario.shape, {2, pending_mask}, {2, pending_mask}}, scenario.protocol);
+    ASSERT_NO_FATAL_FAILURE(prepare_pending_mix_entry(fixture, scenario));
+    auto &admission = fixture.admissions[scenario.worker];
+    auto *local = fixture.locals[scenario.worker];
+    const auto slot = admission.gm_mix.slot_index;
+    ASSERT_LT(slot, SCHEDULER_PENDING_SLOT_COUNT);
+    if (scenario.failure == 0) {
+        scheduler_record_error(
+            fixture.run(), 0, SchedulerGraphResult::TIMEOUT, nullptr, fixture.locals[scenario.worker + 3],
+            SchedulerErrorSite::ORDERED_EXIT_TIMEOUT
+        );
+    } else if (scenario.failure == 1) {
+        ++admission.epoch;
+    } else if (scenario.failure == 2) {
+        ++admission.gm_mix.slot_generation;
+    } else {
+        ++admission.gm_mix.block_idx;
+    }
+    GmExecution denied{};
+    EXPECT_FALSE(fixture.begin(scenario.worker, &denied));
+    EXPECT_EQ(denied.task, SCHEDULER_TASK_REF_INVALID);
+    EXPECT_EQ(fixture.control(0)->completed_blocks, 0u);
+    EXPECT_EQ(fixture.control(1)->next_block, 0u);
+    EXPECT_EQ(fixture.control(2)->next_block, 0u);
+    EXPECT_EQ(admission.pending_task_ref, 1);
+    EXPECT_EQ(fixture.mailbox(0)->published_seq, 1u);
+}
+
+std::vector<GmPendingEntryCase> gm_pending_entry_cases(bool failures) {
+    std::vector<GmPendingEntryCase> cases;
+    for (uint8_t mask : {3, 5, 6, 7})
+        for (uint32_t worker = 0; worker < 3; ++worker) {
+            if ((mask & (1U << worker)) == 0) continue;
+            for (bool prepared : {false, true})
+                for (bool protocol : {false, true}) {
+                    if (failures) {
+                        for (uint32_t failure = 0; failure < 4; ++failure)
+                            cases.push_back({{2, mask}, worker, prepared, protocol, failure});
+                    } else {
+                        for (uint16_t blocks : {1, 2, 65})
+                            cases.push_back({{blocks, mask}, worker, prepared, protocol});
+                        cases.push_back({{2, mask, true}, worker, prepared, protocol});
+                        if (prepared) cases.push_back({{2, mask}, worker, prepared, protocol, 0, true});
+                    }
+                }
+        }
+    return cases;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ActualResourcesAndPendingPhases, HbgGmPendingEarlierEntry, ::testing::ValuesIn(gm_pending_entry_cases(false))
+);
+INSTANTIATE_TEST_SUITE_P(
+    ActualResourcesAndPendingPhases, HbgGmPendingEntryGuard, ::testing::ValuesIn(gm_pending_entry_cases(true))
+);
 
 TEST(HbgGmMix, PublishedRunErrorRejectsNewClaimAndDescriptorPublication) {
     for (uint8_t mask : {3, 5, 6, 7}) {

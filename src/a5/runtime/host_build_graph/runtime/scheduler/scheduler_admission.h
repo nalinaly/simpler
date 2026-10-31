@@ -900,7 +900,6 @@ inline __aicore__ bool scheduler_ordered_can_enter_slot(
         return scheduler_admission_fail(
             graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
         );
-    if (!scheduler_task_ref_is_null(admission->pending_task_ref)) return true;
     if (slot.cooperative) {
         if (slot.task_ref != admission->current_task_ref || slot.block_idx >= admission->current_block_num)
             return scheduler_admission_fail(
@@ -918,6 +917,9 @@ inline __aicore__ bool scheduler_ordered_can_enter_slot(
         scheduler_protocol_execution_permit(base, local, slot_index, UINT64_MAX, true);
         return true;
     }
+    // The current cooperative obligation is already in the committed prefix.
+    // An unpublished candidate cannot precede it; ordinary entry still waits.
+    if (!scheduler_task_ref_is_null(admission->pending_task_ref)) return true;
     uint64_t observed_tail = UINT64_MAX;
     if (!scheduler_can_enter_ordinary(graph, base, local, run, admission, permit, &observed_tail)) return false;
     if (!*permit) return true;

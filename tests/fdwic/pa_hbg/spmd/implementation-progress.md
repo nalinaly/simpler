@@ -2630,7 +2630,7 @@ C++ 入口在 tests/ut/cpp/a5/runtime/host_build_graph，模型在 tests/ut/py/h
 | C51 | M fresh mode/count 反例、D 每轮来源与 aicore producer | 不凭旧 latch 或正确 golden 接受 legacy |
 | C52 | H 能力门禁、D 支持／拒绝／回退分组 | 保留未支持形状，不为“全绿”盲改 marker |
 | C53 | H nullptr SSBUF startup、D 全部 GM Mix 及 CSA | 实际 resident 路径不要求 SSBUF |
-| C54 | H pending/prepared 禁止 kernel entry；提交代码有限短段 | 锁内无 kernel、成员／ready 等待；不改为全任务锁 |
+| C54 | H pending/prepared 阻止普通入口；已提交的当前协同义务可先行；提交代码有限短段 | 锁内无 kernel、成员／ready 等待；不把未持锁的 pending 等同于临界区持有者 |
 | C55 | H sync 提前关闭、D 有界 barrier 的迟到／重叠场景 | 保证最终一致位置，不增加同时开始门槛 |
 | C56 | H mask6 coordinator/close、D 2V Mix 全身份 | AIC 协调义务完成后才局部关闭，不增加 C kernel |
 

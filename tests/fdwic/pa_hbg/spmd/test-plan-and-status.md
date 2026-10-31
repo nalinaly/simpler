@@ -94,7 +94,7 @@ TaskControl 512B 步长、保留字段 offset、整幅初始化、大小任务�
 全宽发布／CAS 不得改坏相邻 task、metadata、其他计数器或 padding。
 
 [test_hbg_ordered_execution.cpp](../../../ut/cpp/a5/runtime/host_build_graph/test_hbg_ordered_execution.cpp)
-共 100 项，直接驱动生产有序填槽、entry gate 和完成路径，包括 24 项 C/V 容量形状，
+共 200 项，直接驱动生产有序填槽、entry gate 和完成路径，包括 24 项 C/V 容量形状，
 8 项完成／LocalDone／候选所有权／predicate 停放行为，2 项无 SSBUF 的 N=3→N=1 依赖链，
 4 项普通队列探测时间和 2 项 COOPERATIVE 不伪造探测时间，另有 2 项真实 direct 后继
 延迟发布必须标记 DISPATCH、不能被误当作 inline refill 的检查；还覆盖显式身份、原生记录，
@@ -105,15 +105,21 @@ TaskControl 512B 步长、保留字段 offset、整幅初始化、大小任务�
 N1／sync_start 保留 CAS、已发布错误与坏计数、32767 上界、prepare/commit 的旧票号拒绝，
 以及两次原子操作后发现不一致时不返回 block 身份、不生成伪 claim 事件。
 计时检查使用真实 CPU_SIM 时钟；这些用例不模拟 A5 cache 可见性。
+后序 pending 入口保护新增 84 项：六个 worker 位置、普通 N2／65、N2 sync_start，
+CLAIMED／PREPARED、无记录／协议记录及反向 task ID；模拟另一发布者持有提交锁时，
+当前已提交 A 可完成，但 B 保持 pending 且没有 block 所有权。普通入口的 pending 门禁仍保留。
 [test_ordered_native_fixture.py](../../../ut/py/hbg_spmd_contracts/test_ordered_native_fixture.py)
 共 108 项，检查 44 场景夹具、坏记录、真假依赖、反向准入及每轮复用来源；这些仍是 CPU 检查。
 
 [test_hbg_gm_mix.cpp](../../../ut/cpp/a5/runtime/host_build_graph/test_hbg_gm_mix.cpp)
-共 346 项，检查真实 descriptor/ack/seal、四种 mask、固定物理 lane、原 N、暂停最后发布者、
+共 1348 项，检查真实 descriptor/ack/seal、四种 mask、固定物理 lane、原 N、暂停最后发布者、
 旧／未来 ack、错误身份、保留 seal、零工作成员、局部跨 task 推进及无新 kernel 的退出 drain，
 并覆盖原生记录和 8 项 sync_start 早关闭、迟到 AIV、零工作 cluster／未发布组。
 另有错误后停止领取／发布／执行／完成／seal、AIC/AIV 合法阶段的 service 停机门禁，
 以及同轮 publish→arrive、release 齐备后同轮退役并领取下一组的检查。
+后序 pending 入口保护新增 306 项，覆盖四种 mask 的全部实际 kernel lane、N1／2／65、
+N2 sync_start、两种 pending 阶段、记录模式、反向 task ID，以及 144 项错误／epoch／组身份拒绝。
+当前组可完整退休不等于后序候选已准入；未使用 V 不被额外纳入两 lane 组。
 有界连续推进新增 21 项：覆盖四种 Mix mask、迟到 release、远端仍执行前任务、错误门禁、
 零工作义务预算，以及完成时直接产生 N=1／2／8／65 后继仍须正确分类为普通／准入任务。
 取号路径新增四种 mask 的暂停窗口：无效尾票不能封闭最后一张尚未确认的有效票，
