@@ -33,7 +33,7 @@ scheduler_protocol_freeze_graph(const SchedulerGraphView &graph, const std::vect
         const auto status = scheduler_classify_task_shape(graph, static_cast<int64_t>(task), &shape);
         if (status != SchedulerGraphResult::OK &&
             !(status == SchedulerGraphResult::UNSUPPORTED_SHAPE &&
-              (metadata[task].active_mask == 0 || scheduler_task_is_inline(metadata[task].flags))))
+              (metadata[task].active_mask.is_empty() || scheduler_task_is_inline(metadata[task].flags))))
             throw std::invalid_argument("invalid frozen protocol graph");
         const auto count = scheduler_graph_fanin_count(graph, static_cast<int64_t>(task));
         SchedulerProtocolTaskSpec spec{metadata[task], {}};

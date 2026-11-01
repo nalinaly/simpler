@@ -41,6 +41,8 @@ public:
     void number(const char *name, T value) {
         field(name) << +value;
     }
+    // The audit schema carries a lane set as the byte LaneMask serializes to.
+    void lane_mask(const char *name, LaneMask value) { field(name) << +value.raw(); }
     void string(const char *name, const char *value) { field(name) << '"' << value << '"'; }
     void stamp(const char *name, const SchedulerProtocolStamp &value) {
         field(name) << '[' << value.cycles << ',' << value.sequence << ']';

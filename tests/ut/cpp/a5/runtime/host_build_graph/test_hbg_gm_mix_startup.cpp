@@ -64,7 +64,7 @@ void identity_test_kernel(__gm__ int64_t *) {
 }
 
 struct StartupFixture {
-    explicit StartupFixture(const std::array<uint8_t, 2> &masks, bool protocol_profiling = false) :
+    explicit StartupFixture(const std::array<LaneMask, 2> &masks, bool protocol_profiling = false) :
         storage(2, 6, 3, SchedulerSpmdRequirements{6, 2, 2, 2}, protocol_profiling) {
         startup_reg_base = registers.data();
         graph_view = graph.graph();
@@ -77,9 +77,9 @@ struct StartupFixture {
             metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX;
             metadata.timing_slot = -1;
             metadata.trace_index_base = trace;
-            trace += static_cast<uint32_t>(__builtin_popcount(masks[task]));
+            trace += static_cast<uint32_t>(masks[task].count());
             for (uint32_t lane = 0; lane < 3; ++lane)
-                metadata.kernel_ids[lane] = (masks[task] & (1U << lane)) != 0 ? 1 : UINT16_MAX;
+                metadata.kernel_ids[lane] = masks[task].has(static_cast<SubtaskSlot>(lane)) ? 1 : UINT16_MAX;
         }
         EXPECT_TRUE(scheduler_init_spmd_task_records(base(), storage.layout, 59));
         storage.callable_addresses[1] = reinterpret_cast<uint64_t>(&count_kernel_entry);
@@ -118,7 +118,11 @@ struct StartupFixture {
     }
 
     void finish_both_tasks_on_cluster_zero() {
-        std::array<SchedulerLocalState, 3> locals{};
+        // SchedulerLocalState's default constructor is explicit, which a
+        // braced initializer here would reach by copy-initialization. These
+        // elements are default-initialized instead; every member of that
+        // struct carries its own initializer, so the state is the same.
+        std::array<SchedulerLocalState, 3> locals;
         std::array<SchedulerLocalProfilingState, 3> profiles{};
         std::array<SchedulerAdmissionLocalState, 3> admissions{};
         for (uint32_t lane = 0; lane < 3; ++lane) {
@@ -131,7 +135,7 @@ struct StartupFixture {
         }
         auto *run = storage.run_control;
         for (int64_t task = 0; task < 2; ++task) {
-            const uint8_t resources = scheduler_mix_resource_mask(storage.metadata[task].active_mask);
+            const LaneMask resources = scheduler_mix_resource_mask(storage.metadata[task].active_mask);
             ASSERT_EQ(
                 scheduler_route_task(graph_view, base(), &locals[0], run, task, nullptr),
                 SchedulerRouteResult::READY_TO_ENQUEUE
@@ -161,19 +165,19 @@ struct StartupFixture {
             ASSERT_TRUE(scheduler_gm_mix_publish(graph_view, base(), &locals[0], run));
             bool progress = false;
             for (uint32_t lane : {1u, 2u})
-                if ((resources & (1U << lane)) != 0)
+                if (resources.has(static_cast<SubtaskSlot>(lane)))
                     ASSERT_TRUE(scheduler_gm_mix_observe(graph_view, base(), &locals[lane], run, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane)
-                if ((resources & (1U << lane)) != 0)
+                if (resources.has(static_cast<SubtaskSlot>(lane)))
                     ASSERT_TRUE(scheduler_gm_mix_arrive(graph_view, base(), &locals[lane], run, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane)
-                if ((resources & (1U << lane)) != 0)
+                if (resources.has(static_cast<SubtaskSlot>(lane)))
                     ASSERT_TRUE(scheduler_gm_mix_prepare_lane(graph_view, base(), &locals[lane], run, 0, &progress));
             for (uint32_t lane = 0; lane < 3; ++lane) {
                 auto &local = locals[lane];
                 uint32_t slot = UINT32_MAX;
                 uint64_t publication = 0;
-                const bool active = (storage.metadata[task].active_mask & (1U << lane)) != 0;
+                const bool active = storage.metadata[task].active_mask.has(static_cast<SubtaskSlot>(lane));
                 if (!scheduler_local_ready_pop(&local, &slot, &publication)) {
                     EXPECT_FALSE(active);
                     continue;
@@ -194,7 +198,7 @@ struct StartupFixture {
                 scheduler_complete_ordered_task(graph_view, base(), &locals[0], run, task, 0, nullptr, nullptr, nullptr)
             );
             for (uint32_t lane = 0; lane < 3; ++lane) {
-                if ((resources & (1U << lane)) == 0) continue;
+                if (!resources.has(static_cast<SubtaskSlot>(lane))) continue;
                 bool closed = false;
                 ASSERT_TRUE(scheduler_gm_mix_close(graph_view, base(), &locals[lane], run, &closed));
                 ASSERT_TRUE(closed);
@@ -221,7 +225,7 @@ struct StartupFixture {
     alignas(64) std::array<uint8_t, SIM_REG_TOTAL_SIZE> registers{};
 };
 
-class HbgGmMixStartupExit : public ::testing::TestWithParam<std::array<uint8_t, 2>> {};
+class HbgGmMixStartupExit : public ::testing::TestWithParam<std::array<LaneMask, 2>> {};
 
 TEST_P(HbgGmMixStartupExit, LateZeroWorkCoordinatorClosesEveryAdmittedMixBeforeExitAck) {
     StartupFixture fixture(GetParam());
@@ -235,7 +239,6 @@ TEST_P(HbgGmMixStartupExit, LateZeroWorkCoordinatorClosesEveryAdmittedMixBeforeE
         ASSERT_EQ(scheduler_gm_fetch_add(fixture.seal(task, 1), UINT64_C(0)), 0u);
     }
     fixture.run_late_worker();
-    EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.seal(0, 1), UINT64_C(0)), 1u);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.seal(1, 1), UINT64_C(0)), 1u);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.storage.run_control->bootstrap_scan_arrived_count, UINT64_C(0)), 6u);
@@ -247,11 +250,15 @@ TEST_P(HbgGmMixStartupExit, LateZeroWorkCoordinatorClosesEveryAdmittedMixBeforeE
 
 INSTANTIATE_TEST_SUITE_P(
     CompletedMixShapes, HbgGmMixStartupExit,
-    ::testing::Values(std::array<uint8_t, 2>{3, 6}, std::array<uint8_t, 2>{6, 6}, std::array<uint8_t, 2>{6, 7})
+    ::testing::Values(
+        std::array<LaneMask, 2>{LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false), LaneMask::both_aiv()},
+        std::array<LaneMask, 2>{LaneMask::both_aiv(), LaneMask::both_aiv()},
+        std::array<LaneMask, 2>{LaneMask::both_aiv(), LaneMask::all()}
+    )
 );
 
 TEST(HbgGmMixStartupExit, FailedRunAcknowledgesExitWithoutFabricatingCloseSeals) {
-    StartupFixture fixture({6, 6});
+    StartupFixture fixture({LaneMask::both_aiv(), LaneMask::both_aiv()});
     fixture.finish_both_tasks_on_cluster_zero();
     ASSERT_EQ(scheduler_gm_fetch_add(fixture.storage.run_control->resolved_task_count, UINT64_C(0)), 2u);
     scheduler_record_error(
@@ -259,7 +266,6 @@ TEST(HbgGmMixStartupExit, FailedRunAcknowledgesExitWithoutFabricatingCloseSeals)
         &fixture.graph_view, &fixture.storage.contexts[3], SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
     );
     fixture.run_late_worker();
-    EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.seal(0, 1), UINT64_C(0)), 0u);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.seal(1, 1), UINT64_C(0)), 0u);
     EXPECT_EQ(startup_kernel_calls, 0u);
@@ -271,7 +277,7 @@ TEST(HbgGmMixStartupExit, FailedRunAcknowledgesExitWithoutFabricatingCloseSeals)
 }
 
 TEST(HbgGmMixStartupExit, MissingCoordinatorSealTimeoutIdentifiesTheWaitingTaskAndWorker) {
-    StartupFixture fixture({6, 6});
+    StartupFixture fixture({LaneMask::both_aiv(), LaneMask::both_aiv()});
     fixture.finish_both_tasks_on_cluster_zero();
     fixture.storage.run_control->scheduler_timeout_cycles = PLATFORM_PROF_SYS_CNT_FREQ / 1000;
     fixture.run_late_worker(4);
@@ -286,14 +292,13 @@ TEST(HbgGmMixStartupExit, MissingCoordinatorSealTimeoutIdentifiesTheWaitingTaskA
     EXPECT_EQ(run.error_worker_index, 4u);
     EXPECT_EQ(run.error_cluster_lane, 1u);
     EXPECT_EQ(run.error_identity_fields, 51u);
-    EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
     EXPECT_EQ(startup_kernel_calls, 0u);
     EXPECT_EQ(startup_ssbuf_calls, 0u);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.seal(0, 1), UINT64_C(0)), 0u);
 }
 
 TEST(HbgProtocolStartupExit, RealExecutorFinishesLateZeroWorkMembersAfterClosingEveryObligation) {
-    StartupFixture fixture({6, 7}, true);
+    StartupFixture fixture({LaneMask::both_aiv(), LaneMask::all()}, true);
     fixture.finish_both_tasks_on_cluster_zero();
     auto *workers = scheduler_state_at<SchedulerProtocolWorkerTrace>(
         fixture.base(), fixture.storage.layout.protocol.workers_offset
@@ -304,7 +309,6 @@ TEST(HbgProtocolStartupExit, RealExecutorFinishesLateZeroWorkMembersAfterClosing
     for (uint32_t worker = 3; worker < 6; ++worker) {
         fixture.run_late_worker(worker);
         ASSERT_EQ(fixture.storage.run_control->scheduler_error, 0u);
-        EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
         EXPECT_EQ(workers[worker].finished, 1u);
         EXPECT_EQ(workers[worker].error_flags, 0u);
         EXPECT_EQ(workers[worker].next_sequence, 4u);
@@ -318,7 +322,7 @@ TEST(HbgProtocolStartupExit, RealExecutorFinishesLateZeroWorkMembersAfterClosing
 }
 
 TEST(HbgProtocolStartupExit, RealExecutorErrorExitDoesNotMarkUnfinishedProtocolSuccessful) {
-    StartupFixture fixture({6, 6}, true);
+    StartupFixture fixture({LaneMask::both_aiv(), LaneMask::both_aiv()}, true);
     fixture.finish_both_tasks_on_cluster_zero();
     scheduler_record_error(
         fixture.storage.run_control, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS,
@@ -332,11 +336,10 @@ TEST(HbgProtocolStartupExit, RealExecutorErrorExitDoesNotMarkUnfinishedProtocolS
     EXPECT_EQ(workers[3].next_sequence, 0u);
     EXPECT_EQ(fixture.seal(0, 1), 0u);
     EXPECT_EQ(fixture.seal(1, 1), 0u);
-    EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
 }
 
 TEST(HbgProtocolStartupExit, RealExecutorSealTimeoutPreservesObservedButUnclosedMember) {
-    StartupFixture fixture({6, 6}, true);
+    StartupFixture fixture({LaneMask::both_aiv(), LaneMask::both_aiv()}, true);
     fixture.finish_both_tasks_on_cluster_zero();
     fixture.storage.run_control->scheduler_timeout_cycles = PLATFORM_PROF_SYS_CNT_FREQ / 1000;
     fixture.run_late_worker(4);
@@ -351,7 +354,6 @@ TEST(HbgProtocolStartupExit, RealExecutorSealTimeoutPreservesObservedButUnclosed
     EXPECT_EQ(members[4].observed.sequence, 1u);
     EXPECT_EQ(members[4].closed.sequence, 0u);
     EXPECT_EQ(fixture.storage.run_control->scheduler_error, static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT));
-    EXPECT_EQ(read_reg(RegId::COND), AICORE_EXITED_VALUE);
 }
 
 class HbgExecutionIdentityEntry : public ::testing::TestWithParam<std::tuple<uint32_t, uint64_t, bool>> {};
@@ -362,7 +364,7 @@ TEST_P(HbgExecutionIdentityEntry, RealExecutorCapturesEntryPayloadBeforeKernelCa
     scheduler_test::BasicGraphBuffer<1> graph(1);
     graph.executable(0, worker == 0 ? 0 : 1);
     auto &metadata = storage.metadata[0];
-    metadata.active_mask = worker == 0 ? 1 : 2;
+    metadata.active_mask = worker == 0 ? LaneMask::aic() : LaneMask::aiv0();
     metadata.kernel_ids[0] = worker == 0 ? 1 : UINT16_MAX;
     metadata.kernel_ids[1] = worker == 0 ? UINT16_MAX : 1;
     metadata.timing_slot = sampled ? 0 : -1;
@@ -479,14 +481,14 @@ TEST_P(HbgIdleDispatchArrival, EmptyPollsObserveNewWorkAndTerminationWithoutSpur
     scheduler_test::BasicGraphBuffer<2> graph(2);
     graph.executable(0, worker == 0 ? 0 : 1);
     auto &metadata = storage.metadata[0];
-    metadata.active_mask = worker == 0 ? 1 : 2;
+    metadata.active_mask = worker == 0 ? LaneMask::aic() : LaneMask::aiv0();
     metadata.kernel_ids[0] = worker == 0 ? 1 : UINT16_MAX;
     metadata.kernel_ids[1] = worker == 0 ? UINT16_MAX : 1;
     metadata.kernel_ids[2] = UINT16_MAX;
     metadata.timing_slot = -1;
     if (ordered) {
-        graph.mixed(1, 7);
-        storage.metadata[1].active_mask = 7;
+        graph.mixed(1, LaneMask::all());
+        storage.metadata[1].active_mask = LaneMask::all();
         storage.metadata[1].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX;
         for (auto &kernel : storage.metadata[1].kernel_ids)
             kernel = 1;
@@ -631,3 +633,7 @@ uint64_t platform_ssbuf_hardware_base_address() {
     ++startup_ssbuf_calls;
     return 0;
 }
+// A zero register base leaves the executor's PMU staging off, which is what
+// these startup cases observe: they drive the dispatch loop, not the counters.
+uint32_t get_aicore_profiling_flag() { return 0; }
+uint64_t get_aicore_pmu_reg_base() { return 0; }

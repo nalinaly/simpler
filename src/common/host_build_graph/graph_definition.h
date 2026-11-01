@@ -16,6 +16,7 @@
 #include <type_traits>
 
 #include "common/args_dump_task_metadata.h"
+#include "common/lane_mask.h"
 #include "data_type.h"
 #include "host_build_graph/submit_types.h"
 
@@ -60,7 +61,7 @@ private:
 
 struct SubTaskDefinition {
     int32_t kernel_id[SUBTASK_SLOT_COUNT];
-    uint8_t active_mask;
+    LaneMask active_mask;
     uint8_t task_attrs;
     // Early-dispatch verdicts (ED_FLAG_CANDIDATE / ED_FLAG_TRACKED), decided once
     // per recorded shape rather than per execution: a body's structure is fixed by
@@ -105,7 +106,7 @@ inline constexpr size_t GRAPH_DEFINITION_OBJECT_ALIGN = 16;
 // of the object alignment.
 struct alignas(GRAPH_DEFINITION_OBJECT_ALIGN) GraphDefinitionHeader {
     uint64_t magic;
-    uint64_t full_key;
+    uint64_t graph_key;
     uint32_t definition_bytes;
 };
 
@@ -115,7 +116,7 @@ static_assert(sizeof(GraphDefinitionHeader) % GRAPH_DEFINITION_OBJECT_ALIGN == 0
 static_assert(sizeof(GraphDefinitionHeader) == 32, "Definition framing must match on every compilation target");
 
 struct GraphDefinition {
-    uint64_t full_key;
+    uint64_t graph_key;
     uint64_t required_heap;
     // The header splits by range, not by name. Everything that counts *things* is
     // signed: each is capped by SUB_TASK_MAX_NUM times a per-task constant, so the

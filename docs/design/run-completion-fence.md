@@ -1,8 +1,26 @@
 # Run completion fences
 
 How an onboard run's completion is established, who owns the resources that
-establish it, and what a future change that queues two runs at once may rely
-on.
+establish it, and what runs queued on the same streams may rely on.
+
+## Initial publication of the run-result region
+
+Each slot lazily allocates one result region. Preparation snapshots a zero
+`published` marker into the existing launch metadata batch, without copying to
+device. Launch publishes the batch from slot-owned pinned memory on the AICPU
+stream before the entry fork and either kernel. Only a successful publication
+marks the allocation initialized; readback occurs after drain. The pinned source
+stays live through retirement or quarantine, including failed enqueue attempts.
+
+A failed or skipped initial publication leaves the allocation untrusted. Even
+allocator bytes equal to the requested epoch cannot produce a certified read or
+terminal result; the existing drain decision uses its conservative fallback.
+A failure after any async enqueue attempt is Partial and prevents kernel launch.
+Preparation abort discards its unpublished snapshot, and a later attempt stages
+a fresh marker. Once initialized, ordinary slot reuse needs no marker copy:
+per-run epochs distinguish the device's results. This adds eight bytes to an
+uninitialized slot's pinned publication source, with no warm-run transfer or
+latency claim. Cold allocation and other initialization remain outside capture.
 
 ## The question a stream cannot answer
 
@@ -36,7 +54,9 @@ On an execution failure, an owned Program context keeps its bounded device drain
 and reset policy. A borrowed kernel context is poisoned without a device-wide
 drain or reset; the caller owns device recovery. The native eager entry
 `simpler_launch_run_on_stream` binds a borrowed caller stream to an already
-prepared run. Worker-level kernel launch and capture/replay remain unsupported.
+prepared run. Public `Worker.init(borrowed_context_generation=...)` and
+`Worker.submit(..., caller_stream=...)` use this same native path. Capture/replay
+is rejected by the eager entry.
 
 ## Borrowed caller ordering
 
@@ -51,8 +71,8 @@ enqueue result; wait/finalize still report the run's device verdict.
 
 ```text
 caller:  prior work -> record Start ------------------------ wait CpuDone -> record Tail -> later work
-AICPU:                wait Start -> record Fork -> kernel -> wait CoreDone -> record CpuDone
-AICore:                            wait Fork ----> kernel -> record CoreDone
+AICPU:                wait Start -> metadata/descriptor H2D -> record Fork -> kernel -> wait CoreDone -> record CpuDone
+AICore:                                              wait Fork -> kernel -> record CoreDone
 ```
 
 `Fork` precedes the AICPU kernel: that kernel can wait for AICore's handshake,
@@ -64,23 +84,43 @@ requires this whole-operator join even when cross-run early enqueue is disabled.
 for explicit caller launches. It holds a reference to the run's existing AICPU
 boundary until `Tail` proves the caller consumed that wait. Poll therefore also
 queries `Tail`, and drain discharges that reference before retirement. Ordinary
-program launch creates no caller events. Timing marks are independent diagnostics
+program launch borrows no caller stream. An asynchronous descriptor publication
+uses the same AICPU-to-AICore fork even without a caller; a cached descriptor with
+no caller queues neither a copy nor a fork. Timing marks are independent
 and do not substitute for these ordering edges.
 
 An attempted record or wait may be enqueued even when its API reports an error.
-The launch transaction is therefore `Partial` from the first caller-edge attempt,
-with its resources retained. If no tail was recorded, bounded synchronization of
-all three bound streams is the fallback proof. A failed proof keeps references
+The launch transaction is therefore `Partial` from the first caller-edge or
+asynchronous descriptor-copy attempt, with its resources retained. If no tail
+was recorded, bounded synchronization of the bound streams is the fallback
+proof (the two private streams, and the caller stream when present). A failed proof keeps references
 quarantined; borrowed execution never resets or synchronizes the whole device.
 Failure does not establish the caller's exit dependency, so the caller must not
 consume output merely because launch returned an error.
 
 This entry is eager-only. It validates the current borrowed RTS context and
 rejects an active caller capture before launch metadata publication. Preparation
-and callable registration take place outside capture. Metadata publication is
-still synchronous, and the old `simpler_kernel_mode_launch` stub and capability
-bit remain closed pending public Worker integration. Native completion events
-and their caller references are not a captured-graph lifetime contract.
+and callable registration take place outside capture. The common eager launch
+publishes its Runtime descriptor asynchronously on the actual AICPU stream;
+its entry fork orders the AICore reader behind that copy. The slot retains a
+pinned immutable source through run retirement. A copy attempt marks Partial
+before entering RTS, so enqueue failure cannot acquire a no-submission receipt.
+The two kernel boundaries consume an ordinary publication fork; unproven partial
+work requires bounded private-stream discharge or quarantine. Bulk HBG arena
+publication and DFX writes retain their own synchronization. The compatibility
+`simpler_kernel_mode_launch` stub and capability bit remain closed; public Worker
+eager uses the shared native lane. Native completion events and their caller
+references are not a captured-graph lifetime contract.
+
+A direct L2 Python `Worker` owns the native `_ChipWorker` itself. Its callable
+handles, argument imports, source uses and close journal belong to `Worker`;
+there is no intervening public Python `ChipWorker` registry or lifecycle lock.
+The public compatibility `ChipWorker` is the only route that retains its own
+wrapper lifecycle; the forked chip-child path holds the native binding directly,
+as direct L2 does. Every route initializes the native runtime through the same
+internal binary-path/logging adapter and executes through the existing native
+run lane. `Worker`'s operation lease and owner-thread close checks remain the
+direct L2 lifecycle authority.
 
 The direct `ChipWorker::submit_chip_run` / internal `_submit_chip_run_direct`
 entry accepts an optional caller stream. The lane validates it before admitting
@@ -94,17 +134,35 @@ is unchanged.
 The stream is recorded on that run, including a declined join's ordinary-launch
 fallback. Poll/wait/finalize and argument borrows remain the lane's existing
 lifecycle. Caller ordering covers device work; Program host output copy-back
-still requires run completion/finalization. The public `Worker.submit` does not
-yet expose this argument or attach a borrowed RTS context.
+still requires run completion/finalization. The public `Worker.submit` exposes
+this argument on direct L2 and supports borrowed RTS initialization.
 
 `ChipWorker::init` / internal `_ChipWorker.init` can select a borrowed,
 already-current RTS context with `borrowed_context_generation`. The value must
 be nonzero; omission selects owned-device initialization. Both routes load the
 same runtime and create the same native storage and lane. Borrowed initialization
-supports neither SDMA/simulator options nor Program workspace management/budget
-requests. Its config is the native admission input; each submission still
-supplies its own config. Generation is forwarded to the native init validation;
-this argument alone does not provide public Worker generation or Buffer binding.
+rejects SDMA/simulator options. Both onboard ownership policies manage internal
+workspace and accept the same optional byte budget. Its config is the native
+admission input; each submission still supplies its own config. Generation is retained in the native environment
+binding; public Worker forwards it on the direct L2 onboard route.
+
+ChipWorker retains a host-only environment identity from native context creation
+through successful teardown: process, non-repeating incarnation, nonzero logical
+context generation, device and owned/borrowed policy. Borrowed generation is
+supplied by the caller; owned generation belongs to its native incarnation.
+Failed rollback/teardown preserves the identity and runtime binding for cleanup.
+Native context validation rejects a foreign process before entering the runtime.
+The run lane also retains its immutable creating process, independently of the
+worker pointer or environment lifetime. Inherited run handles and lane operations
+reject before taking the lane mutex, including cached status queries: a parent
+thread may have held that mutex at fork. Non-throwing stop/detach cleanup in the
+child leaves the inherited lane untouched; worker destruction retains its native
+storage and library without locking the lane or invoking device cleanup. This
+is a refusal contract, not permission to execute inherited device work.
+Buffer sources capture this identity and compare it on wrapping, descriptor
+validation and attachment; it is independent of run, lease and Buffer generations.
+The identity associates the source with the runner that validates the adopted
+RTS context; it neither detects an external reset nor proves pointer ownership.
 
 Before lane progress or native phase mutation, current-context validation rejects
 a mismatched RTS context with `ExecutionContextRefused`, a `std::runtime_error`
@@ -113,8 +171,12 @@ The classification reaches `RunHandle.wait`/`result` without a separate Python
 preflight callback; refusal preserves waiter retry and run references. Restoration
 permits retry with the existing run handle. Other native wait errors remain
 terminal; the C ABI validation status codes are unchanged.
-Python L2 submission and callable registry changes check the same native context
-before publishing source uses, handles or ref-count changes. Close checks before
+Python operation leases check the same native context outside the lifecycle lock
+before the operation body. This includes L2 submission, registry and memory/IO
+operations and automatically covers new leased APIs. The source-only
+`device_location` query explicitly opts out; its lifecycle lease still pins the
+tree. Direct native allocation/free/copies, device-memory queries and diagnostic
+flush enforce their own backend-entry boundary. Close checks before
 claiming CLOSED or a teardown attempt; a rejected claim preserves the prior
 lifecycle. An accepted close failure keeps CLOSED and retryable cleanup debt.
 Native register/unregister and the legacy Python registry enforce their own
@@ -127,8 +189,86 @@ without completing close, it detaches surviving handles with an error and retain
 native storage, lane snapshots, context and runtime library for the process
 lifetime. It cannot prove safe reclamation at that point.
 
-Public `Worker` integration and captured-graph ownership remain separate
-requirements; internal borrowed eager submission does not deliver either.
+Public direct L2 `Worker` consumes this native lane for owned and borrowed
+eager calls. Captured-graph ownership remains a separate requirement.
+
+A failed preparation is a distinct terminal outcome. Only a rollback that
+released its bindings, execution preparation and saved resource plan publishes
+its host-slot release marker with the attempt's run_epoch. ChipWorker consumes
+that exact epoch and reports `RunPreparationRefused`. The lane releases that
+run's caller borrow, and Python releases that invocation's source reservation.
+Unknown or stale release state retains borrows and poisons lane admission;
+carrier destruction alone is not release evidence. Resource-wait flow control
+keeps its existing live plan and is not a terminal release verdict.
+
+A launch setup failure uses the same release verdict only after an explicit
+`NotStarted` result and successful finalize. The platform clears this proof
+before calling the launch backend: a backend exception cannot infer it from a
+missing ActiveExecution. The lane preserves the original launch error while
+retiring this invocation's references and allowing a valid retry. Partial,
+ambiguous and failed-cleanup paths do not produce this verdict.
+
+The common onboard and simulator `launch_execution` entry owns the prepared
+state and allocates its `ActiveExecution` record before invoking the backend.
+The backend receives a reference and cannot consume that owner. An explicit
+`NotStarted` result returns the prepared state for rollback; a partial result
+or escaping backend exception returns an active owner without acceptance.
+The hand-off after submission only moves existing owners and allocates no
+memory. Query, wait and finalize receive that owner; the existing drain and
+failure-isolation rules decide retirement. Partial results and backend
+exceptions close runner admission through the same policy, after the owner
+is installed. A failing recovery policy cannot discard the owner or replace
+the launch rc. An exception or missing receipt is never a no-submission proof.
+
+## Callable registration and execution mode identity
+
+The native registration and execution-mode contracts apply to both owned and
+borrowed runners; the caller-ordering details for borrowed submissions are in
+the preceding section.
+
+Native `ChipWorker::register_callable(image, size)` (Python
+`_ChipWorker.register_callable(callable)`) returns a runtime-assigned ID on an
+initialized PROGRAM or KERNEL worker. Both modes use the optional
+`simpler_register_callable_v2` symbol; a KERNEL context uses the kernel
+preparation path internally. Explicit-ID `register_callable(id, callable)`
+remains available and shares the registry; an ID that is already registered is
+rejected with INVALID_ARGUMENT. A runtime without the optional entry can still
+initialize and serve its existing APIs; requesting auto-ID registration raises
+an explicit unsupported-entry error. Neither overload initializes the worker.
+The public Python `ChipWorker` wrapper retains its existing CallableHandle API.
+
+Automatic and explicit registration share one ID namespace, one image-buffer
+cache and one 64-slot table (`MAX_REGISTERED_CALLABLE_IDS`, mirrored by the
+AICPU executor's `orch_so_table_`); the slot number is the ID. Equal images
+receive distinct IDs, with upload sharing governed by that cache. Capacity is a
+slot count, not a memory budget: with all 64 slots occupied, registration fails
+until an ID is unregistered. Failure leaves the output ID at -1 and preserves
+the runtime's existing cleanup ownership; exhaustion returns INVALID_STATE.
+IDs can be reused after explicit unregistration, so callers retire all users
+first and discard stale IDs. The registration and unregistration entry points
+serialize internally on the context, so an auto-ID scan and its claim cannot
+race an explicit-ID claim of the same slot; finalize takes the same lock, so
+teardown cannot clear the registry under a registration. Runs, initialization
+and destroy still rely on the caller contract. The old C symbol's signature and
+kernel-mode capability bit remain unchanged. Adapters must explicitly select
+v2; an integration-branch binary expecting a different signature under the old
+symbol cannot be loaded as if it were compatible.
+
+Execution mode is latched per native device-context handle, not per process or
+submission. This handle identifies the C++ runner; it is not the borrowed
+ACL/RTS current-context handle. `ExecutionModeLatch::latched_mode()` returns an
+optional identity snapshot: empty means unclaimed, not PROGRAM. Identity,
+initialization phase and resource retirement are separate facts. The latch mutex
+serializes identity claims only; callers serialize native init/finalize/destroy
+against operations using that handle. Concurrent claims cannot choose different
+identities, but this does not make concurrent runner initialization supported.
+A successful mode claim is never undone by finalize or a later initialization
+failure. The same handle cannot switch between PROGRAM and
+KERNEL; a finalized PROGRAM handle can initialize as PROGRAM again only when
+its cleanup proof permits it. This C ABI permission does not apply to
+`ChipWorker`, which rejects reinitialization after finalize. Borrowed submissions
+use the shared native run machinery, so sharing prepare/launch functions is not
+a mode violation.
 
 ## The boundary
 
@@ -158,7 +298,7 @@ Three things that are *not* proofs, each of which is a way to get this wrong:
 The host must not wait for the AICore boundary before submitting the AICPU
 kernel, for the same handshake reason: the AICore kernel may be spinning for a
 kernel that has not been submitted yet. The two submissions stay back to back,
-AICore first (see the launch-order note in each arch's `launch_execution`), and
+AICore first (see the launch-order note in each arch's `launch_execution_impl`), and
 only the boundaries are waited on.
 
 ## Completion is not the verdict — a measured constraint
@@ -527,3 +667,25 @@ instant the submission is accepted, and the transaction grades a later failure
 
 Simulation records no events: its submit callbacks take the sink and ignore it,
 and its grading is unchanged.
+
+## Borrowed TMR eager invocation ownership
+
+Borrowed TMR eager calls use the existing native-run lane, caller ordering and
+completion fence. Their launch package carries a 40-byte invocation header,
+the device Runtime address and nonzero run epoch, followed by DEVICE Tensor
+descriptors and scalar values. The callable occupancy generation is allocated
+by the runner's registry and recorded independently by AICPU registration.
+ID reuse gets a new generation.
+
+The Host packet is a snapshot of the prepared Runtime image. It survives until
+RTS copies the launch package. AICPU checks framing, registered counts and
+generation, the run binding and Tensor geometry before materializing argument
+storage owned by the executor. Orchestration borrows that storage through the
+same completion and teardown path as a program call; cleanup drops the
+orchestration view before clearing the storage.
+
+The first descriptor publication still initializes its complete handshake
+prefix. Program descriptor and launch-envelope routes retain their behavior;
+kernel packets require permitted launch transport and cannot silently fall back
+to unvalidated descriptor values. Active capture remains rejected by the eager
+entry. These per-run resources do not provide captured-graph lifetime.

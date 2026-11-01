@@ -45,6 +45,8 @@ struct RuntimeContext;
  *   - scheduler_dispatch.cpp    (task dispatch loop and helpers)
  */
 class SchedulerContext {
+    friend class MixAdmissionTestPeer;
+
 public:
     // =========================================================================
     // Lifecycle
@@ -81,7 +83,7 @@ public:
     void abort_and_shutdown(Runtime *runtime);
     // Leader-only profiling-subsystem init (DFX builds); called behind a barrier
     // in the barrier-free path since pmu_aicpu_init needs all physical_core_ids_.
-    void post_handshake_profiling_init();
+    void post_handshake_profiling_init(Runtime *runtime);
     bool handshake_failed() const { return handshake_failed_.load(std::memory_order_acquire); }
     // Leader-only, after the handshake barrier: build worker-id lists, assign
     // cores, init profiling subsystems, read task counts, init payloads.
@@ -178,7 +180,7 @@ private:
 #if SIMPLER_DFX
     SchedChipSwimlaneCounters sched_chip_swimlane_[MAX_AICPU_THREADS];
     // Cached once at init() from get_chip_swimlane_level(), AFTER
-    // chip_swimlane_aicpu_init has promoted the level from the shared-memory header.
+    // chip_swimlane_aicpu_init has latched this invocation's descriptor level.
     ChipSwimlaneLevel chip_swimlane_level_{ChipSwimlaneLevel::DISABLED};
 #endif
 
@@ -480,7 +482,7 @@ private:
     );
 
     bool enter_drain_mode(ChipTaskSlotState *slot_state, int32_t block_num);
-    int32_t count_global_available(ResourceShape shape, uint8_t core_mask, bool include_pending = false);
+    int32_t count_global_available(ResourceShape shape, LaneMask lanes, bool include_pending = false);
     struct SyncStartStageResult {
         int32_t staged_blocks{0};
         int32_t running_cores{0};

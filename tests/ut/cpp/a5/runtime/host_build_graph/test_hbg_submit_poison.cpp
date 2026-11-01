@@ -34,7 +34,7 @@
 
 #include "utils/device_arena.h"
 #include "scheduler/scheduler.h"
-#include "host_build_graph/orchestrator.h"
+#include "host_build_graph/host/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_id.h"
 
@@ -135,6 +135,17 @@ TEST_F(HbgSubmitPoisonTest, EveryDeviceReadFieldIsWrittenOverPoison) {
     auto &tasks = sm_handle->header->tasks;
     const int32_t total = orch.task_allocator.active_count();
     ASSERT_GE(total, 4);
+    ReadyQueuePopulations scanned{};
+    for (int32_t i = 0; i < total; ++i) {
+        const auto &slot = tasks.get_slot_state_by_task_id(i);
+        scanned.add_task(slot.active_mask, slot.task_attrs, slot.task_kind);
+    }
+    for (int i = 0; i < NUM_RESOURCE_SHAPES; ++i) {
+        EXPECT_EQ(orch.ready_queue_populations.ready[i], scanned.ready[i]);
+        EXPECT_EQ(orch.ready_queue_populations.ready_sync[i], scanned.ready_sync[i]);
+    }
+    EXPECT_EQ(orch.ready_queue_populations.dummy, scanned.dummy);
+    EXPECT_EQ(orch.ready_queue_populations.graph_prepare, scanned.graph_prepare);
 
     // Every claimed slot's device-read fields must carry real values, not poison.
     for (int32_t local = 0; local < total; local++) {
@@ -218,7 +229,8 @@ TEST_P(HbgSubmitLaunchSpecTest, SyncRequestPreservesShapeAndOnlyMarksMultipleBlo
     EXPECT_EQ(args.launch_spec.block_num(), blocks);
     EXPECT_EQ(args.launch_spec.require_sync_start(), request_sync);
     EXPECT_EQ(entry.slot.logical_block_num, blocks);
-    EXPECT_EQ(entry.slot.active_mask.core_mask(), mask == 4 ? 2 : mask);
+    const int expected_lanes = mask == 4 ? 2 : mask;
+    EXPECT_EQ(entry.slot.active_mask.raw(), expected_lanes);
     EXPECT_EQ(entry.slot.total_required_subtasks, blocks * __builtin_popcount(static_cast<unsigned>(mask)));
     EXPECT_EQ(entry.slot.task_attrs.requires_sync_start(), request_sync && blocks > 1);
     EXPECT_EQ(entry.task.kernel_id[0], kernels.aic_kernel_id);
@@ -303,7 +315,8 @@ TEST_P(HbgSubmitBlockCountBoundary, ValidatesRepresentableCountAndProductBeforeP
     const auto &entry = sm_handle->header->tasks.storage_at(output.task_id().local_id());
     EXPECT_EQ(entry.slot.logical_block_num, blocks);
     EXPECT_EQ(entry.slot.total_required_subtasks, blocks * __builtin_popcount(static_cast<unsigned>(mask)));
-    EXPECT_EQ(entry.slot.active_mask.core_mask(), mask == 4 ? 2 : mask);
+    const int expected_lanes = mask == 4 ? 2 : mask;
+    EXPECT_EQ(entry.slot.active_mask.raw(), expected_lanes);
     EXPECT_FALSE(entry.slot.task_attrs.requires_sync_start());
     EXPECT_EQ(entry.task.kernel_id[0], kernels.aic_kernel_id);
     EXPECT_EQ(entry.task.kernel_id[1], mask == 4 ? 12 : kernels.aiv0_kernel_id);

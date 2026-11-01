@@ -18,14 +18,18 @@ namespace {
 
 enum class HandoffScenario { EMPTY_QUEUE, QUEUED_MIX, TWO_SUCCESSORS, BUSY_MIX_LANES };
 
-class HbgDirectMixHandoff : public ::testing::TestWithParam<std::tuple<uint32_t, uint8_t>> {
+// The lowest slot the lane set occupies, which is the one a dependency edge on
+// the Mix task is recorded against.
+uint8_t first_subtask(LaneMask lanes) { return lanes.has_aic() ? 0 : (lanes.has_aiv0() ? 1 : 2); }
+
+class HbgDirectMixHandoff : public ::testing::TestWithParam<std::tuple<uint32_t, LaneMask>> {
 protected:
     void expect_successor_dispatched(
         bool provide_direct_candidate, HandoffScenario scenario = HandoffScenario::EMPTY_QUEUE
     ) {
         const auto [producer_lane, mix_mask] = GetParam();
         SCOPED_TRACE(producer_lane);
-        SCOPED_TRACE(static_cast<uint32_t>(mix_mask));
+        SCOPED_TRACE(mix_mask.count());
         const bool has_second_mix =
             scenario == HandoffScenario::QUEUED_MIX || scenario == HandoffScenario::TWO_SUCCESSORS;
         const uint32_t task_count = has_second_mix ? 3 : 2;
@@ -51,15 +55,14 @@ protected:
         const uint8_t producer_subtask = producer_lane == 0 ? 0 : 1;
         graph.executable(0, producer_subtask);
         graph.mixed(1, mix_mask);
-        graph.executable(1, static_cast<uint8_t>(__builtin_ctz(mix_mask)), {0});
+        graph.executable(1, first_subtask(mix_mask), {0});
         if (has_second_mix) {
             graph.mixed(2, mix_mask);
-            if (scenario == HandoffScenario::TWO_SUCCESSORS)
-                graph.executable(2, static_cast<uint8_t>(__builtin_ctz(mix_mask)), {0});
+            if (scenario == HandoffScenario::TWO_SUCCESSORS) graph.executable(2, first_subtask(mix_mask), {0});
         }
         for (uint32_t task = 0; task < task_count; ++task) {
             auto &metadata = storage.metadata[task];
-            metadata.active_mask = task == 0 ? static_cast<uint8_t>(1U << producer_subtask) : mix_mask;
+            metadata.active_mask = task == 0 ? LaneMask::of(static_cast<SubtaskSlot>(producer_subtask)) : mix_mask;
             metadata.flags = SCHEDULER_TASK_EXECUTABLE;
             if (task != 0) metadata.flags |= SCHEDULER_TASK_MIX;
             if (task == 1 || (task == 2 && scenario == HandoffScenario::TWO_SUCCESSORS))
@@ -67,7 +70,8 @@ protected:
             metadata.trace_index_base = task * 3;
             metadata.timing_slot = -1;
             for (uint8_t subtask = 0; subtask < 3; ++subtask)
-                metadata.kernel_ids[subtask] = (metadata.active_mask & (1U << subtask)) != 0 ? 1 : UINT16_MAX;
+                metadata.kernel_ids[subtask] =
+                    metadata.active_mask.has(static_cast<SubtaskSlot>(subtask)) ? 1 : UINT16_MAX;
         }
         void *base = storage.scheduler_state->base();
         ASSERT_EQ(
@@ -173,7 +177,7 @@ protected:
         for (const auto &tracker : coordinator->mix_trackers)
             if (tracker.task_ref == 1) ++dispatched_successors;
         EXPECT_EQ(dispatched_successors, 1u)
-            << "producer_lane=" << producer_lane << ", mix_mask=" << static_cast<uint32_t>(mix_mask)
+            << "producer_lane=" << producer_lane << ", mix lanes=" << mix_mask.count()
             << ", candidate left at iteration end=" << unconsumed_candidate
             << ", Mix inbox head=" << scheduler_ready_endpoints_head(mix_inbox->endpoints);
         EXPECT_EQ(unconsumed_candidate, SCHEDULER_TASK_REF_INVALID);
@@ -210,7 +214,13 @@ TEST_P(HbgDirectMixHandoff, BusyPlacementQueuesCandidateUntilMixLanesBecomeAvail
 
 INSTANTIATE_TEST_SUITE_P(
     ProducerLanesAndMixMasks, HbgDirectMixHandoff,
-    ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Values<uint8_t>(3, 5, 6, 7))
+    ::testing::Combine(
+        ::testing::Values(0u, 1u, 2u),
+        ::testing::Values(
+            LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false),
+            LaneMask(/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true), LaneMask::both_aiv(), LaneMask::all()
+        )
+    )
 );
 
 }  // namespace

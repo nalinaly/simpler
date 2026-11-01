@@ -2052,6 +2052,7 @@ NB_MODULE(_task_interface, m) {
     m.attr("__build_commit__") = SIMPLER_BUILD_COMMIT;
 
     nb::exception<ExecutionContextRefused>(m, "ExecutionContextRefused", PyExc_RuntimeError);
+    nb::exception<RunPreparationRefused>(m, "RunPreparationRefused", PyExc_RuntimeError);
 
     // --- DataType enum ---
     nb::enum_<DataType>(m, "DataType")
@@ -3639,10 +3640,38 @@ NB_MODULE(_task_interface, m) {
         .def("finalize", &ChipWorker::finalize)
         .def("_validate_execution_context", &ChipWorker::validate_execution_context)
         .def(
+            "_validate_caller_stream",
+            [](ChipWorker &self, uintptr_t caller_stream) {
+                self.validate_caller_stream(reinterpret_cast<void *>(caller_stream));
+            },
+            nb::arg("caller_stream"),
+            "Check caller context, stream ownership and eager capture state before submission."
+        )
+        .def_prop_ro(
+            "_execution_environment",
+            [](const ChipWorker &self) -> nb::object {
+                const auto environment = self.execution_environment();
+                if (!environment) return nb::none();
+                return nb::make_tuple(
+                    environment->process_id, environment->incarnation, environment->context_generation,
+                    environment->device_id, environment->borrowed
+                );
+            }
+        )
+        .def(
             "flush_diagnostics", &ChipWorker::flush_diagnostics, nb::arg("timeout_ms") = 30000,
             nb::call_guard<nb::gil_scoped_release>(),
             "Publish every diagnostic run this chip has closed. Raises when a promised file is missing. "
             "A no-op unless the worker was initialized with collect_across_runs=True."
+        )
+        .def(
+            "register_callable",
+            [](ChipWorker &self, const PyChipCallable &callable) {
+                return self.register_callable(callable.buffer_.data(), callable.buffer_.size());
+            },
+            nb::arg("callable"), nb::call_guard<nb::gil_scoped_release>(),
+            "Register on an initialized worker and return a runtime-assigned ID. "
+            "Supports owned and borrowed contexts; retire users before unregistering."
         )
         .def(
             "register_callable",
@@ -3765,7 +3794,14 @@ NB_MODULE(_task_interface, m) {
         .def(
             "_launch_native_run",
             [](ChipWorker &self, const ChipWorkerNativeRun &run) {
-                self.launch_native_run(run);
+                // A capacity decline is the one non-failure result, and this
+                // raw entry has no queue to defer into: the caller asked for
+                // this run to go now, so a refusal is reported as one.
+                if (self.launch_native_run(run) == ChipWorker::NativeLaunch::DiagnosticCreditFull) {
+                    throw std::runtime_error(
+                        "native run was not admitted: a diagnostic collector had no capacity free"
+                    );
+                }
             },
             nb::arg("run"), nb::call_guard<nb::gil_scoped_release>(),
             "Launch a prepared native run and return after its real device launch fence."
@@ -3837,6 +3873,20 @@ NB_MODULE(_task_interface, m) {
                uint64_t pipeline_generation, uint64_t run_id, uint64_t dispatch_id, nb::bytes owner_instance_id,
                uint32_t chip_rank, uint32_t capture_index, uint32_t task_slot, uint32_t group_index,
                uint32_t group_size) {
+                // Read while the GIL is still held: this is the only argument
+                // whose storage is Python's, and `make_run_provenance` copies
+                // it into a POD. Everything else is already a bound C++ object
+                // nanobind keeps alive for the call.
+                const NativeRunProvenance provenance = make_run_provenance(
+                    owner_instance_id, chip_rank, capture_index, task_slot, group_index, group_size
+                );
+                // Released for the whole submission. The run's own wait blocks
+                // on the device and, when a diagnostic owner's capacity is
+                // exhausted, on that capacity coming back — both are waits of
+                // unbounded length to this thread, and holding the interpreter
+                // across either stops every other Python thread, including the
+                // ones whose progress could end the wait.
+                nb::gil_scoped_release release;
                 if (pipeline_generation == 0) {
                     self.run(
                         callable_id, &args, config, reinterpret_cast<volatile int32_t *>(accepted_state_addr),
@@ -3846,9 +3896,7 @@ NB_MODULE(_task_interface, m) {
                     self.run_with_lease(
                         callable_id, &args, config, PipelineSlotLease{pipeline_slot, 0, pipeline_generation},
                         reinterpret_cast<volatile int32_t *>(accepted_state_addr), accepted_value, run_id, dispatch_id,
-                        make_run_provenance(
-                            owner_instance_id, chip_rank, capture_index, task_slot, group_index, group_size
-                        )
+                        provenance
                     );
                 }
             },
@@ -3921,6 +3969,22 @@ NB_MODULE(_task_interface, m) {
         )
         .def_prop_ro("pipeline_depth", &ChipWorker::pipeline_depth)
         .def_prop_ro("runtime_slot_count", &ChipWorker::runtime_slot_count)
+        .def(
+            "_enable_automatic_admission", &ChipWorker::enable_automatic_admission,
+            "Let this worker's device context size its own run concurrency from the resources it "
+            "proves. False when the loaded module or the context cannot, in which case the worker "
+            "keeps admitting exactly what it was granted."
+        )
+        .def_prop_ro(
+            "automatic_admission", &ChipWorker::automatic_admission,
+            "Whether this worker's context sizes its own run concurrency."
+        )
+        .def_prop_ro(
+            "admissible_run_resource_sets", &ChipWorker::admissible_run_resource_sets,
+            "Run-resource sets this context reports it can hold right now: a count of identities, "
+            "never a byte figure. One until a run has completed its resource commit; the granted "
+            "count on a context that does not size itself."
+        )
         .def_prop_ro(
             "supports_concurrent_native_prepare", &ChipWorker::supports_concurrent_native_prepare,
             "Whether non-diagnostic native preparation may overlap one active run in another slot."
@@ -4052,18 +4116,19 @@ NB_MODULE(_task_interface, m) {
                 if (commit_flag_address == 0 || commit_flag_address % alignof(uint64_t) != 0) {
                     throw std::invalid_argument("comm_alloc_domain_windows: commit flag address is invalid");
                 }
-                auto [device_ctx, local_window_base] =
+                auto [device_ctx, local_window_base, actual_window_size] =
                     self.comm_alloc_domain_windows(comm_handle, allocation_id, rank_ids, domain_rank, window_size);
                 __atomic_store_n(
                     reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(commit_flag_address)), uint64_t{1},
                     __ATOMIC_RELEASE
                 );
-                return nb::make_tuple(device_ctx, local_window_base);
+                return nb::make_tuple(device_ctx, local_window_base, actual_window_size);
             },
             nb::arg("comm_handle"), nb::arg("allocation_id"), nb::arg("rank_ids"), nb::arg("domain_rank"),
             nb::arg("window_size"), nb::arg("commit_flag_address"),
             "Collectively allocate a fresh per-rank pool for a subset; returns "
-            "(device_ctx, local_window_base) for this rank and publishes the commit flag before result conversion."
+            "(device_ctx, local_window_base, actual_window_size) for this rank and publishes the commit flag before "
+            "result conversion."
         )
         .def(
             "comm_release_domain_windows", &ChipWorker::comm_release_domain_windows, nb::arg("comm_handle"),

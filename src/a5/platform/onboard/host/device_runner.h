@@ -100,7 +100,6 @@ public:
         Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
         std::unique_ptr<PreparedExecution> *prepared
     ) override;
-    LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) override;
     void abandon_prepared_execution(PreparedExecution &prepared) noexcept override;
     int poll_execution(const ActiveExecution &active) override;
     DrainOutcome drain_execution(ActiveExecution &active) override;
@@ -132,7 +131,14 @@ public:
     void arm_host_dep_gen_capture(bool enable) override;
     void configure_dep_gen_retention(bool enabled, std::size_t budget_bytes) override;
     bool dep_gen_retains_runs() const override;
-    int admit_dep_gen_run(const DfxRunConfig &dfx, uint64_t run_epoch) override;
+    int admit_dep_gen_run(
+        const DfxRunConfig &dfx, uint64_t run_epoch, simpler::dfx::runs::AdmissionRefusal *why = nullptr
+    ) override;
+    bool dep_gen_can_admit_joined_run(uint64_t run_epoch) const override;
+    uint64_t dep_gen_run_terminal_bank(uint64_t run_epoch) const override;
+    int open_dep_gen_run_terminal_banks(const DfxRunConfig &dfx) override;
+    void install_dep_gen_credit_release_notifier(const std::function<void()> &notify) override;
+    bool dep_gen_retained_runs_outstanding() const override;
     void withdraw_dep_gen_run(uint64_t run_epoch) noexcept override;
     bool dep_gen_flush_retained(int timeout_ms, std::string *error) override;
     void dep_gen_finish_retained() override;
@@ -185,6 +191,8 @@ public:
     int destroy_comm_stream(void *stream);
 
 private:
+    LaunchTransactionResult launch_execution_impl(PreparedExecution &prepared, LaunchPermit permit) override;
+
     int finalize_impl() override;
 
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
@@ -237,6 +245,18 @@ private:
     // check relies on.
     RunProgressSlots run_progress_;
 
+protected:
+    /** The progress table holds one slot per run-resource set. */
+    ArchRunResourceStaging build_arch_run_resources(size_t granted) override {
+        ArchRunResourceStaging staged;
+        staged.run_progress = RunProgressSlots::build(granted);
+        return staged;
+    }
+    void commit_arch_run_resources(ArchRunResourceStaging &&staged) noexcept override {
+        run_progress_.commit(std::move(staged.run_progress));
+    }
+
+private:
     // Queue this run's own AICore boundary into the AICPU stream, ahead of the
     // AICPU boundary record that then covers the whole operator. The reservation
     // is taken by the caller, so a refusal costs only joinability; this is the
@@ -259,10 +279,9 @@ private:
     // are released in finalize().
     void cleanup_execution(PreparedExecution &prepared, bool launched) noexcept;
 
-    // On an AICore launch/sync error, best-effort drain the device so a later
-    // enqueue on the same DeviceRunner can recover in place; if the drain itself
-    // errors the context is unrecoverable without a full reset, so flip
-    // device_unusable_ and let admission/enqueue fail fast.
+    // Quarantine needs no current device; recovery may drain an owned device.
+    // Both keep admission closed until owner recovery or terminal quarantine.
+    void mark_device_unusable(int runtime_rc) override;
     void recover_device_or_mark_unusable(int aicore_rc) override;
 
     // Force-reset the card via aclrtResetDeviceForce to clear an op-timeout
@@ -386,7 +405,9 @@ private:
      * whole of the completion proof: without it the retained path reads nothing
      * shared and publishes nothing.
      */
-    void emit_device_dep_gen_graph(const DfxRunConfig &dfx, uint64_t run_epoch, bool device_execution_complete);
+    void emit_device_dep_gen_graph(
+        const DfxRunConfig &dfx, uint64_t run_epoch, bool device_execution_complete, bool device_producers_stopped
+    );
 
     // Per-run collector teardown: stops mgmt + poll threads on every collector
     // whose init succeeded, in the only safe order (stop() joins mgmt before
@@ -402,4 +423,5 @@ private:
      * failure is the more useful diagnosis and keeps priority.
      */
     int finalize_collectors(bool abandon_device_resources = false);
+    bool terminal_backing_retained() const override;
 };

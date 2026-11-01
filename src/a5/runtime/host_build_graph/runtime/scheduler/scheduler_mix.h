@@ -35,8 +35,8 @@ inline __aicore__ bool scheduler_dispatch_mix_ready(
     }
     auto &tracker = local->mix_trackers[placement.tracker];
     tracker.task_ref = ready.task_ref;
-    tracker.active_mask = metadata.active_mask;
-    tracker.completed_mask = 0;
+    tracker.active_mask = scheduler_task_lanes(metadata);
+    tracker.completed_mask = LaneMask::none();
     for (uint8_t i = 0; i < placement.count; ++i) {
         const auto &claim = placement.slots[i];
         auto &slot = *local->slot_state(claim);

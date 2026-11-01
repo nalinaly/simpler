@@ -39,7 +39,7 @@ static_assert(offsetof(TaskDescriptor, packed_buffer_end) == SCHEDULER_GRAPH_PAC
 static_assert(offsetof(TaskPayload, dump_metadata) == SCHEDULER_GRAPH_DUMP_METADATA_OFFSET);
 
 struct SchedulerGraphSubmitState {
-    ActiveMask active_mask{};
+    LaneMask active_mask{};
     TaskAttrs task_attrs{};
     int32_t logical_block_num{1};
     int32_t total_required_subtasks{0};
@@ -185,7 +185,7 @@ public:
             const auto *rows =
                 graph_definition_array<int32_t>(definition, definition.off_fanin_offsets, definition.task_count + 1);
             const auto &source = sources[node.child_index];
-            result.active_mask = ActiveMask(source.active_mask);
+            result.active_mask = source.active_mask;
             result.task_attrs = TaskAttrs(source.task_attrs);
             result.logical_block_num = source.logical_block_num;
             result.total_required_subtasks = source.total_required_subtasks;
@@ -194,7 +194,7 @@ public:
             for (uint32_t lane = 0; lane < 3; ++lane)
                 result.shape.kernel_ids[lane] = source.kernel_id[lane];
             result.status =
-                source.active_mask == 0 ? SchedulerGraphResult::UNSUPPORTED_SHAPE : SchedulerGraphResult::OK;
+                source.active_mask.is_empty() ? SchedulerGraphResult::UNSUPPORTED_SHAPE : SchedulerGraphResult::OK;
         }
         if (node.kind == SchedulerGraphNodeKind::ENTER || node.kind == SchedulerGraphNodeKind::EXIT)
             for (auto &kernel : result.shape.kernel_ids)
@@ -320,7 +320,7 @@ public:
                 auto &instance = instances[source.instance_index];
                 instance.definition_section_address = device + out.definitions_offset;
                 instance.definition_section_bytes = bytes_;
-                instance.definition_key = definition.full_key;
+                instance.definition_key = definition.graph_key;
                 instance.definition_offset = outer.task.graph_definition_offset;
                 instance.parent_id = source.outer_id;
                 const uint64_t heap = reinterpret_cast<uint64_t>(outer.task.packed_buffer_base);
@@ -421,12 +421,13 @@ private:
                 seen[edges[edge]] = child;
             }
             const auto &task = tasks[child];
-            if (task.active_mask > 7 || task.logical_block_num <= 0 || task.reserved != 0 || task.tensor_count < 0 ||
-                task.tensor_count > MAX_TENSOR_ARGS || task.scalar_count < 0 || task.scalar_count > MAX_SCALAR_ARGS)
+            if (!task.active_mask.is_valid() || task.logical_block_num <= 0 || task.reserved != 0 ||
+                task.tensor_count < 0 || task.tensor_count > MAX_TENSOR_ARGS || task.scalar_count < 0 ||
+                task.scalar_count > MAX_SCALAR_ARGS)
                 return false;
             for (uint32_t lane = 0; lane < 3; ++lane)
                 if (task.kernel_id[lane] < INVALID_KERNEL_ID ||
-                    ((task.active_mask & (1U << lane)) != 0) != (task.kernel_id[lane] != INVALID_KERNEL_ID))
+                    task.active_mask.has(static_cast<SubtaskSlot>(lane)) != (task.kernel_id[lane] != INVALID_KERNEL_ID))
                     return false;
             const TaskAttrs attrs(task.task_attrs);
             if (attrs.has_predicate() != (task.predicate_slot != 0) || definition.predicate_count < 0 ||
@@ -434,7 +435,7 @@ private:
                 return false;
             if (task.predicate_slot != 0) {
                 if (!validate_predicate(definition, child, task.predicate_slot)) return false;
-                if (task.logical_block_num != 1 || __builtin_popcount(task.active_mask) != 1) supported_ = false;
+                if (task.logical_block_num != 1 || task.active_mask.count() != 1) supported_ = false;
             }
         }
         return true;

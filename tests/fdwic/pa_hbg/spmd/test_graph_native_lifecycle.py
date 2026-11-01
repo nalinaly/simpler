@@ -35,7 +35,7 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
         assert not kwargs.get("skip_golden", False)
         chip = worker._chip_worker  # noqa: SLF001 -- production native-run lifecycle seam
         assert chip is not None
-        concurrent = bool(chip._impl.supports_concurrent_native_prepare)  # noqa: SLF001
+        concurrent = bool(chip.supports_concurrent_native_prepare)
         config = self._build_config(case.get("config", {}))
         handle = worker.register(callable_obj)
         live = []
@@ -49,7 +49,7 @@ class TestHbgGraphNativeLifecycle(_WideFanin):
             before = chip.scheduler_mode_publish_count
             generation = getattr(self, "_graph_lease_generation", 0) + 1
             token = chip._prepare_native_run_with_pipeline_lease(  # noqa: SLF001
-                callable_id, args, slot, generation, config=config
+                callable_id, args, config, slot, generation
             )
             self._graph_lease_generation = generation
             live.append(token)

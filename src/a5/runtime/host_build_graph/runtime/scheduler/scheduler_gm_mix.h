@@ -30,7 +30,8 @@ inline __aicore__ bool scheduler_gm_mix_context_valid(
         !scheduler_task_is_mix(admission->current_flags) || admission->gm_mix.mailbox_offset == 0 ||
         admission->gm_mix.cluster_index >= local->config.cluster_count ||
         local->config.self_lane >= PLATFORM_CORES_PER_BLOCKDIM ||
-        (scheduler_mix_resource_mask(admission->current_active_mask) & (1U << local->config.self_lane)) == 0)
+        !scheduler_mix_resource_mask(admission->current_active_mask)
+             .has(static_cast<SubtaskSlot>(local->config.self_lane)))
         return scheduler_admission_fail(
             graph, local, run, admission->current_task_ref, SchedulerErrorSite::GROUP_INVALID_STATE
         );
@@ -45,17 +46,18 @@ scheduler_gm_mix_mailbox(__gm__ void *base, const SchedulerLocalState *local) {
 inline __aicore__ bool
 scheduler_gm_mix_descriptor_mapping_valid(__gm__ const SchedulerGroupDescriptor *descriptor, uint64_t seq) {
     if (seq == 0 || seq == UINT64_MAX || descriptor->group_seq != seq || descriptor->previous_lane_seq[0] != seq - 1 ||
-        descriptor->resource_mask != scheduler_mix_resource_mask(descriptor->active_mask))
+        scheduler_lane_mask_load(descriptor->resource_mask) !=
+            scheduler_mix_resource_mask(scheduler_lane_mask_load(descriptor->active_mask)))
         return false;
-    uint8_t mapped = 0;
+    LaneMask mapped;
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
         if (descriptor->previous_lane_seq[lane] >= seq) return false;
         const uint8_t subtask = descriptor->lane_subtasks[lane];
         if (subtask == UINT8_MAX) continue;
-        if (subtask >= 3 || lane != subtask || (mapped & (1U << subtask)) != 0) return false;
-        mapped |= 1U << subtask;
+        if (subtask >= 3 || lane != subtask || mapped.has(static_cast<SubtaskSlot>(subtask))) return false;
+        mapped.activate(static_cast<SubtaskSlot>(subtask));
     }
-    return mapped == descriptor->active_mask;
+    return mapped == scheduler_lane_mask_load(descriptor->active_mask);
 }
 
 inline __aicore__ bool scheduler_gm_mix_descriptor_valid(
@@ -66,8 +68,8 @@ inline __aicore__ bool scheduler_gm_mix_descriptor_valid(
            descriptor->order_key == admission.scan_cursor && descriptor->block_idx < admission.current_block_num &&
            descriptor->logical_block_num == admission.current_block_num &&
            descriptor->cluster_index == admission.gm_mix.cluster_index &&
-           descriptor->active_mask == admission.current_active_mask && descriptor->flags == admission.current_flags &&
-           scheduler_gm_mix_descriptor_mapping_valid(descriptor, seq);
+           scheduler_lane_mask_load(descriptor->active_mask) == admission.current_active_mask &&
+           descriptor->flags == admission.current_flags && scheduler_gm_mix_descriptor_mapping_valid(descriptor, seq);
 }
 
 template <bool RecordProtocol = true, bool StaticContextValidated = false>
@@ -140,7 +142,7 @@ static inline __aicore__ bool scheduler_gm_mix_close(
     ++admission.scan_cursor;
     admission.current_task_ref = SCHEDULER_TASK_REF_INVALID;
     admission.current_block_num = 0;
-    admission.current_active_mask = 0;
+    admission.current_active_mask = LaneMask::none();
     admission.current_flags = 0;
     admission.sync_claimed = false;
     admission.ticket_exhausted = false;
@@ -214,13 +216,14 @@ static inline __aicore__ bool scheduler_gm_mix_publish(
     descriptor->block_idx = group.block_idx;
     descriptor->logical_block_num = admission.current_block_num;
     descriptor->cluster_index = group.cluster_index;
-    descriptor->active_mask = admission.current_active_mask;
-    descriptor->resource_mask = scheduler_mix_resource_mask(admission.current_active_mask);
+    scheduler_lane_mask_store(descriptor->active_mask, admission.current_active_mask);
+    scheduler_lane_mask_store(descriptor->resource_mask, scheduler_mix_resource_mask(admission.current_active_mask));
     descriptor->flags = admission.current_flags;
     // Physical communication endpoints retain their logical lane identities.
     // Per-lane predecessors exclude groups that never used that lane.
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
-        descriptor->lane_subtasks[lane] = (admission.current_active_mask & (1U << lane)) != 0 ? lane : UINT8_MAX;
+        descriptor->lane_subtasks[lane] =
+            admission.current_active_mask.has(static_cast<SubtaskSlot>(lane)) ? lane : UINT8_MAX;
         const uint64_t previous = lane == 0 ? group.group_seq - 1 : group.vector_last_published_seq[lane - 1];
         if (previous >= group.group_seq)
             return scheduler_admission_fail(
@@ -234,7 +237,7 @@ static inline __aicore__ bool scheduler_gm_mix_publish(
     scheduler_cache_barrier();
     scheduler_gm_store(mailbox->published_seq, group.group_seq);
     for (uint8_t lane = 1; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
-        if ((descriptor->resource_mask & (1U << lane)) != 0) {
+        if (scheduler_lane_mask_load(descriptor->resource_mask).has(static_cast<SubtaskSlot>(lane))) {
             scheduler_gm_store(mailbox->lanes[lane].assigned_seq, group.group_seq);
             group.vector_last_published_seq[lane - 1] = group.group_seq;
         }
@@ -334,9 +337,9 @@ static inline __aicore__ bool scheduler_gm_mix_check_acks(
     const uint64_t seq = local->admission->gm_mix.group_seq;
     const bool record = RecordProtocol && scheduler_protocol_enabled(local);
     uint64_t observations[PLATFORM_CORES_PER_BLOCKDIM]{};
-    const uint8_t resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
+    const LaneMask resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
     for (uint8_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
-        if ((resources & (1U << lane)) == 0) continue;
+        if (!resources.has(static_cast<SubtaskSlot>(lane))) continue;
         auto &value = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
         // A reused positive poll skips only duplicate weak reads. Even a stale
         // hint still reaches every authoritative atomic check in lane order.

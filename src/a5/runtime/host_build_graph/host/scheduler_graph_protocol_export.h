@@ -36,7 +36,7 @@ inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &ma
         const auto &saved = manifest.definitions[index];
         JsonObject row(out);
         row.number("index", index);
-        row.number("full_key", saved.header.full_key);
+        row.number("full_key", saved.header.graph_key);
         row.number("image_offset", saved.image_offset);
         row.number("image_bytes", saved.header.total_bytes);
         row.number("fanin_indices_offset", saved.header.off_fanin_indices);
@@ -50,7 +50,7 @@ inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &ma
             const auto &source = saved.tasks[local];
             JsonObject task(out);
             task.number("local_id", local);
-            task.number("active_mask", source.active_mask);
+            task.lane_mask("active_mask", source.active_mask);
             task.number("task_attrs", source.task_attrs);
             task.number("block_num", source.logical_block_num);
             task.number("predicate_slot", source.predicate_slot);

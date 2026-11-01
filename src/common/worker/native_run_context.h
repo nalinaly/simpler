@@ -20,6 +20,7 @@
 #include "common/host_api.h"
 #include "native_run_execution.h"
 #include "native_run_phase.h"
+#include "native_run_storage_tag.h"
 #include "runtime_c_api.h"
 #include "runtime.h"
 
@@ -31,7 +32,7 @@
  */
 template <typename Runner>
 struct NativeRunContext {
-    static constexpr uint64_t kMagic = UINT64_C(0x534d504c52554e31);  // "SMPLRUN1"
+    static constexpr uint64_t kMagic = kNativeRunContextMagic;
 
     NativeRunContext(
         Runner *runner_in, const CallConfig &config_in, uint64_t trace_hid_in, const NativeRunDescriptor &descriptor_in,
@@ -41,7 +42,8 @@ struct NativeRunContext {
         config(config_in),
         descriptor(descriptor_in),
         host_api(
-            runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, descriptor_in.run_epoch, host_api_ops
+            runner_in, descriptor_in.pipeline_slot, descriptor_in.arena_bank, descriptor_in.run_epoch, host_api_ops,
+            HostApi::DiagnosticConfig{static_cast<uint32_t>(config_in.enable_chip_swimlane), config_in.enable_pmu > 0}
         ),
         trace_hid(trace_hid_in) {
         // Publish the storage tag only after every potentially-throwing member
@@ -81,6 +83,10 @@ struct NativeRunContext {
     std::unique_ptr<typename Runner::ActiveExecution> active_execution{};
     LaunchPermit launch_permit{};
     char trace_attrs[192]{};
+    // True only for a launch entry that has not attempted execution-visible
+    // submission, or whose returned transaction explicitly reports NotStarted.
+    // Backend exceptions return Partial with an active owner, never this proof.
+    bool launch_not_started_proven{false};
     bool runner_resources_owned{false};
     bool runner_reserved{false};
     bool runner_claimed{false};
@@ -121,6 +127,7 @@ struct NativeRunContext {
 /** End object lifetime, then mark the caller-owned storage reusable. */
 template <typename Runner>
 void destroy_native_run_context(NativeRunContext<Runner> *context) {
+    static_assert(sizeof(NativeRunContext<Runner>) >= kNativeRunPrepareReleaseBytes);
     void *storage = context;
     context->~NativeRunContext<Runner>();
     constexpr uint64_t kEmpty = 0;

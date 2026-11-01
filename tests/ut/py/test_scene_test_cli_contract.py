@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -29,12 +30,13 @@ from simpler_setup.scene_test import (
 )
 
 
-@pytest.fixture(scope="module")
-def root_conftest(pytestconfig):
+def _root_conftest():
     path = Path(__file__).resolve().parents[3] / "conftest.py"
-    plugin = pytestconfig.pluginmanager.get_plugin(str(path))
-    assert plugin is not None, f"root pytest plugin was not loaded: {path}"
-    return plugin
+    spec = importlib.util.spec_from_file_location("_cli_root_conftest", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _recording_converter(calls, merged=True):
@@ -303,12 +305,13 @@ def test_swimlane_overhead_requires_chip_swimlane() -> None:
         )
 
 
-def test_pytest_front_end_reports_a_usage_error_not_a_test_failure(root_conftest) -> None:
+def test_pytest_front_end_reports_a_usage_error_not_a_test_failure() -> None:
+    conftest = _root_conftest()
     options = {"--enable-swimlane-overhead": True, "--enable-chip-swimlane": 0}
     config = SimpleNamespace(getoption=lambda name, default=None: options.get(name, default))
 
     with pytest.raises(pytest.UsageError, match="requires --enable-chip-swimlane"):
-        root_conftest._validate_diagnostic_flags(config)
+        conftest._validate_diagnostic_flags(config)
 
 
 def test_dep_gen_extension_hook_uses_the_shared_multi_round_gate() -> None:
@@ -441,7 +444,9 @@ def test_run_class_cases_names_the_case_without_args() -> None:
     assert str(failure.value) == "SceneTest case failed: FailingScene::empty_args"
 
 
-def test_run_class_cases_keeps_device_error_visible_to_poison_classifier(root_conftest) -> None:
+def test_run_class_cases_keeps_device_error_visible_to_poison_classifier() -> None:
+    conftest = _root_conftest()
+
     class FailingScene:
         def _run_and_validate(self, *_args, **_kwargs):
             raise RuntimeError("prepare_native_run failed with code 507018")
@@ -463,7 +468,7 @@ def test_run_class_cases_keeps_device_error_visible_to_poison_classifier(root_co
         )
 
     excinfo = SimpleNamespace(type=type(failure.value), value=failure.value)
-    assert root_conftest._requires_l2_worker_retirement(excinfo)
+    assert conftest._requires_l2_worker_retirement(excinfo)
 
 
 def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None:
@@ -503,4 +508,36 @@ def test_standalone_dispatch_forwards_every_diagnostic_flag(monkeypatch) -> None
     assert "--enable-dep-gen" in command
     assert "--enable-scope-stats" in command
     assert "--enable-swimlane-overhead" in command
+    assert "--resource-child" in command
     assert command[0] == sys.executable
+
+
+@pytest.mark.parametrize("child", [False, True])
+def test_standalone_runtime_and_level_filter_without_marking_a_child(monkeypatch, child) -> None:
+    scene_test_module = importlib.import_module("simpler_setup.scene_test")
+    scene_class = type("FilteredScene", (), {"_st_level": 2, "_st_runtime": "host_build_graph"})
+    dispatched = []
+
+    monkeypatch.setattr(scene_test_module, "ensure_pto_isa_root", lambda **_kwargs: None)
+    monkeypatch.setattr(scene_test_module, "_discover_module_test_classes", lambda _module: [scene_class])
+    monkeypatch.setattr(
+        scene_test_module,
+        "_select_cases",
+        lambda _classes, _platform, _selectors, _manual: [(scene_class, {"name": "selected"})],
+    )
+    monkeypatch.setattr(
+        scene_test_module,
+        "_dispatch_test_phases_standalone",
+        lambda *_args: dispatched.append(True) or True,
+    )
+    monkeypatch.setattr(scene_test_module, "_standalone_worker_groups", lambda _selected: {})
+    argv = ["test_scene.py", "-p", "a2a3sim", "-d", "0-1", "--runtime", "host_build_graph", "--level", "2"]
+    if child:
+        argv.append("--resource-child")
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(SystemExit) as result:
+        SceneTestCase.run_module(__name__)
+
+    assert result.value.code == 0
+    assert dispatched == ([] if child else [True])

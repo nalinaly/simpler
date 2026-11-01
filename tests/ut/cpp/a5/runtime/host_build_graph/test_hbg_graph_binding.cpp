@@ -133,7 +133,7 @@ TEST(HbgGraphBinding, KeepsTheOriginalMixMasksBlockCountsAndSyncStartAttribute) 
                 if (sync && blocks == 1) continue;
                 BindingFixture f;
                 auto &task = f.definition.object.body.tasks[0];
-                task.active_mask = mask;
+                task.active_mask = LaneMask((mask & 1U) != 0, (mask & 2U) != 0, (mask & 4U) != 0);
                 task.logical_block_num = blocks;
                 task.total_required_subtasks = blocks * __builtin_popcount(mask);
                 TaskAttrs attrs{};
@@ -181,7 +181,7 @@ TEST(HbgGraphBinding, PredicateSupportRemainsSingleBlockAndSingleLane) {
     ASSERT_TRUE(binding);
     EXPECT_FALSE(binding->supported());
     task.logical_block_num = 1;
-    task.active_mask = 3;
+    task.active_mask = LaneMask(true, true, false);
     task.kernel_id[0] = 6;
     binding = f.prepare();
     ASSERT_TRUE(binding);
@@ -243,7 +243,7 @@ TEST(HbgGraphBinding, ProtocolSnapshotOwnsSharedDefinitionsAndExpandedDependenci
     EXPECT_EQ(snapshot.manifest.instance_definitions, (std::vector<uint32_t>{0, 0}));
     ASSERT_EQ(snapshot.manifest.definitions.size(), 1u);
     const auto &definition = snapshot.manifest.definitions[0];
-    EXPECT_EQ(definition.header.full_key, 17u);
+    EXPECT_EQ(definition.header.graph_key, 17u);
     EXPECT_EQ(definition.tasks.size(), 2u);
     EXPECT_EQ(definition.fanin_rows, (std::vector<int32_t>{0, 0, 1}));
     EXPECT_EQ(definition.fanin_indices, std::vector<uint16_t>{0});

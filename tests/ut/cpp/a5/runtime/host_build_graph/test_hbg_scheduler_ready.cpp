@@ -151,7 +151,7 @@ TEST(SchedulerProfilingLevel, DispatchWritesTaskIdentityBeforePhaseDetails) {
 }
 
 struct ReadyPublicationTraceCase {
-    uint8_t active_mask;
+    LaneMask active_mask;
     uint16_t blocks;
     uint64_t level;
     bool inline_task;
@@ -160,11 +160,13 @@ struct ReadyPublicationTraceCase {
 std::vector<ReadyPublicationTraceCase> ready_publication_trace_cases() {
     std::vector<ReadyPublicationTraceCase> cases;
     for (uint64_t level : {UINT64_C(1), UINT64_C(3), UINT64_C(4)}) {
-        for (uint8_t mask : {1, 2, 3, 5, 6, 7}) {
+        for (LaneMask mask :
+             {LaneMask::aic(), LaneMask::aiv0(), LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false),
+              LaneMask(/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true), LaneMask::both_aiv(), LaneMask::all()}) {
             for (uint16_t blocks : {1, 2, 512})
                 cases.push_back({mask, blocks, level, false});
         }
-        cases.push_back({2, 1, level, true});
+        cases.push_back({LaneMask::aiv0(), 1, level, true});
     }
     return cases;
 }
@@ -173,7 +175,7 @@ class SchedulerReadyPublicationTrace : public ::testing::TestWithParam<ReadyPubl
 protected:
     void SetUp() override {
         const auto &param = GetParam();
-        const uint32_t traces_per_task = param.blocks * __builtin_popcount(param.active_mask);
+        const uint32_t traces_per_task = param.blocks * param.active_mask.count();
         storage = std::make_unique<FixtureStorage>(3, 3, traces_per_task);
         graph.executable(0, 0);
         for (uint32_t worker = 0; worker < 3; ++worker) {
@@ -187,13 +189,13 @@ protected:
             metadata.logical_block_num = param.blocks;
             metadata.trace_index_base = task * traces_per_task;
             metadata.flags = SCHEDULER_TASK_EXECUTABLE;
-            if (__builtin_popcount(param.active_mask) > 1) metadata.flags |= SCHEDULER_TASK_MIX;
+            if (param.active_mask.is_mix()) metadata.flags |= SCHEDULER_TASK_MIX;
             if (param.blocks > 1) metadata.flags |= SCHEDULER_TASK_SPMD;
             if (param.inline_task) metadata.flags |= SCHEDULER_TASK_INLINE;
             if (!param.inline_task) graph.mixed(task, param.active_mask);
             for (uint32_t slot = 0; slot < 3; ++slot)
                 metadata.kernel_ids[slot] =
-                    !param.inline_task && (param.active_mask & (1U << slot)) != 0 ? 1 : UINT16_MAX;
+                    !param.inline_task && param.active_mask.has(static_cast<SubtaskSlot>(slot)) ? 1 : UINT16_MAX;
         }
         queue = scheduler_task_ready_queue(storage->metadata[1].flags, param.active_mask);
         local = storage->local_context(&storage->contexts[queue == 1 ? 1 : 0]);
@@ -306,8 +308,7 @@ class SchedulerMixReadyPublicationTrace : public SchedulerReadyPublicationTrace 
 std::vector<ReadyPublicationTraceCase> mix_ready_fallback_trace_cases() {
     std::vector<ReadyPublicationTraceCase> cases;
     for (const auto &param : ready_publication_trace_cases()) {
-        if (param.level >= SCHEDULER_PROFILING_SCHED_PHASES_LEVEL && __builtin_popcount(param.active_mask) > 1)
-            cases.push_back(param);
+        if (param.level >= SCHEDULER_PROFILING_SCHED_PHASES_LEVEL && param.active_mask.is_mix()) cases.push_back(param);
     }
     return cases;
 }
@@ -363,10 +364,10 @@ TEST(SchedulerBootstrap, RegistersOnlyOnFirstExecutableProducer) {
     graph.executable(0, 0);
     graph.executable(1, 1, {0});
     graph.executable(3, 1, {2, 1});
-    storage.metadata[1].active_mask = 2;
+    storage.metadata[1].active_mask = LaneMask::aiv0();
     storage.metadata[1].flags |= SCHEDULER_TASK_HAS_FANIN;
     storage.metadata[2].flags = 0;
-    storage.metadata[3].active_mask = 2;
+    storage.metadata[3].active_mask = LaneMask::aiv0();
     storage.metadata[3].flags |= SCHEDULER_TASK_HAS_FANIN;
     auto *controls =
         scheduler_state_at<SchedulerTaskControl>(storage.scheduler_state->base(), storage.layout.task_controls_offset);
@@ -716,7 +717,7 @@ TEST(SchedulerDispatch, RejectsInvalidSingleSubtaskShapeBeforeMetadataIndex) {
     GraphBuffer graph(1);
     graph.executable(0, 0);
     storage.contexts[0].core_type = static_cast<int32_t>(CoreType::AIC);
-    storage.metadata[0].active_mask = 0;
+    storage.metadata[0].active_mask = LaneMask::none();
     SchedulerFreeSlotClaim slot_claim{0, 0, 0, 0};
     SchedulerReadyClaim ready_claim{};
     ready_claim.task_ref = 0;
@@ -753,7 +754,7 @@ TEST(SchedulerDispatch, RejectsUnknownTargetCoreType) {
     graph.executable(0, 1);
     storage.contexts[0].core_type = 2;
     storage.metadata[0].kernel_ids[1] = 1;
-    storage.metadata[0].active_mask = 2;
+    storage.metadata[0].active_mask = LaneMask::aiv0();
     SchedulerFreeSlotClaim slot_claim{0, 0, 0, 0};
     SchedulerReadyClaim ready_claim{};
     ready_claim.task_ref = 0;
@@ -1321,7 +1322,7 @@ TEST(SchedulerReadyWake, RejectsInvalidWaiterShapeBeforeReadyBatchIndex) {
     GraphBuffer graph(2);
     graph.executable(0, 0);
     graph.executable(1, 0, {0});
-    storage.metadata[1].active_mask = 0;
+    storage.metadata[1].active_mask = LaneMask::none();
     storage.metadata[1].flags |= SCHEDULER_TASK_HAS_FANIN;
     ASSERT_EQ(
         scheduler_route_task(
@@ -1351,10 +1352,10 @@ struct MixPrefixFixture {
         graph.executable(0, 0);
         graph.executable(1, 0);
         for (uint32_t task = 2; task < count + 3; ++task) {
-            graph.mixed(task, 7);
+            graph.mixed(task, LaneMask::all());
             graph.executable(task, 0, task < count + 2 ? std::vector<int32_t>{0} : std::vector<int32_t>{});
             auto &metadata = storage.metadata[task];
-            metadata.active_mask = 7;
+            metadata.active_mask = LaneMask::all();
             metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX;
             if (task < count + 2) metadata.flags |= SCHEDULER_TASK_HAS_FANIN;
             metadata.trace_index_base = task * 3;
@@ -1464,7 +1465,7 @@ TEST(SchedulerReadyWake, InvalidSuffixLeavesOnlyTheAlreadyPublishedMixPrefixReac
             fixture.graph.executable(4, 0, {0, 4});
             ASSERT_EQ(fixture.graph.payload(4).fanin_count, 2);
         } else {
-            fixture.storage.metadata[4].active_mask = 0;
+            fixture.storage.metadata[4].active_mask = LaneMask::none();
             fixture.storage.metadata[4].flags &= ~SCHEDULER_TASK_MIX;
         }
         SchedulerReadyClaim direct{};
@@ -1511,7 +1512,7 @@ TEST(SchedulerReadyWake, ErrorsBeforeTheMixPrefixThresholdPublishNothing) {
                 fixture.graph.executable(task, 0, {0, static_cast<int32_t>(task)});
                 ASSERT_EQ(fixture.graph.payload(task).fanin_count, 2);
             } else {
-                fixture.storage.metadata[2 + bad_position].active_mask = 0;
+                fixture.storage.metadata[2 + bad_position].active_mask = LaneMask::none();
                 fixture.storage.metadata[2 + bad_position].flags &= ~SCHEDULER_TASK_MIX;
             }
             SchedulerReadyClaim direct{};

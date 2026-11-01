@@ -129,6 +129,11 @@ legacy_aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type
     // first deref is safe here — off the dispatch→start critical path.
     __gm__ ChipSwimlaneActiveHead *chip_swimlane_head =
         chip_swimlane_enabled ? get_chip_swimlane_aicore_head() : nullptr;
+    // The AICPU commits one record per completed task from this core's staging
+    // ring, so a core that gates its counters and stages nothing leaves every
+    // one of those commits with no slot to read.
+    __gm__ PmuAicoreRing *pmu_ring = pmu_enabled ? get_aicore_pmu_ring() : nullptr;
+    uint64_t pmu_reg_base = pmu_enabled ? get_aicore_pmu_reg_base() : 0;
     // cached_buf_seq must start != AICPU's initial head.current_buf_seq (0)
     // so the first reservation observes a mismatch and loads the buffer ptr.
     ChipSwimlaneAicoreLocalState chip_swimlane_local = {nullptr, UINT32_MAX, 0};
@@ -142,8 +147,6 @@ legacy_aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type
     while (true) {
         reg_val = static_cast<uint32_t>(read_reg(RegId::DATA_MAIN_BASE));
         if (reg_val == AICORE_EXIT_SIGNAL) {
-            // Signal exit acknowledgment to AICPU
-            write_reg(RegId::COND, AICORE_EXITED_VALUE);
             break;
         }
 
@@ -242,7 +245,6 @@ legacy_aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type
                     SPIN_WAIT_HINT();
                 }
                 if (exiting) {
-                    write_reg(RegId::COND, AICORE_EXITED_VALUE);
                     break;
                 }
                 // Re-stamp receive_time at the moment the doorbell landed: the
@@ -279,6 +281,7 @@ legacy_aicore_execute(__gm__ Runtime *runtime, int block_idx, CoreType core_type
 
             if (pmu_enabled) {
                 pmu_aicore_end();
+                pmu_aicore_record_task(pmu_ring, pmu_reg_base, task_id);
             }
 
             if (dump_args_enabled) {

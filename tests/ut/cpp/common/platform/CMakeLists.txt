@@ -59,6 +59,14 @@ endmacro()
 platform_single_case(test_kernel_execution_state.cpp
     SOURCES ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/kernel_execution_state.cpp)
 
+platform_single_case(test_lane_mask.cpp)
+
+# The growth coordinator is production: the onboard host runtime links this
+# same translation unit, so the trim, the retry policy and the holder discovery
+# under test are the ones the device runner calls rather than a copy of them.
+platform_single_case(test_run_resource_trim.cpp
+    SOURCES ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/run_resource_growth.cpp)
+
 platform_single_case(test_callable_diagnostics.cpp
     SOURCES ${HOST_LOG_TEST_SOURCES}
     INCLUDES ${SIMPLER_LOG_DIR})
@@ -107,6 +115,16 @@ platform_case(test_scope_stats_collector.cpp PER_ARCH
         ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/scope_stats_collector_aicpu.cpp
         ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
         ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp
+    TIER aicpu)
+
+# Detached host shadows keep a failed held-buffer read distinct from a valid
+# shared accounting read, including on the otherwise SVM architecture.
+platform_case(test_scope_stats_read_failure.cpp PER_ARCH
+    SOURCES
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/scope_stats_collector_aicpu.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
     TIER aicpu)
 
 platform_case(test_scope_stats_retained_runs.cpp PER_ARCH
@@ -224,17 +242,19 @@ platform_single_case(test_device_fault_cross_dso.cpp
 # device-initialized tail at all — its header states extent equals copy size —
 # so it declares no teardown_gates and the boundary these cases pin does not
 # exist there. host_build_graph has the tail on both arches.
+set(KERNEL_ARGS_FIXTURES ${CMAKE_SOURCE_DIR}/support/kernel_args)
 set(KERNEL_ARGS_INCLUDES ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host ${SIMPLER_SRC}/common/worker)
 
 tmr_case(test_kernel_persistent_args.cpp ARCHS a2a3
     SOURCES  ${KERNEL_PERSISTENT_ARGS_SRC}
              ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
-    INCLUDES ${KERNEL_ARGS_INCLUDES}
-    DEFINES  SIMPLER_UT_TRB_RUNTIME)
+             ${CMAKE_CURRENT_SOURCE_DIR}/test_kernel_persistent_args_tmr.cpp
+    INCLUDES ${KERNEL_ARGS_INCLUDES} ${KERNEL_ARGS_FIXTURES})
 
 hbg_case(test_kernel_persistent_args.cpp
     SOURCES  ${KERNEL_PERSISTENT_ARGS_SRC} ${HBG_COMMON_SHARED_DIR}/runtime.cpp
-    INCLUDES ${KERNEL_ARGS_INCLUDES})
+             ${CMAKE_CURRENT_SOURCE_DIR}/test_kernel_persistent_args_hbg.cpp
+    INCLUDES ${KERNEL_ARGS_INCLUDES} ${KERNEL_ARGS_FIXTURES})
 
 # Compile the actual onboard helper/allocator without an SDK. support/kernel_args
 # stands in for the CANN headers and must precede the gtest prefix, which on a
@@ -243,7 +263,7 @@ set(KERNEL_ARGS_HELPER_TEST_SOURCES
     ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/device_runner_helpers.cpp
     ${SIMPLER_SRC}/@arch@/platform/onboard/host/memory_allocator.cpp)
 
-tmr_case(test_kernel_args_helper.cpp ARCHS a2a3
+tmr_case(test_kernel_args_helper.cpp
     SOURCES ${KERNEL_ARGS_HELPER_TEST_SOURCES}
             ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
     INCLUDES_BEFORE ${CMAKE_SOURCE_DIR}/support/kernel_args ${KERNEL_ARGS_INCLUDES})
@@ -262,10 +282,11 @@ hbg_case(test_kernel_args_helper.cpp
 # publishes the prefixes it measures.
 tmr_case(test_runtime_workers_boundary.cpp
     SOURCES ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
-    DEFINES SIMPLER_UT_TRB_RUNTIME)
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_runtime_workers_boundary_tmr.cpp)
 
 hbg_case(test_runtime_workers_boundary.cpp
-    SOURCES ${HBG_COMMON_SHARED_DIR}/runtime.cpp)
+    SOURCES ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_runtime_workers_boundary_hbg.cpp)
 
 # The publication side, and a case of this directory's own: it drives the real
 # onboard helper and allocator, and takes the CANN stand-in its siblings above
@@ -283,16 +304,17 @@ hbg_case(test_runtime_workers_publication.cpp
 # prepare captured them. Same pairing as the publication case above, and for the
 # same reason: one source, one build per runtime, each resolving "runtime.h" to
 # its own. The trb build additionally covers the descriptor's wire offsets and
-# the raw-byte decode, so it defines SIMPLER_UT_TRB_RUNTIME.
+# the raw-byte decode in its explicit runtime-specific case source.
 tmr_case(test_launch_entry_args.cpp
     SOURCES ${KERNEL_ARGS_HELPER_TEST_SOURCES}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_entry_args_tmr.cpp
             ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
-    INCLUDES_BEFORE ${CMAKE_SOURCE_DIR}/support/kernel_args ${KERNEL_ARGS_INCLUDES}
-    DEFINES SIMPLER_UT_TRB_RUNTIME)
+    INCLUDES_BEFORE ${KERNEL_ARGS_FIXTURES} ${KERNEL_ARGS_INCLUDES})
 
 hbg_case(test_launch_entry_args.cpp
     SOURCES ${KERNEL_ARGS_HELPER_TEST_SOURCES} ${HBG_COMMON_SHARED_DIR}/runtime.cpp
-    INCLUDES_BEFORE ${CMAKE_SOURCE_DIR}/support/kernel_args ${KERNEL_ARGS_INCLUDES})
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_launch_entry_args_hbg.cpp
+    INCLUDES_BEFORE ${KERNEL_ARGS_FIXTURES} ${KERNEL_ARGS_INCLUDES})
 
 # A loadable stand-in for a compiled AICore child kernel. The sim
 # registration writes each child's binary to a temp file, dlopens it and
@@ -331,6 +353,7 @@ set(SIM_CALLABLE_POOL_SOURCES
 set(SIM_CALLABLE_POOL_INCLUDES
     ${SIMPLER_COMMON_PLATFORM_DIR}/sim/host
     ${SIMPLER_COMMON_PLATFORM_DIR}/sim/sim_context
+    ${SIMPLER_SRC}/common/log
     ${SIMPLER_SRC}/common/worker)
 
 hbg_case(test_sim_callable_pool.cpp
@@ -401,6 +424,28 @@ platform_case(test_pmu_collector.cpp PER_ARCH PER_RUNTIME
         ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
         ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
 
+simpler_pmu_arch_a5_define(pmu_collector)
+
+platform_case(test_dfx_init_rollback.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/chip_swimlane_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_retained_runs.cpp)
+simpler_pmu_arch_a5_define(dfx_init_rollback)
+
+platform_case(test_pmu_finalize.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+        ${SIMPLER_SRC}/@arch@/platform/shared/aicpu/pmu_collector_aicpu.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
+        ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
+simpler_pmu_arch_a5_define(pmu_finalize)
+
 platform_case(test_pmu_run_identity.cpp PER_ARCH PER_RUNTIME
     SOURCES
         ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
@@ -429,6 +474,17 @@ platform_case(test_pmu_frozen_config.cpp PER_ARCH PER_RUNTIME
         ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
         ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
 simpler_pmu_arch_a5_define(pmu_frozen_config)
+
+# The register half the three cases above leave out, over host blocks standing
+# in for the per-core windows: which window a core's programming resolves to,
+# and which control word each run leaves behind for the next run on that core.
+platform_case(test_pmu_counting_window.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+        ${SIMPLER_SRC}/@arch@/platform/shared/aicpu/pmu_collector_aicpu.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
+        ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
+simpler_pmu_arch_a5_define(pmu_counting_window)
 
 # Both axes: the dump record carries the runtime's TaskId, so the case resolves
 # its bare "task_id.h" to the runtime it was built for.
@@ -469,6 +525,201 @@ platform_case(test_args_dump_run_identity.cpp PER_ARCH PER_RUNTIME
         ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/args_dump_aicpu.cpp
         ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp
         ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
+
+platform_case(test_args_dump_read_failure.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/args_dump_aicpu.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp)
+
+# Per-run terminal evidence: the ArgsDump producer's own accounting, and the
+# credit pool and bank array every collector's banks are reserved from. Both
+# axes for the same reason as the cases above — the terminal is dimensioned by
+# the arch's platform_config, and the records carry the runtime's TaskId.
+platform_case(test_args_dump_run_terminal.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/args_dump_aicpu.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/device_run_result_base_aicpu.cpp)
+
+platform_case(test_diagnostic_run_credit.cpp PER_ARCH PER_RUNTIME)
+
+# What a capacity refusal leaves behind at the real C boundary. The entry under
+# test is the production sim `simpler_launch_run`, over the production sim
+# runner base: the carrier whose phase is in question belongs to that entry, so
+# a double placed above it would pass whichever branch the entry took.
+#
+# Declared twice for the reason `test_sim_callable_pool` is: the shared Runtime
+# implementation sits at a different path in each runtime tree, so there is no
+# one template, and the sim base resolves its bare `runtime.h` to whichever
+# runtime it was built for.
+set(CAPACITY_REFUSAL_SOURCES
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/host/c_api_shared.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/host/device_runner_base.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/host/memory_allocator.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/sim_context/cpu_sim_context.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_collector.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_retained_runs.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/chip_swimlane_collector.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_collector.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_retained_runs.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_collector.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_retained_runs.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/host_graph_exporter.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/host_phase_records.cpp
+    ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+    ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp
+    ${SIMPLER_SRC}/common/platform_comm/comm_sim.cpp
+    ${HOST_LOG_TEST_SOURCES})
+set(CAPACITY_REFUSAL_INCLUDES
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/host
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/sim_context
+    ${SIMPLER_LOG_DIR}
+    ${SIMPLER_SRC}/common/worker)
+
+hbg_case(test_diagnostic_capacity_refusal_phase.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_diagnostic_capacity_refusal_phase.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+# What the preparation entry does with an argument dump the runtime beneath it
+# has no producer for. Takes the capacity case's closure for the same reason:
+# the decision is inside the production sim C entry, over the production runner
+# base, so a double above the entry would pass whichever branch it took.
+hbg_case(test_args_dump_capability_refusal.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_args_dump_capability_refusal.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+# Which of a refused admission's own notifications still reach a waiter. Takes
+# the same closure as the case above — the runner base, every collector and the
+# runtime whose descriptor it binds — because it drives the same admission and
+# withdrawal, one layer below the C entry.
+hbg_case(test_diagnostic_rollback_notification.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_diagnostic_rollback_notification.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+
+
+# What a failed run's terminal bank does per owner on the producer-stop proof,
+# and the same decision through the runner's own teardown. Takes the capacity
+# case's closure: the four collectors it drives are the runner base's own
+# members, and the last two cases call that base's production boundary.
+hbg_case(test_run_terminal_stop_settlement.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_run_terminal_stop_settlement.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+# Ordinary close uses the real runner boundary and the real AICPU producer.
+hbg_case(test_args_dump_ordinary_close.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/args_dump_aicpu.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_args_dump_ordinary_close.cpp
+    SOURCES
+        ${CAPACITY_REFUSAL_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+# Both architectures use detached shadows to observe forbidden terminal reads.
+set(SCOPE_STATS_ORDINARY_CLOSE_SOURCES ${CAPACITY_REFUSAL_SOURCES})
+list(FILTER SCOPE_STATS_ORDINARY_CLOSE_SOURCES EXCLUDE REGEX "/sim/host/profiling_copy\\.cpp$")
+
+hbg_case(test_scope_stats_ordinary_close.cpp
+    SOURCES
+        ${SCOPE_STATS_ORDINARY_CLOSE_SOURCES}
+        ${HBG_COMMON_SHARED_DIR}/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK     ${CMAKE_DL_LIBS})
+
+tmr_case(test_scope_stats_ordinary_close.cpp
+    SOURCES
+        ${SCOPE_STATS_ORDINARY_CLOSE_SOURCES}
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES ${CAPACITY_REFUSAL_INCLUDES}
+    DEFINES  SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK     ${CMAKE_DL_LIBS})
+
+# Each owner's own three answers to the all-or-nothing admission: which
+# refusal is re-attemptable, whether withdrawing an identity it never admitted
+# is exact, and whether a writer may still be reading its pools.
+platform_case(test_diagnostic_admission.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_retained_runs.cpp
+        ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
+
+# Which callback each collector's bank array goes back through. All four host
+# collectors in one case because the release policy is one policy; the arch's
+# PMU collector is the only per-arch production source among them.
+platform_case(test_run_terminal_release_policy.cpp PER_ARCH PER_RUNTIME
+    SOURCES
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/args_dump_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/dep_gen_retained_runs.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_collector.cpp
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/scope_stats_retained_runs.cpp
+        ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+        ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp)
+simpler_pmu_arch_a5_define(run_terminal_release_policy)
 
 # The two production sides every chip_swimlane case compiles — the host
 # collector and the AICPU producer module — with the arch's sim regs and
@@ -571,6 +822,65 @@ platform_case(test_chip_swimlane_aicore.cpp PER_ARCH PER_RUNTIME BARE
         # shadow anything the arch directories above own.
         ${SIMPLER_SRC}/common/task_interface)
 
+# The allocation/copy/attachment transport is CPU-backed; every ownership layer
+# above it is the onboard production implementation, including native prepare.
+file(GLOB NATIVE_ADMISSION_SHARED_HOST CONFIGURE_DEPENDS
+    ${SIMPLER_COMMON_PLATFORM_DIR}/shared/host/*.cpp)
+set(NATIVE_ADMISSION_SOURCES
+    ${CMAKE_SOURCE_DIR}/support/native_admission/transport.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/device_runner_base.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/aicore_pmu_lease.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/c_api_shared.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/device_runner_helpers.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/kernel_persistent_args.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/device_phase_capture.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/run_retention_probe.cpp
+    ${SIMPLER_SRC}/@arch@/platform/onboard/host/memory_allocator.cpp
+    ${NATIVE_ADMISSION_SHARED_HOST}
+    ${SIMPLER_SRC}/@arch@/platform/shared/host/pmu_collector.cpp
+    ${SIMPLER_SRC}/@arch@/platform/sim/host/profiling_copy.cpp
+    ${SIMPLER_SRC}/common/platform_comm/comm_sim.cpp
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/sim_context/cpu_sim_context.cpp
+    ${SIMPLER_SRC}/common/log/host_log.cpp)
+set(NATIVE_ADMISSION_INCLUDES
+    ${CMAKE_SOURCE_DIR}/support/native_admission
+    ${CMAKE_SOURCE_DIR}/support/kernel_args
+    ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host
+    ${SIMPLER_COMMON_PLATFORM_DIR}/sim/sim_context
+    ${SIMPLER_SRC}/common/log
+    ${SIMPLER_SRC}/common/worker)
+hbg_case(test_native_admission.cpp
+    SOURCES ${NATIVE_ADMISSION_SOURCES}
+        ${CMAKE_SOURCE_DIR}/support/native_admission/hbg_preparation.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_native_admission_hbg.cpp
+        ${SIMPLER_SRC}/@arch@/runtime/host_build_graph/host/runtime_maker.cpp
+        ${_hbg_orch_host_sources}
+        ${HBG_HOST_DIR}/dep_gen_host_graph.cpp
+        ${HBG_HOST_DIR}/host_phase_trace.cpp
+        ${HBG_SHARED_RUNTIME_SOURCES}
+        ${SIMPLER_COMMON_PLATFORM_DIR}/shared/aicpu/args_dump_aicpu.cpp
+    INCLUDES_BEFORE ${NATIVE_ADMISSION_INCLUDES}
+    DEFINES SIMPLER_RUNTIME_NAME="host_build_graph"
+    LINK @arch@_ut_support ${CMAKE_DL_LIBS})
+tmr_case(test_native_admission.cpp
+    SOURCES ${NATIVE_ADMISSION_SOURCES}
+        ${CMAKE_SOURCE_DIR}/support/native_admission/tmr_preparation.cpp
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/host/runtime_maker.cpp
+        ${SIMPLER_SRC}/@arch@/runtime/tensormap_and_ringbuffer/runtime/shared/runtime.cpp
+    INCLUDES_BEFORE ${NATIVE_ADMISSION_INCLUDES}
+    DEFINES SIMPLER_RUNTIME_NAME="tensormap_and_ringbuffer"
+    LINK @arch@_ut_support ${CMAKE_DL_LIBS})
+
+# The lease's own case. Declared apart from the bulk list below because it needs
+# the implementation compiled in, and because it resolves the driver's prof
+# entry points through `dlsym(RTLD_DEFAULT, ...)`: ENABLE_EXPORTS puts this
+# binary's own definitions of those names in the dynamic symbol table, which is
+# what lets the case drive the refusal codes with no device and no CANN.
+platform_single_case(test_aicore_pmu_lease.cpp
+    SOURCES ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host/aicore_pmu_lease.cpp
+    INCLUDES ${SIMPLER_COMMON_PLATFORM_DIR}/onboard/host)
+set_target_properties(test_aicore_pmu_lease PROPERTIES ENABLE_EXPORTS ON)
+
 # ---------------------------------------------------------------------------
 # Cases reaching neither the arch platform tree nor any runtime's image, so one
 # build is every build. They are named here rather than swept up by a default,
@@ -582,6 +892,7 @@ platform_case(test_chip_swimlane_aicore.cpp PER_ARCH PER_RUNTIME BARE
 simpler_ut_cases(platform_single_case
     test_acl_hal_device.cpp
     test_arena_replacement_transaction.cpp
+    test_auto_admission.cpp
     test_caller_device_buffers.cpp
     test_context_lifecycle.cpp
     test_device_fault_monitor.cpp

@@ -28,6 +28,8 @@
 
 #ifdef __cplusplus
 #include <cinttypes>
+
+#include "common/lane_mask.h"
 #endif
 
 #include "common/memory_barrier.h"
@@ -101,13 +103,10 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info);
 // pointer, host_build_graph's storage by layout — and neither is this dump's concern,
 // so a caller passes what it already has in hand. The types differ per runtime too,
 // hence the deduced parameters.
-template <
-    int MaxSubtaskSlots, typename TaskDescriptorT, typename TaskPayloadT, typename ActiveMaskT,
-    typename IsSubtaskActiveFn, typename GetFunctionBinAddrFn>
+template <int MaxSubtaskSlots, typename TaskDescriptorT, typename TaskPayloadT, typename GetFunctionBinAddrFn>
 inline void dump_args_for_task(
-    int32_t thread_idx, const TaskDescriptorT &descriptor, const TaskPayloadT &pl, const ActiveMaskT &active_mask,
-    ArgsDumpStage stage, IsSubtaskActiveFn is_subtask_active, GetFunctionBinAddrFn get_function_bin_addr,
-    const ArgsDumpTaskMetadata *task_metadata = nullptr
+    int32_t thread_idx, const TaskDescriptorT &descriptor, const TaskPayloadT &pl, LaneMask active_mask,
+    ArgsDumpStage stage, GetFunctionBinAddrFn get_function_bin_addr, const ArgsDumpTaskMetadata *task_metadata = nullptr
 ) {
     // The record's func_ids[] must hold every active subtask's id. MaxSubtaskSlots
     // is SUBTASK_SLOT_COUNT at every call site, so this ties the record array
@@ -133,7 +132,7 @@ inline void dump_args_for_task(
     const CoreCallable *sig_src = nullptr;
 
     for (int raw_subtask_id = 0; raw_subtask_id < MaxSubtaskSlots; raw_subtask_id++) {
-        if (!is_subtask_active(active_mask, raw_subtask_id)) {
+        if (!active_mask.has(static_cast<SubtaskSlot>(raw_subtask_id))) {
             continue;
         }
         uint64_t callable_addr = get_function_bin_addr(descriptor.kernel_id[raw_subtask_id]);
@@ -413,8 +412,9 @@ inline void dump_args_for_task(
  * metadata buffers from each thread's free_queue.
  *
  * @param num_dump_threads Number of scheduling threads that will dump args
+ * @param level This invocation's selection from the published Runtime descriptor
  */
-void dump_args_init(int num_dump_threads);
+void dump_args_init(int num_dump_threads, DumpArgsLevel level);
 
 /**
  * Record a single dumped arg.
@@ -441,6 +441,32 @@ int dump_arg_record(int thread_idx, const ArgsDumpInfo &info);
  * @param thread_idx Thread index
  */
 void dump_args_flush(int thread_idx);
+
+/**
+ * Name this run's terminal bank — the address of its first producer entry,
+ * resolved by the host from the identity that reserved it.
+ *
+ * One producer per AICPU thread, so the bank holds `PLATFORM_MAX_AICPU_THREADS`
+ * entries and a producer adds only its own thread index. A zero address is the
+ * default path: nothing is published and the host reads what it reads today.
+ *
+ * C linkage because the sim runner reaches it by `dlsym` into the AICPU SO,
+ * the same way it reaches the other per-run diagnostic bases.
+ */
+extern "C" void set_platform_dump_args_run_terminal(uint64_t bank);
+
+/**
+ * Settle one producer thread's accounting for this run into its terminal
+ * entry, after every path that can still change one of its counters.
+ *
+ * The payload cursors are deliberately absent from it: `published_payload_count`
+ * and `completed_payload_count` are lifetime cursors that arena reuse depends
+ * on, so this run's payload share is counted separately rather than derived by
+ * differencing them.
+ *
+ * @param thread_idx Thread index
+ */
+void dump_args_close_run(int thread_idx);
 
 #endif
 

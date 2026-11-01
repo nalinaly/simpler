@@ -46,6 +46,7 @@
 #include "common/launch_entry_args.h"     // LaunchEntryArgsPlan
 #include "host_build_graph/entry_args.h"  // EntryArgsStorage
 #include "utils/tensor_lease.h"
+#include "host/scope_stats_capacity.h"
 
 // =============================================================================
 // Configuration Macros
@@ -126,7 +127,7 @@ struct Handshake {
 // dcci(..., CACHELINE_OUT) on its report and again on exit. A word the AICPU
 // must publish independently cannot live here — a stale line writeback would
 // overwrite it. The post-close return gates live in
-// Runtime::teardown_gates, one isolated line each on both platforms.
+// Runtime::teardown_gates, one AICPU-owned request/release line per worker on both platforms.
 static_assert(sizeof(Handshake) == 64);
 static_assert(std::is_standard_layout_v<Handshake> && std::is_trivially_copyable_v<Handshake>);
 // The payload offsets are the device-side wire contract: AICore writes them and
@@ -322,7 +323,11 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     uint64_t graph_section_base;
     uint32_t graph_section_bytes;
     uint32_t graph_section_source;
-    uint32_t graph_section_reserved[12];
+    // Per-invocation granularity travels in every descriptor publication.
+    uint32_t chip_swimlane_level;
+    uint32_t pmu_event_type;   // PmuEventType; zero while PMU is disabled.
+    uint32_t dump_args_level;  // DumpArgsLevel; zero while argument dumping is disabled.
+    uint32_t graph_section_reserved[9];
 
     // Size of the shipped shared-memory image, argument pools included. Set by the
     // host before the image is copied; the AICPU cannot recompute it because the pool
@@ -358,8 +363,8 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Separate from workers[] because the AICore flushes its whole Handshake
     // line, which would overwrite a gate sharing it.
     //
-    // Last, and outside both the uploaded prefix and the initialized prefix: on
-    // both platforms the AICPU zeroes every active entry in `pre_handshake_init` and
+    // Last, and outside both the uploaded prefix and the initialized prefix: the
+    // AICPU resets the active controls in `pre_handshake_init` and
     // executes `wmb()` before it publishes `hs_setup_done_`, and no register
     // window opens before that publication, so the meaningful initial value is
     // produced on the device ahead of every read of it. No host-supplied gate
@@ -367,6 +372,9 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // initialized — `Runtime()` does not touch it — so no host copy may reach
     // this range. `device_initialized_prefix_bytes()` ends where this array
     // begins; the allocation still covers it.
+    // Each 64-byte control is written only by AICPU and cleared before READY
+    // or EXIT. AICore bypass-loads the request and returns its nonce in COND;
+    // it never caches or writes the control.
     AicoreTeardownControl teardown_gates[RUNTIME_MAX_WORKER];
 };
 
@@ -550,6 +558,10 @@ public:
             {target, source, bytes, phase, std::move(attributes), std::move(storage)}
         );
     }
+    using RunImagePublication = HostOnlyState::RunImagePublication;
+    void restore_pending_publication(RunImagePublication publication) {
+        host_.pending_publication_ = std::move(publication);
+    }
     auto take_pending_publication() { return std::exchange(host_.pending_publication_, {}); }
     void clear_pending_publication() { host_.pending_publication_ = {}; }
 
@@ -557,6 +569,8 @@ public:
      * Constructor - zero-initialize all arrays
      */
     Runtime();
+
+    simpler::dfx::scope_stats_runs::CapacityMetadata scope_stats_capacity() const { return {false, std::nullopt}; }
 
     // =========================================================================
     // Accessors for the execution-parameter fields

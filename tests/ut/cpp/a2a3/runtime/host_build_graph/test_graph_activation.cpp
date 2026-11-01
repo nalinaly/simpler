@@ -29,7 +29,7 @@
 
 #include "utils/device_arena.h"
 #include "scheduler/scheduler.h"
-#include "host_build_graph/orchestrator.h"
+#include "host_build_graph/host/orchestrator.h"
 #include "host_build_graph/shared_memory.h"
 
 class GraphActivationTest : public ::testing::Test {
@@ -66,7 +66,7 @@ protected:
         memset(&task, 0, sizeof(ChipTaskStorage));
         states[task_index].store(state);
         task.slot.sub_task_local_id = task_index;
-        task.slot.active_mask = ActiveMask(SUBTASK_MASK_AIC);
+        task.slot.active_mask = LaneMask::aic();
         task.slot.task_kind = TaskKind::KERNEL;
         task.slot.total_required_subtasks = 1;
         task.slot.logical_block_num = 1;

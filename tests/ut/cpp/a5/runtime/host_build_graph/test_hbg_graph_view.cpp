@@ -63,7 +63,7 @@ TEST(HbgGraphView, AddressesMappedStorageAndChecksPublicRatherThanDenseIdentity)
     SchedulerTaskShape shape{};
     ASSERT_EQ(scheduler_classify_task_shape(graph, 2, &shape), SchedulerGraphResult::OK);
     EXPECT_EQ(shape.task_ref, 2);
-    EXPECT_EQ(shape.active_mask, 2);
+    EXPECT_EQ(shape.active_mask, LaneMask::aiv0());
     EXPECT_EQ(shape.kernel_ids[1], 7);
     image.tasks[0].task.task_id = TaskId::make_sub_task(18, 0);
     EXPECT_EQ(scheduler_classify_task_shape(graph, 2, &shape), SchedulerGraphResult::INVALID_TASK_ID);

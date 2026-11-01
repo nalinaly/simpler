@@ -265,6 +265,13 @@ Buffer identity. A Tensor snapshot does not retain allocation ownership or preve
 explicit Buffer close; submission still validates live registration. Constructing
 a new view from a closed Buffer is rejected.
 
+Domains expose the same Buffer/Tensor interface through `domain.member(rank).buffers[name]`.
+Across nodes, existing `REMOTE_SIDECAR` entries locate VMM backings while preserving canonical
+identity, access, extent and view geometry. Sender and receiver revalidate private registration,
+target chip and the complete descriptor; release or name reuse invalidates old references.
+The domain owns its windows; session entries only borrow them, so ordinary remote free/copy/export
+rejects these entries. Pass domain ref/rank explicitly for context, without inferring it from a Tensor.
+
 `buffer.tensor(shapes, dtype, ...)` is a compatibility forwarding method to this
 constructor. The existing descriptor-based constructor remains available for
 internal wire callers. Both use the same geometry validator.
@@ -336,6 +343,15 @@ result = torch.frombuffer(out_h.shm.buf, dtype=torch.float32, count=n)  # after 
 > memoryview alive: drop it before `close()`, or the release raises `BufferError`.
 
 ## How a tensor reaches its consumer (three-way split)
+
+Chip consumers share the private `_materialize_chip_task_args` conversion in
+`simpler.task_interface`: it resolves this invocation's descriptors through the
+caller's `ImportRegistry` and builds a fresh `ChipStorageTaskArgs`. Direct L2,
+serial/staged chip-child dispatch, and the compatibility `ChipWorker` use it.
+Endpoint/callable checks and accepted backing references precede conversion;
+import-cache closure stays with each caller, including after a failed conversion.
+This conversion resolves addresses and preserves views, transfer requests and
+scalar bits. It does not copy tensor contents or authorize external allocations.
 
 A `Tensor` on the wire is materialized differently by each consumer:
 
@@ -484,8 +500,10 @@ belong to `Worker(level=2).submit`. The resolved `ChipStorageTaskArgs` entry
 remains a compatibility path with caller-managed addresses.
 
 A synchronous ChipWorker call owns its imported host mappings through native
-return, including output copies. A binding failure releases those mappings. A
-native-call exception leaves completion unproven, so the imports remain alive,
+return, including output copies. A binding failure releases those mappings.
+`RunPreparationRefused` releases this call's imported host mappings; later calls
+still require a usable context. Other native-call exceptions leave completion
+unproven, so the imports remain alive,
 further public `run` calls are refused, and only successful `finalize` releases
 them. Failed teardown preserves them for retry. Public `run` and `finalize` are
 serialized. Descriptors do not retain the caller's allocation: callers must keep
@@ -510,12 +528,24 @@ run.result()
 source.close()  # revokes the registration; does not free ptr
 ```
 
-`BufferLocation` identifies the source context's process and incarnation, not
-just a device ordinal. Its current provider is an initialized direct L2
-Program `Worker`. Another Worker, a forked process, or a closed context cannot
-use that location. This does not attach an externally owned RTS context and
-does not support HOST or remote wrapping. No new wire placement field or
-cross-Worker grant is introduced.
+`BufferLocation` identifies one native environment binding, not just a device
+ordinal or a Python Worker's READY state. The binding records the process,
+a non-repeating native incarnation, context generation, device and ownership
+policy. Source wrapping, descriptor validation and submission compare against
+the same binding. Successful native teardown invalidates it even if a facade
+still says READY; failed rollback or teardown retains it for cleanup retry.
+The binding's generation is independent of Buffer and pipeline generations.
+
+The public provider is an initialized direct L2 `Worker` with owned or borrowed
+RTS initialization.
+Another Worker, a forked process, or a closed context cannot use that location.
+Reading this descriptor does not require a current RTS context. Device execution
+separately checks the runner's adopted RTS context; the logical identity is not
+an RTS reset detector or a check of the external pointer's actual allocation.
+`Worker.init(borrowed_context_generation=...)` attaches a borrowed RTS context;
+source wrapping does not perform that attachment and does not support HOST/remote
+wrapping.
+No new wire placement field or cross-Worker grant is introduced.
 
 Wrapping creates a source registration, without adding a consumer allocation
 or mapping. Submission checks the complete descriptor and source liveness,

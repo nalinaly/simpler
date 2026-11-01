@@ -35,8 +35,11 @@ SchedulerAdmissionRecord *record_at(void *base, const AicoreSchedulerLayout &lay
     );
 }
 
+constexpr LaneMask kAicAiv0{/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false};
+constexpr LaneMask kAicAiv1{/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true};
+
 void set_metadata(
-    void *base, const AicoreSchedulerLayout &layout, uint64_t task, uint16_t blocks, uint8_t mask,
+    void *base, const AicoreSchedulerLayout &layout, uint64_t task, uint16_t blocks, LaneMask mask,
     uint8_t extra_flags = 0
 ) {
     auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(base, layout.task_metadata_offset);
@@ -45,10 +48,10 @@ void set_metadata(
     entry.active_mask = mask;
     entry.flags = SCHEDULER_TASK_EXECUTABLE | extra_flags;
     if (blocks > 1) entry.flags |= SCHEDULER_TASK_SPMD;
-    if (__builtin_popcount(mask) > 1) entry.flags |= SCHEDULER_TASK_MIX;
+    if (mask.is_mix()) entry.flags |= SCHEDULER_TASK_MIX;
     entry.timing_slot = -1;
     for (uint8_t lane = 0; lane < 3; ++lane)
-        entry.kernel_ids[lane] = (mask & (1U << lane)) != 0 ? 1 : UINT16_MAX;
+        entry.kernel_ids[lane] = mask.has(static_cast<SubtaskSlot>(lane)) ? 1 : UINT16_MAX;
 }
 
 void expect_no_protocol_storage(const AicoreSchedulerLayout &layout) {
@@ -101,7 +104,7 @@ void expect_empty_protocol(void *base, const AicoreSchedulerLayout &layout) {
         EXPECT_EQ(record->order_key, UINT64_MAX);
         EXPECT_EQ(record->logical_block_num, 0u);
         EXPECT_EQ(record->member_count, 0u);
-        EXPECT_EQ(record->active_mask, 0u);
+        EXPECT_EQ(record->active_mask, LaneMask::none());
         EXPECT_EQ(record->flags, 0u);
         EXPECT_EQ(record->mix_close_seals_offset, 0u);
         ASSERT_EQ(
@@ -165,8 +168,8 @@ TEST(HbgSpmdLayout, CloseSealRowsReserveOne128ByteCellForEveryEligibleCluster) {
         AicoreSchedulerLayout layout{};
         ASSERT_TRUE(scheduler_plan_layout(2, 2, 2, &layout, false, 4, requirements(clusters * 3, 2, 2)));
         scheduler_test::SchedulerStateBuffer storage(layout);
-        set_metadata(storage.base(), layout, 0, 1, 3);
-        set_metadata(storage.base(), layout, 1, 1, 7);
+        set_metadata(storage.base(), layout, 0, 1, LaneMask(true, true, false));
+        set_metadata(storage.base(), layout, 1, 1, LaneMask::all());
         ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 17));
         EXPECT_EQ(
             record_at(storage.base(), layout, 1)->mix_close_seals_offset -
@@ -371,8 +374,8 @@ TEST(HbgSpmdLayout, MixSealRowsReserveAnIndependent128ByteCellPerCluster) {
     AicoreSchedulerLayout layout{};
     ASSERT_TRUE(scheduler_plan_layout(2, 2, 2, &layout, false, 4, requirements(6, 2, 2)));
     scheduler_test::SchedulerStateBuffer storage(layout);
-    set_metadata(storage.base(), layout, 0, 1, 3);
-    set_metadata(storage.base(), layout, 1, 1, 3);
+    set_metadata(storage.base(), layout, 0, 1, LaneMask(true, true, false));
+    set_metadata(storage.base(), layout, 1, 1, LaneMask(true, true, false));
     ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 17));
     const auto *first = record_at(storage.base(), layout, 0);
     const auto *second = record_at(storage.base(), layout, 1);
@@ -453,16 +456,16 @@ TEST(HbgSpmdLayout, RetainedAllocationRebindsLargeSmallLargeWithoutTouchingInact
     ASSERT_NE(fresh_small.base(), nullptr);
     ASSERT_NE(fresh_large.base(), nullptr);
     constexpr uint64_t device_base = UINT64_C(0x400000000);
-    const auto fill_large_metadata = [&large](void *base, uint16_t blocks, uint8_t pure_mask) {
+    const auto fill_large_metadata = [&large](void *base, uint16_t blocks, LaneMask pure_mask) {
         for (uint64_t task = 0; task < large.task_count; ++task)
-            set_metadata(base, large, task, 1, 1);
+            set_metadata(base, large, task, 1, LaneMask::aic());
         set_metadata(base, large, 1, blocks, pure_mask);
-        set_metadata(base, large, 3, blocks, 3);
-        set_metadata(base, large, 5, blocks, 2);
-        set_metadata(base, large, 8, blocks, 7);
+        set_metadata(base, large, 3, blocks, kAicAiv0);
+        set_metadata(base, large, 5, blocks, LaneMask::aiv0());
+        set_metadata(base, large, 8, blocks, LaneMask::all());
     };
     ASSERT_TRUE(scheduler_init_data_from_layout(retained.base(), large, device_base));
-    fill_large_metadata(retained.base(), 3, 1);
+    fill_large_metadata(retained.base(), 3, LaneMask::aic());
     ASSERT_TRUE(scheduler_init_spmd_task_records(retained.base(), large, 117));
     auto *old_mailboxes = scheduler_state_at<SchedulerGroupMailbox>(retained.base(), large.group_mailboxes_offset);
     for (uint64_t cluster = 0; cluster < large.spmd.cluster_count; ++cluster) {
@@ -486,15 +489,15 @@ TEST(HbgSpmdLayout, RetainedAllocationRebindsLargeSmallLargeWithoutTouchingInact
     EXPECT_EQ(std::memcmp(retained.base(), fresh_small.base(), static_cast<size_t>(small.total_size)), 0);
     expect_empty_protocol(retained.base(), small);
     for (void *base : {retained.base(), fresh_small.base()}) {
-        set_metadata(base, small, 0, 2, 2);
-        set_metadata(base, small, 1, 1, 1);
+        set_metadata(base, small, 0, 2, LaneMask::aiv0());
+        set_metadata(base, small, 1, 1, LaneMask::aic());
         ASSERT_TRUE(scheduler_init_spmd_task_records(base, small, 232));
     }
     EXPECT_EQ(std::memcmp(retained.base(), fresh_small.base(), static_cast<size_t>(small.total_size)), 0);
     EXPECT_EQ(std::memcmp(retained_bytes + small.total_size, inactive_tail.data(), inactive_tail.size()), 0);
     expect_summary_configuration(retained.base(), small, 232);
     EXPECT_EQ(record_at(retained.base(), small, 0)->logical_block_num, 2u);
-    EXPECT_EQ(record_at(retained.base(), small, 0)->active_mask, 2u);
+    EXPECT_EQ(record_at(retained.base(), small, 0)->active_mask, LaneMask::aiv0());
     EXPECT_EQ(record_at(retained.base(), small, 1)->task_ref, SCHEDULER_TASK_REF_INVALID);
 
     ASSERT_TRUE(scheduler_init_data_from_layout(retained.base(), large, device_base));
@@ -502,14 +505,14 @@ TEST(HbgSpmdLayout, RetainedAllocationRebindsLargeSmallLargeWithoutTouchingInact
     EXPECT_EQ(std::memcmp(retained.base(), fresh_large.base(), static_cast<size_t>(large.total_size)), 0);
     expect_empty_protocol(retained.base(), large);
     for (void *base : {retained.base(), fresh_large.base()}) {
-        fill_large_metadata(base, 7, 4);
+        fill_large_metadata(base, 7, LaneMask::aiv1());
         ASSERT_TRUE(scheduler_init_spmd_task_records(base, large, 349));
     }
     EXPECT_EQ(std::memcmp(retained.base(), fresh_large.base(), static_cast<size_t>(large.total_size)), 0);
     expect_summary_configuration(retained.base(), large, 349);
     EXPECT_EQ(record_at(retained.base(), large, 0)->task_ref, SCHEDULER_TASK_REF_INVALID);
     EXPECT_EQ(record_at(retained.base(), large, 1)->logical_block_num, 7u);
-    EXPECT_EQ(record_at(retained.base(), large, 1)->active_mask, 4u);
+    EXPECT_EQ(record_at(retained.base(), large, 1)->active_mask, LaneMask::aiv1());
     EXPECT_EQ(record_at(retained.base(), large, 1)->run_epoch, 0u);
     EXPECT_EQ(
         record_at(retained.base(), large, 8)->mix_close_seals_offset,
@@ -598,9 +601,9 @@ TEST(HbgSpmdLayout, DeviceRelocationKeepsAllProtocolReferencesAsOffsets) {
     for (uint64_t device_base : {UINT64_C(0x400000000), UINT64_C(0x800000000)}) {
         SCOPED_TRACE(device_base);
         ASSERT_TRUE(scheduler_init_data_from_layout(storage.base(), layout, device_base));
-        set_metadata(storage.base(), layout, 0, 3, 1);
-        set_metadata(storage.base(), layout, 1, 2, 7);
-        set_metadata(storage.base(), layout, 2, 1, 2);
+        set_metadata(storage.base(), layout, 0, 3, LaneMask::aic());
+        set_metadata(storage.base(), layout, 1, 2, LaneMask::all());
+        set_metadata(storage.base(), layout, 2, 1, LaneMask::aiv0());
         ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 9));
         for (uint64_t task = 0; task < layout.task_count; ++task) {
             const auto *record = record_at(storage.base(), layout, task);
@@ -626,13 +629,13 @@ TEST(HbgSpmdTaskRecords, InitializesOnlyCooperativeTasksAndPacksOneSealRowPerMix
     ASSERT_TRUE(scheduler_plan_layout(8, 8, 8, &layout, false, 0, requirements(96, 4, 2)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 1, 1);
-    set_metadata(storage.base(), layout, 1, 5, 1, SCHEDULER_TASK_HAS_FANIN);
-    set_metadata(storage.base(), layout, 2, 1, 6);
-    set_metadata(storage.base(), layout, 3, 2, 2, SCHEDULER_TASK_SYNC_START);
-    set_metadata(storage.base(), layout, 4, 17, 7);
-    set_metadata(storage.base(), layout, 5, 0, 0, SCHEDULER_TASK_INLINE);
-    set_metadata(storage.base(), layout, 7, 1, 4);
+    set_metadata(storage.base(), layout, 0, 1, LaneMask::aic());
+    set_metadata(storage.base(), layout, 1, 5, LaneMask::aic(), SCHEDULER_TASK_HAS_FANIN);
+    set_metadata(storage.base(), layout, 2, 1, LaneMask::both_aiv());
+    set_metadata(storage.base(), layout, 3, 2, LaneMask::aiv0(), SCHEDULER_TASK_SYNC_START);
+    set_metadata(storage.base(), layout, 4, 17, LaneMask::all());
+    set_metadata(storage.base(), layout, 5, 0, LaneMask::none(), SCHEDULER_TASK_INLINE);
+    set_metadata(storage.base(), layout, 7, 1, LaneMask::aiv1());
     constexpr uint64_t epoch = 123;
     ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, epoch));
     expect_summary_configuration(storage.base(), layout, epoch);
@@ -679,7 +682,7 @@ TEST(HbgSpmdTaskRecords, EpochIsSuppliedExactlyWithoutHostPublicationOrIncrement
         ASSERT_TRUE(
             scheduler_init_data_from_layout(storage.base(), layout, reinterpret_cast<uint64_t>(storage.base()))
         );
-        set_metadata(storage.base(), layout, 0, 2, 1);
+        set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
         ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, epoch));
         expect_summary_configuration(storage.base(), layout, epoch);
         EXPECT_EQ(record_at(storage.base(), layout, 0)->run_epoch, 0u);
@@ -689,11 +692,33 @@ TEST(HbgSpmdTaskRecords, EpochIsSuppliedExactlyWithoutHostPublicationOrIncrement
 
 struct InvalidTaskShape {
     uint16_t blocks;
-    uint8_t mask;
+    LaneMask mask;
     uint8_t flags;
 };
 
 class HbgSpmdInvalidTaskShape : public ::testing::TestWithParam<InvalidTaskShape> {};
+
+// A lane byte with bits outside the three lanes cannot be built through
+// LaneMask, but the metadata this validates is read back from device memory,
+// where a corrupted image can still carry one.
+TEST(HbgSpmdInvalidLaneByte, RejectsALaneByteWithBitsOutsideTheThreeLanes) {
+    for (uint8_t corrupt : {uint8_t{8}, uint8_t{UINT8_MAX}}) {
+        SCOPED_TRACE(static_cast<uint32_t>(corrupt));
+        AicoreSchedulerLayout layout{};
+        ASSERT_TRUE(scheduler_plan_layout(2, 2, 2, &layout, false, 0, requirements(108, 2, 0)));
+        scheduler_test::SchedulerStateBuffer storage(layout);
+        ASSERT_NE(storage.base(), nullptr);
+        set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
+        set_metadata(storage.base(), layout, 1, 2, LaneMask::aic());
+        auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
+        metadata[1].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD;
+        std::memcpy(&metadata[1].active_mask, &corrupt, sizeof(corrupt));
+        std::vector<uint8_t> before(static_cast<size_t>(layout.total_size));
+        std::memcpy(before.data(), storage.base(), before.size());
+        EXPECT_FALSE(scheduler_init_spmd_task_records(storage.base(), layout, 99));
+        EXPECT_EQ(std::memcmp(before.data(), storage.base(), before.size()), 0);
+    }
+}
 
 TEST_P(HbgSpmdInvalidTaskShape, RejectsBeforePublishingAnyRecordOrEpoch) {
     AicoreSchedulerLayout layout{};
@@ -701,7 +726,7 @@ TEST_P(HbgSpmdInvalidTaskShape, RejectsBeforePublishingAnyRecordOrEpoch) {
     ASSERT_TRUE(scheduler_plan_layout(2, 2, 2, &layout, false, 0, requirements(108, 2, declared_mix)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 2, 1);
+    set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
     set_metadata(storage.base(), layout, 1, GetParam().blocks, GetParam().mask);
     auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
     metadata[1].flags = GetParam().flags;
@@ -714,24 +739,25 @@ TEST_P(HbgSpmdInvalidTaskShape, RejectsBeforePublishingAnyRecordOrEpoch) {
 INSTANTIATE_TEST_SUITE_P(
     ShapeAndFlags, HbgSpmdInvalidTaskShape,
     ::testing::Values(
-        InvalidTaskShape{0, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{2, 0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD},
-        InvalidTaskShape{2, 8, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD},
-        InvalidTaskShape{2, UINT8_MAX, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{2, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD},
-        InvalidTaskShape{2, 1, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{2, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{1, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{1, 1, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SYNC_START},
-        InvalidTaskShape{1, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX | SCHEDULER_TASK_SYNC_START},
-        InvalidTaskShape{2, 1, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_HAS_PREDICATE},
+        InvalidTaskShape{0, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{2, LaneMask::none(), SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD},
+        InvalidTaskShape{2, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD},
+        InvalidTaskShape{2, LaneMask::aic(), SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{2, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{1, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{1, LaneMask::aic(), SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SYNC_START},
+        InvalidTaskShape{1, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX | SCHEDULER_TASK_SYNC_START},
         InvalidTaskShape{
-            2, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX | SCHEDULER_TASK_HAS_PREDICATE
+            2, LaneMask::aic(), SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_HAS_PREDICATE
         },
-        InvalidTaskShape{1, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX | SCHEDULER_TASK_HAS_PREDICATE},
-        InvalidTaskShape{16384, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{10923, 7, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
-        InvalidTaskShape{UINT16_MAX, 3, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX}
+        InvalidTaskShape{
+            2, kAicAiv0,
+            SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX | SCHEDULER_TASK_HAS_PREDICATE
+        },
+        InvalidTaskShape{1, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX | SCHEDULER_TASK_HAS_PREDICATE},
+        InvalidTaskShape{16384, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{10923, LaneMask::all(), SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX},
+        InvalidTaskShape{UINT16_MAX, kAicAiv0, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX}
     )
 );
 
@@ -749,9 +775,9 @@ TEST(HbgSpmdTaskRecords, CooperativeAndMixCountMismatchDoesNotPartiallyInitializ
         ASSERT_TRUE(scheduler_plan_layout(3, 3, 3, &layout, false, 0, spmd));
         scheduler_test::SchedulerStateBuffer storage(layout);
         ASSERT_NE(storage.base(), nullptr);
-        set_metadata(storage.base(), layout, 0, 2, 1);
-        set_metadata(storage.base(), layout, 1, 1, 3);
-        set_metadata(storage.base(), layout, 2, 1, 2);
+        set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
+        set_metadata(storage.base(), layout, 1, 1, kAicAiv0);
+        set_metadata(storage.base(), layout, 2, 1, LaneMask::aiv0());
         std::vector<uint8_t> before(static_cast<size_t>(layout.total_size));
         std::memcpy(before.data(), storage.base(), before.size());
         EXPECT_FALSE(scheduler_init_spmd_task_records(storage.base(), layout, 55));
@@ -764,7 +790,7 @@ TEST(HbgSpmdTaskRecords, MissingProtocolStorageRejectsCooperativeMetadata) {
     ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &layout, false, 0, requirements(3, 0, 0)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 2, 1);
+    set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
     EXPECT_FALSE(scheduler_init_spmd_task_records(storage.base(), layout, 1));
     expect_summary_configuration(storage.base(), layout, 0);
 }
@@ -774,9 +800,9 @@ TEST(HbgSpmdTaskRecords, OrdinaryPredicateAndSkippedEntriesNeedNoAdmissionStorag
     ASSERT_TRUE(scheduler_plan_layout(4, 4, 4, &layout, false, 0, requirements(3, 0, 0)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 1, 1, SCHEDULER_TASK_HAS_PREDICATE);
-    set_metadata(storage.base(), layout, 1, 1, 2, SCHEDULER_TASK_HAS_PREDICATE);
-    set_metadata(storage.base(), layout, 2, 0, 0, SCHEDULER_TASK_INLINE);
+    set_metadata(storage.base(), layout, 0, 1, LaneMask::aic(), SCHEDULER_TASK_HAS_PREDICATE);
+    set_metadata(storage.base(), layout, 1, 1, LaneMask::aiv0(), SCHEDULER_TASK_HAS_PREDICATE);
+    set_metadata(storage.base(), layout, 2, 0, LaneMask::none(), SCHEDULER_TASK_INLINE);
     ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
     expect_summary_configuration(storage.base(), layout, 37);
     expect_no_protocol_storage(layout);
@@ -793,7 +819,7 @@ TEST(HbgSpmdTaskRecords, RejectsUnalignedStorageWithoutChangingState) {
     ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &layout, false, 0, requirements(3, 1, 0)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 2, 1);
+    set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
     std::vector<uint8_t> before(static_cast<size_t>(layout.total_size));
     std::memcpy(before.data(), storage.base(), before.size());
     for (uint64_t displacement : {1u, 8u, 64u, 127u}) {
@@ -810,8 +836,8 @@ TEST(HbgSpmdTaskRecords, RejectsTimingSlotsOutsideTaskAttrsRangeWithoutPartialPu
     ASSERT_TRUE(scheduler_plan_layout(2, 2, 0, &layout, false, 0, requirements(3, 2, 0)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, 2, 1);
-    set_metadata(storage.base(), layout, 1, 2, 1);
+    set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
+    set_metadata(storage.base(), layout, 1, 2, LaneMask::aic());
     auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
     for (int16_t timing_slot : {-2, INT16_MIN, 16, INT16_MAX}) {
         SCOPED_TRACE(timing_slot);
@@ -829,11 +855,11 @@ TEST(HbgSpmdTaskRecords, AcceptsMaximumRepresentablePureAndMixSubtaskCounts) {
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
     uint64_t task = 0;
-    for (uint8_t mask : {1u, 2u, 4u})
+    for (LaneMask mask : {LaneMask::aic(), LaneMask::aiv0(), LaneMask::aiv1()})
         set_metadata(storage.base(), layout, task++, INT16_MAX, mask);
-    for (uint8_t mask : {3u, 5u, 6u})
+    for (LaneMask mask : {kAicAiv0, kAicAiv1, LaneMask::both_aiv()})
         set_metadata(storage.base(), layout, task++, 16383, mask);
-    set_metadata(storage.base(), layout, task, 10922, 7);
+    set_metadata(storage.base(), layout, task, 10922, LaneMask::all());
     ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 11));
     for (task = 0; task < layout.task_count; ++task) {
         SCOPED_TRACE(task);
@@ -848,7 +874,7 @@ TEST(HbgSpmdTaskRecords, DispatchMetadataAlwaysCopiesLogicalBlockCountAndTimingS
     ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &layout, false, 0, requirements(3, 1, 0)));
     scheduler_test::SchedulerStateBuffer storage(layout);
     ASSERT_NE(storage.base(), nullptr);
-    set_metadata(storage.base(), layout, 0, INT16_MAX, 1);
+    set_metadata(storage.base(), layout, 0, INT16_MAX, LaneMask::aic());
     auto *source = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
     source->trace_index_base = UINT32_MAX;
     SchedulerLocalState local{};
@@ -1028,9 +1054,9 @@ TEST(HbgProtocolTrace, RetainedResetErasesAllEvidenceAndBindsTheLiteralNewEpoch)
     scheduler_test::SchedulerStateBuffer storage(layout);
     const auto init = [&](uint64_t epoch) {
         EXPECT_TRUE(scheduler_init_data_from_layout(storage.base(), layout, UINT64_C(0x400000000)));
-        set_metadata(storage.base(), layout, 0, 2, 1);
-        set_metadata(storage.base(), layout, 1, 2, 3);
-        set_metadata(storage.base(), layout, 2, 1, 2);
+        set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
+        set_metadata(storage.base(), layout, 1, 2, kAicAiv0);
+        set_metadata(storage.base(), layout, 2, 1, LaneMask::aiv0());
         EXPECT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, epoch));
     };
     for (uint64_t epoch : {UINT64_C(0), UINT64_MAX}) {

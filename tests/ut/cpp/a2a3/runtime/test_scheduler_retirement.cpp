@@ -85,7 +85,9 @@ bool assign_owned(Context &, Runtime *, int, long) {
 }  // namespace
 
 uint32_t platform_get_physical_cores_count() { return kCores; }
-extern "C" uint64_t get_platform_run_result_epoch() { return 0; }
+static uint64_t test_report_epoch = 0;
+static std::atomic<int> nonce_batches{0};
+extern "C" uint64_t get_platform_run_result_epoch() { return test_report_epoch; }
 uint64_t platform_aicore_exit_deadline() { return ++deadlines; }
 uint64_t read_reg(uint64_t, RegId) { return AICORE_IDLE_VALUE; }
 volatile uint32_t *get_reg_ptr(uint64_t address, RegId) { return &conditions.at(address - 1); }
@@ -107,6 +109,7 @@ void platform_init_aicore_regs(uint64_t address) {
 }
 
 int32_t platform_retire_aicore_group(const AicoreExitTarget *targets, size_t count, uint64_t, bool *released) {
+    ++nonce_batches;
     ++batches;
     bool timed_out = false;
     for (size_t i = 0; i < count; ++i) {
@@ -167,6 +170,8 @@ protected:
     std::array<uint64_t, kCores> regs{};
 
     void SetUp() override {
+        test_report_epoch = 0;
+        nonce_batches = 0;
         batches = 0;
         deadlines = 0;
         pause_open = false;
@@ -468,4 +473,41 @@ TEST_F(SchedulerRetirement, NewGenerationClearsPendingRequestsAndReturnGates) {
         EXPECT_EQ(runtime->get_teardown_gates()[i].post_close_release, 0U);
     EXPECT_EQ(request_all(), 0);
     expect_once();
+}
+
+TEST_F(SchedulerRetirement, InitializationClearsRequestAndReleaseForEveryCore) {
+    for (int i = 0; i < kCores; ++i) {
+        auto &control = runtime->dev.teardown_gates[i];
+        control.post_close_release = AICORE_POST_CLOSE_RELEASE;
+        control.exit_request = 9;
+    }
+    ASSERT_EQ(initialize(*context, runtime.get(), reinterpret_cast<uint64_t>(regs.data()), 0), 0);
+    for (int i = 0; i < kCores; ++i) {
+        const auto &control = runtime->dev.teardown_gates[i];
+        EXPECT_EQ(control.post_close_release, 0u);
+        EXPECT_EQ(control.exit_request, 0u);
+    }
+}
+
+TEST_F(SchedulerRetirement, NativeModeClaimsOnlyAfterCurrentReportAndUsesCondNonce) {
+    test_report_epoch = 42;
+    ASSERT_EQ(initialize(*context, runtime.get(), reinterpret_cast<uint64_t>(regs.data()), 0), 0);
+    for (int i = 0; i < kCores; ++i) {
+        EXPECT_EQ(runtime->get_teardown_gates()[i].exit_request, 0U);
+        EXPECT_EQ(runtime->get_teardown_gates()[i].post_close_release, 0U);
+        runtime->dev.workers[i].report_epoch = 42;
+    }
+    SchedulerContextTestPeer::assign(*context);
+    EXPECT_EQ(request_all(), 0);
+    EXPECT_EQ(nonce_batches.load(), 0);
+    handshake();
+    expect_once();
+    EXPECT_EQ(nonce_batches.load(), 1);
+    test_report_epoch = 0;
+}
+TEST_F(SchedulerRetirement, UnstampedModeUsesNonceAfterOwnershipPublication) {
+    handshake();
+    EXPECT_EQ(request_all(), 0);
+    expect_once();
+    EXPECT_EQ(nonce_batches.load(), 1);
 }

@@ -45,7 +45,6 @@ from simpler.callable_identity import (
 from simpler.task_interface import (
     MAILBOX_ERROR_MSG_SIZE,
     MAILBOX_OFF_ERROR_MSG,
-    MAILBOX_SIZE,
     ChipCallable,
     DataType,
     TaskArgs,
@@ -63,9 +62,13 @@ from simpler.worker import (
     RunHandle,
     Worker,
     _buffer_field_addr,
+    _close_fork_child_fds,
     _mailbox_addr,
+    _mailbox_extent,
     _mailbox_load_i32,
+    _mailbox_load_u64,
     _mailbox_store_i32,
+    _mailbox_store_u64,
     _pack_py_callable_payload,
 )
 from simpler.worker_level import WorkerLevel
@@ -138,6 +141,15 @@ def _make_shared_counter():
 
 def _read_counter(buf) -> int:
     return struct.unpack_from("i", buf, 0)[0]
+
+
+def test_close_fork_child_fds_ignores_invalid_entries(monkeypatch):
+    closed: list[int] = []
+    monkeypatch.setattr(worker_mod.os, "close", closed.append)
+
+    _close_fork_child_fds(["invalid", 2, 7, object()])
+
+    assert closed == [7]
 
 
 def _increment_counter(buf) -> None:
@@ -222,54 +234,34 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
         # route negotiates two frames without joining native launches.
         supports_joined_native_launch = False
 
-        def init(
-            self,
-            device_id,
-            bins,
-            *,
-            log_level,
-            prewarm_config=None,
-            enable_sdma=False,
-            collect_across_runs=False,
-            requested_pipeline_depth=0,
-        ):
-            events.append(
-                (
-                    "init",
-                    device_id,
-                    bins,
-                    log_level,
-                    prewarm_config,
-                    enable_sdma,
-                    collect_across_runs,
-                    requested_pipeline_depth,
-                )
-            )
+        def init(self, *args):
+            events.append(("init", *args))
 
         def finalize(self) -> None:
             events.append(("finalize",))
 
     def fake_run_chip_main_loop(
-        cw, *_args, chip_platform, chip_runtime, prepared=None, task_frame_count=1, chip_rank=None, **_kwargs
+        cw, *_args, chip_platform, chip_runtime, prepared=None, granted_sets=1, chip_rank=None, **_kwargs
     ):
         assert chip_rank is None
         depth, frames, _spare = worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)
         published_depths.append(depth)
-        published_frame_counts.append(task_frame_count)
-        # The parent registers the endpoint from this word, so the count the loop polls and the
-        # count published for the parent are the same number.
-        assert frames == task_frame_count
+        published_frame_counts.append(granted_sets)
+        # The parent registers the endpoint from this word, so the count the loop's entry table is
+        # built to and the count published for the parent are the same number.
+        assert frames == granted_sets
         events.append(("main_loop", cw, chip_platform, chip_runtime))
 
-    monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
+    monkeypatch.setattr(worker_mod, "_ChipWorker", FakeChipWorker)
     monkeypatch.setattr(worker_mod, "_run_chip_main_loop", fake_run_chip_main_loop)
 
-    shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+    bins = SimpleNamespace(host_path="host.so", aicpu_path="aicpu.so", aicore_path="aicore.bin")
+    shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
     try:
         assert shm.buf is not None
         worker_mod._chip_process_loop(
             shm.buf,
-            "bins",
+            bins,
             7,
             {},
             {},
@@ -286,7 +278,7 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
 
     # A chip child asked for no particular capacity passes zero through, which is what makes the
     # grant the runtime's standing default rather than its published maximum.
-    assert events[0] == ("init", 7, "bins", 25, None, False, False, 0)
+    assert events[0] == ("init", "host.so", "aicpu.so", "aicore.bin", "", 7, None, False, "", "", False, 0, False, 0)
     assert events[1][0] == "main_loop"
     assert events[1][2:] == ("a2a3", "tensormap_and_ringbuffer")
     assert events[2] == ("finalize",)
@@ -295,28 +287,33 @@ def test_chip_process_loop_inits_runs_and_finalizes(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("launch_depth", "configured", "expected_frames"),
+    ("launch_depth", "configured"),
     [
         # The native entry is reached only above depth one, so the default route configures
-        # nothing on the ChipWorker and publishes the single-frame serial contract.
-        (1, [], 1),
+        # nothing on the ChipWorker.
+        (1, []),
         # At depth two the child configures its own ChipWorker before init — the only place the
-        # request and the runtime's resolved capability meet — and publishes the second frame.
-        (2, [2], 2),
+        # request and the runtime's resolved capability meet.
+        (2, [2]),
     ],
 )
-def test_chip_child_configures_its_launch_depth_through_the_native_entry(
-    monkeypatch, launch_depth, configured, expected_frames
-):
-    """a5 TMR's frame count follows the capability the child resolved, through the native entry.
+def test_chip_child_configures_its_launch_depth_through_the_native_entry(monkeypatch, launch_depth, configured):
+    """The launch budget reaches the ChipWorker; the grant the child publishes does not follow it.
 
     ``ChipWorker.configure_launch_depth`` is the only configuration route below the public
     Worker — it is bound for direct callers as well — so this covers both: the public route's
     child arrives here, and a caller driving a ``ChipWorker`` itself reaches the same entry with
-    the same effect on the negotiated frame count.
+    the same effect.
+
+    The grant is the second half, and the two rows are what make it a claim rather than a
+    coincidence. Whatever launch budget the child was started with, the sets it publishes are the
+    depth its ``ChipWorker`` resolved — a run-resource count, which request frames are separate
+    from and which the launch budget does not clip. A child that still derived its grant from the
+    launch budget would satisfy the configure half above and fail the publication below.
     """
     configured_depths: list[int] = []
-    published_frame_counts: list[int] = []
+    published_depths: list[int] = []
+    published_sets: list[int] = []
 
     class FakeChipWorker:
         pipeline_depth = 2
@@ -325,28 +322,30 @@ def test_chip_child_configures_its_launch_depth_through_the_native_entry(
         def configure_launch_depth(self, depth: int) -> None:
             configured_depths.append(int(depth))
 
-        def init(self, device_id, bins, **_kwargs):
-            del device_id, bins
+        def init(self, *_args):
+            pass
 
         def finalize(self) -> None:
             pass
 
-    def fake_run_chip_main_loop(cw, *_args, task_frame_count=1, **_kwargs):
+    def fake_run_chip_main_loop(cw, *_args, granted_sets=1, **_kwargs):
         del cw
-        depth, frames, _spare = worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)
-        del depth
-        published_frame_counts.append(task_frame_count)
-        assert frames == task_frame_count
+        depth, sets, _spare = worker_mod._PIPELINE_LEASE_FMT.unpack_from(_args[0], worker_mod._OFF_PIPELINE_LEASE)
+        published_depths.append(depth)
+        published_sets.append(granted_sets)
+        # The loop is handed the same number the lease carries, so the parent and the child
+        # cannot disagree about how many sets exist.
+        assert sets == granted_sets
 
-    monkeypatch.setattr(worker_mod, "ChipWorker", FakeChipWorker)
+    monkeypatch.setattr(worker_mod, "_ChipWorker", FakeChipWorker)
     monkeypatch.setattr(worker_mod, "_run_chip_main_loop", fake_run_chip_main_loop)
 
-    shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+    shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
     try:
         assert shm.buf is not None
         worker_mod._chip_process_loop(
             shm.buf,
-            "bins",
+            SimpleNamespace(host_path="host.so", aicpu_path="aicpu.so", aicore_path="aicore.bin"),
             0,
             {},
             {},
@@ -363,7 +362,11 @@ def test_chip_child_configures_its_launch_depth_through_the_native_entry(
         shm.unlink()
 
     assert configured_depths == configured
-    assert published_frame_counts == [expected_frames]
+    assert published_depths == [FakeChipWorker.pipeline_depth]
+    assert published_sets == [FakeChipWorker.pipeline_depth], (
+        f"a child started at launch_depth={launch_depth} published {published_sets} run-resource sets rather "
+        f"than the {FakeChipWorker.pipeline_depth} its ChipWorker resolved"
+    )
 
 
 def _dummy_l2_domain(domain_id: int):
@@ -490,7 +493,7 @@ def test_sweep_l2_global_domains_attempts_every_domain_and_lists_failures_by_id(
         }
     )
     with pytest.raises(RuntimeError, match="domain cleanup failed") as exc_info:
-        worker_mod._sweep_l2_global_domains(cast(Any, SimpleNamespace(_impl=impl)), store)
+        worker_mod._sweep_l2_global_domains(cast(Any, impl), store)
     assert impl.released == [3, 5, 7]
     assert store.domains == {}
     message = str(exc_info.value)
@@ -547,7 +550,7 @@ def test_teardown_chip_process_resources_continues_and_aggregates_in_order():
     with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
         worker_mod._teardown_chip_process_resources(
             cast(Any, registry),
-            cast(Any, SimpleNamespace(_impl=impl)),
+            cast(Any, impl),
             domains,
             store,
         )
@@ -610,7 +613,7 @@ def test_teardown_chip_process_resources_lists_every_retained_resource():
     with pytest.raises(RuntimeError, match="chip process resource teardown failed") as exc_info:
         worker_mod._teardown_chip_process_resources(
             cast(Any, _RecordingImportRegistry()),
-            cast(Any, SimpleNamespace(_impl=_RecordingDomainImpl())),
+            cast(Any, _RecordingDomainImpl()),
             worker_mod._L2GlobalDomainStore(),
             store,
         )
@@ -657,7 +660,7 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
     )
     worker_mod._teardown_chip_process_resources(
         cast(Any, registry),
-        cast(Any, SimpleNamespace(_impl=impl)),
+        cast(Any, impl),
         domains,
         store,
     )
@@ -668,29 +671,24 @@ def test_teardown_chip_process_resources_ignores_released_and_keeps_each_step_on
     assert store.state is ProviderRegionStoreState.CLOSED
 
 
-@pytest.mark.parametrize(
-    ("platform", "runtime", "depth", "joins", "expected"),
-    [
-        ("a2a3", "host_build_graph", 2, False, 2),
-        ("a2a3", "host_build_graph", 1, False, 1),
-        ("a2a3", "tensormap_and_ringbuffer", 2, False, 2),
-        # Every other route negotiates a successor frame only where the child resolved that it
-        # can order one native submission behind another. Depth alone does not, and the runtime
-        # name does not either: both a5 runtimes grant two resource sets and both now join, so
-        # the same runtime appears here under each answer.
-        ("a5", "host_build_graph", 2, True, 2),
-        ("a5", "host_build_graph", 2, False, 1),
-        ("a5", "tensormap_and_ringbuffer", 2, True, 2),
-        ("a5", "tensormap_and_ringbuffer", 2, False, 1),
-        ("a5sim", "tensormap_and_ringbuffer", 2, False, 1),
-        ("a2a3sim", "host_build_graph", 2, False, 1),
-        # A joining route still cannot use a frame the granted sets do not back.
-        ("a5", "host_build_graph", 1, True, 1),
-        ("a5", "tensormap_and_ringbuffer", 1, True, 1),
-    ],
-)
-def test_local_task_frame_count_follows_a2a3_depth_or_a_resolved_join(platform, runtime, depth, joins, expected):
-    assert worker_mod._local_task_frame_count(platform, runtime, depth, joins) == expected
+@pytest.mark.parametrize("depth", [1, 2, 3, 8, 64, 1024])
+def test_a_chip_child_grants_the_depth_it_resolved(depth):
+    """The grant is the resolved depth, on every route.
+
+    It used to be conditional: a route that could not order one native submission behind another
+    was handed a single set however wide the request, because the count also stood for the task
+    frames a successor would occupy. Those are two separate numbers now — request frames are a
+    fixed pool that carries hand-offs, and this count sizes the run-state entries a run holds —
+    so joining and granting are no longer the same question, and nothing about the platform or
+    the runtime enters this answer.
+    """
+    assert worker_mod._local_run_resource_set_count(depth) == depth
+
+
+def test_a_grant_below_one_set_is_refused_rather_than_published():
+    """There is no such thing as a chip child that can hold no run at all."""
+    with pytest.raises(ValueError, match="at least one run-resource set"):
+        worker_mod._local_run_resource_set_count(0)
 
 
 @pytest.mark.parametrize("level", [1, 2])
@@ -719,56 +717,63 @@ def test_launch_depth_comes_from_each_workers_own_config():
 
 
 @pytest.mark.parametrize(
-    ("frame_counts", "depths"),
+    ("resource_counts", "depths"),
     [
-        # Below one: no frame at all to publish a dispatch into.
+        # Below one: no run-resource set at all to publish a dispatch into.
         ([0], [2]),
-        # Above the sets that child granted, so the extra frame has no resources behind it.
+        # Above the sets that child granted, so the extra run has no resources behind it.
         ([3], [2]),
-        # Above the frames the mailbox is laid out for, so the extra frame is past the region.
-        ([worker_mod._TASK_FRAME_COUNT + 1], [worker_mod._TASK_FRAME_COUNT + 1]),
+        # Above the grant this Worker's mailbox was created for, so the extra run has no
+        # run-state entry behind it.
+        ([worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST + 1], [worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST + 1]),
         # One child's answer missing entirely.
         ([2], [2, 2]),
     ],
 )
-def test_a_chip_published_frame_count_the_parent_cannot_honour_fails_startup(frame_counts, depths):
-    """A frame count that does not reconcile is a startup error, not a quietly clamped one.
+def test_a_chip_published_run_resource_count_the_parent_cannot_honour_fails_startup(resource_counts, depths):
+    """A granted-set count that does not reconcile is a startup error, not a quietly clamped one.
 
-    The parent publishes dispatches into exactly the frames its child polls, so a disagreement
-    about how many exist is a dispatch written where nothing reads it — which presents as a run
-    that never completes rather than as an error. Refusing at startup is what keeps that from
-    being the symptom.
+    The parent sizes its run-state entry table from this number and admits exactly the runs it
+    covers, so a disagreement about how many sets exist is a dispatch published into an entry the
+    child never polls — which presents as a run that never completes rather than as an error.
+    Refusing at startup is what keeps that from being the symptom.
     """
     worker = Worker(level=3, device_ids=[0], num_sub_workers=0, platform="a5", runtime="host_build_graph")
-    with pytest.raises(RuntimeError, match="task frame counts|frame counts for"):
-        worker._granted_chip_task_frame_counts(frame_counts, depths)
+    with pytest.raises(RuntimeError, match="invalid run-resource counts|resource grants for"):
+        worker._granted_chip_run_resource_sets(resource_counts, depths)
 
 
-def test_a_reconciled_chip_frame_count_is_taken_as_published():
-    """Each child's own count, in its own order: two children may negotiate differently."""
+def test_a_reconciled_chip_resource_grant_is_taken_as_published():
+    """Each child's own grant, in its own order: two children may resolve different depths."""
     worker = Worker(level=3, device_ids=[0, 1], num_sub_workers=0, platform="a5", runtime="host_build_graph")
-    assert worker._granted_chip_task_frame_counts([2, 1], [2, 2]) == [2, 1]
+    assert worker._granted_chip_run_resource_sets([2, 1], [2, 2]) == [2, 1]
 
 
-def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypatch):
+@pytest.mark.parametrize(("automatic", "undersized"), [(False, False), (True, False), (False, True)])
+def test_start_hierarchical_passes_each_chip_its_published_resource_grant(monkeypatch, automatic, undersized):
     class FakeParentWorker:
         def __init__(self) -> None:
+            self.initial_admission_depths: list[int] = []
             self.configured_depths: list[int] = []
             self.configured_pending_depths: list[int] = []
             self.configured_launch_depths: list[int] = []
-            self.next_level_calls: list[tuple[int, int, int]] = []
+            self.next_level_calls: list[tuple[int, int, int, int]] = []
             self.initialized = False
 
-        def configure_pipeline_depth(self, depth: int, pending_depth: int = 0, launch_depth: int = 1) -> None:
+        def configure_pipeline_depth(
+            self, depth: int, pending_depth: int = 0, launch_depth: int = 1, initial_admission_depth: int = 0
+        ) -> None:
             # Three budgets: the negotiated native pipeline-slot depth, the
             # logical admission cap that defaults to deriving from it, and how
             # many of those runs may have device work launched at once.
+            assert not self.initialized
+            self.initial_admission_depths.append(initial_admission_depth)
             self.configured_depths.append(int(depth))
             self.configured_pending_depths.append(int(pending_depth))
             self.configured_launch_depths.append(int(launch_depth))
 
-        def add_next_level_worker(self, mailbox_addr: int, pid: int, task_frame_count: int) -> None:
-            self.next_level_calls.append((int(mailbox_addr), int(pid), int(task_frame_count)))
+        def add_next_level_worker(self, mailbox_addr: int, mailbox_bytes: int, pid: int, granted_sets: int) -> None:
+            self.next_level_calls.append((int(mailbox_addr), int(mailbox_bytes), int(pid), int(granted_sets)))
 
         def init(self) -> None:
             self.initialized = True
@@ -782,8 +787,17 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
         num_sub_workers=0,
         platform="a2a3",
         runtime="host_build_graph",
+        **({} if automatic else {"pipeline_depth": 2}),
     )
-    worker._chip_shms = [SharedMemory(create=True, size=MAILBOX_SIZE) for _ in range(2)]
+    directory = worker_mod._AUTOMATIC_IDENTITY_DIRECTORY_SETS
+    depths = (directory, directory) if automatic else ((2, 1) if undersized else (2, 2))
+    grants = (directory, directory) if automatic else (2, 1)
+    # _init_hierarchical resolves this before creating mailboxes; this fixture
+    # enters _start_hierarchical directly after replacing those resources.
+    worker._mailbox_granted_sets = worker._requested_chip_pipeline_depth()
+    worker._chip_shms = [
+        SharedMemory(create=True, size=worker_mod.mailbox_size(directory if automatic else 2)) for _ in range(2)
+    ]
     worker._l3_bins = "bins"
     fake_parent = FakeParentWorker()
     worker._worker = cast(Any, fake_parent)
@@ -794,12 +808,12 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     def fake_await_children_ready(shms, _pids, kind: str, _deadline: float) -> None:
         if kind != "chip":
             return
-        # What the child publishes at INIT_READY: the sets it granted, and the task frames it
-        # will poll. The parent takes the frame count from here rather than deriving it, so a
-        # child that negotiated one frame is registered with one.
-        for shm, depth, frames in zip(shms, (2, 1), (2, 1)):
+        # What the child publishes at INIT_READY: its resolved depth and the run-resource sets it
+        # granted. The parent takes the grant from here rather than deriving it, so a child that
+        # resolved one set is registered with one.
+        for shm, depth, granted_sets in zip(shms, depths, grants):
             assert shm.buf is not None
-            worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, frames, 0)
+            worker_mod._PIPELINE_LEASE_FMT.pack_into(shm.buf, worker_mod._OFF_PIPELINE_LEASE, depth, granted_sets, 0)
 
     def fake_fork() -> int:
         startup_events.append(("fork",))
@@ -816,19 +830,36 @@ def test_start_hierarchical_passes_each_chip_its_negotiated_frame_count(monkeypa
     monkeypatch.setattr(worker_mod, "_start_host_log_writer", lambda: startup_events.append(("writer",)))
     monkeypatch.setattr(worker, "_await_children_ready", fake_await_children_ready)
     monkeypatch.setattr(worker_mod, "Orchestrator", lambda native, owner: (native, owner))
+    # Read before the teardown below unmaps them: this is what each registration has to declare,
+    # and it is not the size that was asked for — macOS rounds a POSIX shm mapping up to a page.
+    mapped_extents = [shm.buf.nbytes for shm in worker._chip_shms if shm.buf is not None]
     try:
+        if undersized:
+            with pytest.raises(RuntimeError, match="pipeline_depth"):
+                worker._start_hierarchical()
+            assert not fake_parent.initialized
+            assert not fake_parent.next_level_calls
+            return
         worker._start_hierarchical()
     finally:
         for shm in worker._chip_shms:
             shm.close()
             shm.unlink()
 
-    assert fake_parent.configured_depths == [1]
+    assert fake_parent.configured_depths == [min(depths)]
+    assert fake_parent.initial_admission_depths == [1 if automatic else 0]
     assert fake_parent.configured_pending_depths == [0]
-    # One launched run: the default launch depth, and no more than the frames the narrower
-    # child negotiated could carry anyway.
-    assert fake_parent.configured_launch_depths == [1]
-    assert [call[1:] for call in fake_parent.next_level_calls] == [(12001, 2), (12002, 1)]
+    # One launched run: the default launch depth, and no more than the grant the narrower child
+    # published could hold anyway.
+    assert fake_parent.configured_launch_depths == [directory if automatic else 1]
+    assert [call[2:] for call in fake_parent.next_level_calls] == list(zip((12001, 12002), grants))
+    # Each registration carries the extent of the region this process actually mapped, not the one
+    # the grant it publishes would imply: the C++ side checks the second against the first, so a
+    # child that granted two sets is still registered against the whole mapping.
+    assert [call[1] for call in fake_parent.next_level_calls] == mapped_extents
+    assert all(
+        extent >= worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST) for extent in mapped_extents
+    )
     assert fake_parent.initialized
     assert startup_events[0] == ("log", 60, True)
     assert startup_events[1:] == [("fork",), ("fork",), ("writer",)]
@@ -846,11 +877,14 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
         def __init__(self) -> None:
             self.initialized = False
             self.sub_workers: list[int] = []
+            self.configured = None
 
-        def configure_pipeline_depth(self, depth: int, pending_depth: int = 0, launch_depth: int = 1) -> None:
-            pass
+        def configure_pipeline_depth(
+            self, depth: int, pending_depth: int = 0, launch_depth: int = 1, initial_admission_depth: int = 0
+        ) -> None:
+            self.configured = (depth, pending_depth, launch_depth, initial_admission_depth)
 
-        def add_sub_worker(self, _mailbox_addr: int, pid: int) -> None:
+        def add_sub_worker(self, _mailbox_addr: int, _mailbox_bytes: int, pid: int) -> None:
             self.sub_workers.append(pid)
 
         def init(self) -> None:
@@ -866,7 +900,9 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
         platform="a2a3",
         runtime="host_build_graph",
     )
-    worker._sub_shms = [SharedMemory(create=True, size=MAILBOX_SIZE)]
+    worker._sub_shms = [
+        SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
+    ]
     worker._worker = cast(Any, FakeParentWorker())
     worker._startup_deadline = time.monotonic() + 5.0
     startup_events: list[tuple] = []
@@ -893,6 +929,10 @@ def test_start_hierarchical_seeds_the_logger_when_the_process_owns_no_chips(monk
             shm.close()
             shm.unlink()
 
+    assert worker._worker is not None
+    assert worker._worker.initialized
+    assert worker._worker.configured == (worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST, 0, 1, 0)
+    assert worker._worker.sub_workers == [13001]
     assert startup_events[0] == ("log", 60, True)
     assert startup_events[1:] == [("fork",), ("writer",)]
 
@@ -971,7 +1011,7 @@ class _FakeNativeRunImpl:
         self._lane_poisoned = False
 
     def _stop_chip_run_lane_admission(self) -> None:
-        """The control loop reaches this through ``cw._impl`` when ownership is unknown.
+        """The control loop reaches this through the native chip entry when ownership is unknown.
 
         Stopping admission is not a recovery: whatever poisoned the lane stays poisoned, so a
         `close` that follows still reports it.
@@ -1021,7 +1061,7 @@ class _FakeNativeRunImpl:
         slot = int(token.slot_id)
         accepted_addr = int(token.accepted_addr)
         accepted_value = int(token.accepted_value)
-        state_addr = int(accepted_addr) - worker_mod._OFF_ACCEPTED
+        state_addr = int(accepted_addr) - worker_mod._OFF_ENTRY_ACCEPTED + worker_mod._OFF_ENTRY_STATE
         self.events.append(
             (
                 "launch_enter",
@@ -1039,7 +1079,7 @@ class _FakeNativeRunImpl:
 
     def _poll_native_run(self, token) -> bool:
         slot = int(token.slot_id)
-        state_addr = int(token.accepted_addr) - worker_mod._OFF_ACCEPTED
+        state_addr = int(token.accepted_addr) - worker_mod._OFF_ENTRY_ACCEPTED + worker_mod._OFF_ENTRY_STATE
         self.poll_states.append((slot, _mailbox_load_i32(state_addr)))
         error = self.poll_errors.get((slot, int(token.generation)))
         if error is not None:
@@ -1223,12 +1263,12 @@ class _FakeNativeRunImpl:
             raise RuntimeError("fake chip run lane is poisoned")
 
 
-class _FakeTwoFrameChipWorker:
+class _FakeTwoFrameChipWorker(_FakeNativeRunImpl):
     """Collaborator double handed straight to ``_run_chip_main_loop`` in-process.
 
-    Distinct from ``_harness.FakeChipWorker``, which stands in for the class the
+    Distinct from ``_harness._FakeChipImpl``, which stands in for the class the
     forked chip child instantiates: this one is never bound as
-    ``worker.ChipWorker`` and never init'd or finalized, so it implements only
+    ``worker._ChipWorker`` and never init'd or finalized, so it implements only
     the two-frame native-run surface the loop drives.
     """
 
@@ -1236,7 +1276,7 @@ class _FakeTwoFrameChipWorker:
     launch_depth = 1
 
     def __init__(self, *, supports_concurrent_native_prepare: bool = False) -> None:
-        self._impl = _FakeNativeRunImpl(supports_concurrent_native_prepare=supports_concurrent_native_prepare)
+        super().__init__(supports_concurrent_native_prepare=supports_concurrent_native_prepare)
         self.malloc_called = threading.Event()
         self.unregister_calls: list[int] = []
         self.unregister_called = threading.Event()
@@ -1250,11 +1290,11 @@ class _FakeTwoFrameChipWorker:
         self.exported_device_regions_live = bool(live)
 
     def malloc(self, size: int) -> int:
-        self._impl.events.append(("malloc", int(size)))
+        self.events.append(("malloc", int(size)))
         self.malloc_called.set()
         return 0xCAFE
 
-    def _unregister_slot(self, cid: int) -> None:
+    def unregister_callable(self, cid: int) -> None:
         self.unregister_calls.append(int(cid))
         self.unregister_called.set()
         if self.unregister_error is not None:
@@ -1268,7 +1308,7 @@ class _TwoFrameLoopHarness:
         supports_concurrent_native_prepare: bool = False,
         chip_runtime: str = "",
     ) -> None:
-        self.shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        self.shm = SharedMemory(create=True, size=worker_mod.mailbox_size(2))
         self.buf = cast(memoryview, self.shm.buf)
         assert self.buf is not None
         self.mailbox_addr = _mailbox_addr(self.shm)
@@ -1285,6 +1325,8 @@ class _TwoFrameLoopHarness:
             return value
 
         self.digest = bytes([0x42]) * worker_mod.CALLABLE_HASH_DIGEST_BYTES
+        self._frame_generation = 0
+        self._entry_generations: dict[int, int] = {}
         self.cw = _FakeTwoFrameChipWorker(supports_concurrent_native_prepare=supports_concurrent_native_prepare)
         self.registry = {7: object()}
         self.identity_table = {self.digest: 7}
@@ -1307,26 +1349,36 @@ class _TwoFrameLoopHarness:
                 "chip_platform": "a2a3",
                 "chip_runtime": chip_runtime,
                 "prepared": self.prepared,
-                "task_frame_count": 2,
+                "granted_sets": 2,
                 "provider_region_store": _chip_loop_provider_region_store(chip_platform="a2a3"),
             },
         )
         self._mailbox_load_patch = patch.object(worker_mod, "_mailbox_load_i32", observed_mailbox_load)
         self._mailbox_load_patch.start()
 
-    def _frame_offset(self, index: int) -> int:
-        return (1 + index) * worker_mod.MAILBOX_FRAME_SIZE
+    def _frame_offset(self, frame_index: int) -> int:
+        return (1 + frame_index) * worker_mod.MAILBOX_FRAME_SIZE
+
+    def _entry_offset(self, index: int) -> int:
+        return worker_mod.MAILBOX_RUN_ENTRY_TABLE_OFFSET + index * worker_mod.MAILBOX_RUN_ENTRY_STRIDE
 
     def state_addr(self, index: int) -> int:
-        return self.mailbox_addr + self._frame_offset(index) + _OFF_STATE
+        """A run's state lives in its entry; `index` names the entry, not a frame."""
+        return self.mailbox_addr + self._entry_offset(index) + worker_mod._OFF_ENTRY_STATE
+
+    def frame_state_addr(self, frame_index: int) -> int:
+        return self.mailbox_addr + self._frame_offset(frame_index) + _OFF_STATE
 
     def accepted_addr(self, index: int) -> int:
-        return self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_ACCEPTED
+        return self.mailbox_addr + self._entry_offset(index) + worker_mod._OFF_ENTRY_ACCEPTED
 
     def preparation_disposition(self, index: int) -> int:
         return _mailbox_load_i32(
-            self.mailbox_addr + self._frame_offset(index) + worker_mod._OFF_PREPARATION_DISPOSITION
+            self.mailbox_addr + self._entry_offset(index) + worker_mod._OFF_ENTRY_PREPARATION_DISPOSITION
         )
+
+    def admissible_sets(self, index: int) -> int:
+        return _mailbox_load_i32(self.mailbox_addr + self._entry_offset(index) + worker_mod._OFF_ENTRY_ADMISSIBLE_SETS)
 
     def publish(
         self,
@@ -1340,8 +1392,41 @@ class _TwoFrameLoopHarness:
         task_slot: Optional[int] = None,
         group_index: int = 0,
         group_size: int = 1,
+        frame_index: Optional[int] = None,
     ) -> None:
-        offset = self._frame_offset(index)
+        """Publish one submission exactly as the parent endpoint does.
+
+        The entry first — its identity and its odd generation — then the request frame carrying
+        the payload and the header that binds it to that entry, and the frame's state word last,
+        which releases every byte written above it. `index` names the run-state entry; the frame
+        it travels on defaults to the matching one of the fixed request pool.
+        """
+        frame_index = index % worker_mod.MAILBOX_REQUEST_FRAMES if frame_index is None else frame_index
+        entry_generation = 2 * (index + 1) + 1
+        self._entry_generations[index] = entry_generation
+        entry_addr = self.mailbox_addr + self._entry_offset(index)
+        entry_off = self._entry_offset(index)
+        entry = self.buf[entry_off : entry_off + worker_mod.MAILBOX_RUN_ENTRY_STRIDE]
+        try:
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_RUN_ID, 5)
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_SLOT_ID, index)
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_LEASE_GENERATION, generation)
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_DISPATCH_ID, dispatch_id)
+            struct.pack_into(
+                "=Q", entry, worker_mod._OFF_ENTRY_TASK_SLOT, dispatch_id if task_slot is None else task_slot
+            )
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_GROUP_INDEX, group_index)
+            struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_GROUP_SIZE, group_size)
+            struct.pack_into("=i", entry, worker_mod._OFF_ENTRY_PREPARATION_DISPOSITION, 0)
+        finally:
+            entry.release()
+        _mailbox_store_i32(self.accepted_addr(index), 0)
+        _mailbox_store_u64(entry_addr + worker_mod._OFF_ENTRY_FRAME_CONSUMED_GENERATION, 0)
+        _mailbox_store_i32(self.state_addr(index), worker_mod._IDLE)
+        _mailbox_store_u64(entry_addr + worker_mod._OFF_ENTRY_GENERATION, entry_generation)
+
+        offset = self._frame_offset(frame_index)
         frame = self.buf[offset : offset + worker_mod.MAILBOX_FRAME_SIZE]
         try:
             frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = self.digest
@@ -1352,20 +1437,13 @@ class _TwoFrameLoopHarness:
             output_prefix = b"/tmp/simpler-test" if diagnostics or chip_swimlane else b""
             worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, output_prefix)
             worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, index, 0, generation)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_RUN_ID, 5)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_SLOT_ID, index)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, generation)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_DISPATCH_ID, dispatch_id)
-            struct.pack_into(
-                "=Q", frame, worker_mod._OFF_FRAME_TASK_SLOT, dispatch_id if task_slot is None else task_slot
-            )
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_INDEX, group_index)
-            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_SIZE, group_size)
+            self._frame_generation += 1
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_ENTRY_INDEX, index)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_ENTRY_GENERATION, entry_generation)
+            struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, self._frame_generation)
         finally:
             frame.release()
-        _mailbox_store_i32(self.accepted_addr(index), 0)
-        _mailbox_store_i32(self.state_addr(index), state)
+        _mailbox_store_i32(self.frame_state_addr(frame_index), state)
 
     def wait_state(self, index: int, expected: int) -> None:
         deadline = time.monotonic() + 5.0
@@ -1430,22 +1508,22 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish(1, 2)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
         assert harness.preparation_disposition(1) == worker_mod._VALIDATED_ONLY
-        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw.prepared[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.finalized[0].wait(5.0)
-        assert harness.cw._impl.launched[1].wait(5.0)
+        harness.cw.completed[0].set()
+        assert harness.cw.finalized[0].wait(5.0)
+        assert harness.cw.launched[1].wait(5.0)
         assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
 
-        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        lifecycle = [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [
             ("prepare", 0),
             ("launch", 0),
@@ -1454,7 +1532,7 @@ def test_two_frame_stages_b_without_native_prepare_until_a_finalizes():
             ("launch", 1),
             ("finalize", 1),
         ]
-        launch_entries = [event for event in harness.cw._impl.events if event[0] == "launch_enter"]
+        launch_entries = [event for event in harness.cw.events if event[0] == "launch_enter"]
         assert launch_entries == [
             ("launch_enter", 0, 0, worker_mod._FRAME_STAGED),
             ("launch_enter", 1, 0, worker_mod._FRAME_STAGED),
@@ -1479,8 +1557,8 @@ def test_two_frame_swimlane_log_flush_before_completion(monkeypatch, chip_swimla
     try:
         harness.publish(0, 1, diagnostics=True, chip_swimlane=chip_swimlane)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
-        harness.cw._impl.completed[0].set()
+        assert harness.cw.launched[0].wait(5.0)
+        harness.cw.completed[0].set()
         if not chip_swimlane:
             harness.wait_state(0, worker_mod._TASK_DONE)
             assert not entered.is_set(), "PMU-only completion must not flush the Host log"
@@ -1497,7 +1575,7 @@ def test_two_frame_swimlane_log_flush_before_completion(monkeypatch, chip_swimla
 
 def test_two_frame_success_survives_successor_poison_during_recursive_progress(monkeypatch):
     harness = _TwoFrameLoopHarness()
-    lane = harness.cw._impl
+    lane = harness.cw
     progress = lane._progress
 
     def recursive_progress(target):
@@ -1518,7 +1596,9 @@ def test_two_frame_success_survives_successor_poison_during_recursive_progress(m
         assert not harness.thread.is_alive()
         assert _mailbox_load_i32(harness.state_addr(0)) == worker_mod._TASK_DONE
         assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
-        offset = harness._frame_offset(1) + MAILBOX_OFF_ERROR_MSG
+        # The terminal report lives on the run-state entry, not the frame: the frame carried only
+        # the payload and went back to the parent long before this run finished.
+        offset = harness._entry_offset(1) + worker_mod._OFF_ENTRY_ERROR_TEXT
         message = bytes(harness.buf[offset : offset + worker_mod.MAILBOX_ERROR_MSG_SIZE])
         assert b"successor finalize failed" in message
     finally:
@@ -1528,12 +1608,29 @@ def test_two_frame_success_survives_successor_poison_during_recursive_progress(m
 def test_two_frame_publishes_launch_before_polling_immediate_completion():
     harness = _TwoFrameLoopHarness()
     try:
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.publish(0, 1)
         harness.start()
         harness.wait_state(0, worker_mod._TASK_DONE)
 
-        assert harness.cw._impl.poll_states[0] == (0, worker_mod._TASK_LAUNCHED)
+        assert harness.cw.poll_states[0] == (0, worker_mod._TASK_LAUNCHED)
+    finally:
+        harness.close()
+
+
+def test_two_frame_publishes_no_capacity_figure_when_the_endpoint_does_not_measure_itself():
+    # Zero is the "no report" `Orchestrator::note_endpoint_capacity` reads, so an endpoint that
+    # was never asked to size itself has to leave it there. Republishing the grant it was given
+    # would fold a figure nothing measured into the admitted depth, and would make every
+    # completion read a capacity the endpoint does not maintain.
+    harness = _TwoFrameLoopHarness()
+    try:
+        harness.cw.completed[0].set()
+        harness.publish(0, 1)
+        harness.start()
+        harness.wait_state(0, worker_mod._TASK_DONE)
+
+        assert harness.admissible_sets(0) == 0
     finally:
         harness.close()
 
@@ -1546,29 +1643,29 @@ def test_two_frame_hbg_prepares_b_while_a_runs_but_accepts_only_after_launch():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
         assert harness.preparation_disposition(1) == worker_mod._NATIVE_PREPARED
-        assert harness.cw._impl.prepared[1].is_set()
-        assert not harness.cw._impl.finalized[0].is_set()
-        assert not harness.cw._impl.launched[1].is_set()
+        assert harness.cw.prepared[1].is_set()
+        assert not harness.cw.finalized[0].is_set()
+        assert not harness.cw.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        assert harness.cw._impl.wait_for_non_head_progress(1)
-        assert not harness.cw._impl.launched[1].is_set()
+        assert harness.cw.wait_for_non_head_progress(1)
+        assert not harness.cw.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.finalized[0].wait(5.0)
-        assert harness.cw._impl.launched[1].wait(5.0)
+        harness.cw.completed[0].set()
+        assert harness.cw.finalized[0].wait(5.0)
+        assert harness.cw.launched[1].wait(5.0)
         assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
 
-        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        lifecycle = [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [
             ("prepare", 0),
             ("launch", 0),
@@ -1587,12 +1684,12 @@ def test_two_frame_hbg_publishes_failure_instead_of_staged_when_prepare_fails():
         chip_runtime="host_build_graph",
     )
     try:
-        harness.cw._impl.prepare_errors[(0, 11)] = RuntimeError("prepare failed")
+        harness.cw.prepare_errors[(0, 11)] = RuntimeError("prepare failed")
         harness.publish(0, 1)
         harness.start()
         harness.wait_state(0, worker_mod._TASK_FAILED)
-        assert not harness.cw._impl.prepared[0].is_set()
-        assert not harness.cw._impl.launched[0].is_set()
+        assert not harness.cw.prepared[0].is_set()
+        assert not harness.cw.launched[0].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(0)) == 0
     finally:
         harness.close()
@@ -1608,20 +1705,20 @@ def test_two_frame_hbg_waits_for_first_token_to_launch_before_preparing_second()
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.start()
 
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[1].is_set()
-        assert not harness.cw._impl.finalized[0].is_set()
-        assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
+        assert harness.cw.prepared[1].is_set()
+        assert not harness.cw.finalized[0].is_set()
+        assert [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 0),
             ("launch", 0),
             ("prepare", 1),
         ]
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.launched[1].wait(5.0)
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[0].set()
+        assert harness.cw.launched[1].wait(5.0)
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1637,18 +1734,18 @@ def test_two_frame_hbg_prepares_and_launches_reverse_ready_frames_by_dispatch_id
         harness.publish(1, 1)
         harness.start()
 
-        assert harness.cw._impl.launched[1].wait(5.0)
-        assert not harness.cw._impl.launched[0].is_set()
-        assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
+        assert harness.cw.launched[1].wait(5.0)
+        assert not harness.cw.launched[0].is_set()
+        assert [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 1),
             ("launch", 1),
             ("prepare", 0),
         ]
-        assert harness.cw._impl.prepare_identities == [(1, 11, 5, 1), (0, 11, 5, 2)]
+        assert harness.cw.prepare_identities == [(1, 11, 5, 1), (0, 11, 5, 2)]
 
-        harness.cw._impl.completed[1].set()
-        assert harness.cw._impl.launched[0].wait(5.0)
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[1].set()
+        assert harness.cw.launched[0].wait(5.0)
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1664,20 +1761,20 @@ def test_two_frame_hbg_does_not_prepare_high_dispatch_successor_before_active_fr
         harness.publish(1, 1)
         harness.start()
 
-        assert harness.cw._impl.launched[1].wait(5.0)
+        assert harness.cw.launched[1].wait(5.0)
         harness.wait_state(0, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[0].is_set()
-        assert not harness.cw._impl.launched[0].is_set()
-        assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
+        assert harness.cw.prepared[0].is_set()
+        assert not harness.cw.launched[0].is_set()
+        assert [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 1),
             ("launch", 1),
             ("prepare", 0),
         ]
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
-        harness.cw._impl.completed[1].set()
-        assert harness.cw._impl.launched[0].wait(5.0)
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[1].set()
+        assert harness.cw.launched[0].wait(5.0)
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1692,7 +1789,7 @@ def test_two_frame_hbg_defers_diagnostic_native_prepare_until_predecessor_finali
     try:
         harness.publish(0, 1, diagnostics=diagnostic_frame == "active")
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish(
             1,
@@ -1701,16 +1798,16 @@ def test_two_frame_hbg_defers_diagnostic_native_prepare_until_predecessor_finali
             diagnostics=diagnostic_frame == "successor",
         )
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw.prepared[1].is_set()
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.finalized[0].wait(5.0)
-        assert harness.cw._impl.launched[1].wait(5.0)
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[0].set()
+        assert harness.cw.finalized[0].wait(5.0)
+        assert harness.cw.launched[1].wait(5.0)
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
 
-        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        lifecycle = [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [
             ("prepare", 0),
             ("launch", 0),
@@ -1729,13 +1826,13 @@ def test_two_frame_launches_by_dispatch_id_when_frames_are_ready_in_reverse_orde
         harness.publish(0, 2)
         harness.publish(1, 1)
         harness.start()
-        assert harness.cw._impl.launched[1].wait(5.0)
-        assert not harness.cw._impl.prepared[0].is_set()
-        harness.cw._impl.completed[1].set()
-        assert harness.cw._impl.launched[0].wait(5.0)
-        harness.cw._impl.completed[0].set()
+        assert harness.cw.launched[1].wait(5.0)
+        assert not harness.cw.prepared[0].is_set()
+        harness.cw.completed[1].set()
+        assert harness.cw.launched[0].wait(5.0)
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
-        launches = [event for event in harness.cw._impl.events if event[0] == "launch"]
+        launches = [event for event in harness.cw.events if event[0] == "launch"]
         assert launches == [("launch", 1), ("launch", 0)]
     finally:
         harness.close()
@@ -1748,11 +1845,11 @@ def test_two_frame_prepare_ready_waits_for_sticky_activation():
         harness.start()
         harness.wait_state(0, worker_mod._FRAME_STAGED)
         assert harness.preparation_disposition(0) == worker_mod._VALIDATED_ONLY
-        assert not harness.cw._impl.prepared[0].is_set()
+        assert not harness.cw.prepared[0].is_set()
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
-        assert harness.cw._impl.launched[0].wait(5.0)
-        harness.cw._impl.completed[0].set()
+        assert harness.cw.launched[0].wait(5.0)
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1767,12 +1864,12 @@ def test_two_frame_hbg_lone_prepare_ready_stages_before_native_prepare():
         harness.publish(0, 1, state=worker_mod._PREPARE_READY)
         harness.start()
         harness.wait_state(0, worker_mod._FRAME_STAGED)
-        assert not harness.cw._impl.prepared[0].is_set()
+        assert not harness.cw.prepared[0].is_set()
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
-        assert harness.cw._impl.launched[0].wait(5.0)
-        assert harness.cw._impl.prepared[0].is_set()
-        harness.cw._impl.completed[0].set()
+        assert harness.cw.launched[0].wait(5.0)
+        assert harness.cw.prepared[0].is_set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1787,21 +1884,21 @@ def test_two_frame_hbg_prepares_already_staged_successor_after_active_claim():
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.start()
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert not harness.cw._impl.prepared[1].is_set()
+        assert not harness.cw.prepared[1].is_set()
 
         harness.publish(0, 1)
-        assert harness.cw._impl.launched[0].wait(5.0)
-        assert harness.cw._impl.prepared[1].wait(5.0)
-        assert [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch"}] == [
+        assert harness.cw.launched[0].wait(5.0)
+        assert harness.cw.prepared[1].wait(5.0)
+        assert [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch"}] == [
             ("prepare", 0),
             ("launch", 0),
             ("prepare", 1),
         ]
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.launched[1].wait(5.0)
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[0].set()
+        assert harness.cw.launched[1].wait(5.0)
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1812,7 +1909,7 @@ def test_two_frame_processes_control_while_native_run_is_active():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         struct.pack_into("Q", harness.buf, worker_mod._OFF_CALLABLE, worker_mod._CTRL_MALLOC)
         struct.pack_into("Q", harness.buf, worker_mod._CTRL_OFF_ARG0, 4096)
@@ -1820,9 +1917,9 @@ def test_two_frame_processes_control_while_native_run_is_active():
         assert harness.cw.malloc_called.wait(5.0)
         assert _mailbox_load_i32(harness.mailbox_addr + _OFF_STATE) == worker_mod._CONTROL_DONE
         assert struct.unpack_from("Q", harness.buf, worker_mod._CTRL_OFF_RESULT)[0] == 0xCAFE
-        assert not harness.cw._impl.completed[0].is_set()
+        assert not harness.cw.completed[0].is_set()
 
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
     finally:
         harness.close()
@@ -1833,15 +1930,15 @@ def test_two_frame_defers_unregister_until_active_native_run_finalizes():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish_unregister()
         harness.assert_control_stays_pending()
         assert harness.cw.unregister_calls == []
         assert harness.identity_table == {harness.digest: 7}
 
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.finalized[0].wait(5.0)
+        harness.cw.completed[0].set()
+        assert harness.cw.finalized[0].wait(5.0)
         harness.wait_control_state(worker_mod._CONTROL_DONE)
         assert harness.cw.unregister_calls == [7]
         assert harness.identity_table == {}
@@ -1859,19 +1956,19 @@ def test_two_frame_defers_register_until_active_native_run_finalizes():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish_register(callable_obj, payload_shm, digest)
         harness.assert_control_stays_pending()
-        assert harness.cw._impl.register_calls == []
+        assert harness.cw.register_calls == []
         assert digest not in harness.identity_table
 
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.finalized[0].wait(5.0)
+        harness.cw.completed[0].set()
+        assert harness.cw.finalized[0].wait(5.0)
         harness.wait_control_state(worker_mod._CONTROL_DONE)
-        assert len(harness.cw._impl.register_calls) == 1
+        assert len(harness.cw.register_calls) == 1
         cid = harness.identity_table[digest]
-        assert harness.cw._impl.register_calls[0][0] == cid
+        assert harness.cw.register_calls[0][0] == cid
         assert cid in harness.registry
         assert cid in harness.prepared
     finally:
@@ -1891,23 +1988,23 @@ def test_two_frame_defers_register_until_backend_prepared_frame_finalizes():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[1].is_set()
+        assert harness.cw.prepared[1].is_set()
 
         harness.publish_register(callable_obj, payload_shm, digest)
         harness.assert_control_stays_pending()
-        assert harness.cw._impl.register_calls == []
+        assert harness.cw.register_calls == []
 
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
-        harness.cw._impl.completed[0].set()
-        assert harness.cw._impl.launched[1].wait(5.0)
+        harness.cw.completed[0].set()
+        assert harness.cw.launched[1].wait(5.0)
         harness.assert_control_stays_pending()
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
         harness.wait_control_state(worker_mod._CONTROL_DONE)
-        assert len(harness.cw._impl.register_calls) == 1
+        assert len(harness.cw.register_calls) == 1
     finally:
         harness.close()
         payload_shm.close()
@@ -1926,11 +2023,11 @@ def test_two_frame_defers_final_unregister_while_matching_frame_is_staged():
         assert harness.cw.unregister_calls == []
 
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.assert_control_stays_pending()
         assert harness.cw.unregister_calls == []
 
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
         harness.wait_control_state(worker_mod._CONTROL_DONE)
         assert harness.cw.unregister_calls == [7]
@@ -1971,15 +2068,15 @@ def test_two_frame_shutdown_finalizes_active_and_fails_staged_without_launch():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.publish(1, 2)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
 
         _mailbox_store_i32(harness.mailbox_addr + _OFF_STATE, worker_mod._SHUTDOWN)
         harness.thread.join(5.0)
         assert not harness.thread.is_alive()
-        assert harness.cw._impl.finalized[0].is_set()
-        assert not harness.cw._impl.prepared[1].is_set()
+        assert harness.cw.finalized[0].is_set()
+        assert not harness.cw.prepared[1].is_set()
         assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
     finally:
         harness.close()
@@ -1993,18 +2090,18 @@ def test_two_frame_shutdown_finalizes_backend_prepared_successor_once():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[1].is_set()
+        assert harness.cw.prepared[1].is_set()
 
         _mailbox_store_i32(harness.mailbox_addr + _OFF_STATE, worker_mod._SHUTDOWN)
         harness.thread.join(5.0)
         assert not harness.thread.is_alive()
         assert _mailbox_load_i32(harness.state_addr(1)) == worker_mod._TASK_FAILED
-        assert not harness.cw._impl.launched[1].is_set()
-        assert sum(event == ("finalize", 0) for event in harness.cw._impl.events) == 1
-        assert sum(event == ("finalize", 1) for event in harness.cw._impl.events) == 1
+        assert not harness.cw.launched[1].is_set()
+        assert sum(event == ("finalize", 0) for event in harness.cw.events) == 1
+        assert sum(event == ("finalize", 1) for event in harness.cw.events) == 1
     finally:
         harness.close()
 
@@ -2017,21 +2114,23 @@ def test_two_frame_stale_activation_finalizes_backend_prepared_successor_once():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
-        assert harness.cw._impl.prepared[1].is_set()
+        assert harness.cw.prepared[1].is_set()
 
-        frame_offset = harness._frame_offset(1)
-        struct.pack_into("=Q", harness.buf, frame_offset + worker_mod._OFF_FRAME_DISPATCH_ID, 99)
+        # Identity is the entry's, so a stale activation is forged there: the child rechecks the
+        # entry it staged under before it activates, and the frame no longer exists to it.
+        entry_offset = harness._entry_offset(1)
+        struct.pack_into("=Q", harness.buf, entry_offset + worker_mod._OFF_ENTRY_DISPATCH_ID, 99)
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
         harness.wait_state(1, worker_mod._TASK_FAILED)
-        assert not harness.cw._impl.launched[1].is_set()
-        assert sum(event == ("finalize", 1) for event in harness.cw._impl.events) == 1
+        assert not harness.cw.launched[1].is_set()
+        assert sum(event == ("finalize", 1) for event in harness.cw.events) == 1
 
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
-        assert sum(event == ("finalize", 1) for event in harness.cw._impl.events) == 1
+        assert sum(event == ("finalize", 1) for event in harness.cw.events) == 1
     finally:
         harness.close()
 
@@ -2041,24 +2140,24 @@ def test_two_frame_reuses_completed_frame_for_next_staged_successor():
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
 
         harness.publish(1, 2, state=worker_mod._PREPARE_READY)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
 
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
         _mailbox_store_i32(harness.state_addr(1), worker_mod._ACTIVATE)
         harness.wait_state(1, worker_mod._TASK_LAUNCHED)
         assert _mailbox_load_i32(harness.accepted_addr(1)) == worker_mod._TASK_ACCEPTED
 
-        harness.cw._impl.completed[0].clear()
+        harness.cw.completed[0].clear()
         harness.publish(0, 3, state=worker_mod._PREPARE_READY, generation=12)
         harness.wait_state(0, worker_mod._FRAME_STAGED)
         assert _mailbox_load_i32(harness.accepted_addr(0)) == 0
         lifecycle_before_c_activation = [
-            event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}
+            event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}
         ]
         assert lifecycle_before_c_activation == [
             ("prepare", 0),
@@ -2068,15 +2167,15 @@ def test_two_frame_reuses_completed_frame_for_next_staged_successor():
             ("launch", 1),
         ]
 
-        harness.cw._impl.completed[1].set()
+        harness.cw.completed[1].set()
         harness.wait_state(1, worker_mod._TASK_DONE)
         _mailbox_store_i32(harness.state_addr(0), worker_mod._ACTIVATE)
         harness.wait_state(0, worker_mod._TASK_LAUNCHED)
         assert _mailbox_load_i32(harness.accepted_addr(0)) == worker_mod._TASK_ACCEPTED
-        harness.cw._impl.completed[0].set()
+        harness.cw.completed[0].set()
         harness.wait_state(0, worker_mod._TASK_DONE)
 
-        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        lifecycle = [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [
             ("prepare", 0),
             ("launch", 0),
@@ -2095,16 +2194,16 @@ def test_two_frame_reuses_completed_frame_for_next_staged_successor():
 def test_two_frame_launch_failure_does_not_accept_and_finalizes_once():
     harness = _TwoFrameLoopHarness()
     try:
-        harness.cw._impl.launch_errors[(0, 11)] = RuntimeError("launch failed")
+        harness.cw.launch_errors[(0, 11)] = RuntimeError("launch failed")
         harness.publish(0, 1)
         harness.start()
         harness.wait_state(0, worker_mod._TASK_FAILED)
 
         assert _mailbox_load_i32(harness.accepted_addr(0)) == 0
-        lifecycle = [event[:2] for event in harness.cw._impl.events if event[0] in {"prepare", "launch", "finalize"}]
+        lifecycle = [event[:2] for event in harness.cw.events if event[0] in {"prepare", "launch", "finalize"}]
         assert lifecycle == [("prepare", 0), ("finalize", 0)]
-        assert harness.cw._impl.finalized[0].is_set()
-        assert sum(event == ("finalize", 0) for event in harness.cw._impl.events) == 1
+        assert harness.cw.finalized[0].is_set()
+        assert sum(event == ("finalize", 0) for event in harness.cw.events) == 1
     finally:
         harness.close()
 
@@ -2112,8 +2211,8 @@ def test_two_frame_launch_failure_does_not_accept_and_finalizes_once():
 def test_two_frame_launch_cleanup_failure_terminalizes_staged_successor():
     harness = _TwoFrameLoopHarness()
     try:
-        harness.cw._impl.launch_errors[(0, 11)] = RuntimeError("launch failed")
-        harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("launch cleanup failed")
+        harness.cw.launch_errors[(0, 11)] = RuntimeError("launch failed")
+        harness.cw.finalize_errors[(0, 11)] = RuntimeError("launch cleanup failed")
         harness.publish(0, 1)
         harness.publish(1, 2)
         harness.start()
@@ -2122,8 +2221,8 @@ def test_two_frame_launch_cleanup_failure_terminalizes_staged_successor():
         harness.wait_state(1, worker_mod._TASK_FAILED)
         harness.thread.join(5.0)
         assert not harness.thread.is_alive()
-        assert not harness.cw._impl.prepared[1].is_set()
-        assert not harness.cw._impl.launched[1].is_set()
+        assert not harness.cw.prepared[1].is_set()
+        assert not harness.cw.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
     finally:
         harness.close()
@@ -2135,22 +2234,22 @@ def test_two_frame_native_progress_failure_terminalizes_staged_successor(failure
     try:
         harness.publish(0, 1)
         harness.start()
-        assert harness.cw._impl.launched[0].wait(5.0)
+        assert harness.cw.launched[0].wait(5.0)
         harness.publish(1, 2)
         harness.wait_state(1, worker_mod._FRAME_STAGED)
 
         if failure_point == "poll":
-            harness.cw._impl.poll_errors[(0, 11)] = RuntimeError("poll failed")
+            harness.cw.poll_errors[(0, 11)] = RuntimeError("poll failed")
         else:
-            harness.cw._impl.finalize_errors[(0, 11)] = RuntimeError("finalize failed")
-            harness.cw._impl.completed[0].set()
+            harness.cw.finalize_errors[(0, 11)] = RuntimeError("finalize failed")
+            harness.cw.completed[0].set()
 
         harness.wait_state(0, worker_mod._TASK_FAILED)
         harness.wait_state(1, worker_mod._TASK_FAILED)
         harness.thread.join(5.0)
         assert not harness.thread.is_alive()
-        assert not harness.cw._impl.prepared[1].is_set()
-        assert not harness.cw._impl.launched[1].is_set()
+        assert not harness.cw.prepared[1].is_set()
+        assert not harness.cw.launched[1].is_set()
         assert _mailbox_load_i32(harness.accepted_addr(1)) == 0
     finally:
         harness.close()
@@ -3094,12 +3193,12 @@ class TestLifecycle:
             hw.close()
 
     def test_broadcast_control_all_timeout_reports_failed_child(self):
-        shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
         dw = _Worker(3)
         try:
             assert shm.buf is not None
             _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
-            dw.add_sub_worker(_mailbox_addr(shm))
+            dw.add_sub_worker(_mailbox_addr(shm), _mailbox_extent(shm))
             dw.init()
             results = dw.broadcast_control_all(
                 WorkerType.SUB,
@@ -3118,7 +3217,7 @@ class TestLifecycle:
 
     def test_broadcast_control_all_selected_pool_routing(self):
         def make_mailbox():
-            shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+            shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
             assert shm.buf is not None
             _mailbox_store_i32(_buffer_field_addr(shm.buf, _OFF_STATE), _IDLE)
             return shm
@@ -3131,8 +3230,8 @@ class TestLifecycle:
             next_shm = make_mailbox()
             dw = _Worker(3)
             try:
-                dw.add_sub_worker(_mailbox_addr(sub_shm))
-                dw.add_next_level_worker(_mailbox_addr(next_shm))
+                dw.add_sub_worker(_mailbox_addr(sub_shm), _mailbox_extent(sub_shm))
+                dw.add_next_level_worker(_mailbox_addr(next_shm), _mailbox_extent(next_shm))
                 dw.init()
                 results = dw.broadcast_control_all(
                     selected_type,
@@ -5061,8 +5160,13 @@ class TestRunHandle:
         assert caught.value is interrupt
         assert handle.released
         assert resources.live_domains == {handle.name: handle}
-        assert worker._live_domains == {handle.name: handle}
+        assert worker._live_domains == {} and not worker._cleanup_journal.empty
         assert resources.pending_release_domains == []
+        worker._worker = None
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            worker.close()
+        assert not handle.freed and not worker._cleanup_journal.empty
+        assert worker._worker is None and not worker._chip_pids and not worker._chip_shms
 
     def test_pending_domain_drain_does_not_clear_unclaimed_owners(self):
         class NoClearList(list):
@@ -5264,10 +5368,10 @@ class TestRunHandle:
         release_done = threading.Event()
         real_sweep = worker._release_all_live_domains
 
-        def parked_sweep(res=None):
+        def parked_sweep(res=None, **kwargs):
             in_sweep.set()
             assert release_done.wait(5.0), "releasing thread did not finish"
-            real_sweep(res)
+            real_sweep(res, **kwargs)
 
         worker._release_all_live_domains = cast(Any, parked_sweep)
 
@@ -5401,14 +5505,13 @@ class TestRunHandle:
         """The owner's failure reaches every later caller, so no path reports
         success for an allocation whose backend release did not happen.
 
-        ``_release_all_live_domains`` keeps an un-freed handle in
-        ``_live_domains`` precisely so ``close()`` reports it as a residual; a
-        second caller that returned success would erase that.
+        Failed releases remain journal-owned while close drains the tree;
+        later callers must still observe the same failure.
         """
         worker = Worker(level=3, num_sub_workers=0)
         worker._worker = cast(Any, object())
         boom = RuntimeError("backend release failed")
-        _entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7, outcome=boom)
+        entered, in_backend, let_go = self._gated_domain_worker(worker, target_id=7, outcome=boom)
         let_go.set()
 
         resources = worker_mod._RunResources()
@@ -5419,13 +5522,16 @@ class TestRunHandle:
         assert in_backend.is_set()
         assert not contested.freed
 
-        # The sweep is the second caller: it must see the failure, keep the
-        # handle, leave `freed` false, and report the failure to its own caller
-        # rather than returning as if the domain were reclaimed.
-        with pytest.raises(RuntimeError, match="backend release failed"):
-            worker._release_all_live_domains()
+        worker._release_all_live_domains()
         assert not contested.freed, "a failed release must not be reported as freed"
-        assert "contested" in worker._live_domains, "a failed release must stay a detectable residual"
+        assert "contested" not in worker._live_domains and not worker._cleanup_journal.empty
+        replacement = self._retired_domain(worker, resources, "contested", 8)
+        with pytest.raises(RuntimeError, match="backend release failed"):
+            worker._free_domain_after_fence(contested)
+        assert worker._live_domains["contested"] is replacement
+        error = worker._cleanup_journal.drive_kinds({"domain-retirement"})
+        assert isinstance(error, RuntimeError) and "unconfirmed" in str(error)
+        assert not contested.freed and not worker._cleanup_journal.empty and entered == [7]
 
     def test_allocate_domain_outside_graph_construction_is_rejected(self):
         worker = Worker(level=3, num_sub_workers=0)
@@ -5546,7 +5652,7 @@ class TestOrderedCleanupDegradation:
         worker._orch = cast(Any, _StubOrch())
         boom = RuntimeError("domain release failed")
 
-        def failing_release(res):
+        def failing_release(res, **_kwargs):
             raise boom
 
         worker._release_all_live_domains = cast(Any, failing_release)
@@ -6262,14 +6368,14 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             struct.pack_into("<Q", req_buf, worker_mod._DOMAIN_REQ_HEADER.size, 4096)
             struct.pack_into("<I", req_buf, worker_mod._DOMAIN_REQ_HEADER.size + 8, 0)
 
-            cw = cast(Any, SimpleNamespace(_impl=SimpleNamespace()))
+            cw = cast(Any, SimpleNamespace())
 
             def committed(*args):
                 ctypes.c_uint64.from_address(args[5]).value = 1
-                return 0xC7, 0xB000
+                return 0xC7, 0xB000, 64
 
-            cw._impl.comm_alloc_domain_windows = committed
-            mailbox = memoryview(bytearray(MAILBOX_SIZE))
+            cw.comm_alloc_domain_windows = committed
+            mailbox = memoryview(bytearray(worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST)))
             for offset, shm_name in (
                 (worker_mod._OFF_ARGS, request.name),
                 (worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES, reply.name),
@@ -6277,11 +6383,8 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 encoded = shm_name.encode("utf-8")
                 mailbox[offset : offset + len(encoded)] = encoded
 
-            with (
-                patch.object(worker_mod, "_comm_base_handle", lambda _cw: 1),
-                pytest.raises(ValueError, match="overflows window_size"),
-            ):
-                worker_mod._handle_ctrl_alloc_domain(cw, mailbox)
+            with pytest.raises(ValueError, match="overflows window_size"):
+                worker_mod._handle_ctrl_alloc_domain(cw, mailbox, base_comm_handle=1)
 
             assert worker_mod._domain_reply_committed(reply), (
                 "the window was allocated and the chip did not say so before failing"
@@ -6304,9 +6407,9 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 ctypes.c_uint64.from_address(commit_address).value = 1
                 raise MemoryError("tuple conversion failed")
 
-            cw = cast(Any, SimpleNamespace(_impl=SimpleNamespace()))
-            cw._impl.comm_alloc_domain_windows = committed_then_failed
-            mailbox = memoryview(bytearray(MAILBOX_SIZE))
+            cw = cast(Any, SimpleNamespace())
+            cw.comm_alloc_domain_windows = committed_then_failed
+            mailbox = memoryview(bytearray(worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST)))
             for offset, shm_name in (
                 (worker_mod._OFF_ARGS, request.name),
                 (worker_mod._OFF_ARGS + worker_mod._CTRL_SHM_NAME_BYTES, reply.name),
@@ -6314,11 +6417,8 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 encoded = shm_name.encode("utf-8")
                 mailbox[offset : offset + len(encoded)] = encoded
 
-            with (
-                patch.object(worker_mod, "_comm_base_handle", lambda _cw: 1),
-                pytest.raises(MemoryError, match="tuple conversion failed"),
-            ):
-                worker_mod._handle_ctrl_alloc_domain(cw, mailbox)
+            with pytest.raises(MemoryError, match="tuple conversion failed"):
+                worker_mod._handle_ctrl_alloc_domain(cw, mailbox, base_comm_handle=1)
 
             assert worker_mod._domain_reply_committed(reply)
         finally:
@@ -6839,7 +6939,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 assert reply_shms is not None
                 reply = reply_shms[0]
                 assert reply.buf is not None
-                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 0)
+                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 4096, 0)
 
             monkeypatch.setattr(worker, "_dispatch_control_domain", commit_domain)
         else:
@@ -6936,7 +7036,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
                 interrupt_main()
                 reply = reply_shms[0]
                 assert reply.buf is not None
-                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 0)
+                worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply.buf, 0, 1, 0, 0, 4096, 0)
 
             monkeypatch.setattr(worker, "_dispatch_control_domain", commit_domain)
         else:
@@ -7611,7 +7711,7 @@ class TestUnreclaimedDeviceStateIsNeverSilent:
             staged_shms.extend(reply_shms.values())
             reply_buf = reply_shms[0].buf
             assert reply_buf is not None
-            worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply_buf, 0, 1, 0xC7, 0xB000, 0)
+            worker_mod._DOMAIN_REPLY_HEADER.pack_into(reply_buf, 0, 1, 0xC7, 0xB000, 64, 0)
 
         monkeypatch.setattr(worker, "_dispatch_control_domain", successful_dispatch)
         real_close = worker_mod.os.close
@@ -8161,10 +8261,9 @@ class TestChipMainLoopDigestRegister:
 
     @staticmethod
     def _build_mailbox():
-        from simpler.task_interface import MAILBOX_SIZE  # noqa: PLC0415
         from simpler.worker import _IDLE, _OFF_STATE, _buffer_field_addr, _mailbox_store_i32  # noqa: PLC0415
 
-        shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+        shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
         buf = shm.buf
         assert buf is not None
         # Loop reads the state field via a raw address (atomic_int32 in C++),
@@ -8284,9 +8383,8 @@ class TestChipMainLoopDigestRegister:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         cw = MagicMock()
-        cw._impl = MagicMock()
-        cw._unregister_slot = MagicMock()
-        cw._impl.register_callable_from_blob = MagicMock()
+        cw.unregister_callable = MagicMock()
+        cw.register_callable_from_blob = MagicMock()
 
         callable_obj = _unique_chip_callable(7)
         digest = _chip_digest(callable_obj)
@@ -8304,9 +8402,9 @@ class TestChipMainLoopDigestRegister:
                 )
                 err = self._wait_for_done_and_reset(buf, state_addr)
                 assert err == 0
-                assert cw._unregister_slot.call_count == 0
-                cw._impl.register_callable_from_blob.assert_called_once()
-                assert cw._impl.register_callable_from_blob.call_args.args[0] == 0
+                assert cw.unregister_callable.call_count == 0
+                cw.register_callable_from_blob.assert_called_once()
+                assert cw.register_callable_from_blob.call_args.args[0] == 0
             finally:
                 self._shutdown(state_addr)
                 t.join(timeout=2.0)
@@ -8320,9 +8418,8 @@ class TestChipMainLoopDigestRegister:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         cw = MagicMock()
-        cw._impl = MagicMock()
-        cw._unregister_slot = MagicMock()
-        cw._impl.register_callable_from_blob = MagicMock()
+        cw.unregister_callable = MagicMock()
+        cw.register_callable_from_blob = MagicMock()
 
         callable_obj = _unique_chip_callable(7)
         payload = ctypes.string_at(int(callable_obj.buffer_ptr()), int(callable_obj.buffer_size()))
@@ -8347,7 +8444,7 @@ class TestChipMainLoopDigestRegister:
                     payload_size=len(payload),
                 )
                 assert self._wait_for_done_and_reset(buf, state_addr) == 0
-                cw._impl.register_callable_from_blob.assert_called_once()
+                cw.register_callable_from_blob.assert_called_once()
             finally:
                 self._shutdown(state_addr)
                 t.join(timeout=2.0)
@@ -8361,9 +8458,8 @@ class TestChipMainLoopDigestRegister:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         cw = MagicMock()
-        cw._impl = MagicMock()
-        cw._unregister_slot = MagicMock()
-        cw._impl.register_callable_from_blob = MagicMock()
+        cw.unregister_callable = MagicMock()
+        cw.register_callable_from_blob = MagicMock()
 
         callable_obj = _unique_chip_callable(7)
         wrong_digest = _chip_digest(_unique_chip_callable(8))
@@ -8385,8 +8481,8 @@ class TestChipMainLoopDigestRegister:
                 err = self._wait_for_done_and_reset(buf, state_addr)
                 assert err == 1
                 assert "HASHID_DESCRIPTOR_MISMATCH" in self._read_error_message(buf)
-                cw._impl.register_callable_from_blob.assert_not_called()
-                cw._unregister_slot.assert_not_called()
+                cw.register_callable_from_blob.assert_not_called()
+                cw.unregister_callable.assert_not_called()
                 assert registry == {}
                 assert identity_table == {}
                 assert identity_refs == {}
@@ -8403,9 +8499,8 @@ class TestChipMainLoopDigestRegister:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         cw = MagicMock()
-        cw._impl = MagicMock()
-        cw._unregister_slot = MagicMock()
-        cw._impl.register_callable_from_blob = MagicMock()
+        cw.unregister_callable = MagicMock()
+        cw.register_callable_from_blob = MagicMock()
 
         callable_obj = _unique_chip_callable(7)
         digest = _chip_digest(callable_obj)
@@ -8431,8 +8526,8 @@ class TestChipMainLoopDigestRegister:
                     digest=digest,
                 )
                 assert self._wait_for_done_and_reset(buf, state_addr) == 0
-                assert cw._unregister_slot.call_count == 0
-                assert cw._impl.register_callable_from_blob.call_count == 1
+                assert cw.unregister_callable.call_count == 0
+                assert cw.register_callable_from_blob.call_count == 1
             finally:
                 self._shutdown(state_addr)
                 t.join(timeout=2.0)
@@ -8446,9 +8541,8 @@ class TestChipMainLoopDigestRegister:
         from unittest.mock import MagicMock  # noqa: PLC0415
 
         cw = MagicMock()
-        cw._impl = MagicMock()
-        cw._unregister_slot = MagicMock()
-        cw._impl.register_callable_from_blob = MagicMock()
+        cw.unregister_callable = MagicMock()
+        cw.register_callable_from_blob = MagicMock()
 
         callable_obj = _unique_chip_callable(7)
         digest = _chip_digest(callable_obj)
@@ -8477,11 +8571,11 @@ class TestChipMainLoopDigestRegister:
 
                 self._send_ctrl_unregister(buf, state_addr, digest=digest)
                 assert self._wait_for_done_and_reset(buf, state_addr) == 0
-                assert cw._unregister_slot.call_count == 0
+                assert cw.unregister_callable.call_count == 0
 
                 self._send_ctrl_unregister(buf, state_addr, digest=digest)
                 assert self._wait_for_done_and_reset(buf, state_addr) == 0
-                cw._unregister_slot.assert_called_once_with(0)
+                cw.unregister_callable.assert_called_once_with(0)
             finally:
                 self._shutdown(state_addr)
                 t.join(timeout=2.0)
@@ -8507,15 +8601,37 @@ def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path)
     # while output_prefix itself stays a directory the host log setter accepts.
     (tmp_path / "rank0").write_text("")
 
-    shm = SharedMemory(create=True, size=MAILBOX_SIZE)
+    shm = SharedMemory(create=True, size=worker_mod.mailbox_size(worker_mod._DEFAULT_PIPELINE_DEPTH_REQUEST))
     buf = shm.buf
     assert buf is not None
     mailbox_addr = _mailbox_addr(shm)
     state_addr = mailbox_addr + _OFF_STATE
     frame_state_addr = mailbox_addr + worker_mod.MAILBOX_FRAME_SIZE + _OFF_STATE
+    entry_offset = worker_mod.MAILBOX_RUN_ENTRY_TABLE_OFFSET
+    entry_addr = mailbox_addr + entry_offset
+    entry_generation = 3
     _mailbox_store_i32(state_addr, worker_mod._IDLE)
 
     digest = bytes([0x42]) * worker_mod.CALLABLE_HASH_DIGEST_BYTES
+    # The run's identity goes on its run-state entry, the payload on a request frame, and the
+    # frame's header is what binds the two. Published in that order, state word last.
+    entry = buf[entry_offset : entry_offset + worker_mod.MAILBOX_RUN_ENTRY_STRIDE]
+    try:
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_RUN_ID, 5)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_SLOT_ID, 0)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_LEASE_GENERATION, 11)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_DISPATCH_ID, 1)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_TASK_SLOT, 3)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_GROUP_INDEX, 0)
+        struct.pack_into("=Q", entry, worker_mod._OFF_ENTRY_GROUP_SIZE, 1)
+    finally:
+        entry.release()
+    _mailbox_store_i32(entry_addr + worker_mod._OFF_ENTRY_ACCEPTED, 0)
+    _mailbox_store_u64(entry_addr + worker_mod._OFF_ENTRY_FRAME_CONSUMED_GENERATION, 0)
+    _mailbox_store_i32(entry_addr + worker_mod._OFF_ENTRY_STATE, worker_mod._IDLE)
+    _mailbox_store_u64(entry_addr + worker_mod._OFF_ENTRY_GENERATION, entry_generation)
+
     frame = buf[worker_mod.MAILBOX_FRAME_SIZE : 2 * worker_mod.MAILBOX_FRAME_SIZE]
     try:
         frame[worker_mod._OFF_TASK_CALLABLE_HASH : worker_mod._OFF_TASK_ARGS_BLOB] = digest
@@ -8524,14 +8640,9 @@ def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path)
         cfg_values[1] = 4  # enable_chip_swimlane
         worker_mod._CFG_FMT.pack_into(frame, worker_mod._OFF_CONFIG, *cfg_values, str(tmp_path).encode())
         worker_mod._PIPELINE_LEASE_FMT.pack_into(frame, worker_mod._OFF_PIPELINE_LEASE, 0, 0, 11)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_PROTOCOL, worker_mod._TASK_PROTOCOL_VERSION)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_RUN_ID, 5)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_SLOT_ID, 0)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, 11)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_DISPATCH_ID, 1)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_TASK_SLOT, 3)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_INDEX, 0)
-        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GROUP_SIZE, 1)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_ENTRY_INDEX, 0)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_ENTRY_GENERATION, entry_generation)
+        struct.pack_into("=Q", frame, worker_mod._OFF_FRAME_GENERATION, 1)
     finally:
         frame.release()
 
@@ -8561,16 +8672,29 @@ def test_a_failed_diagnostic_sidecar_write_fails_the_task_not_the_loop(tmp_path)
         _mailbox_store_i32(frame_state_addr, worker_mod._TASK_READY)
         thread.start()
         deadline = time.monotonic() + 5.0
-        while _mailbox_load_i32(frame_state_addr) != worker_mod._TASK_DONE:
-            assert time.monotonic() < deadline, "loop exited without publishing TASK_DONE"
+        # The run terminates on its entry. The frame comes back before that and is reusable, so
+        # waiting on the frame's own word would be waiting on transport, not on this run.
+        while _mailbox_load_i32(entry_addr + worker_mod._OFF_ENTRY_STATE) != worker_mod._TASK_FAILED:
+            assert time.monotonic() < deadline, "loop exited without publishing a terminal state"
             time.sleep(0.001)
+        # The ACK is the child's last access to the frame, so observing it means every store into
+        # the frame has already landed.
+        assert _mailbox_load_u64(entry_addr + worker_mod._OFF_ENTRY_FRAME_CONSUMED_GENERATION) == 1, (
+            "the request frame was not handed back"
+        )
+        assert _mailbox_load_i32(frame_state_addr) == worker_mod._IDLE
 
-        task_frame = buf[worker_mod.MAILBOX_FRAME_SIZE : 2 * worker_mod.MAILBOX_FRAME_SIZE]
+        entry = buf[entry_offset : entry_offset + worker_mod.MAILBOX_RUN_ENTRY_STRIDE]
         try:
-            error_code = struct.unpack_from("i", task_frame, worker_mod._OFF_ERROR)[0]
-            raw = bytes(task_frame[MAILBOX_OFF_ERROR_MSG : MAILBOX_OFF_ERROR_MSG + MAILBOX_ERROR_MSG_SIZE])
+            error_code = struct.unpack_from("i", entry, worker_mod._OFF_ENTRY_ERROR)[0]
+            raw = bytes(
+                entry[
+                    worker_mod._OFF_ENTRY_ERROR_TEXT : worker_mod._OFF_ENTRY_ERROR_TEXT
+                    + worker_mod.MAILBOX_ERROR_MSG_SIZE
+                ]
+            )
         finally:
-            task_frame.release()
+            entry.release()
         assert error_code == 1
         assert raw.split(b"\x00", 1)[0].decode("utf-8", "replace").startswith("chip_process dev=0")
         assert not (tmp_path / "rank0" / "d0").exists()

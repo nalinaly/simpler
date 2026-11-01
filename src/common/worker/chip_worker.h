@@ -12,6 +12,7 @@
 #pragma once
 
 #include <array>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -29,7 +31,8 @@
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
 #include "host/chip_swimlane_runs.h"
-#include "pipeline_slot_pool.h"
+#include "native_run_storage_tag.h"
+#include "run_resource_arena.h"
 #include "runtime_c_api.h"
 #include "types.h"
 
@@ -48,11 +51,20 @@ struct ChipWorkerNativeRun {
 
 class ChipRun;
 class ChipRunLane;
+class RuntimeModule;
 struct ChipRunLaneState;
 
 // A current-context preflight refusal occurs before lane progress or native
 // phase mutation; it supplies no execution or completion verdict.
 class ExecutionContextRefused : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// This invocation enqueued no operator kernel, and its native input bindings and
+// preparation resources have all been released. It supplies no verdict about
+// any other run or about whether the execution environment accepts a retry.
+class RunPreparationRefused : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
@@ -64,6 +76,16 @@ public:
 
 class ChipWorker {
 public:
+    // Host-only identity of one native environment binding, including retained
+    // rollback debt. It is independent of Buffer and pipeline lease generations.
+    struct ExecutionEnvironment {
+        uint64_t process_id;
+        uint64_t incarnation;
+        uint64_t context_generation;
+        int device_id;
+        bool borrowed;
+    };
+
     ChipWorker() = default;
     ~ChipWorker();
 
@@ -102,10 +124,16 @@ public:
     ///
     /// borrowed_context_generation selects the caller-owned, already-current RTS
     /// context. It must be nonzero; absent means the existing owned-device init.
-    /// Borrowed init supports no SDMA, simulator or Program workspace-budget policy.
+    /// Both onboard routes manage internal workspace and accept an optional byte budget.
+    /// Borrowed init supports no SDMA or simulator policy.
     /// The caller keeps its context current through successful finalize. Failed
     /// rollback requires explicit finalize if it could not close; that worker
     /// cannot be reinitialized.
+    /// Onboard admission allows one execution ChipWorker per process/device,
+    /// across both modes and all runtime modules. Other framework operators
+    /// and simulator virtual devices do not participate in that reservation.
+    /// Logical terminal close without confirmed cleanup retains the device
+    /// reservation until process exit; it does not establish device recovery.
 
     void init(
         const std::string &host_lib_path, const std::string &aicpu_path, const std::string &aicore_path,
@@ -168,9 +196,19 @@ public:
         uint64_t run_id = 0, uint64_t dispatch_id = 0, volatile int32_t *accepted_state = nullptr,
         int32_t accepted_value = 0, NativeRunProvenance provenance = {}
     );
-    void launch_native_run(const ChipWorkerNativeRun &run, void *caller_stream = nullptr);
+    /**
+     * What a launch attempt did, for the one outcome that is not a failure.
+     *
+     * `DiagnosticCreditFull` means every output slot or terminal bank some
+     * enabled owner needs is still held by a run ahead: nothing was submitted,
+     * nothing was admitted, and the run is unchanged and launchable again once
+     * credit moves. Every other non-zero result still throws, because it is
+     * this run's failure.
+     */
+    enum class NativeLaunch : int { Launched, DiagnosticCreditFull };
+    NativeLaunch launch_native_run(const ChipWorkerNativeRun &run, void *caller_stream = nullptr);
     void validate_caller_stream(void *caller_stream);
-    void validate_execution_context();
+    void validate_execution_context() const;
     /**
      * Launch `run` ordered behind `predecessor`, which must be a run this
      * ChipWorker launched and has not yet reaped.
@@ -269,8 +307,11 @@ public:
     void stop_chip_run_lane_admission() noexcept;
 
     // Per-callable_id preparation. Requires init() first and a callable_id
-    // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64).
+    // in [0, MAX_REGISTERED_CALLABLE_IDS) (cap 64). An ID that is already
+    // registered is rejected; unregister it before reuse.
     void register_callable(int32_t callable_id, const void *callable);
+    /// Register with a runtime-assigned ID in either initialization mode.
+    int32_t register_callable(const void *callable, size_t callable_size);
     void unregister_callable(int32_t callable_id);
 
     /// Number of distinct callable_ids the AICPU has been asked to dlopen for
@@ -319,7 +360,7 @@ public:
     ///
     /// The three `device_*_caller_buffer(s)_ctx` entries are mandatory C ABI,
     /// like the rest of the `device_*_ctx` family: `init` resolves them with
-    /// `load_symbol`, which throws when one is missing, so a bound runtime
+    /// `RuntimeModule::required`, which throws when one is missing, so a bound runtime
     /// always has them. (The two `HostApiOps` entries this capability adds are
     /// the optional half — those are null-guarded, and a platform publishing
     /// neither behaves as it did.) False therefore means what the paragraph
@@ -358,9 +399,9 @@ public:
     );
     /// Collectively allocate a fresh per-rank symmetric pool for a subset of
     /// ranks.  Multiple concurrent allocations are disambiguated by
-    /// `allocation_id`.  Returns (device_ctx, local_window_base).  Only
+    /// `allocation_id`. Returns (device_ctx, local_window_base, actual_window_size). Only
     /// participating ranks call this; non-members of the subset must not.
-    std::pair<uint64_t, uint64_t> comm_alloc_domain_windows(
+    std::tuple<uint64_t, uint64_t, size_t> comm_alloc_domain_windows(
         uint64_t comm_handle, uint64_t allocation_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
         size_t window_size
     );
@@ -382,9 +423,37 @@ public:
 
     int device_id() const { return device_id_; }
     bool initialized() const { return initialized_; }
+    std::optional<ExecutionEnvironment> execution_environment() const { return execution_environment_; }
     unsigned pipeline_depth() const { return pipeline_contract_.pipeline_depth; }
     size_t runtime_slot_count() const { return runtime_bufs_.size(); }
     bool supports_concurrent_native_prepare() const;
+
+    /**
+     * Let this worker's device context size its own run concurrency.
+     *
+     * @return false when the loaded module or the context cannot, in which case
+     *         the worker keeps admitting exactly what it was granted
+     */
+    bool enable_automatic_admission();
+
+    /** Whether this worker's context sizes its own concurrency. */
+    bool automatic_admission() const { return automatic_admission_; }
+
+    /**
+     * Run-resource sets the context reports it can hold right now, or the
+     * granted count when it does not size itself.
+     */
+    uint32_t admissible_run_resource_sets() const;
+
+    /**
+     * Give up every resource a waiting plan on this slot still holds.
+     *
+     * Called by the lane for a run it is abandoning that asked to wait, because
+     * such a run holds things an unprepared run does not. Reports failure when
+     * the run could still have reached the device, which the caller must treat
+     * as a reason not to hand its borrows back.
+     */
+    int abort_run_plan(uint32_t pipeline_slot, uint64_t run_epoch);
     /**
      * Whether this worker may order one run's native submission behind
      * another's right now, which is both a runtime capability and a
@@ -401,6 +470,29 @@ public:
      * launch actually arms.
      */
     bool supports_joined_diagnostic_launch(const ChipWorkerNativeRun &run, const ChipWorkerNativeRun &predecessor);
+
+    /**
+     * The device context and the three credit entries, for a caller that must
+     * keep calling them after this worker may be gone.
+     *
+     * Handed out once, to be copied into storage that outlives the worker: a
+     * parked waiter reaches the runtime through that copy, never through
+     * `worker->`, because the lane holds the worker as a raw pointer and a
+     * waiter is exactly the thing that can outlive it.
+     */
+    using CreditGenerationFn = decltype(&simpler_diagnostic_credit_generation_ctx);
+    using CreditWaitFn = decltype(&simpler_wait_diagnostic_credit_ctx);
+    using CreditCancelFn = decltype(&simpler_cancel_diagnostic_credit_waits_ctx);
+
+    struct CreditEntries {
+        void *ctx = nullptr;
+        CreditGenerationFn generation = nullptr;
+        CreditWaitFn wait = nullptr;
+        CreditCancelFn cancel = nullptr;
+    };
+    CreditEntries credit_entries() const {
+        return CreditEntries{device_ctx_, credit_generation_fn_, credit_wait_fn_, credit_cancel_fn_};
+    }
     /**
      * Whether this worker holds a live communication session or global domain.
      *
@@ -481,7 +573,7 @@ private:
     using ValidateExecutionContextFn = decltype(&simpler_validate_execution_context);
     using ValidateCallerStreamFn = decltype(&simpler_validate_caller_stream);
     using CallerStreamLaunchFn = decltype(&simpler_launch_run_on_stream);
-    // Resolved optionally rather than through `load_symbol`: only onboard
+    // Resolved optionally rather than through `RuntimeModule::required`: only onboard
     // modules carry the retention fixture, so a hard requirement would oblige
     // every simulated and stand-in runtime to export a stub of it.
     using SimplerProbeRunRetentionFn = decltype(&simpler_probe_run_retention);
@@ -494,6 +586,7 @@ private:
     using SimplerUnregisterCallableFn = int (*)(void *, int32_t);
     using GetAicpuDlopenCountFn = size_t (*)(void *);
     using FinalizeDeviceFn = int (*)(void *);
+    using ExecutionEnvironmentReleasableFn = int (*)(void *);
     using EnsureAclReadyFn = int (*)(void *, int);
     using CreateCommStreamFn = void *(*)(void *);
     using DestroyCommStreamFn = int (*)(void *, void *);
@@ -503,7 +596,7 @@ private:
     using CommGetWindowSizeFn = int (*)(void *, size_t *);
     using CommDeriveContextFn = int (*)(void *, const uint32_t *, size_t, uint32_t, size_t, size_t, uint64_t *);
     using CommAllocDomainWindowsFn =
-        int (*)(void *, uint64_t, const uint32_t *, size_t, uint32_t, size_t, uint64_t *, uint64_t *);
+        int (*)(void *, uint64_t, const uint32_t *, size_t, uint32_t, size_t, uint64_t *, uint64_t *, size_t *);
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
     using CommGlobalDomainPrepareFn =
         int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
@@ -532,8 +625,9 @@ private:
     int destroy_comm_session(CommSession &session);
     uint64_t create_base_comm(int rank, int nranks, const std::string &rootinfo_path);
     void clear_comm_sessions();
+    void require_comm_reclamation_safe() const;
 
-    void *lib_handle_ = nullptr;
+    std::shared_ptr<RuntimeModule> runtime_module_;
     CreateDeviceContextFn create_device_context_fn_ = nullptr;
     DestroyDeviceContextFn destroy_device_context_fn_ = nullptr;
     DeviceMallocCtxFn device_malloc_ctx_fn_ = nullptr;
@@ -549,6 +643,8 @@ private:
     GetDeviceMemoryInfoFn device_memory_info_fn_ = nullptr;
     SimplerInitFn simpler_init_fn_ = nullptr;
     SimplerRegisterCallableFn register_callable_fn_ = nullptr;
+    using SimplerRegisterCallableV2Fn = decltype(&simpler_register_callable_v2);
+    SimplerRegisterCallableV2Fn register_callable_v2_fn_ = nullptr;
     SimplerRunFn run_fn_ = nullptr;
     SimplerPrepareRunFn prepare_run_fn_ = nullptr;
     SimplerNativeRunFn launch_run_fn_ = nullptr;
@@ -568,20 +664,29 @@ private:
     bool teardown_report_captured_ = false;
     using SimplerSetRetainRunsFn = decltype(&simpler_set_retain_runs_ctx);
     using SimplerSetRetainedEpochLimitFn = decltype(&simpler_set_retained_epoch_limit_ctx);
+    using SimplerSetRunResourceGrantFn = decltype(&simpler_set_run_resource_grant_ctx);
     using SimplerFlushDiagnosticsFn = decltype(&simpler_flush_diagnostics_ctx);
     SimplerSetRetainRunsFn set_retain_runs_fn_ = nullptr;
     // Optional: a module built before the capacity grant exports no such
     // symbol, and a null pointer leaves `retained_epoch_limit_granted_` at the
     // shipped figure.
     SimplerSetRetainedEpochLimitFn set_retained_epoch_limit_fn_ = nullptr;
+    SimplerSetRunResourceGrantFn set_run_resource_grant_fn_ = nullptr;
     // What the backend actually granted, recorded only on a success return.
     // The joined-diagnostic gate reads it, so a refused request can never let
     // the lane order more runs than the collector can hold.
     size_t retained_epoch_limit_granted_ = simpler::dfx::runs::kMaxOpenEpochs;
     using SimplerSetWorkspaceBudgetFn = decltype(&simpler_set_workspace_budget_ctx);
+    using SimplerEnableAutomaticAdmissionFn = decltype(&simpler_enable_automatic_admission_ctx);
+    using SimplerAdmissibleRunResourceSetsFn = decltype(&simpler_admissible_run_resource_sets_ctx);
+    using SimplerAbortRunPlanFn = decltype(&simpler_abort_run_plan_ctx);
     using SimplerEnableWorkspaceManagementFn = decltype(&simpler_enable_workspace_management_ctx);
     using SimplerGetWorkspaceReportFn = decltype(&simpler_get_workspace_report_ctx);
     SimplerSetWorkspaceBudgetFn set_workspace_budget_fn_ = nullptr;
+    SimplerEnableAutomaticAdmissionFn enable_automatic_admission_fn_ = nullptr;
+    SimplerAdmissibleRunResourceSetsFn admissible_run_resource_sets_fn_ = nullptr;
+    SimplerAbortRunPlanFn abort_run_plan_fn_ = nullptr;
+    bool automatic_admission_ = false;
     // Resolved for the retained compatibility entry, which a direct C caller
     // may still invoke before init. `init` no longer calls it: the program
     // init entry installs the manager for every caller.
@@ -598,19 +703,26 @@ private:
     SupportsConcurrentNativePrepareFn supports_concurrent_native_prepare_fn_ = nullptr;
     SupportsConcurrentNativePrepareFn supports_joined_native_launch_fn_ = nullptr;
     SupportsJoinedDiagnosticLaunchFn supports_joined_diagnostic_launch_fn_ = nullptr;
+    // The credit bridge. A runtime that exports none of these leaves the
+    // slots null, which degrades to "no credit wait": the caller re-asks on
+    // its own next pass, exactly as it does today.
+    CreditGenerationFn credit_generation_fn_ = nullptr;
+    CreditWaitFn credit_wait_fn_ = nullptr;
+    CreditCancelFn credit_cancel_fn_ = nullptr;
     GetArenaBankGmHeapBaseFn get_arena_bank_gm_heap_base_fn_ = nullptr;
     GetRetainedTempAddrFn get_retained_temp_addr_fn_ = nullptr;
     SimplerUnregisterCallableFn unregister_callable_fn_ = nullptr;
     GetAicpuDlopenCountFn get_aicpu_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_host_dlopen_count_fn_ = nullptr;
     GetAicpuDlopenCountFn get_run_stream_set_create_count_fn_ = nullptr;
-    // Resolved optionally rather than through `load_symbol`: only the a5
+    // Resolved optionally rather than through `RuntimeModule::required`: only the a5
     // host_build_graph module records a scheduler selection, so a hard
     // requirement would oblige every other runtime to export a stub.
     using GetLastSchedulerRuntimeModeFn = uint32_t (*)(void *);
     GetLastSchedulerRuntimeModeFn get_last_scheduler_runtime_mode_fn_ = nullptr;
     GetAicpuDlopenCountFn get_scheduler_mode_publish_count_fn_ = nullptr;
     FinalizeDeviceFn finalize_device_fn_ = nullptr;
+    ExecutionEnvironmentReleasableFn execution_environment_releasable_fn_ = nullptr;
     EnsureAclReadyFn ensure_acl_ready_fn_ = nullptr;
     CreateCommStreamFn create_comm_stream_fn_ = nullptr;
     DestroyCommStreamFn destroy_comm_stream_fn_ = nullptr;
@@ -643,13 +755,49 @@ private:
     public:
         using std::runtime_error::runtime_error;
     };
-    struct NativeRunSlotState {
+    /**
+     * This run's device resources are not available yet, and a consumer that
+     * holds some of them has a finish this context will reach.
+     *
+     * Distinct from `PreparedRunIncompatible`, which is about a layout two runs
+     * cannot share and clears when the run ahead retires, and from a failure,
+     * which ends the run. The caller keeps the run queued with everything it
+     * holds; the worker's saved plan is what the next attempt continues from,
+     * so the caller's orchestration callback is not invoked again.
+     */
+    class PreparedRunResourceWait : public std::runtime_error {
+    public:
+        using std::runtime_error::runtime_error;
+    };
+    /**
+     * One live native run, owned by this worker and keyed by its own epoch.
+     *
+     * `phase` is what the run's execution established, `finalize_reserved` is which caller owns its
+     * finalization, and `pending_rc` is the error a later finalize must report; they are separate
+     * fields because one of them overwriting another is exactly what this must not permit.
+     * `ops_in_flight` is zero or one, so at most one operation is inside the runtime for one run.
+     * The entry outlives the carrier object the runtime places in that run's storage.
+     */
+    struct NativeRunEntry {
+        uint32_t slot_id{0};
         uint64_t lease_generation{0};
         uint64_t run_epoch{0};
         NativeRunPhase phase{NativeRunPhase::EMPTY};
-        int wait_rc{0};
+        unsigned ops_in_flight{0};
+        bool finalize_reserved{false};
+        /** Teardown progress is unknown, so no further call may reach this run. */
+        bool destruction_unknown{false};
+        /** First writer wins: an established error is never replaced by a later one. */
+        int pending_rc{0};
+        bool pending_rc_set{false};
         bool permits_prepared_successor{false};
     };
+    /** What the storage tag says after a finalize that reached the C entry. */
+    enum class RunStorageTag : uint8_t { Destroyed, Canonical, Noncanonical };
+    /** Which operation a lease is being taken for; decides blocking and the admitted phases. */
+    enum class NativeRunOp : uint8_t { Launch, Poll, Wait, Finalize, Probe, Predecessor, ProbeSuccessor };
+    /** Why a lease was refused, or that the run had already completed. */
+    enum class NativeRunLease : uint8_t { Acquired, AlreadyComplete, Absent, Stale, Reserved, Busy };
     ChipWorkerNativeRun prepare_native_run_on_slot(
         int32_t callable_id, const ChipStorageTaskArgs *args, const CallConfig &config, uint32_t slot_id,
         uint64_t generation, uint64_t run_id, uint64_t dispatch_id, volatile int32_t *accepted_state,
@@ -661,8 +809,19 @@ private:
         bool pipeline_leased, NativeRunProvenance provenance
     );
     void cleanup_native_runs_noexcept() noexcept;
-    void clear_runtime_binding();
+    void clear_runtime_binding(bool release_device_reservation = true);
     void abandon_after_failed_teardown(std::exception_ptr error) noexcept;
+    /** How many runs remain tracked and not proved destroyed, including live runs. */
+    size_t unproven_native_run_count() const noexcept;
+    /**
+     * Detach the run storage of every run not proved destroyed.
+     *
+     * Returns how many blocks were abandoned. Retaining the map entry cannot
+     * preserve anything: the entry and the storage both belong to this object,
+     * and once its destructor returns the storage is freed whatever the map
+     * said. Abandoning the block is what actually outlives the owner.
+     */
+    size_t abandon_unproven_native_run_storage() noexcept;
 
     /** Fill the write-once teardown copy from the still-live context; never throws. */
     void capture_teardown_report_noexcept() noexcept;
@@ -672,7 +831,7 @@ private:
     class RuntimeStorage {
     public:
         RuntimeStorage() = default;
-        RuntimeStorage(size_t size, size_t alignment);
+        RuntimeStorage(size_t size, size_t alignment, std::shared_ptr<RuntimeModule> module);
         ~RuntimeStorage();
         RuntimeStorage(RuntimeStorage &&other) noexcept;
         RuntimeStorage &operator=(RuntimeStorage &&other) noexcept;
@@ -680,20 +839,168 @@ private:
         RuntimeStorage &operator=(const RuntimeStorage &) = delete;
 
         // Unproven completion retains the allocation for the process lifetime.
-        void abandon() noexcept { data_ = nullptr; }
         void *data() { return data_; }
         const void *data() const { return data_; }
+        size_t size() const noexcept { return size_; }
+
+        /**
+         * Give up ownership of the block without freeing it.
+         *
+         * For a run whose carrier could not be proved destroyed. The block then
+         * outlives this object, which is the whole point: a carrier the device
+         * or the AICPU may still reach must not have its bytes returned to the
+         * allocator, and no owner that dies can keep it. Deliberately a leak —
+         * a bounded one, with the reason logged, which is what the alternative
+         * of reusing those bytes cannot offer.
+         */
+        void abandon() noexcept;
 
     private:
         void *data_{nullptr};
+        size_t size_{0};
+        std::shared_ptr<RuntimeModule> module_;
     };
 
     // Allocated once during init and never resized. Each allocation honors the
     // runtime-reported alignment and keeps a stable C ABI address through
     // prepare/finalize even if the owning vector itself is moved.
     std::vector<RuntimeStorage> runtime_bufs_;
-    std::array<NativeRunSlotState, PTO_PIPELINE_MAX_DEPTH> native_run_states_{};
+    /**
+     * Every live native run, keyed by the epoch that names it.
+     *
+     * A run's identity is its epoch, which no later run repeats; a slot is only which resource set
+     * it borrows. Values are held by pointer so an entry keeps its address across a rehash, though
+     * correctness rests on every re-entry re-looking-up by epoch rather than on that.
+     */
+    std::unordered_map<uint64_t, std::unique_ptr<NativeRunEntry>> native_runs_;
     mutable std::mutex native_run_mu_;
+    /** Signalled whenever an operation lease is released or a run entry is removed. */
+    std::condition_variable native_run_ops_done_;
+
+    /**
+     * Take the exclusive operation lease for `run`, or report why not.
+     *
+     * Re-looks-up and fully revalidates after every wake: while the wait releases the mutex, a
+     * finalizer may reserve the run and another operation may remove it, so a predicate proved
+     * before the wait proves nothing after it. Never returns a pointer the caller holds across
+     * the lock — `storage_out` is the runtime storage address, whose lifetime is the slot's.
+     */
+    /**
+     * Holds one run's operation lease and releases it on every exit path.
+     *
+     * Scope-bound because the release has to survive a throw between the runtime call and the
+     * caller's own tail: an exception constructed there would otherwise leave `ops_in_flight` set
+     * and nothing could finalize that run again.
+     */
+    class NativeRunOpLease {
+    public:
+        NativeRunOpLease() = default;
+        NativeRunOpLease(ChipWorker *owner, uint64_t run_epoch) noexcept :
+            owner_(owner),
+            run_epoch_(run_epoch) {}
+        NativeRunOpLease(const NativeRunOpLease &) = delete;
+        NativeRunOpLease &operator=(const NativeRunOpLease &) = delete;
+        NativeRunOpLease(NativeRunOpLease &&other) noexcept :
+            owner_(std::exchange(other.owner_, nullptr)),
+            run_epoch_(other.run_epoch_) {}
+        NativeRunOpLease &operator=(NativeRunOpLease &&other) noexcept {
+            if (this != &other) {
+                if (owner_ != nullptr) owner_->release_native_run_op(run_epoch_);
+                owner_ = std::exchange(other.owner_, nullptr);
+                run_epoch_ = other.run_epoch_;
+            }
+            return *this;
+        }
+        ~NativeRunOpLease() {
+            if (owner_ != nullptr) owner_->release_native_run_op(run_epoch_);
+        }
+
+    private:
+        ChipWorker *owner_{nullptr};
+        uint64_t run_epoch_{0};
+    };
+    NativeRunLease acquire_native_run_op(
+        const ChipWorkerNativeRun &run, NativeRunOp op, void **storage_out, NativeRunPhase *phase_out,
+        NativeRunOpLease *lease_out
+    );
+    /** Whether a lease refused only because another operation holds it waits, or reports it now. */
+    enum class LeaseWait : uint8_t { Block, Immediate };
+    /**
+     * Take both runs' leases at once, or neither.
+     *
+     * A joined launch dereferences the predecessor's carrier as well as its own, so holding only
+     * the successor's lease leaves the other free to be finalized and its object destroyed under
+     * the call. Both are taken under one hold of the mutex, lowest epoch first so two joins that
+     * name the same pair in opposite orders cannot wedge, and the whole pair is retried from
+     * scratch after any wake. `LeaseWait::Immediate` reports `Busy` instead of waiting, which is
+     * what a scheduling probe needs: it asks again next round rather than holding a thread.
+     */
+    NativeRunLease acquire_native_run_pair(
+        const ChipWorkerNativeRun &run, const ChipWorkerNativeRun &predecessor, NativeRunOp op, void **storage_out,
+        void **predecessor_storage_out, NativeRunOpLease *lease_out, NativeRunOpLease *predecessor_lease_out,
+        LeaseWait wait
+    );
+    /** Release the lease taken above and wake anything waiting for it. */
+    void release_native_run_op(uint64_t run_epoch) noexcept;
+    /** Classify the storage tag the runtime leaves behind, without dereferencing the object. */
+    RunStorageTag read_run_storage_tag(const void *storage) const noexcept;
+    /** Which run phases one operation may be taken for. */
+    static bool native_run_op_admits_phase(NativeRunOp op, NativeRunPhase phase);
+    /** Decide one run's lease eligibility; `native_run_mu_` is held by the caller. */
+    NativeRunLease
+    inspect_native_run_locked(const ChipWorkerNativeRun &run, NativeRunOp op, NativeRunEntry **entry_out);
+    /** Report a refused lease with the reason the caller is owed. */
+    [[noreturn]] static void
+    throw_native_run_lease_error(const ChipWorkerNativeRun &run, NativeRunLease lease, const char *operation);
+    /** Record that a run's work reached the device. */
+    void note_native_run_launched(uint64_t run_epoch) noexcept;
+    /** Record that a run's device work is over, and the error it carries, if any. */
+    void note_native_run_completion(uint64_t run_epoch, int rc) noexcept;
+    /** Remove an entry that never got past preparation. */
+    void drop_preparing_native_run(uint64_t run_epoch) noexcept;
+    /** Whether a finalization reports to a caller or is closing this worker down. */
+    enum class FinalizeMode : uint8_t { Caller, Teardown };
+    /** Why a finalization has something to report; the message belongs to whoever raises it. */
+    enum class FinalizeFault : uint8_t {
+        None,
+        /** The token names no live run, or one already finalized. */
+        Stale,
+        /** Another caller owns this run's finalization. */
+        Reserved,
+        /** The teardown returned success with the carrier still canonical. */
+        NonDestroying,
+        /** The carrier's tag is neither destroyed nor canonical, or teardown progress is unknown. */
+        UnknownDestruction,
+        /** A nonzero code, carried in `rc`. */
+        Failed,
+    };
+    /**
+     * What one finalization established, in a form that costs no allocation to produce.
+     *
+     * `captured` is the original exception when one came out of the runtime or the bookkeeping;
+     * everything else is a reason and a code. A message is built only by a caller that raises,
+     * which is what lets the finalization itself be `noexcept` with nothing to construct —
+     * teardown, which has no caller to report to, builds nothing at all.
+     */
+    struct NativeRunFinalizeOutcome {
+        FinalizeFault fault{FinalizeFault::None};
+        int rc{0};
+        bool no_submission_released{false};
+        std::exception_ptr captured;
+    };
+    // This out-fact survives a persisted launch error, never failed cleanup.
+    void finalize_native_run_impl(const ChipWorkerNativeRun &run, bool *no_submission_released);
+    /**
+     * Finalize one run and report what it established.
+     *
+     * `noexcept` and returning the outcome rather than throwing it, so teardown can share this
+     * exact ordering instead of carrying a second implementation of it. A null `token` identifies
+     * the run by epoch alone, which is what teardown has.
+     */
+    NativeRunFinalizeOutcome
+    finalize_native_run_epoch(uint64_t run_epoch, const ChipWorkerNativeRun *token, FinalizeMode mode) noexcept;
+    /** Give back a finalization reservation that could not be used; never throws. */
+    void clear_finalize_reservation_noexcept(uint64_t run_epoch) noexcept;
     PipelineSlotGenerationFilter pipeline_generations_;
     PipelineContract pipeline_contract_{PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 1, {}};
     // How many runs may be launched at once. One is the serial path; a greater
@@ -704,10 +1011,13 @@ private:
     // neither creates nor tracks. Plain: written and read from the one thread
     // that drives this worker's control commands and its run lane.
     bool exported_device_regions_live_ = false;
+    bool comm_reclamation_unconfirmed_ = false;
     std::unique_ptr<ChipRunLane> run_lane_;
     // Names a successful binding or an init whose rollback still needs close.
     // Cleared only after successful teardown. Control calls run on the owning
     // thread, as enforced by Worker.close().
+    std::optional<ExecutionEnvironment> execution_environment_;
+    bool device_owner_reserved_ = false;
     int device_id_ = -1;
     bool initialized_ = false;
     bool finalized_ = false;

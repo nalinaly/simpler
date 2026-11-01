@@ -150,18 +150,17 @@ inline __aicore__ bool scheduler_admission_static_record_valid(
     __gm__ const SchedulerAdmissionRecord *record
 ) {
     const SchedulerTaskMetadata meta = scheduler_load_dispatch_metadata(base, local, task_ref, 0);
-    const uint32_t active = static_cast<uint32_t>(__builtin_popcount(meta.active_mask));
+    const uint32_t active = static_cast<uint32_t>(meta.active_mask.count());
     uint32_t subtasks = 0;
-    if (!scheduler_task_requires_admission(meta) || (meta.active_mask & ~UINT8_C(7)) != 0 ||
-        (meta.flags & UINT8_C(128)) != 0 ||
+    if (!scheduler_task_requires_admission(meta) || !meta.active_mask.is_valid() || (meta.flags & UINT8_C(128)) != 0 ||
         !scheduler_subtask_count_checked(meta.logical_block_num, active, &subtasks) ||
         scheduler_task_is_mix(meta.flags) != (active > 1) ||
         scheduler_task_is_spmd(meta.flags) != (meta.logical_block_num > 1) ||
         scheduler_task_has_predicate(meta.flags) ||
         (scheduler_task_requires_sync_start(meta.flags) && meta.logical_block_num == 1) || meta.timing_slot < -1 ||
         meta.timing_slot >= SCHEDULER_TASK_TIMING_SLOT_COUNT || record->task_ref != task_ref ||
-        record->logical_block_num != meta.logical_block_num || record->active_mask != meta.active_mask ||
-        record->flags != meta.flags ||
+        record->logical_block_num != meta.logical_block_num ||
+        scheduler_lane_mask_load(record->active_mask) != meta.active_mask || record->flags != meta.flags ||
         record->member_words_offset != admission->records_offset +
                                            static_cast<uint64_t>(task_ref) * admission->record_stride +
                                            sizeof(SchedulerAdmissionRecord))
@@ -232,22 +231,22 @@ inline __aicore__ bool scheduler_admission_expected_members(
         return false;
     }
     const bool mix = scheduler_task_is_mix(record->flags);
-    const bool cube_task = (record->active_mask & 1U) != 0;
+    const bool cube_task = scheduler_lane_mask_load(record->active_mask).has_aic();
     for (uint64_t word = 0; word < admission->member_word_count; ++word) {
         const uint64_t remaining = workers - word * 64;
         const uint64_t valid = remaining >= 64 ? UINT64_MAX : (UINT64_C(1) << remaining) - 1;
         const uint64_t cube_word = admission->topology_cube_words[word];
         if (mix) {
-            const uint8_t resources = scheduler_mix_resource_mask(record->active_mask);
+            const LaneMask resources = scheduler_mix_resource_mask(scheduler_lane_mask_load(record->active_mask));
             words[word] |= cube_word;
-            if ((resources & 2U) != 0) words[word] |= admission->topology_vector0_words[word];
-            if ((resources & 4U) != 0) words[word] |= valid & ~(cube_word | admission->topology_vector0_words[word]);
+            if (resources.has_aiv0()) words[word] |= admission->topology_vector0_words[word];
+            if (resources.has_aiv1()) words[word] |= valid & ~(cube_word | admission->topology_vector0_words[word]);
         } else {
             words[word] |= cube_task ? cube_word : (valid & ~cube_word);
         }
     }
     *member_count = static_cast<uint32_t>(
-        mix ? cubes * __builtin_popcount(scheduler_mix_resource_mask(record->active_mask)) :
+        mix ? cubes * scheduler_mix_resource_mask(scheduler_lane_mask_load(record->active_mask)).count() :
               (cube_task ? cubes : workers - cubes)
     );
     const uint32_t positions = mix ? cubes : *member_count;
@@ -484,7 +483,7 @@ inline __aicore__ bool scheduler_refresh_local_obligation(
                 );
             admission->current_task_ref = task;
             admission->current_block_num = record->logical_block_num;
-            admission->current_active_mask = record->active_mask;
+            admission->current_active_mask = scheduler_lane_mask_load(record->active_mask);
             admission->current_flags = record->flags;
             admission->sync_claimed = false;
             admission->ticket_exhausted = false;
@@ -845,7 +844,7 @@ static inline __aicore__ bool scheduler_close_ordered_obligation(
     ++admission->scan_cursor;
     admission->current_task_ref = SCHEDULER_TASK_REF_INVALID;
     admission->current_block_num = 0;
-    admission->current_active_mask = 0;
+    admission->current_active_mask = LaneMask::none();
     admission->current_flags = 0;
     admission->sync_claimed = false;
     admission->ticket_exhausted = false;

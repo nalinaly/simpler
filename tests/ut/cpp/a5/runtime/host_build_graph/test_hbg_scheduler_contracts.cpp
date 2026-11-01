@@ -23,6 +23,7 @@
 #include "host_build_graph/runtime_types.h"
 #include "aicore_scheduler_error.h"
 #include "aicore_scheduler_state.h"
+#include "scheduler_ready_watchdog.h"
 #include "scheduler/scheduler_graph.h"
 #include "scheduler/scheduler_ssbuf.h"
 #include "scheduler/scheduler_topology.h"
@@ -113,19 +114,27 @@ TEST(AicoreSchedulerState, ResidentSyncStartShapeRequiresMultipleBlocksAndSepara
 
 TEST(AicoreSchedulerState, SyncDemandCountsDistinctCoresInTheDeclaredResourceScope) {
     for (uint64_t workers : {3U, 6U, 9U, 96U, 108U}) {
-        for (uint8_t mask : {1U, 2U, 4U, 3U, 5U, 6U, 7U}) {
+        for (LaneMask mask :
+             {LaneMask::aic(), LaneMask::aiv0(), LaneMask::aiv1(),
+              LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false),
+              LaneMask(/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true), LaneMask::both_aiv(), LaneMask::all()}) {
             SCOPED_TRACE(workers);
-            SCOPED_TRACE(mask);
-            const uint32_t positions = static_cast<uint32_t>(workers / 3) * ((mask == 2 || mask == 4) ? 2 : 1);
+            SCOPED_TRACE(mask.count());
+            const uint32_t positions =
+                static_cast<uint32_t>(workers / 3) * (mask.to_shape() == ResourceShape::AIV ? 2 : 1);
             for (uint32_t blocks : {1U, 2U, positions, positions + 1, 512U, UINT32_MAX}) {
                 SCOPED_TRACE(blocks);
                 SchedulerMinimumWorkerDemand demand{};
                 const bool valid = blocks > 1 && blocks <= positions;
                 EXPECT_EQ(scheduler_resident_worker_demand_checked(mask, blocks, true, workers, &demand), valid);
                 if (valid) {
-                    const bool mix = __builtin_popcount(mask) > 1;
-                    EXPECT_EQ(demand.aic, (mix || mask == 1) ? blocks : 0u);
-                    EXPECT_EQ(demand.aiv, mix ? blocks * __builtin_popcount(mask & 6U) : (mask == 1 ? 0 : blocks));
+                    const bool mix = mask.is_mix();
+                    EXPECT_EQ(demand.aic, (mix || mask.is_aic()) ? blocks : 0u);
+                    EXPECT_EQ(
+                        demand.aiv, mix ? blocks * (static_cast<uint32_t>(mask.has_aiv0()) +
+                                                    static_cast<uint32_t>(mask.has_aiv1())) :
+                                          (mask.is_aic() ? 0 : blocks)
+                    );
                 }
             }
             SchedulerMinimumWorkerDemand ordinary{};
@@ -140,22 +149,26 @@ TEST(AicoreSchedulerState, SyncDemandCountsDistinctCoresInTheDeclaredResourceSco
 TEST(AicoreSchedulerState, ResidentDemandRejectsInvalidTopologyMaskAndOutput) {
     SchedulerMinimumWorkerDemand demand{};
     for (uint64_t workers : {UINT64_C(0), UINT64_C(1), UINT64_C(5), UINT64_C(109), UINT64_C(111), UINT64_MAX})
-        EXPECT_FALSE(scheduler_resident_worker_demand_checked(1, 2, true, workers, &demand));
-    for (uint8_t mask : {0U, 8U, 255U})
-        EXPECT_FALSE(scheduler_resident_worker_demand_checked(mask, 2, true, 96, &demand));
-    EXPECT_FALSE(scheduler_resident_worker_demand_checked(1, 2, true, 96, nullptr));
+        EXPECT_FALSE(scheduler_resident_worker_demand_checked(LaneMask::aic(), 2, true, workers, &demand));
+    // An empty lane set is the only mask the demand check can still be asked
+    // about and must refuse: a byte with bits outside the three lanes is not a
+    // LaneMask any caller can construct.
+    EXPECT_FALSE(scheduler_resident_worker_demand_checked(LaneMask::none(), 2, true, 96, &demand));
+    EXPECT_FALSE(scheduler_resident_worker_demand_checked(LaneMask::aic(), 2, true, 96, nullptr));
 }
 
 TEST(AicoreSchedulerState, OrdinaryMixMasksCanExecuteMoreBlocksThanPhysicalClusters) {
-    for (uint8_t mask : {3U, 5U, 6U, 7U}) {
-        SCOPED_TRACE(mask);
-        const uint32_t active = static_cast<uint32_t>(__builtin_popcount(mask));
+    for (LaneMask mask :
+         {LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false), LaneMask(/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true),
+          LaneMask::both_aiv(), LaneMask::all()}) {
+        SCOPED_TRACE(mask.count());
+        const uint32_t active = static_cast<uint32_t>(mask.count());
         for (uint32_t blocks : {SCHEDULER_CLUSTER_CAPACITY + 1, 512U}) {
             SCOPED_TRACE(blocks);
             EXPECT_TRUE(scheduler_resident_task_shape_supported(active, blocks, false));
             const auto demand = scheduler_minimum_worker_demand(mask);
             EXPECT_EQ(demand.aic, 1u);
-            EXPECT_EQ(demand.aiv, (mask & 6U) == 6U ? 2u : 1u);
+            EXPECT_EQ(demand.aiv, mask.has_both_aiv() ? 2u : 1u);
         }
     }
 }
@@ -180,19 +193,19 @@ TEST(AicoreSchedulerState, OrdinaryPureAndMixShapeValidationIsSubmissionOrderInd
 
 TEST(AicoreSchedulerState, OrdinaryDemandCountsOneExecutionPositionOrMixGroup) {
     struct DemandCase {
-        uint8_t mask;
+        LaneMask mask;
         uint32_t aic;
         uint32_t aiv;
     };
     for (const DemandCase &test : {
-             DemandCase{1, 1, 0},
-             DemandCase{2, 0, 1},
-             DemandCase{3, 1, 1},
-             DemandCase{5, 1, 1},
-             DemandCase{6, 1, 2},
-             DemandCase{7, 1, 2},
+             DemandCase{LaneMask::aic(), 1, 0},
+             DemandCase{LaneMask::aiv0(), 0, 1},
+             DemandCase{LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false), 1, 1},
+             DemandCase{LaneMask(/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true), 1, 1},
+             DemandCase{LaneMask::both_aiv(), 1, 2},
+             DemandCase{LaneMask::all(), 1, 2},
          }) {
-        SCOPED_TRACE(test.mask);
+        SCOPED_TRACE(test.mask.count());
         const auto demand = scheduler_minimum_worker_demand(test.mask);
         EXPECT_EQ(demand.aic, test.aic);
         EXPECT_EQ(demand.aiv, test.aiv);
@@ -203,7 +216,277 @@ TEST(AicoreSchedulerWatchdog, UsesElapsedWallClockBudget) {
     EXPECT_FALSE(scheduler_watchdog_expired(100, UINT64_MAX, 0));
     EXPECT_FALSE(scheduler_watchdog_expired(100, 199, 100));
     EXPECT_TRUE(scheduler_watchdog_expired(100, 200, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(UINT64_MAX - 10, 3, 15));
     EXPECT_TRUE(scheduler_watchdog_expired(UINT64_MAX - 10, 4, 15));
+}
+
+TEST(AicoreSchedulerWatchdog, RejectsBackwardAndHalfRangeSamples) {
+    constexpr uint64_t half_range = uint64_t{1} << 63;
+    EXPECT_TRUE(scheduler_watchdog_expired(0, half_range - 1, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(0, half_range, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(0, UINT64_MAX, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(1000, 800, 0));
+}
+
+TEST(AicpuReadyWatchdog, SupervisorSeedAheadOfFirstSampleKeepsDeadline) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(1000);
+    const uint64_t last_progress = watchdog.last_progress();
+    EXPECT_FALSE(scheduler_watchdog_expired(last_progress, 800, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(last_progress, 1099, 100));
+    EXPECT_TRUE(scheduler_watchdog_expired(last_progress, 1100, 100));
+    EXPECT_EQ(watchdog.last_progress(), 1000);
+}
+
+TEST(AicpuReadyWatchdog, RealProgressAllowsTotalExecutionBeyondBudget) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(0);
+    uint64_t now = 0;
+    int advances = 0;
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [&] {
+            return advances == 4;
+        },
+        [&] {
+            return now;
+        },
+        [&] {
+            now += 90;
+            watchdog.record_progress(now);
+            ++advances;
+        },
+        100
+    ));
+    EXPECT_EQ(now, 360u);
+    EXPECT_TRUE(scheduler_watchdog_expired(0, now, 100));
+}
+
+TEST(AicpuReadyWatchdog, UnchangedProgressExpiresAtOriginalBoundary) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    uint64_t now = 100;
+    int polls = 0;
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [&] {
+            return now;
+        },
+        [&] {
+            now += 25;
+            ++polls;
+        },
+        100
+    ));
+    EXPECT_EQ(now, 200u);
+    EXPECT_EQ(polls, 4);
+    EXPECT_EQ(watchdog.last_progress(), 100u);
+}
+
+TEST(AicpuReadyWatchdog, SupervisorNeverStartsRemainsBounded) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [] {
+            return 200u;
+        },
+        [] {
+            ADD_FAILURE() << "expired wait must not spin";
+        },
+        100
+    ));
+}
+
+TEST(AicpuReadyWatchdog, SupervisorLossAfterProgressRemainsBounded) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    watchdog.record_progress(150);
+    uint64_t now = 200;
+    int unrelated_activity = 0;
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [&] {
+            return now;
+        },
+        [&] {
+            ++unrelated_activity;
+            now += 25;
+        },
+        100
+    ));
+    EXPECT_EQ(now, 250u);
+    EXPECT_EQ(unrelated_activity, 2);
+    EXPECT_EQ(watchdog.last_progress(), 150u);
+}
+
+TEST(AicpuReadyWatchdog, ReadyWinsBeforeClockAndAtExpiryRecheck) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [] {
+            return true;
+        },
+        [] {
+            ADD_FAILURE() << "ready wait must not sample the clock";
+            return 0u;
+        },
+        [] {
+            ADD_FAILURE() << "ready wait must not spin";
+        },
+        100
+    ));
+    bool ready = false;
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [&] {
+            return ready;
+        },
+        [&] {
+            ready = true;
+            return 200u;
+        },
+        [] {
+            ADD_FAILURE() << "ready publication must win expiry";
+        },
+        100
+    ));
+}
+
+TEST(AicpuReadyWatchdog, RefreshDuringExpiryUsesNewClockSample) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    int samples = 0;
+    bool ready = false;
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [&] {
+            return ready;
+        },
+        [&] {
+            if (++samples == 1) {
+                watchdog.record_progress(205);
+                return 200u;
+            }
+            return 206u;
+        },
+        [&] {
+            if (samples == 2) ready = true;
+        },
+        100
+    ));
+    EXPECT_EQ(samples, 2);
+}
+
+TEST(AicpuReadyWatchdog, ProgressPublicationAheadOfSampleDoesNotExpire) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(101);
+    uint64_t now = 100;
+    bool ready = false;
+    int relaxations = 0;
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [&] {
+            return ready;
+        },
+        [&] {
+            return now;
+        },
+        [&] {
+            now = 102;
+            ready = true;
+            ++relaxations;
+        },
+        2000
+    ));
+    EXPECT_EQ(relaxations, 1);
+}
+
+TEST(AicpuReadyWatchdog, OlderClockSampleStillExpiresAtProgressDeadline) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(101);
+    uint64_t now = 100;
+    int samples = 0;
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [&] {
+            ++samples;
+            return now;
+        },
+        [&] {
+            now = now == 100 ? 102 : 2101;
+        },
+        2000
+    ));
+    EXPECT_EQ(now, 2101u);
+    EXPECT_EQ(samples, 3);
+    EXPECT_EQ(watchdog.last_progress(), 101u);
+}
+
+TEST(AicpuReadyWatchdog, InvocationResetDropsPriorProgress) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    watchdog.record_progress(900);
+    watchdog.reset();
+    EXPECT_EQ(watchdog.last_progress(), 0u);
+    watchdog.reset(1000);
+    uint64_t now = 1099;
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [&] {
+            return now;
+        },
+        [&] {
+            ++now;
+        },
+        100
+    ));
+    EXPECT_EQ(now, 1100u);
+}
+
+TEST(AicpuReadyWatchdog, SignalingBarrierKeepsFixedBudget) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(100);
+    const uint64_t signaling_start = 100;
+    watchdog.record_progress(199);
+    EXPECT_TRUE(scheduler_watchdog_expired(signaling_start, 200, 100));
+    EXPECT_FALSE(scheduler_watchdog_expired(watchdog.last_progress(), 200, 100));
+}
+
+TEST(AicpuReadyWatchdog, WrapAndDisabledBudgetMatchElapsedWatchdog) {
+    AicpuReadyWatchdog watchdog;
+    watchdog.reset(UINT64_MAX - 10);
+    EXPECT_FALSE(watchdog.wait_until_ready(
+        [] {
+            return false;
+        },
+        [] {
+            return 4u;
+        },
+        [] {
+            ADD_FAILURE() << "wrapped deadline expired";
+        },
+        15
+    ));
+    bool ready = false;
+    EXPECT_TRUE(watchdog.wait_until_ready(
+        [&] {
+            return ready;
+        },
+        [] {
+            return UINT64_MAX;
+        },
+        [&] {
+            ready = true;
+        },
+        0
+    ));
 }
 
 using scheduler_test::SchedulerStateBuffer;
@@ -306,7 +589,7 @@ TEST(SchedulerMetadata, ProjectsExistingSubmitTypesWithoutChangingTheirSemantics
     attrs.set_predicate();
     attrs.set_timing_slot(7);
     const uint8_t flags = scheduler_task_metadata_flags_from_submit_state(
-        ActiveMask(SUBTASK_MASK_AIC | SUBTASK_MASK_AIV0), attrs, 2, true, false
+        LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false), attrs, 2, true, false
     );
     EXPECT_TRUE(scheduler_task_is_executable(flags));
     EXPECT_TRUE(scheduler_task_has_fanin(flags));
@@ -318,7 +601,7 @@ TEST(SchedulerMetadata, ProjectsExistingSubmitTypesWithoutChangingTheirSemantics
     EXPECT_EQ(attrs.timing_slot(), 7);
 
     const uint8_t inline_flags =
-        scheduler_task_metadata_flags_from_submit_state(ActiveMask(SUBTASK_MASK_AIV0), TaskAttrs{}, 1, false, true);
+        scheduler_task_metadata_flags_from_submit_state(LaneMask::aiv0(), TaskAttrs{}, 1, false, true);
     EXPECT_EQ(inline_flags, SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_INLINE);
 }
 

@@ -81,9 +81,9 @@ struct ErrorFixture {
     ErrorFixture() :
         storage(2, 3, 8, SchedulerSpmdRequirements{3, 1, 2, 2}) {
         for (uint32_t task = 0; task < 2; ++task) {
-            graph.mixed(task, 3);
+            graph.mixed(task, LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false));
             auto &metadata = storage.metadata[task];
-            metadata.active_mask = 3;
+            metadata.active_mask = LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false);
             metadata.logical_block_num = 4;
             metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX;
             metadata.kernel_ids[0] = 1;
@@ -105,7 +105,7 @@ struct ErrorFixture {
             auto &admission = admissions[worker];
             admission.current_task_ref = 0;
             admission.current_block_num = 4;
-            admission.current_active_mask = 3;
+            admission.current_active_mask = LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false);
             admission.current_flags = storage.metadata[0].flags;
             admission.scan_cursor = 0;
             admission.gm_mix.phase = SchedulerGmMixPhase::RUNNING;
@@ -283,7 +283,7 @@ TEST(HbgErrorIdentity, PurePreparationFailureNamesTheExactFillingBlockAmongTwoOw
     auto *local = fixture.locals[1];
     auto &admission = fixture.admissions[1];
     auto &metadata = fixture.storage.metadata[0];
-    metadata.active_mask = 2;
+    metadata.active_mask = LaneMask::aiv0();
     metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD;
     metadata.kernel_ids[0] = UINT16_MAX;
     admission.current_active_mask = metadata.active_mask;
@@ -310,9 +310,11 @@ TEST_P(HbgErrorGroupPhase, PreservesOwnedGroupIdentityIncludingInactiveCoordinat
     for (uint32_t worker : {0u, 1u, 2u}) {
         ErrorFixture fixture;
         auto &admission = fixture.admissions[worker];
-        admission.current_active_mask = GetParam() == SchedulerGmMixPhase::RUNNING ? 7 : 6;
+        admission.current_active_mask =
+            GetParam() == SchedulerGmMixPhase::RUNNING ? LaneMask::all() : LaneMask::both_aiv();
         admission.gm_mix.phase = GetParam();
-        admission.gm_mix.subtask_slot = worker == 0 && admission.current_active_mask == 6 ? UINT8_MAX : worker;
+        admission.gm_mix.subtask_slot =
+            worker == 0 && admission.current_active_mask == LaneMask::both_aiv() ? UINT8_MAX : worker;
         fixture.record(worker);
         EXPECT_EQ(read_identity(*fixture.run()), (Identity{61, 0, 2, 7, worker, worker}));
     }
@@ -415,7 +417,7 @@ TEST(HbgErrorIdentity, OrdinarySingleBlockPreparationHasKnownBlockWithoutClaimin
     local->admission = nullptr;
     local->slots[0].state = SchedulerDispatchSlotState::FILLING;
     auto &metadata = fixture.storage.metadata[0];
-    metadata.active_mask = 2;
+    metadata.active_mask = LaneMask::aiv0();
     metadata.logical_block_num = 1;
     metadata.flags = SCHEDULER_TASK_EXECUTABLE;
     metadata.kernel_ids[0] = UINT16_MAX;

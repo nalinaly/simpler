@@ -29,9 +29,15 @@ namespace {
 
 struct OrderedShape {
     uint16_t blocks;
-    uint8_t mask;
+    LaneMask mask;
     bool sync_start{false};
 };
+
+constexpr LaneMask kAicAiv0{/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false};
+constexpr LaneMask kAicAiv1{/*aic=*/true, /*aiv0=*/false, /*aiv1=*/true};
+// The single-lane sets: one cube lane, then each vector lane.
+constexpr std::array<LaneMask, 2> kPureCAndV{LaneMask::aic(), LaneMask::aiv0()};
+constexpr std::array<LaneMask, 3> kPureMasks{LaneMask::aic(), LaneMask::aiv0(), LaneMask::aiv1()};
 
 uint64_t maximum_blocks(const std::vector<OrderedShape> &shapes) {
     uint64_t maximum = 1;
@@ -64,7 +70,7 @@ struct OrderedFixture {
         uint32_t trace = 0;
         for (uint64_t task = 0; task < shapes.size(); ++task) {
             const auto shape = shapes[task];
-            graph.executable(task, shape.mask == 1 ? 0 : 1);
+            graph.executable(task, shape.mask == LaneMask::aic() ? 0 : 1);
             auto &metadata = storage.metadata[task];
             metadata.active_mask = shape.mask;
             metadata.logical_block_num = shape.blocks;
@@ -74,7 +80,7 @@ struct OrderedFixture {
             trace += shape.blocks;
             metadata.timing_slot = -1;
             for (uint32_t slot = 0; slot < 3; ++slot)
-                metadata.kernel_ids[slot] = (shape.mask & (1U << slot)) != 0 ? 1 : UINT16_MAX;
+                metadata.kernel_ids[slot] = shape.mask.has(static_cast<SubtaskSlot>(slot)) ? 1 : UINT16_MAX;
         }
         EXPECT_TRUE(scheduler_init_spmd_task_records(base(), storage.layout, 37));
         storage.run_control->active_worker_count = 6;
@@ -100,10 +106,11 @@ struct OrderedFixture {
     SchedulerTaskControl *control(uint64_t task) const {
         return scheduler_state_at<SchedulerTaskControl>(base(), storage.layout.task_controls_offset) + task;
     }
-    uint32_t publisher(uint64_t task) const { return storage.metadata[task].active_mask == 1 ? 0 : 1; }
+    uint32_t publisher(uint64_t task) const { return storage.metadata[task].active_mask == LaneMask::aic() ? 0 : 1; }
     void dependency(uint64_t consumer, uint64_t producer) {
         graph.executable(
-            consumer, storage.metadata[consumer].active_mask == 1 ? 0 : 1, {static_cast<int32_t>(producer)}
+            consumer, storage.metadata[consumer].active_mask == LaneMask::aic() ? 0 : 1,
+            {static_cast<int32_t>(producer)}
         );
         storage.metadata[consumer].flags |= SCHEDULER_TASK_HAS_FANIN;
         EXPECT_TRUE(scheduler_init_spmd_task_records(base(), storage.layout, 37));
@@ -209,7 +216,7 @@ struct OrderedFixture {
     std::array<SchedulerReadyStats, 6> ready_stats{};
 };
 
-class HbgOrderedFirstReady : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedFirstReady : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedFirstReady, FirstBlockIsExecutableWithoutClaimingOrPublishingASecondBlock) {
     OrderedFixture fixture({{8, GetParam()}}, true);
@@ -313,15 +320,15 @@ TEST_P(HbgOrderedFirstReady, ReadyBlockDoesNotSkipDiscoveryOrPublicationOfALater
     EXPECT_EQ(execution.slot, 1u);
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedFirstReady, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedFirstReady, ::testing::ValuesIn(kPureCAndV));
 
-class HbgOrderedExhaustionSafety : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedExhaustionSafety : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedExhaustionSafety, ZeroWorkMemberClosesWhileRemoteClaimedBlocksRemainLive) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     OrderedFixture fixture({{2, mask}}, true);
     const uint32_t owner = fixture.publisher(0);
-    const uint32_t zero_worker = mask == 1 ? 3 : 2;
+    const uint32_t zero_worker = mask == LaneMask::aic() ? 3 : 2;
     ASSERT_TRUE(fixture.admit(0, owner));
     ASSERT_TRUE(fixture.stage_one(owner, 0));
     ASSERT_TRUE(fixture.stage_one(owner, 1));
@@ -344,10 +351,10 @@ TEST_P(HbgOrderedExhaustionSafety, ZeroWorkMemberClosesWhileRemoteClaimedBlocksR
 }
 
 TEST_P(HbgOrderedExhaustionSafety, ExhaustionCannotCloseAnActiveSlotWithItsReadyBitAlreadyConsumed) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     OrderedFixture fixture({{2, mask}});
     const uint32_t worker = fixture.publisher(0);
-    const uint32_t peer = mask == 1 ? 3 : 2;
+    const uint32_t peer = mask == LaneMask::aic() ? 3 : 2;
     ASSERT_TRUE(fixture.admit(0, worker));
     ASSERT_TRUE(fixture.stage_one(worker, 1));
     ASSERT_TRUE(fixture.stage_one(peer, 0));
@@ -368,7 +375,7 @@ TEST_P(HbgOrderedExhaustionSafety, ExhaustionCannotCloseAnActiveSlotWithItsReady
 }
 
 TEST_P(HbgOrderedExhaustionSafety, PositiveHintCannotBypassCursorShapeOrErrorValidation) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     for (uint32_t fault = 0; fault < 4; ++fault) {
         SCOPED_TRACE(fault);
         OrderedFixture fixture({{2, mask}});
@@ -378,8 +385,10 @@ TEST_P(HbgOrderedExhaustionSafety, PositiveHintCannotBypassCursorShapeOrErrorVal
             fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), &fixture.admissions[worker]
         ));
         scheduler_gm_store(fixture.control(0)->next_block, fault == 0 ? UINT64_C(3) : UINT64_C(2));
-        if (fault == 1) fixture.admissions[worker].current_active_mask = 0;
-        if (fault == 2) fixture.admissions[worker].current_active_mask = mask == 1 ? 2 : 1;
+        if (fault == 1) fixture.admissions[worker].current_active_mask = LaneMask::none();
+        if (fault == 2)
+            fixture.admissions[worker].current_active_mask =
+                mask == LaneMask::aic() ? LaneMask::aiv0() : LaneMask::aic();
         if (fault == 3)
             scheduler_record_error(
                 fixture.run(), 0, SchedulerGraphResult::TIMEOUT, nullptr, fixture.locals[3],
@@ -400,7 +409,7 @@ TEST_P(HbgOrderedExhaustionSafety, PositiveHintCannotBypassCursorShapeOrErrorVal
 }
 
 TEST_P(HbgOrderedExhaustionSafety, InvalidTailAndPartiallyClaimedSyncStartKeepDifferentCloseRules) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     {
         OrderedFixture fixture({{3, mask}});
         const uint32_t worker = fixture.publisher(0);
@@ -428,7 +437,7 @@ TEST_P(HbgOrderedExhaustionSafety, InvalidTailAndPartiallyClaimedSyncStartKeepDi
         EXPECT_EQ(fixture.control(0)->completed_blocks, 0u);
     }
     {
-        const uint16_t count = mask == 1 ? 2 : 4;
+        const uint16_t count = mask == LaneMask::aic() ? 2 : 4;
         OrderedFixture fixture({{count, mask, true}});
         const uint32_t worker = fixture.publisher(0);
         ASSERT_TRUE(fixture.admit(0, worker));
@@ -446,13 +455,13 @@ TEST_P(HbgOrderedExhaustionSafety, InvalidTailAndPartiallyClaimedSyncStartKeepDi
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedExhaustionSafety, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedExhaustionSafety, ::testing::ValuesIn(kPureCAndV));
 
-class HbgOrderedSyncStart : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedSyncStart : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedSyncStart, TwoPendingSlotsAndEarlyReturnDoNotClaimAnotherPosition) {
-    const uint8_t mask = GetParam();
-    const uint32_t first = mask == 1 ? 0 : 1;
+    const LaneMask mask = GetParam();
+    const uint32_t first = mask == LaneMask::aic() ? 0 : 1;
     OrderedFixture fixture({{2, mask, true}});
     ASSERT_TRUE(fixture.admit(0, first));
     ASSERT_TRUE(fixture.fill(first));
@@ -481,8 +490,9 @@ TEST_P(HbgOrderedSyncStart, TwoPendingSlotsAndEarlyReturnDoNotClaimAnotherPositi
 }
 
 TEST_P(HbgOrderedSyncStart, FastMemberEntersNextFullTaskWithoutStealingLateMembersPosition) {
-    const uint8_t mask = GetParam();
-    const std::vector<uint32_t> members = mask == 1 ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
+    const LaneMask mask = GetParam();
+    const std::vector<uint32_t> members =
+        mask == LaneMask::aic() ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
     const auto blocks = static_cast<uint16_t>(members.size());
     OrderedFixture fixture({{blocks, mask, true}, {blocks, mask, true}});
     ASSERT_TRUE(fixture.admit(0, members[0]));
@@ -527,8 +537,8 @@ TEST_P(HbgOrderedSyncStart, FastMemberEntersNextFullTaskWithoutStealingLateMembe
 }
 
 TEST_P(HbgOrderedSyncStart, OrdinarySuccessorContinuesClaimingAfterSyncPositionRetires) {
-    const uint8_t mask = GetParam();
-    const uint32_t worker = mask == 1 ? 0 : 1;
+    const LaneMask mask = GetParam();
+    const uint32_t worker = mask == LaneMask::aic() ? 0 : 1;
     OrderedFixture fixture({{2, mask, true}, {3, mask}});
     ASSERT_TRUE(fixture.admit(0, worker));
     ASSERT_TRUE(fixture.admit(1, worker));
@@ -551,10 +561,10 @@ TEST_P(HbgOrderedSyncStart, OrdinarySuccessorContinuesClaimingAfterSyncPositionR
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedSyncStart, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedSyncStart, ::testing::ValuesIn(kPureCAndV));
 
 TEST(HbgOrderedExecution, SyncStartZeroWorkMemberWaitsForAllPositionsToBeClaimedNotCompleted) {
-    OrderedFixture fixture({{2, 2, true}});
+    OrderedFixture fixture({{2, LaneMask::aiv0(), true}});
     ASSERT_TRUE(fixture.admit(0, 1));
     ASSERT_TRUE(fixture.fill(1));
     ASSERT_TRUE(scheduler_refresh_local_obligation(
@@ -570,7 +580,7 @@ TEST(HbgOrderedExecution, SyncStartZeroWorkMemberWaitsForAllPositionsToBeClaimed
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.control(0)->completed_blocks, UINT64_C(0)), 0u);
 }
 
-class HbgOrderedBlockIdentity : public ::testing::TestWithParam<std::tuple<uint8_t, uint16_t>> {};
+class HbgOrderedBlockIdentity : public ::testing::TestWithParam<std::tuple<LaneMask, uint16_t>> {};
 
 TEST_P(HbgOrderedBlockIdentity, RealDispatchAndCompletionExecuteEveryOriginalBlockExactlyOnce) {
     const auto [mask, blocks] = GetParam();
@@ -609,12 +619,12 @@ TEST_P(HbgOrderedBlockIdentity, RealDispatchAndCompletionExecuteEveryOriginalBlo
 INSTANTIATE_TEST_SUITE_P(
     PureCAndVCapacityBoundaries, HbgOrderedBlockIdentity,
     ::testing::Combine(
-        ::testing::Values<uint8_t>(1, 2), ::testing::Values<uint16_t>(1, 2, 3, 7, 31, 32, 33, 63, 64, 65, 129, 512)
+        ::testing::ValuesIn(kPureCAndV), ::testing::Values<uint16_t>(1, 2, 3, 7, 31, 32, 33, 63, 64, 65, 129, 512)
     )
 );
 
 TEST(HbgOrderedExecution, PartialCompletionDoesNotReleaseFaninAndLastGenerationReleasesExactlyOnce) {
-    OrderedFixture fixture({{3, 1}, {1, 1}});
+    OrderedFixture fixture({{3, LaneMask::aic()}, {1, LaneMask::aic()}});
     fixture.dependency(1, 0);
     ASSERT_EQ(
         scheduler_route_task(fixture.graph.graph(), fixture.base(), fixture.locals[0], fixture.run(), 1, nullptr),
@@ -667,7 +677,7 @@ TEST(HbgOrderedExecution, PartialCompletionDoesNotReleaseFaninAndLastGenerationR
 }
 
 TEST(HbgOrderedExecution, LocalDoneAllowsIndependentBWhileARemoteLastBlockIsStillExecuting) {
-    OrderedFixture fixture({{3, 1}, {2, 1}});
+    OrderedFixture fixture({{3, LaneMask::aic()}, {2, LaneMask::aic()}});
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.admit(1, 3));
     ASSERT_TRUE(fixture.stage_one(0, 0));
@@ -704,7 +714,7 @@ TEST(HbgOrderedExecution, LocalDoneAllowsIndependentBWhileARemoteLastBlockIsStil
 }
 
 TEST(HbgOrderedExecution, CursorExhaustionIsBoundedAndDoesNotCloseLiveLocalSlots) {
-    OrderedFixture fixture({{2, 1}});
+    OrderedFixture fixture({{2, LaneMask::aic()}});
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     ASSERT_TRUE(fixture.stage_one(3, 0));
@@ -724,7 +734,7 @@ TEST(HbgOrderedExecution, CursorExhaustionIsBoundedAndDoesNotCloseLiveLocalSlots
 }
 
 TEST(HbgOrderedExecution, EmptyFillStillStopsOnAnAlreadyPublishedRunError) {
-    OrderedFixture fixture({{2, 1}, {1, 1}});
+    OrderedFixture fixture({{2, LaneMask::aic()}, {1, LaneMask::aic()}});
     for (uint32_t poll = 0; poll < 8; ++poll)
         ASSERT_TRUE(fixture.fill(0));
     EXPECT_EQ(fixture.locals[0]->local_ready_mask, 0u);
@@ -743,7 +753,7 @@ TEST(HbgOrderedExecution, EmptyFillStillStopsOnAnAlreadyPublishedRunError) {
 }
 
 TEST(HbgOrderedExecution, IdlePollIsOnlyAHintAndDoesNotConsumeNewWorkOrEntryPermission) {
-    OrderedFixture fixture({{2, 1}, {1, 1}});
+    OrderedFixture fixture({{2, LaneMask::aic()}, {1, LaneMask::aic()}});
     for (uint32_t worker = 0; worker < 6; ++worker)
         EXPECT_FALSE(
             scheduler_ordered_poll_may_progress(fixture.graph.graph(), fixture.base(), fixture.locals[worker])
@@ -765,10 +775,10 @@ TEST(HbgOrderedExecution, IdlePollIsOnlyAHintAndDoesNotConsumeNewWorkOrEntryPerm
 }
 
 TEST(HbgOrderedExecution, IdlePollFindsOwnWorkEvenWhenItsDirectoryBitIsMissing) {
-    for (uint8_t mask : {1, 2}) {
-        SCOPED_TRACE(mask);
+    for (LaneMask mask : kPureCAndV) {
+        SCOPED_TRACE(mask.count());
         OrderedFixture fixture({{2, mask}});
-        const uint32_t worker = mask == 1 ? 0 : 1;
+        const uint32_t worker = mask == LaneMask::aic() ? 0 : 1;
         auto *local = fixture.locals[worker];
         ASSERT_TRUE(fixture.enqueue(0, worker));
         scheduler_ready_directory_clear(
@@ -787,7 +797,7 @@ TEST(HbgOrderedExecution, IdlePollFindsOwnWorkEvenWhenItsDirectoryBitIsMissing) 
 }
 
 TEST(HbgOrderedExecution, EmptyPollDoesNotGrantLaterOrdinaryWorkAPermitPastANewAdmission) {
-    OrderedFixture fixture({{1, 1}, {2, 1}});
+    OrderedFixture fixture({{1, LaneMask::aic()}, {2, LaneMask::aic()}});
     for (uint32_t poll = 0; poll < 8; ++poll)
         ASSERT_TRUE(fixture.fill(0));
     ASSERT_TRUE(fixture.admit(1, 3));
@@ -812,7 +822,7 @@ TEST(HbgOrderedExecution, EmptyPollDoesNotGrantLaterOrdinaryWorkAPermitPastANewA
 }
 
 TEST(HbgOrderedExecution, SecondPreparedOrdinarySlotRechecksAdmissionAfterTheFirstEntered) {
-    OrderedFixture fixture({{1, 1}, {1, 1}, {2, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}, {1, LaneMask::aic()}, {2, LaneMask::aic()}}, true);
     const auto *events = scheduler_state_at<SchedulerProtocolExecutionTrace>(
         fixture.base(), fixture.storage.layout.protocol.executions_offset
     );
@@ -853,7 +863,7 @@ TEST(HbgOrderedExecution, SecondPreparedOrdinarySlotRechecksAdmissionAfterTheFir
 }
 
 TEST(HbgOrderedExecution, TwoPrefilledOrdinaryCandidatesYieldSlotsAndPreservePredicateDecisions) {
-    OrderedFixture fixture({{1, 1}, {1, 1}, {2, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}, {1, LaneMask::aic()}, {2, LaneMask::aic()}}, true);
     const auto *events = scheduler_state_at<SchedulerProtocolExecutionTrace>(
         fixture.base(), fixture.storage.layout.protocol.executions_offset
     );
@@ -941,7 +951,7 @@ TEST(HbgOrderedExecution, TwoPrefilledOrdinaryCandidatesYieldSlotsAndPreservePre
 }
 
 TEST(HbgOrderedExecution, NonmemberVectorCanExecuteOrdinaryWorkWhileCubeObligationIsLive) {
-    OrderedFixture fixture({{2, 1}, {1, 2}});
+    OrderedFixture fixture({{2, LaneMask::aic()}, {1, LaneMask::aiv0()}});
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     OrderedExecution cube{};
@@ -958,7 +968,7 @@ TEST(HbgOrderedExecution, NonmemberVectorCanExecuteOrdinaryWorkWhileCubeObligati
 }
 
 TEST(HbgOrderedExecution, NonmemberCubeCanExecuteOrdinaryWorkWhileVectorObligationIsLive) {
-    OrderedFixture fixture({{2, 2}, {1, 1}});
+    OrderedFixture fixture({{2, LaneMask::aiv0()}, {1, LaneMask::aic()}});
     ASSERT_TRUE(fixture.admit(0, 1));
     ASSERT_TRUE(fixture.stage_one(1, 0));
     OrderedExecution vector{};
@@ -975,7 +985,7 @@ TEST(HbgOrderedExecution, NonmemberCubeCanExecuteOrdinaryWorkWhileVectorObligati
 }
 
 TEST(HbgOrderedExecution, PendingLaterAdmissionDoesNotPreemptTheCurrentCooperativeKernel) {
-    OrderedFixture fixture({{2, 1}, {2, 1}});
+    OrderedFixture fixture({{2, LaneMask::aic()}, {2, LaneMask::aic()}});
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     SchedulerReadyClaim later{};
@@ -1026,7 +1036,7 @@ class HbgOrderedPendingEarlierEntry : public ::testing::TestWithParam<OrderedPen
 
 TEST_P(HbgOrderedPendingEarlierEntry, CurrentBlockRetiresWhileLaterPublicationRemainsPending) {
     const auto scenario = GetParam();
-    const uint8_t mask = scenario.worker % 3 == 0 ? 1 : 2;
+    const LaneMask mask = scenario.worker % 3 == 0 ? LaneMask::aic() : LaneMask::aiv0();
     const uint32_t current_task = scenario.reversed_task_ids ? 1 : 0;
     const uint32_t later_task = current_task ^ 1U;
     std::vector<OrderedShape> shapes{{2, mask}, {2, mask}, {2, mask}};
@@ -1102,7 +1112,7 @@ INSTANTIATE_TEST_SUITE_P(
 );
 
 TEST(HbgOrderedExecution, PersistentCandidateCreditsRejectDuplicatesAndDoNotOverwriteFullPool) {
-    OrderedFixture fixture({{1, 1}, {1, 1}, {1, 1}});
+    OrderedFixture fixture({{1, LaneMask::aic()}, {1, LaneMask::aic()}, {1, LaneMask::aic()}});
     std::array<SchedulerReadyClaim, 3> claims{};
     for (uint32_t task = 0; task < 3; ++task)
         ASSERT_TRUE(fixture.pop(task, 0, &claims[task]));
@@ -1116,10 +1126,10 @@ TEST(HbgOrderedExecution, PersistentCandidateCreditsRejectDuplicatesAndDoNotOver
     EXPECT_EQ(claims[2].task_ref, 2);
 }
 
-class HbgOrderedWithoutSsbuf : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedWithoutSsbuf : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedWithoutSsbuf, MultiBlockAndDependentOrdinaryTaskCompleteWithoutSsbufStorage) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     OrderedFixture fixture({{3, mask}, {1, mask}});
     fixture.dependency(1, 0);
     fixture.storage.ssbuf_region = nullptr;
@@ -1170,14 +1180,14 @@ TEST_P(HbgOrderedWithoutSsbuf, MultiBlockAndDependentOrdinaryTaskCompleteWithout
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->scheduler_error, UINT64_C(0)), 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedWithoutSsbuf, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedWithoutSsbuf, ::testing::ValuesIn(kPureCAndV));
 
-class HbgOrderedQueueProbe : public ::testing::TestWithParam<std::tuple<uint8_t, uint8_t>> {};
+class HbgOrderedQueueProbe : public ::testing::TestWithParam<std::tuple<LaneMask, LaneMask>> {};
 
 TEST_P(HbgOrderedQueueProbe, OrdinaryLocalQueueClaimRecordsRealProbeTimesAtPhaseProfilingLevel) {
     const auto [cooperative_mask, ordinary_mask] = GetParam();
     OrderedFixture fixture({{2, cooperative_mask}, {1, ordinary_mask}});
-    const uint32_t worker = ordinary_mask == 1 ? 0 : 2;
+    const uint32_t worker = ordinary_mask == LaneMask::aic() ? 0 : 2;
     ASSERT_EQ(fixture.admissions[worker].capacity, 1u);
     ASSERT_TRUE(fixture.enqueue(1, worker));
     ASSERT_TRUE(fixture.fill(worker, SCHEDULER_PROFILING_SCHED_PHASES_LEVEL));
@@ -1200,10 +1210,10 @@ TEST_P(HbgOrderedQueueProbe, OrdinaryLocalQueueClaimRecordsRealProbeTimesAtPhase
 
 INSTANTIATE_TEST_SUITE_P(
     SameAndDifferentCoreTypes, HbgOrderedQueueProbe,
-    ::testing::Combine(::testing::Values<uint8_t>(1, 2), ::testing::Values<uint8_t>(1, 2))
+    ::testing::Combine(::testing::ValuesIn(kPureCAndV), ::testing::ValuesIn(kPureCAndV))
 );
 
-class HbgOrderedCooperativeProbe : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedCooperativeProbe : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedCooperativeProbe, CooperativeBlockDispatchDoesNotInventQueueProbeTimes) {
     OrderedFixture fixture({{2, GetParam()}});
@@ -1231,12 +1241,12 @@ TEST_P(HbgOrderedCooperativeProbe, CooperativeBlockDispatchDoesNotInventQueuePro
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->scheduler_error, UINT64_C(0)), 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedCooperativeProbe, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedCooperativeProbe, ::testing::ValuesIn(kPureCAndV));
 
-class HbgOrderedDeferredPublication : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedDeferredPublication : public ::testing::TestWithParam<LaneMask> {};
 
 TEST_P(HbgOrderedDeferredPublication, DirectSuccessorPublishedLaterIsDispatchNotAnInlineRefill) {
-    const uint8_t mask = GetParam();
+    const LaneMask mask = GetParam();
     OrderedFixture fixture({{2, mask}, {1, mask}});
     fixture.dependency(1, 0);
     const uint32_t worker = fixture.publisher(0);
@@ -1289,13 +1299,13 @@ TEST_P(HbgOrderedDeferredPublication, DirectSuccessorPublishedLaterIsDispatchNot
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->scheduler_error, UINT64_C(0)), 0u);
 }
 
-INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedDeferredPublication, ::testing::Values<uint8_t>(1, 2));
+INSTANTIATE_TEST_SUITE_P(PureCAndV, HbgOrderedDeferredPublication, ::testing::ValuesIn(kPureCAndV));
 
 TEST(HbgOrderedProtocol, RecordsClaimOwnerAndActualCompletionTicketRatherThanBlockOrder) {
-    for (uint8_t mask : {1, 2}) {
+    for (LaneMask mask : kPureCAndV) {
         OrderedFixture fixture({{2, mask}}, true);
-        const uint32_t first = mask == 1 ? 0 : 1;
-        const uint32_t second = mask == 1 ? 3 : 2;
+        const uint32_t first = mask == LaneMask::aic() ? 0 : 1;
+        const uint32_t second = mask == LaneMask::aic() ? 3 : 2;
         ASSERT_TRUE(fixture.admit(0, first));
         ASSERT_TRUE(fixture.stage_one(first, 0));
         ASSERT_TRUE(fixture.stage_one(second, 0));
@@ -1331,12 +1341,14 @@ TEST(HbgOrderedProtocol, RecordsClaimOwnerAndActualCompletionTicketRatherThanBlo
     }
 }
 
-class HbgOrderedTicketCursor : public ::testing::TestWithParam<uint8_t> {};
+class HbgOrderedTicketCursor : public ::testing::TestWithParam<LaneMask> {};
 
 TEST(HbgOrderedTicketPolicy, AllOrdinaryMultiblockTasksUseTicketsButSingleAndSyncStartDoNot) {
-    for (uint8_t mask : {1, 2, 3, 4, 5, 6, 7}) {
+    for (LaneMask mask :
+         {LaneMask::aic(), LaneMask::aiv0(), kAicAiv0, LaneMask::aiv1(), kAicAiv1, LaneMask::both_aiv(),
+          LaneMask::all()}) {
         for (uint64_t clusters : {UINT64_C(1), UINT64_C(2), UINT64_C(8), UINT64_C(32)}) {
-            const uint64_t positions = clusters * (mask == 2 || mask == 4 ? 2 : 1);
+            const uint64_t positions = clusters * (mask.to_shape() == ResourceShape::AIV ? 2 : 1);
             EXPECT_FALSE(scheduler_task_uses_ticket_claim(0, mask, 1, clusters));
             EXPECT_FALSE(scheduler_task_uses_ticket_claim(0, mask, 0, clusters));
             EXPECT_TRUE(scheduler_task_uses_ticket_claim(0, mask, 2, clusters));
@@ -1351,8 +1363,8 @@ TEST(HbgOrderedTicketPolicy, AllOrdinaryMultiblockTasksUseTicketsButSingleAndSyn
 }
 
 TEST_P(HbgOrderedTicketCursor, SmallCountsAndTwoWaveNeighboursKeepExactBlockOwnership) {
-    const uint8_t mask = GetParam();
-    const uint32_t positions = mask == 1 ? 2 : 4;
+    const LaneMask mask = GetParam();
+    const uint32_t positions = mask == LaneMask::aic() ? 2 : 4;
     for (uint32_t count : {2u, 3u, positions * 2 - 1, positions * 2, positions * 2 + 1}) {
         OrderedFixture fixture({{static_cast<uint16_t>(count), mask}}, true);
         const uint32_t worker = fixture.publisher(0);
@@ -1387,8 +1399,8 @@ TEST_P(HbgOrderedTicketCursor, SmallCountsAndTwoWaveNeighboursKeepExactBlockOwne
 }
 
 TEST_P(HbgOrderedTicketCursor, LargeOrdinaryClaimsKeepExactValidCountAndBoundTheTail) {
-    const uint8_t mask = GetParam();
-    const uint32_t positions = mask == 1 ? 2 : 4;
+    const LaneMask mask = GetParam();
+    const uint32_t positions = mask == LaneMask::aic() ? 2 : 4;
     const uint32_t count = positions * 2 + 1;
     OrderedFixture fixture({{static_cast<uint16_t>(count), mask}}, true);
     ASSERT_TRUE(fixture.admit(0, fixture.publisher(0)));
@@ -1424,8 +1436,8 @@ TEST_P(HbgOrderedTicketCursor, LargeOrdinaryClaimsKeepExactValidCountAndBoundThe
 }
 
 TEST_P(HbgOrderedTicketCursor, AReservedLastTicketCannotBecomeAnEarlyCloseOrAnotherBlock) {
-    const uint8_t mask = GetParam();
-    for (uint32_t count : {2u, 3u, mask == 1 ? 4u : 8u}) {
+    const LaneMask mask = GetParam();
+    for (uint32_t count : {2u, 3u, mask == LaneMask::aic() ? 4u : 8u}) {
         OrderedFixture fixture({{static_cast<uint16_t>(count), mask}, {2, mask}}, true);
         const uint32_t worker = fixture.publisher(0);
         ASSERT_TRUE(fixture.admit(0, worker));
@@ -1481,8 +1493,8 @@ TEST_P(HbgOrderedTicketCursor, AReservedLastTicketCannotBecomeAnEarlyCloseOrAnot
 }
 
 TEST_P(HbgOrderedTicketCursor, ErrorAndPoisonedCountersCannotPublishAnotherValidClaim) {
-    const uint8_t mask = GetParam();
-    const uint64_t positions = mask == 1 ? 2 : 4;
+    const LaneMask mask = GetParam();
+    const uint64_t positions = mask == LaneMask::aic() ? 2 : 4;
     for (uint32_t fault = 0; fault < 4; ++fault) {
         OrderedFixture fixture({{17, mask}});
         const uint32_t worker = fixture.publisher(0);
@@ -1510,7 +1522,7 @@ TEST_P(HbgOrderedTicketCursor, ErrorAndPoisonedCountersCannotPublishAnotherValid
 }
 
 TEST_P(HbgOrderedTicketCursor, InconsistentReservationAndConfirmationStopBeforeReturningABlock) {
-    const uint64_t positions = GetParam() == 1 ? 2 : 4;
+    const uint64_t positions = GetParam() == LaneMask::aic() ? 2 : 4;
     OrderedFixture fixture({{17, GetParam()}}, true);
     const uint32_t worker = fixture.publisher(0);
     ASSERT_TRUE(fixture.admit(0, worker));
@@ -1540,8 +1552,9 @@ TEST_P(HbgOrderedTicketCursor, InconsistentReservationAndConfirmationStopBeforeR
 }
 
 TEST_P(HbgOrderedTicketCursor, ConcurrentTailLosersStopWithoutHidingTheUnpublishedValidTicket) {
-    const uint8_t mask = GetParam();
-    const std::vector<uint32_t> workers = mask == 1 ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
+    const LaneMask mask = GetParam();
+    const std::vector<uint32_t> workers =
+        mask == LaneMask::aic() ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
     for (uint16_t count : {uint16_t{2}, uint16_t{3}, static_cast<uint16_t>(workers.size() * 2 + 1)}) {
         OrderedFixture fixture({{count, mask}});
         ASSERT_TRUE(fixture.admit(0, workers.front()));
@@ -1647,8 +1660,8 @@ TEST_P(HbgOrderedTicketCursor, StaleTicketsRejectBothPreparationAndCommit) {
 }
 
 TEST_P(HbgOrderedTicketCursor, SyncStartTasksKeepTheBoundedCasPath) {
-    const uint8_t mask = GetParam();
-    const uint16_t positions = mask == 1 ? 2 : 4;
+    const LaneMask mask = GetParam();
+    const uint16_t positions = mask == LaneMask::aic() ? 2 : 4;
     OrderedFixture fixture({{positions, mask, true}});
     const uint32_t worker = fixture.publisher(0);
     ASSERT_TRUE(fixture.admit(0, worker));
@@ -1671,10 +1684,10 @@ TEST_P(HbgOrderedTicketCursor, SyncStartTasksKeepTheBoundedCasPath) {
     );
 }
 
-INSTANTIATE_TEST_SUITE_P(PureMasks, HbgOrderedTicketCursor, ::testing::Values<uint8_t>(1, 2, 4));
+INSTANTIATE_TEST_SUITE_P(PureMasks, HbgOrderedTicketCursor, ::testing::ValuesIn(kPureMasks));
 
 TEST(HbgOrderedProtocol, ExhaustedCursorDoesNotInventAnotherClaim) {
-    OrderedFixture fixture({{2, 1}}, true);
+    OrderedFixture fixture({{2, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 1));
@@ -1696,7 +1709,7 @@ TEST(HbgOrderedProtocol, ExhaustedCursorDoesNotInventAnotherClaim) {
 }
 
 TEST(HbgOrderedProtocol, OutOfRangeTracePrefixDoesNotWriteOutsideThePlannedBlockRegion) {
-    OrderedFixture fixture({{2, 1}}, true);
+    OrderedFixture fixture({{2, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.admit(0, 0));
     fixture.storage.metadata[0].trace_index_base = UINT32_MAX;
     ASSERT_TRUE(scheduler_refresh_local_obligation(
@@ -1720,12 +1733,12 @@ TEST(HbgOrderedProtocol, OutOfRangeTracePrefixDoesNotWriteOutsideThePlannedBlock
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->scheduler_error, UINT64_C(0)), 0u);
 }
 
-class HbgOrderedConcurrentProtocol : public ::testing::TestWithParam<std::tuple<uint8_t, uint16_t>> {};
+class HbgOrderedConcurrentProtocol : public ::testing::TestWithParam<std::tuple<LaneMask, uint16_t>> {};
 
 TEST_P(HbgOrderedConcurrentProtocol, ConcurrentWorkersKeepUniqueOwnersAndContiguousLocalSequences) {
     const auto [mask, count] = GetParam();
     const std::vector<uint32_t> participants =
-        mask == 1 ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
+        mask == LaneMask::aic() ? std::vector<uint32_t>{0, 3} : std::vector<uint32_t>{1, 2, 4, 5};
     OrderedFixture fixture({{count, mask}}, true);
     ASSERT_TRUE(fixture.admit(0, participants.front()));
     for (uint32_t worker : participants)
@@ -1814,11 +1827,11 @@ TEST_P(HbgOrderedConcurrentProtocol, ConcurrentWorkersKeepUniqueOwnersAndContigu
 
 INSTANTIATE_TEST_SUITE_P(
     PureMasksAndCounts, HbgOrderedConcurrentProtocol,
-    ::testing::Combine(::testing::Values<uint8_t>(1, 2, 4), ::testing::Values<uint16_t>(2, 3, 128))
+    ::testing::Combine(::testing::ValuesIn(kPureMasks), ::testing::Values<uint16_t>(2, 3, 128))
 );
 
 TEST(HbgOrderedProtocol, AdmissionAfterAnOrdinaryPermitCannotRewriteItsObservedTail) {
-    OrderedFixture fixture({{1, 1}, {2, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}, {2, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.enqueue(0, 0));
     ASSERT_TRUE(fixture.fill(0));
     auto *local = fixture.locals[0];
@@ -1855,7 +1868,7 @@ TEST(HbgOrderedProtocol, AdmissionAfterAnOrdinaryPermitCannotRewriteItsObservedT
 }
 
 TEST(HbgOrderedProtocol, DuplicateReturnKeepsTheFirstReturnAndVisibilityPoints) {
-    OrderedFixture fixture({{2, 1}}, true);
+    OrderedFixture fixture({{2, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     OrderedExecution execution{};
@@ -1877,7 +1890,7 @@ TEST(HbgOrderedProtocol, DuplicateReturnKeepsTheFirstReturnAndVisibilityPoints) 
 }
 
 TEST(HbgOrderedProtocol, InvalidReturnSlotLeavesExecutionRecordsUntouched) {
-    OrderedFixture fixture({{1, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}}, true);
     scheduler_protocol_execution_returned(fixture.base(), fixture.locals[0], UINT32_MAX, 0, 0);
     const auto *event = scheduler_state_at<SchedulerProtocolExecutionTrace>(
         fixture.base(), fixture.storage.layout.protocol.executions_offset
@@ -1892,7 +1905,7 @@ TEST(HbgOrderedProtocol, InvalidReturnSlotLeavesExecutionRecordsUntouched) {
 }
 
 TEST(HbgOrderedProtocol, ConsumedPermitPreventsPayloadSnapshotFromBeingReplaced) {
-    OrderedFixture fixture({{1, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.enqueue(0, 0));
     ASSERT_TRUE(fixture.fill(0));
     OrderedExecution execution{};
@@ -1916,7 +1929,7 @@ TEST(HbgOrderedProtocol, ConsumedPermitPreventsPayloadSnapshotFromBeingReplaced)
 }
 
 TEST(HbgOrderedProtocol, FinishedWorkerCannotPublishEvenAnUnsequencedPayloadSnapshot) {
-    OrderedFixture fixture({{1, 1}}, true);
+    OrderedFixture fixture({{1, LaneMask::aic()}}, true);
     auto *local = fixture.locals[0];
     scheduler_protocol_finish(fixture.base(), local, true);
     SchedulerReadyClaim ready{};
@@ -1935,7 +1948,7 @@ TEST(HbgOrderedProtocol, FinishedWorkerCannotPublishEvenAnUnsequencedPayloadSnap
 }
 
 TEST(HbgOrderedProtocol, CooperativePayloadCannotBeRepublishedBeforeItsFirstPermit) {
-    OrderedFixture fixture({{2, 1}}, true);
+    OrderedFixture fixture({{2, LaneMask::aic()}}, true);
     ASSERT_TRUE(fixture.admit(0, 0));
     ASSERT_TRUE(fixture.stage_one(0, 0));
     const auto *events = scheduler_state_at<SchedulerProtocolExecutionTrace>(

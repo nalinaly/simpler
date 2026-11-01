@@ -146,6 +146,12 @@ void Scheduler::stop() {
 
 void Scheduler::worker_done(WorkerCompletion completion) {
     TaskSlotState &s = *cfg_.ring->slot_state(completion.task_slot);
+    // Recorded here, where the endpoint identity is still in hand, and applied
+    // when the whole run retires. This is a capacity report, not a task
+    // outcome, so it is taken whatever the outcome below turns out to be.
+    if (completion.admissible_run_resource_sets != 0 && cfg_.note_endpoint_capacity_cb) {
+        cfg_.note_endpoint_capacity_cb(completion.worker_id, completion.admissible_run_resource_sets);
+    }
     bool failure_reported = is_failure(completion.outcome);
     if (failure_reported && cfg_.on_task_failed_cb) {
         cfg_.on_task_failed_cb(completion.task_slot, completion.error_message);
@@ -685,7 +691,11 @@ Scheduler::NextLevelGroupDispatchResult Scheduler::dispatch_next_level_group(con
             if (!result.reserved_worker_ids.insert(worker_id).second) {
                 throw std::runtime_error("Scheduler::dispatch_next_level_group: duplicate target worker");
             }
-            const bool worker_idle = worker->idle();
+            // A free lane with no request frame behind it cannot carry this
+            // member's publication, so it counts as busy here. Treating it as
+            // idle would claim the whole group and fail the member that found
+            // no transport.
+            const bool worker_idle = worker->can_dispatch();
             if (!worker_idle) {
                 all_workers_idle = false;
                 result.busy_target_worker_ids.push_back(worker_id);
@@ -788,7 +798,10 @@ bool Scheduler::dispatch_next_level_singles(
                 "Scheduler::dispatch_next_level_singles: unknown worker id " + std::to_string(worker_id)
             );
         }
-        if (!worker->idle()) continue;
+        // Lane and transport together: a task is claimed only against a worker
+        // that can publish it. The frames come back as the child acknowledges
+        // them, so a worker skipped here is asked again next round.
+        if (!worker->can_dispatch()) continue;
 
         TaskSlot slot;
         while (run_snapshot ? cfg_.ready_next_level_queues->try_pop_single(worker_id, *run_snapshot, slot) :

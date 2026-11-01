@@ -14,7 +14,6 @@ import ctypes
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from test_kernel_caller_stream import _callable
@@ -56,6 +55,22 @@ def _cleanup(worker, lib, contexts, device_buffers, host_buffers, streams):
         contexts.close()
     else:
         worker.finalize()
+
+
+def _prepare_callable(worker, contexts, callable_image):
+    from simpler.task_interface import ExecutionContextRefused  # noqa: PLC0415
+
+    if contexts is None:
+        assert worker.register_callable(callable_image) == 0
+        return
+    with contexts.other():
+        for operation in (
+            lambda: worker.register_callable(0, callable_image),
+            lambda: worker.register_callable(callable_image),
+        ):
+            with pytest.raises(ExecutionContextRefused, match="context validation failed"):
+                operation()
+    assert worker.register_callable(callable_image) == 0
 
 
 def _run(arch, runtime, device, depth, borrowed):
@@ -108,17 +123,13 @@ def _run(arch, runtime, device, depth, borrowed):
     runs = []
     python_runs = []
     handle_owner = Worker(level=2)
-    handle_owner._chip_worker = SimpleNamespace(_impl=worker)
+    handle_owner._chip_worker = worker
     outputs = []
     size = 128 * 128
     nbytes = size * ctypes.sizeof(ctypes.c_float)
     try:
         callable_image = _callable(arch, runtime)
-        if contexts is not None:
-            with contexts.other():
-                with pytest.raises(ExecutionContextRefused, match="context validation failed"):
-                    worker.register_callable(0, callable_image)
-        worker.register_callable(0, callable_image)
+        _prepare_callable(worker, contexts, callable_image)
         public_callable = handle_owner.register(callable_image)
         handle_owner._lifecycle = _Lifecycle.READY
         for stream in streams:
@@ -149,7 +160,7 @@ def _run(arch, runtime, device, depth, borrowed):
             run = worker._submit_chip_run_direct(0, args, CallConfig(), caller_stream=stream.value)
             assert run.launched
             runs.append(run)
-            # Public Worker initialization is owned-only. These handles bridge
+            # This test probes native admission directly. These handles bridge
             # real borrowed native runs to its shared Python completion path.
             run_id = invocation + 1
             handle_owner._chip_runs[run_id] = run
@@ -180,6 +191,12 @@ def _run(arch, runtime, device, depth, borrowed):
                     lambda: handle_owner.unregister(public_callable),
                     handle_owner.close,
                     lambda: worker.unregister_callable(0),
+                    lambda: worker.malloc(16),
+                    lambda: worker.free(device_buffers[0]),
+                    lambda: worker.copy_to(device_buffers[0], host_buffers[0].value, nbytes),
+                    lambda: worker.copy_from(host_buffers[0].value, device_buffers[0], nbytes),
+                    worker.device_memory_info,
+                    lambda: worker.flush_diagnostics(0),
                     worker.finalize,
                 ):
                     with pytest.raises(ExecutionContextRefused, match="context validation failed"):

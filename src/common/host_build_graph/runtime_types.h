@@ -146,6 +146,8 @@ inline constexpr uint64_t GRAPH_RECORD_BASE = PACKED_OUTPUT_ALIGN;
 // Per-queue arena reservation ceiling. Bind configures each queue to the next
 // power of two covering the tasks that can reach it and rejects a larger graph.
 inline constexpr uint64_t READY_QUEUE_CAPACITY_LIMIT = 32768;
+// Graph preparation keeps one extra rounded population of recycling headroom.
+inline constexpr uint64_t GRAPH_PREPARE_QUEUE_CAPACITY_LIMIT = 2 * READY_QUEUE_CAPACITY_LIMIT;
 
 // Cross-thread early-dispatch work queue (power of two)
 #define CHIP_EARLY_DISPATCH_QUEUE_SIZE 64
@@ -237,8 +239,10 @@ enum class TaskKind : uint8_t {
 };
 
 struct OutputLayout {
-    uint64_t offsets[MAX_TENSOR_ARGS] = {};
-    uint64_t buffer_sizes[MAX_TENSOR_ARGS] = {};
+    // Only OUTPUT positions are written and read. Avoid clearing two full
+    // arrays for every submission, including tasks without created outputs.
+    uint64_t offsets[MAX_TENSOR_ARGS];
+    uint64_t buffer_sizes[MAX_TENSOR_ARGS];
     uint64_t total_output_size = 0;
 };
 
@@ -681,7 +685,7 @@ struct alignas(64) ChipTaskSlotState {
     uint16_t ed_publish_scan_cursor{0};
 
     // --- Set per-submit (depend on task inputs) ---
-    ActiveMask active_mask;  // Bitmask of active subtask slots (set once)
+    LaneMask active_mask;  // Bitmask of active subtask slots (set once)
     // Single per-task attributes byte (early-dispatch hint, sync_start,
     // has_predicate, selective timing tag). Lives on slot_state (not payload) so
     // fanin walks and the completion path read them off the already-hot producer
@@ -773,6 +777,7 @@ struct alignas(64) ChipTaskSlotState {
 };
 
 static_assert(sizeof(ChipTaskSlotState) == 64);
+static_assert(offsetof(ChipTaskSlotState, active_mask) == 56);
 // Pins the widest-first order that leaves the record padding-free: every member
 // before `reserved` is naturally aligned where the one before it ends.
 static_assert(

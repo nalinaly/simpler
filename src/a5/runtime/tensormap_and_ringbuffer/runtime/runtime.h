@@ -40,6 +40,7 @@
 
 #include "common/core_type.h"
 #include "common/host_api.h"
+#include "host/scope_stats_capacity.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
@@ -238,6 +239,11 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     uint32_t entry_scalar_count_;
     uint32_t entry_args_source_;  // EntryArgsSource
 
+    // Per-invocation granularity travels in every descriptor publication.
+    uint32_t chip_swimlane_level;
+    uint32_t pmu_event_type;   // PmuEventType; zero while PMU is disabled.
+    uint32_t dump_args_level;  // DumpArgsLevel; zero while argument dumping is disabled.
+
     // Entry args, adopted on the host. Last of the uploaded fields, because it
     // is the only one whose useful length is a property of the run: a
     // steady-state publication stops after `tensor_count_` of its
@@ -258,6 +264,8 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // block a defined starting value. The initialized prefix ends here; the
     // AICPU initializes the isolated return gates before opening any window.
     Handshake workers[RUNTIME_MAX_WORKER];
+    // Each 64-byte control is written only by AICPU and cleared before READY
+    // or EXIT. AICore bypass-loads the request and returns its nonce in COND.
     AicoreTeardownControl teardown_gates[RUNTIME_MAX_WORKER];
 };
 
@@ -409,6 +417,11 @@ public:
     // copy_in_run_inputs_impl and copy_back_run_outputs_impl, and released by
     // release_run_bindings_impl. Host-only (after `dev`): never uploaded.
     std::vector<TensorLease> tensor_leases_;
+
+    simpler::dfx::scope_stats_runs::CapacityMetadata scope_stats_capacity_;
+    const simpler::dfx::scope_stats_runs::CapacityMetadata &scope_stats_capacity() const {
+        return scope_stats_capacity_;
+    }
 
     // Host view of the active callable's registration-owned object-address
     // table, borrowed for as long as that callable stays registered, plus the

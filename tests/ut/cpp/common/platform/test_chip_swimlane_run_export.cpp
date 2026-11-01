@@ -292,9 +292,9 @@ TEST(ChipSwimlaneRunExportTest, ExecutionIdentitiesTravelWithTheSealedRunAndAreN
     fixture::populate(collector, buffers, first.path);
     const auto section = ChipSwimlaneExtensionSection::AicoreExecutionIdentities;
     const std::string payload = R"({"schema":"hbg-execution-identity-v1","producer":"aicore","records":[]})";
-    EXPECT_FALSE(collector.set_json_extension(section, "[]"));
-    ASSERT_TRUE(collector.set_json_extension(section, payload));
-    EXPECT_FALSE(collector.set_json_extension(section, "{}"));
+    EXPECT_FALSE(collector.set_json_extension(fixture::kEpoch, section, "[]", 2));
+    ASSERT_TRUE(collector.set_json_extension(fixture::kEpoch, section, payload.c_str(), payload.size()));
+    EXPECT_FALSE(collector.set_json_extension(fixture::kEpoch, section, "{}", 2));
     const auto sealed = collector.seal_run_export();
     collector.begin_run(second.path, ChipSwimlaneLevel::SCHED_PHASES);
     EXPECT_TRUE(collector.seal_run_export().json_extensions[static_cast<size_t>(section)].empty());
@@ -314,9 +314,9 @@ TEST(ChipSwimlaneRunExportTest, NativeProtocolIsAnOwnedObjectAndDoesNotLeakIntoT
     fixture::populate(collector, buffers, first.path);
     const auto section = ChipSwimlaneExtensionSection::AicoreProtocol;
     const std::string payload = R"({"schema":"hbg-native-protocol-v1","producer":"aicore","run_epoch":0})";
-    EXPECT_FALSE(collector.set_json_extension(section, "[]"));
-    ASSERT_TRUE(collector.set_json_extension(section, payload));
-    EXPECT_FALSE(collector.set_json_extension(section, "{}"));
+    EXPECT_FALSE(collector.set_json_extension(fixture::kEpoch, section, "[]", 2));
+    ASSERT_TRUE(collector.set_json_extension(fixture::kEpoch, section, payload.c_str(), payload.size()));
+    EXPECT_FALSE(collector.set_json_extension(fixture::kEpoch, section, "{}", 2));
     const auto sealed = collector.seal_run_export();
     collector.begin_run(second.path, ChipSwimlaneLevel::SCHED_PHASES);
     EXPECT_TRUE(collector.seal_run_export().json_extensions[static_cast<size_t>(section)].empty());

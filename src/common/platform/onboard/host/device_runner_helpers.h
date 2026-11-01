@@ -38,8 +38,11 @@
 #include "common/launch_entry_args.h"
 #include "host/memory_allocator.h"
 #include "host/runtime_launch_image.h"
+#include "host/runtime_launch_metadata.h"
 #include "runtime_c_api.h"
+#include "native_run_execution.h"
 #include "runtime.h"
+#include "tensormap_and_ringbuffer/kernel_invocation.h"
 
 /**
  * Query both streams that form one onboard run without waiting.
@@ -86,16 +89,8 @@ int query_stream_pair_error(rtStream_t aicpu_stream, rtStream_t aicore_stream);
  * Pass the same stream handle the launch will submit on, resolved and about to
  * be used, so the answer describes the stream that actually carries the launch.
  *
- * Who this is asked about, and who it is not: the only callers are the two
- * program `DeviceRunner` launch paths, and the stream each passes is one the
- * runner created itself — a2a3's per-run `RunStreamPair`, a5's persistent
- * `stream_aicpu_`. Neither is ever supplied by a caller, so a capture would
- * have to begin on a private member. Kernel/persistent mode does not reach
- * here at all: it publishes once at `prepare_once` and keeps its own streams,
- * which `tests/st/a2a3/kernel_capture/native/driver.cpp` depends on — that
- * driver captures a stream of its own, asserts the kernel context's streams are
- * different objects, and link-wraps this very query as a forbidden call whose
- * count must stay zero.
+ * The common eager launch passes its actual AICPU stream, for either device
+ * ownership policy. Captured launches remain outside this contract.
  */
 bool launch_entry_args_permitted(rtStream_t aicpu_stream);
 
@@ -121,9 +116,9 @@ bool launch_route_permitted_by_capture(int query_rc, int capture_status);
  * at a time
  * (`try_reserve_native_run` rejects a second reservation on an occupied slot),
  * so one block per slot needs no further serialization. Per-slot rather than
- * per-runner because the copy is not ordered on the run stream: a prepared
- * successor would otherwise overwrite the image its predecessor is executing
- * against.
+ * per-runner because a prepared successor retains its own unpublished state while
+ * its predecessor executes. The asynchronous copy is ordered on the bound
+ * AICPU stream and a fork event orders the AICore reader behind it.
  *
  * The runner owns this for its whole lifetime and releases it in `finalize()`,
  * alongside the collector resources that already work this way.
@@ -134,6 +129,14 @@ bool launch_route_permitted_by_capture(int query_rc, int capture_status);
  * `KernelArgs`: AICore receives everything it needs as launch arguments.
  */
 struct SlotPersistentArgs {
+    // Pinned copy source, immutable from enqueue through the run's drain. A
+    // slot cannot be prepared again until its previous run has retired.
+    void *runtime_upload_source{nullptr};
+    uint64_t runtime_upload_bytes{0};
+
+    // Bind hands owned metadata values to prepare; launch consumes them once.
+    RuntimeLaunchMetadata staged_launch_metadata;
+
     Runtime *runtime_args{nullptr};  // device block holding the Runtime descriptor
     uint64_t runtime_bytes{0};       // committed length: the full device extent, not a published prefix
 
@@ -144,8 +147,9 @@ struct SlotPersistentArgs {
     // pointer it describes, and the two teardown paths reset the whole struct
     // rather than named fields, so a later block cannot inherit a predecessor's
     // verdict. Committed only after the copy carrying that region has
-    // succeeded; a failed publication leaves it false and the next prepare
-    // sends the longer prefix again.
+    // been accepted into the stream; the entry fork orders both readers after
+    // that copy. A failed enqueue leaves it false. Slot reuse requires retirement
+    // of the previous run, never just an accepted publication.
     bool workers_initialized{false};
 
     // Host staging for this slot's AICPU launch package, on a runtime whose
@@ -226,10 +230,12 @@ struct KernelArgsHelper {
         args(other.args),
         allocator_(std::exchange(other.allocator_, nullptr)),
         runtime_image_(std::move(other.runtime_image_)),
+        launch_metadata_(std::move(other.launch_metadata_)),
         runtime_args_state_(std::exchange(other.runtime_args_state_, RuntimeArgsState::Empty)),
         initializing_slot_(std::exchange(other.initializing_slot_, nullptr)),
         slot_(std::exchange(other.slot_, nullptr)),
         plan_(other.plan_),
+        kernel_invocation_(std::move(other.kernel_invocation_)),
         graph_section_bytes_(std::exchange(other.graph_section_bytes_, 0)),
         launch_payload_(nullptr),
         launch_payload_bytes_(std::exchange(other.launch_payload_bytes_, 0)) {
@@ -254,8 +260,10 @@ struct KernelArgsHelper {
     // release, a fresh prepare withdraws the previous publication status.
     int prepare_runtime_args(const Runtime &host_runtime, MemoryAllocator &allocator, SlotPersistentArgs &slot);
 
+    int prepare_kernel_invocation(const simpler::tmr::KernelCallableIdentity &identity);
+
     /**
-     * Consume the snapshot with one synchronous metadata H2D, having recorded
+     * Consume the snapshot by enqueueing metadata H2D on `stream`, having recorded
      * which route this run's entry values take.
      *
      * `launch_route_permitted` says the caller has established that this
@@ -269,15 +277,19 @@ struct KernelArgsHelper {
      * decision and this run's counts are patched into it; nothing is re-read
      * from the caller's `Runtime`, which by now may hold a successor's values.
      *
-     * The slot remains owned even on failure. Callers must check the return
+     * The pinned source and destination stay slot-owned until drain or
+     * quarantine. The sink records a copy attempt before the RTS call; an
+     * error does not certify that no stream submission happened.
+     * Callers must check the return
      * code and abort the run on error — the state stays unpublished, so no
      * kernel may be submitted. A repeated publish is rejected without another
      * copy.
      */
-    int publish_runtime_args(bool launch_route_permitted);
+    int publish_runtime_args(bool launch_route_permitted, rtStream_t stream, LaunchProgressSink &sink);
 
     // A non-null destination alone may still contain a previous run's bytes.
-    // This verdict covers only the Runtime descriptor, not late DFX publication.
+    // This verdict covers the Runtime descriptor and staged launch metadata,
+    // not late DFX publication.
     bool runtime_args_published() const {
         return runtime_args_state_ == RuntimeArgsState::Published && args.runtime_args != nullptr;
     }
@@ -320,11 +332,13 @@ struct KernelArgsHelper {
      */
     void release_run_view() {
         runtime_image_.clear();
+        launch_metadata_.clear();
         runtime_args_state_ = RuntimeArgsState::Empty;
         args.runtime_args = nullptr;
         initializing_slot_ = nullptr;
         slot_ = nullptr;
         plan_ = LaunchEntryArgsPlan{};
+        kernel_invocation_.clear();
         launch_payload_ = nullptr;
         launch_payload_bytes_ = 0;
     }
@@ -352,6 +366,7 @@ private:
     enum class RuntimeArgsState : uint8_t { Empty, Prepared, Published };
 
     RuntimeLaunchImage runtime_image_;
+    RuntimeLaunchMetadata launch_metadata_;
     RuntimeArgsState runtime_args_state_{RuntimeArgsState::Empty};
 
     // The slot whose pending snapshot carries the handshake region, or null
@@ -370,6 +385,7 @@ private:
     // This run's entry-argument routing facts, read while the source was still
     // this run's. The launch side works from this and the snapshot alone.
     LaunchEntryArgsPlan plan_{};
+    std::vector<std::byte> kernel_invocation_;
     // The Definition-section length this run's descriptor names, captured with
     // the snapshot. The publication stamps the section only when the slot's
     // staged length agrees with it, so a length a failed prepare left staged
@@ -379,6 +395,8 @@ private:
     void *launch_payload_{nullptr};
     size_t launch_payload_bytes_{0};
 
+    bool build_kernel_launch_package();
+
     // Fill the slot's staging with this run's launch package, reading the entry
     // values out of the captured snapshot. Returns false when the snapshot does
     // not contain the windows the plan names.
@@ -386,30 +404,19 @@ private:
 };
 
 /**
- * This run's one descriptor publication, immediately before its launch.
+ * Enqueue this run's descriptor on the actual AICPU stream.
  *
- * Asks `aicpu_stream` whether the launch route is open, then consumes the
- * snapshot prepare captured. Returns 0 only when the copy succeeded and the run
- * is Published — the state a kernel submission requires. A non-zero return is
- * the copy's own error and leaves the run unpublished with no launch payload,
- * so the caller reports it with the run NotStarted and submits nothing.
- *
- * The copy is a blocking, stream-less `rtMemcpy`, and it happens here rather
- * than at prepare because the route is a question about the stream this launch
- * will use. A caller that captured this window would therefore find a
- * synchronous copy inside it — but it would find more than that: the same
- * window records this run's boundary events on these streams and
- * `wait_run_fence` then synchronizes both, neither of which a capture admits
- * either, and both of which predate the move. Capturing a program run is
- * outside the current contract for that reason, not for this copy's.
- *
- * Idempotent on an already-published run, which is what lets a launch path call
- * it unconditionally.
+ * The prepare snapshot supplies the bytes and the slot supplies pinned storage
+ * that outlives the DMA reader. Success means the descriptor is ordered before
+ * the fork event and both kernels; it does not mean the DMA has completed.
+ * Any attempted copy marks the transaction sink before entering RTS, so a
+ * failure cannot acquire a no-submission receipt. A cache hit queues no copy.
+ * An already-published run is an idempotent no-op.
  */
-int publish_for_launch(KernelArgsHelper &kernel_args, rtStream_t aicpu_stream);
+int publish_for_launch(KernelArgsHelper &kernel_args, rtStream_t aicpu_stream, LaunchProgressSink &sink);
 
 /**
- * Release one slot's persistent device blocks and clear its bookkeeping.
+ * Release a retired slot's device block and pinned source, retaining failed frees.
  *
  * Returns the first failing free's code, having attempted every block, so a
  * single failure cannot strand the rest. A block whose free fails keeps its
@@ -418,9 +425,9 @@ int publish_for_launch(KernelArgsHelper &kernel_args, rtStream_t aicpu_stream);
 int release_slot_persistent_args(SlotPersistentArgs &slot, MemoryAllocator &allocator);
 
 /**
- * Drop one slot's persistent device blocks without calling the allocator.
+ * Abandon a slot's device block and pinned DMA source without release calls.
  *
- * Used only by fatal teardown, where a reset has already invalidated the
- * device generation these addresses belong to.
+ * Used by fatal teardown when the generation has ended or its completion is
+ * unproven; a queued reader can still name the source on an unconfirmed device.
  */
 void abandon_slot_persistent_args(SlotPersistentArgs &slot);

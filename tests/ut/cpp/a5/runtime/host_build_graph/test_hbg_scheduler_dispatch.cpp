@@ -11,6 +11,8 @@
 
 #include <gtest/gtest.h>
 
+#include <iterator>
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -60,7 +62,7 @@ void configure_normal_aiv_cluster(FixtureStorage &storage, uint64_t task_count) 
     for (uint64_t task = 0; task < task_count; ++task) {
         storage.metadata[task].kernel_ids[0] = UINT16_MAX;
         storage.metadata[task].kernel_ids[1] = 1;
-        storage.metadata[task].active_mask = 2;
+        storage.metadata[task].active_mask = LaneMask::aiv0();
         storage.metadata[task].flags = SCHEDULER_TASK_EXECUTABLE;
     }
 }
@@ -293,7 +295,7 @@ TEST(SchedulerClusterCompletion, SelfSlotsKeepDistinctSampledTraces) {
         local->set_timing_slot(1, index, index);
         slot.state = SchedulerDispatchSlotState::READY;
         slot.generation = ++local->dispatch_sequence;
-        storage.metadata[index].active_mask = 2;
+        storage.metadata[index].active_mask = LaneMask::aiv0();
         local->profiling->executor_traces[index].kernel_start_cycles = 100 + index;
         local->profiling->executor_traces[index].kernel_end_cycles = 200 + index;
         local->local_completed_generations[index] = slot.generation;
@@ -786,7 +788,7 @@ TEST(SchedulerNormalDispatch, PreservesProgressWhenALaterFillFails) {
     FixtureStorage storage(2, 3);
     GraphBuffer graph(2);
     graph.executable(0, 0);
-    graph.mixed(1, 3);
+    graph.mixed(1, LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false));
     SchedulerWorkerContext &scheduler = storage.contexts[0];
     scheduler.core_type = static_cast<int32_t>(CoreType::AIC);
     scheduler.is_scheduler = 1;
@@ -794,7 +796,7 @@ TEST(SchedulerNormalDispatch, PreservesProgressWhenALaterFillFails) {
     scheduler.scheduler_index = 0;
     for (uint32_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane)
         scheduler.cluster_worker_ids[lane] = lane;
-    storage.metadata[1].active_mask = 3;
+    storage.metadata[1].active_mask = (LaneMask(/*aic=*/true, /*aiv0=*/true, /*aiv1=*/false));
     uint64_t *callables = storage.callable_addresses;
     callables[1] = 0x1000;
     auto *local = storage.local_context(&scheduler, &storage.scheduler_local_state);
@@ -974,9 +976,16 @@ TEST(SchedulerLocalConfig, RejectsTruncatedOffsetsAndInconsistentPayloadRoutes) 
         EXPECT_FALSE(scheduler_initialize_local_config(storage.scheduler_state->base(), &context, &graph, &local));
         context.*field = 0;
     }
-    context.topology_reserved[0] = 1;
-    EXPECT_FALSE(scheduler_initialize_local_config(storage.scheduler_state->base(), &context, &graph, &local));
-    context.topology_reserved[0] = 0;
+    // Every word of the reserved tail, by its own extent. A field taken out of
+    // this array is a field a producer writes, so a validation whose bound
+    // outlives the array would read the next member instead — and this loop is
+    // what makes that a test failure rather than a run that refuses to boot.
+    for (size_t index = 0; index < std::size(context.topology_reserved); ++index) {
+        context.topology_reserved[index] = 1;
+        EXPECT_FALSE(scheduler_initialize_local_config(storage.scheduler_state->base(), &context, &graph, &local))
+            << "reserved tail word " << index << " is not validated";
+        context.topology_reserved[index] = 0;
+    }
     for (auto field : {&SchedulerWorkerContext::mix_payloads_offset, &SchedulerWorkerContext::mix_traces_offset}) {
         const uint64_t saved = context.*field;
         context.*field = 0;
@@ -1102,14 +1111,15 @@ struct MixFixture {
             set_task(task, 7);
     }
     void set_task(uint32_t task, uint8_t mask) {
-        graph.mixed(task, mask);
+        const LaneMask lanes((mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0);
+        graph.mixed(task, lanes);
         auto &metadata = storage.metadata[task];
-        metadata.active_mask = mask;
-        metadata.flags = SCHEDULER_TASK_EXECUTABLE | (__builtin_popcount(mask) > 1 ? SCHEDULER_TASK_MIX : 0);
+        metadata.active_mask = lanes;
+        metadata.flags = SCHEDULER_TASK_EXECUTABLE | (lanes.is_mix() ? SCHEDULER_TASK_MIX : 0);
         metadata.trace_index_base = task * 3;
         metadata.timing_slot = -1;
         for (uint8_t subtask = 0; subtask < 3; ++subtask)
-            metadata.kernel_ids[subtask] = (mask & (1U << subtask)) != 0 ? 1 : UINT16_MAX;
+            metadata.kernel_ids[subtask] = lanes.has(static_cast<SubtaskSlot>(subtask)) ? 1 : UINT16_MAX;
     }
     void enqueue(uint32_t task) {
         SchedulerReadyBatch batch{};

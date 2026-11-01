@@ -35,11 +35,11 @@ inline __aicore__ bool scheduler_graph_definition_open(
     const auto *header = reinterpret_cast<const __gm__ GraphDefinitionHeader *>(
         section_address + image_offset - sizeof(GraphDefinitionHeader)
     );
-    if (header->magic != GRAPH_DEFINITION_OBJECT_MAGIC || header->full_key != expected_key ||
+    if (header->magic != GRAPH_DEFINITION_OBJECT_MAGIC || header->graph_key != expected_key ||
         header->definition_bytes < sizeof(GraphDefinition) || header->definition_bytes > section_bytes - image_offset)
         return false;
     const auto *definition = reinterpret_cast<const __gm__ GraphDefinition *>(section_address + image_offset);
-    if (definition->full_key != expected_key || definition->total_bytes != header->definition_bytes) return false;
+    if (definition->graph_key != expected_key || definition->total_bytes != header->definition_bytes) return false;
     out->image_address = section_address + image_offset;
     out->image_bytes = definition->total_bytes;
     return true;

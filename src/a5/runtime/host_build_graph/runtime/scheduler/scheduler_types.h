@@ -10,6 +10,8 @@
  */
 #pragma once
 
+#include "common/lane_mask.h"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -381,15 +383,15 @@ public:
     // already-running core takes its pending slot and executes after its in-flight
     // task. REJECT only when a used core's pending slot is already occupied (no free
     // slot) or the mask is empty.
-    MixPlacement classify_mix_cluster(int32_t cluster_offset, uint8_t core_mask) const {
+    MixPlacement classify_mix_cluster(int32_t cluster_offset, LaneMask lanes) const {
         BitStates used;
-        if (core_mask & SUBTASK_MASK_AIC) {
+        if (lanes.has_aic()) {
             used |= BitStates::bit(cluster_offset);
         }
-        if (core_mask & SUBTASK_MASK_AIV0) {
+        if (lanes.has_aiv0()) {
             used |= BitStates::bit(cluster_offset + 1);
         }
-        if (core_mask & SUBTASK_MASK_AIV1) {
+        if (lanes.has_aiv1()) {
             used |= BitStates::bit(cluster_offset + 2);
         }
         if (!used.has_value() || (pending_occupied_ & used).has_value()) {
@@ -403,12 +405,12 @@ public:
         return MixPlacement::PENDING;
     }
 
-    BitStates get_mix_cluster_offset_states(uint8_t core_mask, MixPlacement placement) const {
+    BitStates get_mix_cluster_offset_states(LaneMask lanes, MixPlacement placement) const {
         BitStates result;
         BitStates candidates = get_cluster_offset_states();
         while (candidates.has_value()) {
             int32_t cluster_offset = candidates.pop_first();
-            if (classify_mix_cluster(cluster_offset, core_mask) == placement) {
+            if (classify_mix_cluster(cluster_offset, lanes) == placement) {
                 result |= BitStates::bit(cluster_offset);
             }
         }
@@ -422,61 +424,61 @@ public:
     // This is unsafe for immediate (non-gated) dispatch — hence separate from
     // classify_mix_cluster, which forces a single placement for the whole cluster.
 
-    // Cores of `cluster_offset` named by core_mask.
-    BitStates mix_used_cores(int32_t cluster_offset, uint8_t core_mask) const {
+    // Cores of `cluster_offset` named by lanes.
+    BitStates mix_used_cores(int32_t cluster_offset, LaneMask lanes) const {
         BitStates used;
-        if (core_mask & SUBTASK_MASK_AIC) used |= BitStates::bit(cluster_offset);
-        if (core_mask & SUBTASK_MASK_AIV0) used |= BitStates::bit(cluster_offset + 1);
-        if (core_mask & SUBTASK_MASK_AIV1) used |= BitStates::bit(cluster_offset + 2);
+        if (lanes.has_aic()) used |= BitStates::bit(cluster_offset);
+        if (lanes.has_aiv0()) used |= BitStates::bit(cluster_offset + 1);
+        if (lanes.has_aiv1()) used |= BitStates::bit(cluster_offset + 2);
         return used;
     }
 
     // Every used core has SOME free slot: a core lacks one only when it is running AND
     // its pending slot is occupied (both slots taken).
-    bool mix_cluster_all_slots(int32_t cluster_offset, uint8_t core_mask) const {
-        BitStates used = mix_used_cores(cluster_offset, core_mask);
+    bool mix_cluster_all_slots(int32_t cluster_offset, LaneMask lanes) const {
+        BitStates used = mix_used_cores(cluster_offset, lanes);
         if (!used.has_value()) return false;
         BitStates no_slot = (~core_states_) & pending_occupied_;  // running AND pending taken
         return !(used & no_slot).has_value();
     }
 
     // Used cores that are idle -> will take a running slot (rendezvous seed count).
-    int32_t mix_cluster_idle_core_count(int32_t cluster_offset, uint8_t core_mask) const {
-        return (mix_used_cores(cluster_offset, core_mask) & core_states_).count();
+    int32_t mix_cluster_idle_core_count(int32_t cluster_offset, LaneMask lanes) const {
+        return (mix_used_cores(cluster_offset, lanes) & core_states_).count();
     }
 
     // Clusters where every used core has a free slot (gated MIX split gate/iteration).
-    BitStates get_mix_split_cluster_offset_states(uint8_t core_mask) const {
+    BitStates get_mix_split_cluster_offset_states(LaneMask lanes) const {
         BitStates result;
         BitStates candidates = get_cluster_offset_states();
         while (candidates.has_value()) {
             int32_t off = candidates.pop_first();
-            if (mix_cluster_all_slots(off, core_mask)) {
+            if (mix_cluster_all_slots(off, lanes)) {
                 result |= BitStates::bit(off);
             }
         }
         return result;
     }
 
-    int32_t count_mix_split_clusters(uint8_t core_mask) const {
-        return get_mix_split_cluster_offset_states(core_mask).count();
+    int32_t count_mix_split_clusters(LaneMask lanes) const {
+        return get_mix_split_cluster_offset_states(lanes).count();
     }
 
-    BitStates get_mix_running_cluster_offset_states(uint8_t core_mask) const {
-        return get_mix_cluster_offset_states(core_mask, MixPlacement::RUNNING);
+    BitStates get_mix_running_cluster_offset_states(LaneMask lanes) const {
+        return get_mix_cluster_offset_states(lanes, MixPlacement::RUNNING);
     }
 
-    int32_t count_mix_running_clusters(uint8_t core_mask) const {
-        return get_mix_running_cluster_offset_states(core_mask).count();
+    int32_t count_mix_running_clusters(LaneMask lanes) const {
+        return get_mix_running_cluster_offset_states(lanes).count();
     }
 
     // Number of whole logical blocks this tracker can accept for sync_start
     // staging. AIC/AIV count cores; MIX counts clusters because one logical MIX
     // block may occupy multiple cores in the same cluster. Gated early staging
     // includes pending slots, while ready staging is restricted to idle slots.
-    int32_t count_available_blocks(ResourceShape shape, uint8_t core_mask, bool include_pending) const {
+    int32_t count_available_blocks(ResourceShape shape, LaneMask lanes, bool include_pending) const {
         if (shape == ResourceShape::MIX) {
-            return include_pending ? count_mix_split_clusters(core_mask) : count_mix_running_clusters(core_mask);
+            return include_pending ? count_mix_split_clusters(lanes) : count_mix_running_clusters(lanes);
         }
         if (shape == ResourceShape::DUMMY) return 0;
 
@@ -784,13 +786,13 @@ enum SchedulerTaskMetadataFlags : uint8_t {
 
 #if !defined(__CCE_AICORE__)
 // Derive the compact AICore metadata from the established HBG scheduling
-// types. This is a host-only projection: ActiveMask and TaskAttrs remain the
+// types. This is a host-only projection: LaneMask and TaskAttrs remain the
 // source of truth, while SchedulerTaskMetadata stays a 16-byte GM read model.
 inline uint8_t scheduler_task_metadata_flags_from_submit_state(
-    ActiveMask active_mask, TaskAttrs task_attrs, int32_t logical_block_num, bool has_fanin, bool inline_task
+    LaneMask active_mask, TaskAttrs task_attrs, int32_t logical_block_num, bool has_fanin, bool inline_task
 ) {
     uint8_t flags = SCHEDULER_TASK_EXECUTABLE;
-    const uint32_t active_subtasks = static_cast<uint32_t>(__builtin_popcount(active_mask.core_mask()));
+    const uint32_t active_subtasks = static_cast<uint32_t>(active_mask.count());
     if (has_fanin) flags |= SCHEDULER_TASK_HAS_FANIN;
     if (active_subtasks > 1) flags |= SCHEDULER_TASK_MIX;
     if (logical_block_num > 1) flags |= SCHEDULER_TASK_SPMD;
@@ -805,7 +807,7 @@ constexpr int32_t SCHEDULER_TASK_TIMING_SLOT_COUNT = 16;
 
 struct alignas(16) SchedulerTaskMetadata {
     uint16_t kernel_ids[3];
-    uint8_t active_mask;
+    LaneMask active_mask;
     uint8_t flags;
     uint32_t trace_index_base;
     int16_t timing_slot;
@@ -828,14 +830,48 @@ inline __aicore__ bool scheduler_trace_count_checked(uint64_t prefix, uint64_t a
     return true;
 }
 
-inline __aicore__ uint32_t
-scheduler_task_trace_index(uint32_t trace_index_base, uint8_t active_mask, uint8_t subtask, uint32_t block_idx = 0) {
-    const uint64_t offset = static_cast<uint64_t>(block_idx) * __builtin_popcount(active_mask) +
-                            __builtin_popcount(active_mask & ((1U << subtask) - 1U));
+inline __aicore__ LaneMask scheduler_task_lanes(const SchedulerTaskMetadata &metadata) { return metadata.active_mask; }
+
+// A lane set held in device memory. An AICore reaches those structs through
+// `__gm__` references, which LaneMask's own members do not accept, so the byte
+// moves through a local. The GM access is the one the caller needed anyway;
+// `scheduler_task_lanes` pays the same copy on the dispatch path.
+inline __aicore__ LaneMask scheduler_lane_mask_load(const LaneMask &lanes) { return lanes; }
+inline __aicore__ void scheduler_lane_mask_store(LaneMask &field, LaneMask lanes) { field = lanes; }
+
+#if defined(__CCE_AICORE__)
+inline __aicore__ LaneMask scheduler_lane_mask_load(const __gm__ LaneMask &lanes) {
+    LaneMask local;
+    __builtin_memcpy(&local, &lanes, sizeof(local));
+    return local;
+}
+
+inline __aicore__ void scheduler_lane_mask_store(__gm__ LaneMask &field, LaneMask lanes) {
+    __builtin_memcpy(&field, &lanes, sizeof(lanes));
+}
+
+inline __aicore__ LaneMask scheduler_task_lanes(const __gm__ SchedulerTaskMetadata &metadata) {
+    LaneMask lanes;
+    // The one-byte POD copy transfers the field from GM into a local value.
+    __builtin_memcpy(&lanes, &metadata.active_mask, sizeof(lanes));
+    return lanes;
+}
+#endif
+
+// Trace and PMU cells are ordered by task, then by block, then by active
+// subtask, so a task owns `logical_block_num * active_mask.count()` of them
+// starting at its `trace_index_base`.
+inline constexpr uint8_t SCHEDULER_TASK_SUBTASK_SLOTS = 3;
+
+inline __aicore__ uint32_t scheduler_task_trace_index(
+    uint32_t trace_index_base, LaneMask active_mask, SubtaskSlot subtask, uint32_t block_idx = 0
+) {
+    const uint64_t offset =
+        static_cast<uint64_t>(block_idx) * active_mask.count() + static_cast<uint64_t>(active_mask.rank_of(subtask));
     return static_cast<uint32_t>(static_cast<uint64_t>(trace_index_base) + offset);
 }
-inline __aicore__ uint32_t scheduler_task_ready_queue(uint8_t flags, uint8_t active_mask) {
-    return (flags & SCHEDULER_TASK_MIX) != 0 ? SCHEDULER_MIX_QUEUE : ((active_mask & 1U) != 0 ? 0U : 1U);
+inline __aicore__ uint32_t scheduler_task_ready_queue(uint8_t flags, LaneMask active_mask) {
+    return (flags & SCHEDULER_TASK_MIX) != 0 ? SCHEDULER_MIX_QUEUE : (active_mask.has_aic() ? 0U : 1U);
 }
 
 inline __aicore__ bool scheduler_task_is_executable(uint8_t flags) { return (flags & SCHEDULER_TASK_EXECUTABLE) != 0; }
@@ -845,7 +881,9 @@ inline __aicore__ bool scheduler_task_has_fanin(uint8_t flags) { return (flags &
 inline __aicore__ bool scheduler_task_is_mix(uint8_t flags) { return (flags & SCHEDULER_TASK_MIX) != 0; }
 
 // The coordinator is a resource participant even for a Vector-only Mix.
-inline __aicore__ uint8_t scheduler_mix_resource_mask(uint8_t active_mask) { return active_mask | UINT8_C(1); }
+inline __aicore__ LaneMask scheduler_mix_resource_mask(LaneMask active_mask) {
+    return active_mask.merged_with(LaneMask::aic());
+}
 
 inline __aicore__ bool scheduler_task_is_spmd(uint8_t flags) { return (flags & SCHEDULER_TASK_SPMD) != 0; }
 
@@ -853,12 +891,14 @@ inline __aicore__ bool scheduler_task_requires_sync_start(uint8_t flags) {
     return (flags & SCHEDULER_TASK_SYNC_START) != 0;
 }
 
-inline __aicore__ uint64_t scheduler_block_claim_positions(uint8_t active_mask, uint64_t clusters) {
-    return clusters * (active_mask == 2 || active_mask == 4 ? 2 : 1);
+// A lone AIV subtask can run on either of a cluster's two V lanes, so it has
+// two claimable positions there; every other shape is pinned to one.
+inline __aicore__ uint64_t scheduler_block_claim_positions(LaneMask active_mask, uint64_t clusters) {
+    return clusters * (active_mask.to_shape() == ResourceShape::AIV ? 2 : 1);
 }
 
 inline __aicore__ bool
-scheduler_task_uses_ticket_claim(uint8_t flags, uint8_t active_mask, uint64_t blocks, uint64_t clusters) {
+scheduler_task_uses_ticket_claim(uint8_t flags, LaneMask active_mask, uint64_t blocks, uint64_t clusters) {
     const uint64_t positions = scheduler_block_claim_positions(active_mask, clusters);
     return !scheduler_task_requires_sync_start(flags) && positions != 0 && blocks > 1;
 }
@@ -932,7 +972,7 @@ struct alignas(64) SchedulerAdmissionRecord {
     uint64_t mix_close_seals_offset;
     uint32_t logical_block_num;
     uint32_t member_count;
-    uint8_t active_mask;
+    LaneMask active_mask;
     uint8_t flags;
     uint8_t reserved[14];
 };
@@ -959,8 +999,8 @@ struct alignas(128) SchedulerGroupDescriptor {
     uint32_t block_idx;
     uint32_t logical_block_num;
     uint32_t cluster_index;
-    uint8_t active_mask;
-    uint8_t resource_mask;
+    LaneMask active_mask;
+    LaneMask resource_mask;
     uint8_t lane_subtasks[3];
     uint8_t flags;
     uint64_t previous_lane_seq[3];
@@ -1233,7 +1273,12 @@ struct alignas(128) SchedulerWorkerContext {
     uint64_t bootstrap_target_aic_cycles;
     uint64_t bootstrap_target_aiv_cycles;
     volatile uint64_t callable_addresses_count;
-    uint64_t bootstrap_timing_reserved;
+    // This run's per-subtask PMU staging array, in the same index space as the
+    // trace cells. Taken from this group rather than from `topology_reserved`
+    // below: that tail is contract-checked zero by `scheduler_initialize_local_config`
+    // and consuming one of its words would make a context carrying this offset
+    // read as malformed.
+    volatile uint64_t pmu_cells_offset;
 
     alignas(128) volatile uint64_t graph_summary_offset;
     volatile uint64_t scheduler_count;
@@ -1368,7 +1413,31 @@ struct alignas(128) SchedulerTaskTrace {
     uint32_t execution_cluster_lane;
 };
 
+/**
+ * One executed subtask's PMU snapshot, staged by the AICore that ran it.
+ *
+ * The AICore-scheduler route dispatches on-core, so no AICPU thread observes a
+ * task's completion while the run is live and the two-slot per-core staging
+ * ring the legacy route drains on every FIN has no consumer here. This array is
+ * the route's own staging: one cell per (task, subtask slot), written once by
+ * the core that executed it and read once by the AICPU after every core has
+ * retired. `published` carries the task id plus one and is written last, so a
+ * zero cell is a subtask this run never executed rather than one whose counters
+ * read zero.
+ */
+struct alignas(64) SchedulerTaskPmuCell {
+    uint64_t total_cycles;
+    uint32_t counters[PMU_COUNTER_COUNT_A5];
+    uint32_t worker_id;
+    volatile uint32_t published;
+    uint32_t pmu_reserved;
+};
+
+static_assert(sizeof(SchedulerTaskPmuCell) == 64, "one PMU cell per cache line");
+
 static_assert(sizeof(SchedulerTaskMetadata) == 16, "task metadata layout changed");
+static_assert(offsetof(SchedulerTaskMetadata, active_mask) == 6);
+static_assert(std::is_trivially_copyable_v<SchedulerTaskMetadata> && std::is_standard_layout_v<SchedulerTaskMetadata>);
 static_assert(alignof(SchedulerTaskMetadata) == 16, "task metadata alignment changed");
 static_assert(offsetof(SchedulerTaskMetadata, timing_slot) == 12, "timing tag offset changed");
 static_assert(offsetof(SchedulerTaskMetadata, logical_block_num) == 14, "block count must occupy the metadata tail");
@@ -1625,7 +1694,7 @@ inline bool scheduler_plan_protocol_storage(uint64_t *cursor, AicoreSchedulerLay
 inline bool scheduler_plan_layout(
     uint64_t task_count, uint64_t aic_task_count, uint64_t aiv_task_count, AicoreSchedulerLayout *layout,
     bool enable_activity_profiling = false, uint64_t trace_count = 0, const SchedulerSpmdRequirements &spmd = {},
-    bool enable_protocol_profiling = false
+    bool enable_protocol_profiling = false, bool enable_pmu = false
 ) {
     // A ready inbox holds its endpoints as int32 task refs, so a graph whose
     // refs would not fit that encoding cannot be scheduled at all.
@@ -1664,6 +1733,9 @@ inline bool scheduler_plan_layout(
             &cursor, sizeof(SchedulerGraphSummary), alignof(SchedulerGraphSummary), &next.graph_summary_offset
         ) ||
         !SCHEDULER_RESERVE_ARRAY(trace_count == 0 ? task_count : trace_count, SchedulerTaskTrace, trace_cells_offset) ||
+        (enable_pmu && !SCHEDULER_RESERVE_ARRAY(
+                           trace_count == 0 ? task_count : trace_count, SchedulerTaskPmuCell, pmu_cells_offset
+                       )) ||
         (enable_activity_profiling &&
          !SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerActivityBuffer, activity_buffers_offset)) ||
         !scheduler_plan_spmd_storage(&cursor, &next) ||
@@ -1783,9 +1855,9 @@ inline bool scheduler_init_spmd_task_records(void *base, const AicoreSchedulerLa
     for (uint64_t task = 0; task < layout.task_count; ++task) {
         const auto &meta = metadata[task];
         if (!scheduler_task_is_executable(meta.flags) || scheduler_task_is_inline(meta.flags)) continue;
-        const uint32_t active_subtasks = static_cast<uint32_t>(__builtin_popcount(meta.active_mask));
+        const uint32_t active_subtasks = static_cast<uint32_t>(meta.active_mask.count());
         uint32_t expected_subtasks = 0;
-        if ((meta.active_mask & ~UINT8_C(7)) != 0 ||
+        if (!meta.active_mask.is_valid() ||
             !scheduler_subtask_count_checked(meta.logical_block_num, active_subtasks, &expected_subtasks) ||
             scheduler_task_is_mix(meta.flags) != (active_subtasks > 1) ||
             scheduler_task_is_spmd(meta.flags) != (meta.logical_block_num > 1) ||

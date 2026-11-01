@@ -13,6 +13,7 @@ import copy
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -90,6 +91,26 @@ def test_both_real_timeout_writers_have_the_same_containment_requirements(native
     native._check_failed_capture(raw, 2, 3, 0)
 
 
+@pytest.mark.parametrize("graph", (False, True))
+def test_fault_root_ignores_inline_graph_boundaries(native, graph):
+    protocol = _capture()["aicore_protocol"]
+    if graph:
+        protocol["tasks"].extend(
+            {"task_ref": ref, "active_mask": 2, "kernel_ids": [65535] * 3, "block_num": 1} for ref in (2, 3)
+        )
+    assert native._root_block_num(protocol) == 2
+
+
+@pytest.mark.parametrize("graph_tail", (False, True))
+def test_graph_recovery_serializes_boolean_tail_for_integer_cli(native, graph_tail, monkeypatch, tmp_path):
+    def run(command, **kwargs):
+        assert f"--graph-tail={int(graph_tail)}" in command
+        return SimpleNamespace(returncode=0, stdout=native._RECOVERY_MARKER + "[]", stderr="")
+
+    monkeypatch.setattr(native.subprocess, "run", run)
+    assert native._recovery_pass("a5", 0, tmp_path, 7, 0, 2, 2500, False, graph_tail) == []
+
+
 def _large_ticket_capture(mask, lane, blocks=257):
     raw = _capture()
     protocol = raw["aicore_protocol"]
@@ -134,10 +155,14 @@ def test_small_fault_capture_requires_the_versioned_claim_policy(native, mask, l
         native._check_failed_capture(raw, blocks, mask, lane)
 
 
-@pytest.mark.parametrize("platform,clusters", (("a5", 32), ("a5sim", 8)))
 @pytest.mark.parametrize("mask", (1, 2, 4, 6, 7))
-def test_two_wave_fault_uses_platform_claimant_population(native, platform, clusters, mask):
-    assert native._two_wave_blocks(platform, mask) == clusters * (4 if mask in (2, 4) else 2)
+def test_two_wave_fault_asks_the_device_for_its_own_claimant_population(native, mask):
+    # The host cannot read the cluster count before the run, so it asks with a
+    # negative sentinel and the orchestration launches two waves against the
+    # device's own topology. The host only sizes buffers, for the widest
+    # topology the platform admits.
+    assert native._TWO_WAVE_REQUEST < 0
+    assert native._two_wave_capacity(mask) == native._MAX_CLUSTERS * (4 if mask in (2, 4) else 2)
 
 
 @pytest.mark.parametrize("mask", (1, 2, 4, 6, 7))
@@ -494,7 +519,7 @@ def test_failed_output_checks_return_writes_and_untouched_successor(native, corr
         records[lane, :2] = 1
         records[lane, 8:14] = torch.tensor([1, 1, lane + 1, 1, 100, 200])
     values = [records.flatten(), torch.zeros(16, dtype=torch.int64)]
-    native._check_output(values, 1, 3, failed=True)
+    native._check_output(values, 1, 1, 3, failed=True)
     if corruption == "duplicate":
         records[0, 0] = 2
     elif corruption == "missing_return":
@@ -510,4 +535,4 @@ def test_failed_output_checks_return_writes_and_untouched_successor(native, corr
     else:
         records[0, 14] = 1
     with pytest.raises(AssertionError):
-        native._check_output(values, 1, 3, failed=True)
+        native._check_output(values, 1, 1, 3, failed=True)

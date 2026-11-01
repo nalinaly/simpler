@@ -94,8 +94,9 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     bool orch_done = orchestrator_done_.load(std::memory_order_acquire);
     if (!orch_done) return LoopAction::NONE;
 
+    // orchestrator_done_ publishes the final task count, including zero.
     task_count = total_tasks_;
-    if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
+    if (completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
         LOG_INFO(
             "Thread %d: completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count
@@ -167,14 +168,9 @@ LoopAction SchedulerContext::check_idle_fatal_error(
 
 namespace {
 
-// Format a core's idle/busy state into a fixed buffer. Used inside CLUSTER lines.
-// Layout (idle):    coreN(idle)
-// Layout (busy):    coreN(busy kernel=K task=T cond_reg_state=ack)
-// Layout (anomaly): coreN(busy kernel=K task=T cond_reg_state=fin ANOMALY)
-//
-// Healthy busy: COND register reports ack (AICore still executing). fin means
-// AICore wrote completion but AICPU hasn't recycled the running slot yet —
-// either a completion-poll bug or the diagnostic raced the recycle.
+// COND and DMB are separate observations. FIN can belong to either slot;
+// DMB's low word reports publication, not pickup or the high-word doorbell.
+// Scheduler fields in a cross-thread shutdown dump are best-effort observations.
 void format_core_status(
     char *buf, size_t buf_size, int32_t core_id, bool idle, const CoreExecState *core_state, uint64_t reg_addr_for_cond
 ) {
@@ -184,28 +180,32 @@ void format_core_status(
     }
     int32_t kernel = -1;
     TaskId task_id = TaskId::invalid();
+    const int32_t running_token = core_state->running_reg_task_id;
+    const int32_t pending_token = core_state->pending_reg_task_id;
     if (core_state && core_state->running_slot_state) {
         int32_t subslot = static_cast<int32_t>(core_state->running_subslot);
         kernel = core_state->running_slot_state->task->kernel_id[subslot];
         task_id = core_state->running_slot_state->task->task_id;
     }
-    uint64_t cond_reg = read_reg(reg_addr_for_cond, RegId::COND);
+    const uint32_t cond_reg = static_cast<uint32_t>(read_reg(reg_addr_for_cond, RegId::COND));
+    const uint32_t dmb_low = static_cast<uint32_t>(read_reg(reg_addr_for_cond, RegId::DATA_MAIN_BASE));
+    const int32_t cond_token = EXTRACT_TASK_ID(cond_reg);
     int32_t hw_state = EXTRACT_TASK_STATE(cond_reg);
     const char *cond_reg_state_str = (hw_state == TASK_ACK_STATE) ? "ack" : "fin";
-    if (hw_state == TASK_ACK_STATE) {
-        snprintf(
-            buf, buf_size, "core%d(busy kernel=%d task=0x%" PRIx64 " cond_reg_state=%s)", core_id, kernel,
-            TaskId::to_uint64(task_id), cond_reg_state_str
-        );
-    } else {
-        snprintf(
-            buf, buf_size,
-            "core%d(busy kernel=%d task=0x%" PRIx64
-            " cond_reg_state=%s ANOMALY cond_tok=%d running_tok=%d pending_tok=%d)",
-            core_id, kernel, TaskId::to_uint64(task_id), cond_reg_state_str, EXTRACT_TASK_ID(cond_reg),
-            core_state->running_reg_task_id, core_state->pending_reg_task_id
-        );
+    const char *cond_match = "other";
+    if (running_token != AICPU_TASK_INVALID && cond_token == running_token) {
+        cond_match = "running";
+    } else if (pending_token != AICPU_TASK_INVALID && cond_token == pending_token) {
+        cond_match = "pending";
     }
+    snprintf(
+        buf, buf_size,
+        "core%d(busy kernel=%d task=0x%" PRIx64 " cond_reg_state=%s cond_raw=0x%" PRIx32
+        " cond_tok=%d running_tok=%d pending_tok=%d"
+        " cond_match=%s dmb_low=0x%" PRIx32 ")",
+        core_id, kernel, TaskId::to_uint64(task_id), cond_reg_state_str, cond_reg, cond_token, running_token,
+        pending_token, cond_match, dmb_low
+    );
 }
 
 }  // namespace
@@ -349,7 +349,7 @@ void SchedulerContext::log_stall_diagnostics(int32_t thread_idx, int32_t idle_it
         bool aiv0_idle = tracker.is_aiv0_core_idle(offset);
         bool aiv1_idle = tracker.is_aiv1_core_idle(offset);
         int32_t cluster_id = cli * ast + thread_idx;
-        char aic_buf[128], aiv0_buf[128], aiv1_buf[128];
+        char aic_buf[320], aiv0_buf[320], aiv1_buf[320];
         format_core_status(
             aic_buf, sizeof(aic_buf), aic_id, aic_idle, &core_exec_states_[aic_id], core_exec_states_[aic_id].reg_addr
         );
@@ -362,8 +362,9 @@ void SchedulerContext::log_stall_diagnostics(int32_t thread_idx, int32_t idle_it
             core_exec_states_[aiv1_id].reg_addr
         );
         STALL_DUMP_LOG(
-            report, "[STALL thread=%d idle_iterations=%d] CLUSTER cluster_id=%d aic=%s aiv0=%s aiv1=%s", thread_idx,
-            idle_iterations, cluster_id, aic_buf, aiv0_buf, aiv1_buf
+            report,
+            "[STALL thread=%d idle_iterations=%d] CLUSTER cluster_id=%d snapshot=best_effort aic=%s aiv0=%s aiv1=%s",
+            thread_idx, idle_iterations, cluster_id, aic_buf, aiv0_buf, aiv1_buf
         );
     }
 }
@@ -505,11 +506,7 @@ int32_t SchedulerContext::handle_timeout_exit(
                 [this, thread_idx](const ChipTaskSlotState &slot_state) {
                     dump_args_for_task<SUBTASK_SLOT_COUNT>(
                         thread_idx, *slot_state.task, *slot_state.payload, slot_state.active_mask,
-                        ArgsDumpStage::AFTER_COMPLETION,
-                        [](ActiveMask active_mask, int raw_subtask_id) {
-                            return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
-                        },
-                        [this](int32_t func_id) {
+                        ArgsDumpStage::AFTER_COMPLETION, [this](int32_t func_id) {
                             return get_function_bin_addr(func_id);
                         }
                     );
@@ -684,6 +681,10 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx) {
     // shutdown. A fatal run ends in a host-side device reset, so counters read
     // here would not survive into the next generation.
     if (is_pmu_enabled() && !fatal_shutdown_started_.load(std::memory_order_acquire)) {
+        // Settle this run's per-core accounting before the registers are
+        // restored and the cores retired: those are what stop the producer,
+        // and this reads what the producer wrote.
+        pmu_aicpu_close_run_cores(core_trackers_[thread_idx].core_ids(), core_trackers_[thread_idx].core_num());
         pmu_aicpu_finalize(core_trackers_[thread_idx].core_ids(), core_trackers_[thread_idx].core_num());
     }
 #endif
@@ -761,7 +762,8 @@ int32_t SchedulerContext::retire_claimed_cores(const int32_t *core_ids, int32_t 
     // platform_retire_aicore_group fills every entry on every path it returns
     // from, so this needs no initializer.
     bool released[PLATFORM_MAX_CORES];
-    const int32_t rc = platform_retire_aicore_group(targets, count, platform_aicore_exit_deadline(), released);
+    const uint64_t deadline = platform_aicore_exit_deadline();
+    const int32_t rc = platform_retire_aicore_group(targets, count, deadline, released);
     if (rc != 0) {
         // Naming the cores is the only signal an unretired core leaves: the host
         // sees just a stream timeout.
@@ -1109,13 +1111,14 @@ void SchedulerContext::abort_and_shutdown(Runtime *runtime) { emergency_shutdown
 // Profiling-subsystem init (leader-only). pmu_aicpu_init needs every core's
 // physical_core_id, so the barrier-free init path calls this behind an
 // all-thread barrier compiled only into DFX builds. No-op otherwise.
-void SchedulerContext::post_handshake_profiling_init() {
+void SchedulerContext::post_handshake_profiling_init(Runtime *runtime) {
+    (void)runtime;
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
-        dump_args_init(active_sched_threads_);
+        dump_args_init(active_sched_threads_, static_cast<DumpArgsLevel>(runtime->dev.dump_args_level));
     }
     if (is_pmu_enabled()) {
-        pmu_aicpu_init(physical_core_ids_, cores_total_num_);
+        pmu_aicpu_init(physical_core_ids_, cores_total_num_, static_cast<PmuEventType>(runtime->dev.pmu_event_type));
     }
 #endif
 }
@@ -1229,19 +1232,18 @@ int32_t SchedulerContext::pre_handshake_init(
     regs_ = regs_base;
 
 #if SIMPLER_DFX
-    // chip_swimlane_aicpu_init promotes g_chip_swimlane_level from the shared-memory
-    // header — must be called BEFORE the orchestrator thread caches the level
-    // via rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level() in
-    // AicpuExecutor::run(). Otherwise the cached value would still be DISABLED
-    // (only the binary enable bit has been seeded by kernel.cpp at this point),
-    // and the CYCLE_COUNT_START() gate in orchestrator.cpp would suppress
-    // all ORCH_PHASES records. Reset the cached level on disabled runs so a
-    // prior enabled launch's level can't leak into the phase-record gates in
+    // chip_swimlane_aicpu_init latches this run's descriptor level — must be called BEFORE the orchestrator thread
+    // caches the level via rt->orchestrator.chip_swimlane_level = get_chip_swimlane_level() in AicpuExecutor::run().
+    // Otherwise the cached value would still be DISABLED (only the binary enable bit has been seeded by kernel.cpp at
+    // this point), and the CYCLE_COUNT_START() gate in orchestrator.cpp would suppress all ORCH_PHASES records. Reset
+    // the cached level on disabled runs so a prior enabled launch's level can't leak into the phase-record gates in
     // scheduler_dispatch (`>= SCHED_PHASES`). This runs on the leader before it
     // publishes hs_setup_done_, so it happens-before every thread's
     // handshake_partition and therefore before any register window is opened.
     if (is_chip_swimlane_enabled()) {
-        chip_swimlane_aicpu_init(runtime->dev.worker_count);
+        chip_swimlane_aicpu_init(
+            runtime->dev.worker_count, static_cast<ChipSwimlaneLevel>(runtime->dev.chip_swimlane_level)
+        );
         chip_swimlane_level_ = get_chip_swimlane_level();
         if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
             // Sched phase pool count = number of scheduler threads.
@@ -1369,10 +1371,10 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // orchestrator thread (see aicpu_executor.cpp).
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
-        dump_args_init(active_sched_threads_);
+        dump_args_init(active_sched_threads_, static_cast<DumpArgsLevel>(runtime->dev.dump_args_level));
     }
     if (is_pmu_enabled()) {
-        pmu_aicpu_init(physical_core_ids_, cores_total_num_);
+        pmu_aicpu_init(physical_core_ids_, cores_total_num_, static_cast<PmuEventType>(runtime->dev.pmu_event_type));
     }
 #endif
 
@@ -1467,6 +1469,7 @@ void SchedulerContext::deinit() {
     drain_state_.drain_stage_go.store(0, std::memory_order_release);
     drain_state_.drain_stage_done_mask.store(0, std::memory_order_release);
     drain_state_.drain_running_staged.store(0, std::memory_order_release);
+    drain_state_.reserved_lanes.store(LaneMask::all(), std::memory_order_release);
 
     // Reset task counters and orchestrator state
     completed_tasks_.store(0, std::memory_order_release);

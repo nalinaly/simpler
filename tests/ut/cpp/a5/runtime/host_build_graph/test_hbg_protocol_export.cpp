@@ -29,13 +29,13 @@ struct ProtocolExportFixture : ::testing::Test {
         ASSERT_TRUE(scheduler_plan_layout(2, 1, 0, &layout, false, 6, {3, 1, 1, 1}, true));
         storage = std::make_unique<scheduler_test::SchedulerStateBuffer>(layout);
         auto *meta = at<SchedulerTaskMetadata>(layout.task_metadata_offset);
-        meta[0].active_mask = 7;
+        meta[0].active_mask = LaneMask::all();
         meta[0].logical_block_num = 2;
         meta[0].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX | SCHEDULER_TASK_SPMD;
         meta[0].timing_slot = -1;
         ASSERT_TRUE(scheduler_init_spmd_task_records(storage->base(), layout, 0));
         scheduler_test::BasicGraphBuffer<2> graph(2);
-        graph.mixed(0, 7);
+        graph.mixed(0, LaneMask::all());
         graph.payload(1).fanin_count = 1;
         graph.payload(1).fanin_data()[0] = 0;
         tasks = scheduler_protocol_freeze_graph(graph.graph(), {meta[0], meta[1]});
@@ -152,8 +152,8 @@ TEST(ProtocolCloseSealExport, ReadsEveryClusterAndTaskValueWithoutInterpretingCe
     auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
     scheduler_test::BasicGraphBuffer<2> graph(2);
     for (uint32_t task = 0; task < 2; ++task) {
-        graph.mixed(task, 3);
-        metadata[task].active_mask = 3;
+        graph.mixed(task, LaneMask(true, true, false));
+        metadata[task].active_mask = LaneMask(true, true, false);
         metadata[task].logical_block_num = 1;
         metadata[task].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_MIX;
         metadata[task].trace_index_base = task * 2;
@@ -231,13 +231,13 @@ TEST(ProtocolGraphSnapshot, DependencyOnlyServiceRetainsRoutingWithoutRequiringA
     graph.payload(1).fanin_data()[0] = 0;
     std::vector<SchedulerTaskMetadata> metadata(2);
     metadata[1].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_INLINE | SCHEDULER_TASK_HAS_FANIN;
-    metadata[1].active_mask = 2;
+    metadata[1].active_mask = LaneMask::aiv0();
     metadata[1].logical_block_num = 1;
     for (auto &kernel : metadata[1].kernel_ids)
         kernel = UINT16_MAX;
     const auto frozen = scheduler_protocol_freeze_graph(graph.graph(), metadata);
     EXPECT_TRUE(scheduler_task_is_inline(frozen[1].metadata.flags));
-    EXPECT_EQ(frozen[1].metadata.active_mask, 2);
+    EXPECT_EQ(frozen[1].metadata.active_mask, LaneMask::aiv0());
     EXPECT_EQ(frozen[1].metadata.kernel_ids[1], UINT16_MAX);
     EXPECT_EQ(frozen[1].dependencies, std::vector<int32_t>({0}));
 }

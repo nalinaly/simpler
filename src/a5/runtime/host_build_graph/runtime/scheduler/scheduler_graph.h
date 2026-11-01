@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "common/lane_mask.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
@@ -69,26 +71,25 @@ struct SchedulerMinimumWorkerDemand {
     uint32_t aiv;
 };
 
-inline constexpr SchedulerMinimumWorkerDemand scheduler_minimum_worker_demand(uint8_t active_mask) {
-    const uint32_t vectors = ((active_mask & 2U) != 0 ? 1U : 0U) + ((active_mask & 4U) != 0 ? 1U : 0U);
+inline constexpr SchedulerMinimumWorkerDemand scheduler_minimum_worker_demand(LaneMask active_mask) {
+    const uint32_t vectors = (active_mask.has_aiv0() ? 1U : 0U) + (active_mask.has_aiv1() ? 1U : 0U);
     // Ordinary blocks can execute in waves. A dual-AIV Mix still needs an AIC coordinator.
-    return {((active_mask & 1U) != 0 || vectors > 1) ? 1U : 0U, vectors};
+    return {(active_mask.has_aic() || vectors > 1) ? 1U : 0U, vectors};
 }
 
 inline constexpr bool scheduler_resident_worker_demand_checked(
-    uint8_t active_mask, uint32_t blocks, bool sync_start, uint64_t workers, SchedulerMinimumWorkerDemand *demand
+    LaneMask active_mask, uint32_t blocks, bool sync_start, uint64_t workers, SchedulerMinimumWorkerDemand *demand
 ) {
-    if (demand == nullptr || active_mask == 0 || active_mask > 7 || workers == 0 || workers > PLATFORM_MAX_CORES ||
-        workers % PLATFORM_CORES_PER_BLOCKDIM != 0 ||
-        !scheduler_resident_task_shape_supported(
-            static_cast<uint32_t>(__builtin_popcount(active_mask)), blocks, sync_start
-        ))
+    if (demand == nullptr || active_mask.is_empty() || !active_mask.is_valid() || workers == 0 ||
+        workers > PLATFORM_MAX_CORES || workers % PLATFORM_CORES_PER_BLOCKDIM != 0 ||
+        !scheduler_resident_task_shape_supported(static_cast<uint32_t>(active_mask.count()), blocks, sync_start))
         return false;
     auto required = scheduler_minimum_worker_demand(active_mask);
     if (sync_start) {
-        const bool mix = __builtin_popcount(active_mask) > 1;
-        required.aic = (mix || active_mask == 1) ? blocks : 0;
-        required.aiv = mix ? blocks * required.aiv : (active_mask == 1 ? 0 : blocks);
+        const bool mix = active_mask.is_mix();
+        const bool aic_only = active_mask.is_aic();
+        required.aic = (mix || aic_only) ? blocks : 0;
+        required.aiv = mix ? blocks * required.aiv : (aic_only ? 0 : blocks);
     }
     const uint64_t clusters = workers / PLATFORM_CORES_PER_BLOCKDIM;
     if (required.aic > clusters || required.aiv > clusters * PLATFORM_AIV_CORES_PER_BLOCKDIM) return false;
@@ -149,7 +150,7 @@ struct SchedulerTaskInfo {
 struct SchedulerTaskShape {
     int64_t task_ref;
     int32_t kernel_ids[3];
-    uint8_t active_mask;
+    LaneMask active_mask;
     uint8_t reserved[3];
 };
 
@@ -164,6 +165,8 @@ static_assert(sizeof(SchedulerGraphView) == 48, "read-only graph view layout cha
 static_assert(offsetof(SchedulerGraphView, storage_address) == 0, "storage address offset changed");
 static_assert(sizeof(SchedulerTaskInfo) == 24, "root classification result layout changed");
 static_assert(sizeof(SchedulerTaskShape) == 24, "task shape result layout changed");
+static_assert(offsetof(SchedulerTaskShape, active_mask) == 20);
+static_assert(std::is_trivially_copyable_v<SchedulerTaskShape> && std::is_standard_layout_v<SchedulerTaskShape>);
 static_assert(sizeof(SchedulerDispatchPredicate) == 24, "dispatch predicate layout changed");
 
 inline __aicore__ bool
@@ -253,7 +256,7 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_ref,
     *shape = {
         -1,
         {SCHEDULER_GRAPH_INVALID_KERNEL_ID, SCHEDULER_GRAPH_INVALID_KERNEL_ID, SCHEDULER_GRAPH_INVALID_KERNEL_ID},
-        0,
+        LaneMask::none(),
         {0, 0, 0}
     };
     if (graph.task_count == 0) return SchedulerGraphResult::EMPTY;
@@ -304,9 +307,13 @@ scheduler_classify_task_shape(const SchedulerGraphView &graph, int64_t task_ref,
         if (kernel_ids[slot] == SCHEDULER_GRAPH_INVALID_KERNEL_ID) continue;
         if (kernel_ids[slot] < 0) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
         shape->kernel_ids[slot] = kernel_ids[slot];
-        shape->active_mask |= static_cast<uint8_t>(1U << slot);
     }
-    if (shape->active_mask == 0) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
+    shape->active_mask = LaneMask(
+        shape->kernel_ids[0] != SCHEDULER_GRAPH_INVALID_KERNEL_ID,
+        shape->kernel_ids[1] != SCHEDULER_GRAPH_INVALID_KERNEL_ID,
+        shape->kernel_ids[2] != SCHEDULER_GRAPH_INVALID_KERNEL_ID
+    );
+    if (shape->active_mask.is_empty()) return SchedulerGraphResult::UNSUPPORTED_SHAPE;
 
     shape->task_ref = task_ref;
     return SchedulerGraphResult::OK;

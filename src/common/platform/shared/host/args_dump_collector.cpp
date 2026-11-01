@@ -36,6 +36,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 #include "common/memory_barrier.h"
@@ -75,11 +76,15 @@ size_t ArgsDumpCollector::normalize_collector_shard(int collector_shard) const {
     return static_cast<size_t>(collector_shard);
 }
 
-void ArgsDumpCollector::begin_run(const std::string &output_prefix, DumpArgsLevel dump_args_level) {
+void ArgsDumpCollector::begin_run(const std::string &output_prefix, DumpArgsLevel dump_args_level, uint64_t run_epoch) {
     output_prefix_ = output_prefix;
+    run_epoch_ = run_epoch;
     dump_args_level_ = dump_args_level;
     reset_collector_shards();
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
+    dropped_records_complete_ = false;
+    ordinary_drain_loss_ = false;
+    recovered_current_buffers_.assign(static_cast<size_t>(num_dump_threads_), {});
     total_truncated_count_.store(0, std::memory_order_relaxed);
     last_progress_ms_.store(0, std::memory_order_relaxed);
     // The lane counters are the one piece of per-run state a retained run must
@@ -99,42 +104,6 @@ void ArgsDumpCollector::begin_run(const std::string &output_prefix, DumpArgsLeve
     }
     for (auto &count : received_payload_counts_) {
         count.store(0, std::memory_order_relaxed);
-    }
-
-    // Before the first initialize() there is no region; initialize() writes the
-    // level from the member just set. Afterwards the device needs the new value
-    // by another route, and it is one narrow field rather than a bulk write-back
-    // so it cannot race the AICPU's own header fields.
-    if (shm_host_ != nullptr) {
-        DumpDataHeader *header = get_dump_header(shm_host_);
-        header->dump_args_level = static_cast<uint32_t>(dump_args_level_);
-        wmb();
-        publish_field(&header->dump_args_level, sizeof(header->dump_args_level), "dump_args_level");
-
-        // The per-thread payload counters are what reconcile compares against,
-        // and nothing on the device resets them. published/completed/dropped are
-        // contiguous, so one write-back per thread covers them.
-        //
-        // arena_write_offset is deliberately NOT reset: it is a monotonic cursor
-        // the host reads modulo arena_size, so it stays correct across runs.
-        static_assert(
-            offsetof(DumpBufferState, dropped_record_count) ==
-                offsetof(DumpBufferState, published_payload_count) + 2 * sizeof(uint64_t),
-            "the payload counters must stay contiguous for this single write-back to cover them"
-        );
-        constexpr size_t kCounterSpan = 2 * sizeof(uint64_t) + sizeof(uint32_t);
-        // The region holds num_dump_threads_ states (calc_dump_data_size), so
-        // that is the bound — a wider loop writes past its end. The runner
-        // rebuilds this collector when a run's thread count changes, so a
-        // resident one is never asked to reset a state it does not own.
-        for (int t = 0; t < num_dump_threads_; t++) {
-            DumpBufferState *state = get_dump_buffer_state(shm_host_, t);
-            state->published_payload_count = 0;
-            state->completed_payload_count = 0;
-            state->dropped_record_count = 0;
-            wmb();
-            publish_field(&state->published_payload_count, kCounterSpan, "payload counters");
-        }
     }
 }
 
@@ -165,10 +134,76 @@ void ArgsDumpCollector::merge_collector_shards() {
     collector_shards_merged_ = true;
 }
 
+void *ArgsDumpCollector::bank_alloc(void *owner, size_t bytes, void **host_out) {
+    auto *self = static_cast<ArgsDumpCollector *>(owner);
+    // Paired, because an allocation's host readability is a property of how it
+    // was mapped and not of the platform: the raw device allocator alone leaves
+    // an address this process may not dereference. Kept out of the buffer
+    // pool's mapping table, whose teardown would free it on a path that proves
+    // nothing about this collector's producers.
+    return self->alloc_unmanaged_paired_buffer(bytes, host_out);
+}
+
+int ArgsDumpCollector::bank_unmap(void *owner, void *device_ptr) {
+    auto *self = static_cast<ArgsDumpCollector *>(owner);
+    return self->unmap_unmanaged_paired_buffer(device_ptr, self->bank_unregister_cb_);
+}
+
+int ArgsDumpCollector::bank_free(void *owner, void *device_ptr) {
+    auto *self = static_cast<ArgsDumpCollector *>(owner);
+    if (self->bank_free_cb_ == nullptr || device_ptr == nullptr) return -1;
+    // The allocator's own status, reported rather than dropped: a refused free
+    // may leave the allocator still owning the pointer, and the bank array is
+    // the memory a producer writes.
+    return self->bank_free_cb_(device_ptr);
+}
+
+int ArgsDumpCollector::bank_copy(
+    void *owner, void *host_dst, const void *device_src, const void *host_src, size_t bytes
+) {
+    auto *self = static_cast<ArgsDumpCollector *>(owner);
+    // Both addresses and this collector's own copy context, so the shared rule
+    // reads the mapping this allocation actually has rather than the one its
+    // platform usually gives.
+    return simpler::dfx::credit::read_run_terminal_bank(host_dst, device_src, host_src, bytes, self->copy_from_device_);
+}
+
+int ArgsDumpCollector::bank_initialize(
+    void *owner, void *device_dst, void *host_dst, const void *initial, size_t bytes
+) {
+    auto *self = static_cast<ArgsDumpCollector *>(owner);
+    return simpler::dfx::credit::initialize_run_terminal_bank(
+        device_dst, host_dst, initial, bytes, self->copy_to_device_
+    );
+}
+
+bool ArgsDumpCollector::open_run_terminal_banks(int expected_producers) {
+    if (!retain_across_runs_) return false;
+    if (shm_host_ == nullptr || device_alloc_cb_ == nullptr || device_free_cb_ == nullptr) return false;
+    // One producer per dump thread, in a bank dimensioned by the platform
+    // maximum: the stride is what the device indexes by thread, the expected
+    // count is what this collector brought up.
+    if (expected_producers != num_dump_threads_ || expected_producers <= 0) return false;
+    return terminal_banks_.open(
+        PLATFORM_MAX_AICPU_THREADS, expected_producers, this, &ArgsDumpCollector::bank_alloc,
+        &ArgsDumpCollector::bank_unmap, &ArgsDumpCollector::bank_free, &ArgsDumpCollector::bank_copy,
+        &ArgsDumpCollector::bank_initialize
+    );
+}
+
 int ArgsDumpCollector::initialize(
     int num_dump_threads, int device_id, DumpArgsLevel dump_args_level, const DumpAllocCallback &alloc_cb,
-    DumpRegisterCallback register_cb, const DumpFreeCallback &free_cb
-) {
+    DumpRegisterCallback register_cb, const DumpFreeCallback &free_cb, DumpUnregisterCallback unregister_cb
+) try {
+    if (register_cb != nullptr && unregister_cb == nullptr) {
+        LOG_ERROR("Dump collector registration requires an unregister callback");
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+
+    if (terminal_banks_.backing_retained()) {
+        LOG_ERROR("ArgsDumpCollector: terminal backing still requires cleanup before initialization");
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
     if (shm_host_ != nullptr) {
         // Already holding this run's device resources. They are not per-run:
         // configuration arrives via begin_run() and the layout is fixed at
@@ -176,6 +211,9 @@ int ArgsDumpCollector::initialize(
         return 0;
     }
     dump_args_level_ = dump_args_level;
+    device_alloc_cb_ = alloc_cb;
+    device_free_cb_ = free_cb;
+    bank_free_cb_ = free_cb;
     if (num_dump_threads <= 0 || num_dump_threads > PLATFORM_MAX_AICPU_THREADS) {
         LOG_ERROR(
             "ArgsDumpCollector::initialize: invalid num_dump_threads=%d (valid range: 1-%d)", num_dump_threads,
@@ -191,6 +229,9 @@ int ArgsDumpCollector::initialize(
     num_dump_threads_ = num_dump_threads;
     reset_collector_shards();
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
+    dropped_records_complete_ = false;
+    ordinary_drain_loss_ = false;
+    recovered_current_buffers_.assign(static_cast<size_t>(num_dump_threads_), {});
     total_truncated_count_.store(0, std::memory_order_relaxed);
     last_progress_ms_.store(0, std::memory_order_relaxed);
     for (auto &count : written_payload_counts_) {
@@ -204,14 +245,16 @@ int ArgsDumpCollector::initialize(
     // start(tf) a no-op without further bookkeeping.
     set_memory_context(
         alloc_cb, register_cb, free_cb, profiling_copy_to_device_or_null(), profiling_copy_from_device_or_null(),
-        /*shm_dev=*/nullptr, /*shm_host=*/nullptr, /*shm_size=*/0, device_id
+        /*shm_dev=*/nullptr, /*shm_host=*/nullptr, /*shm_size=*/0, device_id, unregister_cb
     );
 
     // RAII rollback: any early return after this point releases the shm
     // region + per-thread arenas + DumpMetaBuffers through the framework's
     // dev→host map. `guard.commit()` runs on the success path before the
     // trailing return 0.
-    profiling_common::InitRollbackGuard<decltype(manager_)> guard(manager_, free_cb);
+    profiling_common::InitRollbackGuard<decltype(manager_)> guard(
+        manager_, free_cb, register_cb != nullptr ? unregister_cb : nullptr, device_id
+    );
 
     // Allocate dump shared memory (header + buffer states)
     size_t shm_size = calc_dump_data_size(num_dump_threads);
@@ -228,7 +271,6 @@ int ArgsDumpCollector::initialize(
     header->magic = ARGS_DUMP_MAGIC;
     header->num_dump_threads = static_cast<uint32_t>(num_dump_threads);
     header->records_per_buffer = PLATFORM_DUMP_RECORDS_PER_BUFFER;
-    header->dump_args_level = static_cast<uint32_t>(dump_args_level_);
 
     uint64_t arena_size = calc_dump_arena_size();
     header->arena_size_per_thread = arena_size;
@@ -286,24 +328,20 @@ int ArgsDumpCollector::initialize(
 
     // Push the entire initialized shm region (header + BufferStates +
     // free_queue contents) to device.
-    profiling_copy_to_device(shm_dev_local, shm_host_local, shm_size);
+    if (int rc = profiling_copy_to_device(shm_dev_local, shm_host_local, shm_size); rc != 0) return rc;
 
-    // Publish shm pointers on the base now that the region is ready. start(tf)
-    // gates on shm_host_ being non-null, so this re-set_memory_context call
-    // is the moment the collector becomes startable.
+    guard.commit();
     dump_shared_mem_dev_ = shm_dev_local;
-    set_memory_context(
-        alloc_cb, register_cb, free_cb, profiling_copy_to_device_or_null(), profiling_copy_from_device_or_null(),
-        shm_dev_local, shm_host_local, shm_size, device_id
-    );
+    publish_shared_memory(shm_dev_local, shm_host_local, shm_size);
 
     LOG_INFO(
         "Args dump initialized: %d threads, arena=%lu MB/thread, %d buffers/thread", num_dump_threads,
         arena_size / (1024 * 1024), PLATFORM_DUMP_BUFFERS_PER_THREAD
     );
 
-    guard.commit();
     return 0;
+} catch (const std::bad_alloc &) {
+    return PTO_RUNTIME_ERR_INTERNAL;
 }
 
 void ArgsDumpCollector::start(const profiling_common::ThreadFactory &thread_factory) {
@@ -659,56 +697,103 @@ void ArgsDumpCollector::on_buffer_collected(const DumpReadyBufferInfo &info, int
 // reconcile_counters: recover un-flushed current buffers + dropped accounting
 // ---------------------------------------------------------------------------
 
+int ArgsDumpCollector::close_ordinary_run(bool producer_stop_proved) {
+    if (producer_stop_proved) {
+        quiesce();
+        reconcile_counters();
+    } else {
+        // Host transport finishes only entries already handed to collectors;
+        // new device publications and producer-held buffers stay on the device.
+        // Thread exit supplies no authority to release device storage.
+        stop(false);
+        report_drain_drops();
+    }
+    return export_dump_files();
+}
+
 void ArgsDumpCollector::reconcile_counters() {
-    if (shm_host_ == nullptr) return;
     // The retained path decides a leftover buffer at its own close, under that
     // run's execution claim and against that run's receipt ledger. Reaching
     // this bulk read afterwards would copy the whole shared region back over
     // the free-queue cursors the drain and replenish threads own, and would
     // read a buffer whose identity nothing here can check.
     if (retain_across_runs_) return;
+    dropped_records_complete_ = false;
+    if (shm_host_ == nullptr) return;
+    ordinary_drain_loss_ = ordinary_drain_loss_ || drain_dropped_buffers() != 0;
     report_drain_drops();
 
-    // Pull the latest BufferStates (current_buf_ptr, dropped_record_count)
-    // before the per-thread loop so leftovers reflect post-stop() device
-    // state.
+    // Producer stop precedes this snapshot. quiesce() drains published records
+    // but leaves host transport threads resident.
     if (manager_.shared_mem_dev() != nullptr && shm_size_ > 0) {
-        profiling_copy_from_device(shm_host_, manager_.shared_mem_dev(), shm_size_);
+        if (profiling_copy_from_device(shm_host_, manager_.shared_mem_dev(), shm_size_) != 0) {
+            LOG_ERROR("Args dump: cannot read device state for run %llu", static_cast<unsigned long long>(run_epoch_));
+            return;
+        }
     }
     rmb();
 
-    uint32_t dropped_total = 0;
+    uint64_t dropped_total = 0;
+    bool counts_complete = !ordinary_drain_loss_;
     int recovered_threads = 0;
-    // After stop(), a non-zero current_buf_ptr with records means the device
-    // never ran dump_args_flush for that thread. The common cause is a hang:
-    // the AICPU op is reaped by the hardware op-execution timeout (507xxx)
-    // before its graceful scheduler-timeout shutdown can flush. The host still
-    // holds the buffer and the originating arena, so recover the records here
-    // (the same path the poll thread uses for a ready buffer) instead of
-    // dropping them — export_dump_files() then writes them like any normally
-    // collected buffer, so a hung run still yields its dumped inputs/outputs.
+    // A stopped producer may leave records in its unpublished current buffer.
+    // Recovery reads require the current lane/buffer epoch and successful
+    // copies; a failed fence alone supplies none of the stop proof.
     for (int t = 0; t < num_dump_threads_; t++) {
         DumpBufferState *state = get_dump_buffer_state(shm_host_, t);
+        if (state->run_epoch != run_epoch_) {
+            // The pool includes non-scheduler AICPU lanes that never initialize.
+            // A prior held buffer or loss count still needs an attributable run.
+            if (state->current_buf_ptr != 0 || state->run_dropped_record_count != 0) {
+                counts_complete = false;
+                LOG_ERROR(
+                    "Args dump: lane %d did not initialize for run %llu", t, static_cast<unsigned long long>(run_epoch_)
+                );
+            }
+            continue;
+        }
 
-        total_dropped_record_count_.fetch_add(state->dropped_record_count, std::memory_order_relaxed);
-        dropped_total += state->dropped_record_count;
+        dropped_total += state->run_dropped_record_count;
+        if (state->run_dropped_record_count == std::numeric_limits<uint32_t>::max()) counts_complete = false;
 
         uint64_t cur_ptr = state->current_buf_ptr;
         if (cur_ptr == 0) continue;
 
-        void *host_ptr = manager_.resolve_host_ptr(reinterpret_cast<void *>(cur_ptr));
-        if (host_ptr == nullptr) continue;
+        // A stopped producer preserves its held pointer/sequence for this run.
+        auto &recovered = recovered_current_buffers_[static_cast<size_t>(t)];
+        const uint32_t current_seq = state->current_buf_seq;
+        if (recovered.dev_buffer_ptr == cur_ptr && recovered.buffer_seq == current_seq) continue;
 
-        profiling_copy_from_device(host_ptr, reinterpret_cast<void *>(cur_ptr), sizeof(DumpMetaBuffer));
-        uint32_t count = reinterpret_cast<DumpMetaBuffer *>(host_ptr)->count;
+        void *host_ptr = manager_.resolve_host_ptr(reinterpret_cast<void *>(cur_ptr));
+        if (host_ptr == nullptr) {
+            counts_complete = false;
+            continue;
+        }
+
+        if (profiling_copy_from_device(host_ptr, reinterpret_cast<void *>(cur_ptr), sizeof(DumpMetaBuffer)) != 0) {
+            counts_complete = false;
+            LOG_ERROR("Args dump: cannot recover lane %d for run %llu", t, static_cast<unsigned long long>(run_epoch_));
+            continue;
+        }
+        const auto *buffer = static_cast<const DumpMetaBuffer *>(host_ptr);
+        if (buffer->run_epoch != run_epoch_) {
+            counts_complete = false;
+            continue;
+        }
+        uint32_t count = buffer->count;
+        if (count > PLATFORM_DUMP_RECORDS_PER_BUFFER) {
+            counts_complete = false;
+            continue;
+        }
         if (count == 0) continue;
 
         DumpReadyBufferInfo info;
         info.thread_index = static_cast<uint32_t>(t);
         info.dev_buffer_ptr = reinterpret_cast<void *>(cur_ptr);
         info.host_buffer_ptr = host_ptr;
-        info.buffer_seq = state->current_buf_seq;
+        info.buffer_seq = current_seq;
         on_buffer_collected(info, static_cast<int>(t));
+        recovered = {cur_ptr, current_seq};
         recovered_threads++;
         LOG_WARN(
             "Dump reconcile: thread %d had an un-flushed buffer (count=%u) — device flush did not run "
@@ -717,11 +802,16 @@ void ArgsDumpCollector::reconcile_counters() {
         );
     }
 
+    const uint64_t max_count = std::numeric_limits<uint32_t>::max();
+    total_dropped_record_count_.store(
+        static_cast<uint32_t>(std::min(dropped_total, max_count)), std::memory_order_relaxed
+    );
+    dropped_records_complete_ = counts_complete && dropped_total <= max_count;
     if (dropped_total > 0) {
         LOG_WARN(
-            "Dump reconcile: %u records dropped on device side. "
+            "Dump reconcile: %llu records dropped on device side. "
             "Increase PLATFORM_DUMP_BUFFERS_PER_THREAD or PLATFORM_DUMP_READYQUEUE_SIZE.",
-            dropped_total
+            static_cast<unsigned long long>(dropped_total)
         );
     }
     if (recovered_threads > 0) {
@@ -800,22 +890,28 @@ void ArgsDumpCollector::publish_arena_acks() {
     for (int t = 0; t < num_dump_threads_; t++) {
         DumpBufferState *host_state = get_dump_buffer_state(shm_host_, t);
         DumpBufferState *device_state = get_dump_buffer_state(dump_shared_mem_dev_, t);
+        constexpr size_t kOrdinaryCounterSpan = offsetof(DumpBufferState, run_epoch) + sizeof(uint64_t) -
+                                                offsetof(DumpBufferState, published_payload_count);
+        const size_t counter_bytes =
+            retain_across_runs_ ? sizeof(host_state->published_payload_count) : kOrdinaryCounterSpan;
         if (profiling_copy_from_device(
-                &host_state->published_payload_count, &device_state->published_payload_count,
-                sizeof(host_state->published_payload_count)
+                &host_state->published_payload_count, &device_state->published_payload_count, counter_bytes
             ) != 0) {
             continue;
         }
+        if (!retain_across_runs_ && host_state->run_epoch != run_epoch_) continue;
         const uint64_t published = host_state->published_payload_count;
         // What releases this lane's arena differs by path, and the difference is
         // the whole point of the retained one.
         //
-        // Default path, unchanged: the writer bumps `written_payload_counts_[t]`
+        // Ordinary collection: the writer bumps `written_payload_counts_[t]`
         // once `args.bin` accepted the bytes, and that equality is the proof.
         // One run owns the file for its whole boundary, so tying reuse to disk
-        // costs that run nothing — and `begin_run` zeroes these counters per
-        // run, which is what keeps that path's own recovery of an un-flushed
-        // buffer from crediting a payload the device never published.
+        // costs that run nothing. Its host window starts at zero while the
+        // device's initialization baseline anchors it in the lifetime cursor.
+        // Recovery requires a producer-stop proof. An unproven close joins the
+        // host transport before export and excludes unpublished payloads from
+        // this count.
         //
         // `written_payload_counts_[t]` is deliberately **not** part of the
         // retained equation: the writer advances it for recovered payloads too,
@@ -838,14 +934,14 @@ void ArgsDumpCollector::publish_arena_acks() {
             taken = received_payload_counts_[t].load(std::memory_order_acquire) +
                     discarded_payload_counts_[t].load(std::memory_order_acquire);
         } else {
-            taken = written_payload_counts_[t].load(std::memory_order_acquire);
+            taken = host_state->run_published_payload_base + written_payload_counts_[t].load(std::memory_order_acquire);
         }
         if (taken < published) {
             continue;
         }
         if (host_state->completed_payload_count >= published) {
             // Already acknowledged at or past this watermark. The counters are
-            // monotonic for the collector's life on the retained path, so the
+            // monotonic for the collector's life on both paths, so the
             // acknowledgement must never move backwards.
             continue;
         }
@@ -906,6 +1002,9 @@ int ArgsDumpCollector::export_dump_files() {
         LOG_WARN("No args dump data to export");
         reset_collector_shards();
         total_dropped_record_count_.store(0, std::memory_order_relaxed);
+        dropped_records_complete_ = false;
+        ordinary_drain_loss_ = false;
+        recovered_current_buffers_.assign(static_cast<size_t>(num_dump_threads_), {});
         total_truncated_count_.store(0, std::memory_order_relaxed);
         writer_started_ = false;
         return 0;
@@ -957,6 +1056,7 @@ int ArgsDumpCollector::export_dump_files() {
     meta.inout_args = num_inout_args;
     meta.truncated_args = total_truncated_count_.load(std::memory_order_relaxed);
     meta.dropped_records = total_dropped_record_count_.load(std::memory_order_relaxed);
+    meta.dropped_records_complete = dropped_records_complete_;
     if (dump_args_level_ != DumpArgsLevel::HYBRID || bytes_written_.load() != 0) {
         meta.bin_file = "args.bin";
     }
@@ -992,6 +1092,9 @@ int ArgsDumpCollector::export_dump_files() {
     collector_shards_merged_ = false;
     total_metadata_collected_.store(0, std::memory_order_relaxed);
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
+    dropped_records_complete_ = false;
+    ordinary_drain_loss_ = false;
+    recovered_current_buffers_.assign(static_cast<size_t>(num_dump_threads_), {});
     total_truncated_count_.store(0, std::memory_order_relaxed);
     writer_started_ = false;
     return 0;
@@ -1014,6 +1117,27 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
 
     // Stop mgmt + collector threads if the caller didn't already (idempotent).
     stop();
+
+    // Released through this teardown's own callback, the one that also frees
+    // each thread's `current_buf_ptr` below — buffers a producer writes into —
+    // so the array follows exactly the policy the caller chose for every other
+    // device resource here: freed on the ordinary paths, and abandoned
+    // untouched on a teardown whose callback frees nothing. The init-time
+    // allocator is deliberately not used: it would hand this memory back on a
+    // path where the caller abandoned everything else. A release the callback
+    // refuses leaves the array mapped, and this entry already has a return
+    // code to report it with.
+    bank_free_cb_ = free_cb;
+    bank_unregister_cb_ = unregister_cb;
+    const auto bank_release = terminal_banks_.release_backing(/*device_stopped=*/true);
+    if (terminal_banks_.backing_retained()) {
+        if (bank_release == simpler::dfx::credit::RunTerminalBanks::Release::FreeFailed) {
+            LOG_ERROR("Args dump: the device refused the per-run terminal bank array; it stays mapped");
+        } else {
+            LOG_ERROR("Args dump: the per-run terminal bank array could not be released and stays mapped");
+        }
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
 
     if (retain_across_runs_) {
         // Only now: the shards whose references a quarantined run could not
@@ -1052,6 +1176,8 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
     if (bin_file_.is_open()) {
         bin_file_.close();
     }
+
+    if (!validate_release_callbacks(unregister_cb, free_cb)) return PTO_RUNTIME_ERR_INTERNAL;
 
     auto release_dev = [&](void *p) {
         release_one_buffer(p, unregister_cb, free_cb);
@@ -1119,6 +1245,9 @@ int ArgsDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Dump
     collector_shards_merged_ = false;
     total_metadata_collected_.store(0, std::memory_order_relaxed);
     total_dropped_record_count_.store(0, std::memory_order_relaxed);
+    dropped_records_complete_ = false;
+    ordinary_drain_loss_ = false;
+    recovered_current_buffers_.assign(static_cast<size_t>(num_dump_threads_), {});
     total_truncated_count_.store(0, std::memory_order_relaxed);
     writer_started_ = false;
     clear_memory_context();

@@ -155,7 +155,7 @@ struct SchedulerAdmissionLocalState {
     uint64_t scan_cursor{0};
     int64_t current_task_ref{SCHEDULER_TASK_REF_INVALID};
     uint32_t current_block_num{0};
-    uint8_t current_active_mask{0};
+    LaneMask current_active_mask{};
     uint8_t current_flags{0};
     bool initialized{false};
     uint8_t next_candidate{0};
@@ -233,6 +233,10 @@ struct SchedulerLocalConfig {
     // address cannot be narrowed the way the offsets are; the length can, and
     // is validated below.
     uint64_t callable_addresses_address{0};
+    // This run's per-subtask PMU staging array. Here rather than in the
+    // profiling state because PMU is its own owner: a run can enable it with
+    // every swimlane level off, and that state is then absent.
+    uint64_t pmu_cells_offset{0};
     uint32_t worker_contexts_offset{0};
     uint32_t callable_addresses_count{0};
     uint32_t task_metadata_offset{0};
@@ -279,9 +283,13 @@ struct SchedulerLocalProfilingState {
 inline constexpr uint32_t SCHEDULER_MIX_TRACKER_COUNT = PLATFORM_CORES_PER_BLOCKDIM * SCHEDULER_PENDING_SLOT_COUNT;
 struct SchedulerMixTracker {
     int64_t task_ref{SCHEDULER_TASK_REF_INVALID};
-    uint8_t active_mask{0};
-    uint8_t completed_mask{0};
+    LaneMask active_mask{};
+    LaneMask completed_mask{};
 };
+static_assert(sizeof(SchedulerMixTracker) == 16);
+static_assert(offsetof(SchedulerMixTracker, active_mask) == 8);
+static_assert(offsetof(SchedulerMixTracker, completed_mask) == 9);
+static_assert(std::is_trivially_copyable_v<SchedulerMixTracker> && std::is_standard_layout_v<SchedulerMixTracker>);
 
 struct SchedulerLocalState {
     SchedulerLocalConfig config{};
@@ -370,9 +378,9 @@ static_assert(SCHEDULER_PENDING_SLOT_COUNT <= 8, "local ready mask must fit one 
 static_assert(SCHEDULER_READY_QUEUE_COUNT <= 8, "owner ready mask must fit one byte");
 static_assert(alignof(SchedulerLocalSlotState) == alignof(uint64_t));
 static_assert(alignof(SchedulerLocalState) == alignof(uint64_t));
-static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalConfig) == 120, "64-bit local config size changed");
+static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalConfig) == 128, "64-bit local config size changed");
 static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalSlotState) == 24, "64-bit local slot size changed");
-static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalState) == 504, "64-bit local state size changed");
+static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalState) == 512, "64-bit local state size changed");
 static_assert(
     sizeof(void *) != 8 || sizeof(SchedulerLocalProfilingState) == 248, "64-bit local profiling size changed"
 );
@@ -407,6 +415,7 @@ inline __aicore__ bool scheduler_initialize_local_config(
     config.task_metadata_offset = static_cast<uint32_t>(context->task_metadata_offset);
     config.ready_inboxes_offset = context->ready_inboxes_offset;
     config.ready_directory_offset = context->ready_directory_offset;
+    config.pmu_cells_offset = context->pmu_cells_offset;
     if (local->profiling != nullptr) {
         local->profiling->trace_cells_offset = context->trace_cells_offset;
         local->profiling->activity_buffers_offset = context->activity_buffers_offset;
@@ -566,9 +575,9 @@ inline __aicore__ uint32_t scheduler_metadata_core_type_index(uint8_t subtask_sl
     return subtask_slot == 0 ? 0U : 1U;
 }
 
-inline __aicore__ uint8_t scheduler_metadata_single_subtask_slot(uint8_t active_mask) {
-    if (active_mask == 1U) return 0;
-    if (active_mask == 2U) return 1;
+inline __aicore__ uint8_t scheduler_metadata_single_subtask_slot(LaneMask active_mask) {
+    if (active_mask == LaneMask::aic()) return 0;
+    if (active_mask == LaneMask::aiv0()) return 1;
     return UINT8_MAX;
 }
 
@@ -934,10 +943,10 @@ inline __aicore__ SchedulerRouteResult scheduler_bootstrap_route_task(
 }
 
 inline __aicore__ uint32_t scheduler_trace_index_at(
-    __gm__ void *base, SchedulerLocalState *local, int64_t task_ref, uint8_t subtask, uint32_t block_idx = 0
+    __gm__ void *base, SchedulerLocalState *local, int64_t task_ref, SubtaskSlot subtask, uint32_t block_idx = 0
 ) {
     const auto *metadata = scheduler_task_metadata_at(base, local, task_ref);
-    return scheduler_task_trace_index(metadata->trace_index_base, metadata->active_mask, subtask, block_idx);
+    return scheduler_task_trace_index(metadata->trace_index_base, scheduler_task_lanes(*metadata), subtask, block_idx);
 }
 
 inline __aicore__ void scheduler_capture_execution_identity(
@@ -946,7 +955,9 @@ inline __aicore__ void scheduler_capture_execution_identity(
 ) {
     const auto &slot = local->slots[pending_slot];
     auto *traces = scheduler_state_at<SchedulerTaskTrace>(base, local->profiling->trace_cells_offset);
-    auto *trace = &traces[scheduler_trace_index_at(base, local, slot.task_ref, slot.subtask_slot, slot.block_idx)];
+    auto *trace = &traces[scheduler_trace_index_at(
+        base, local, slot.task_ref, static_cast<SubtaskSlot>(slot.subtask_slot), slot.block_idx
+    )];
     const auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, local->config.graph_summary_offset);
     scheduler_observe_cache_line(&trace->descriptor_cache_observed_cycles);
     trace->execution_run_epoch = summary->run_epoch;
@@ -987,6 +998,7 @@ inline __aicore__ bool scheduler_bootstrap_ready_batch_append(
         scheduler_gm_store(tail->next_waiter, task_ref);
     }
     batch->tail = task_ref;
+
     ++batch->count;
     if (stats != nullptr) ++stats->enqueue_count;
     return true;
@@ -1006,6 +1018,7 @@ inline __aicore__ bool scheduler_ready_batch_append(
         scheduler_gm_store(tail->next_waiter, task_ref);
     }
     batch->tail = task_ref;
+
     ++batch->count;
     if (stats != nullptr) ++stats->enqueue_count;
     return true;
@@ -1187,6 +1200,7 @@ inline __aicore__ bool scheduler_plan_mix_placement(
     *placement = {};
     if (!local->is_mix_coordinator()) return false;
     const auto &metadata = *scheduler_task_metadata_at(base, local, task_ref);
+    const LaneMask lanes = scheduler_task_lanes(metadata);
     if (!scheduler_task_is_mix(metadata.flags)) return false;
     for (uint8_t i = 0; i < SCHEDULER_MIX_TRACKER_COUNT; ++i) {
         if (scheduler_task_ref_is_null(local->mix_trackers[i].task_ref)) {
@@ -1195,16 +1209,16 @@ inline __aicore__ bool scheduler_plan_mix_placement(
         }
     }
     if (placement->tracker == UINT8_MAX) return false;
-    const bool both_aiv = (metadata.active_mask & 6U) == 6U;
-    uint8_t used_lanes = 0;
+    const bool both_aiv = lanes.has_both_aiv();
+    bool used[PLATFORM_CORES_PER_BLOCKDIM]{};
     for (uint8_t subtask = 0; subtask < 3; ++subtask) {
-        if ((metadata.active_mask & (1U << subtask)) == 0) continue;
+        if (!lanes.has(static_cast<SubtaskSlot>(subtask))) continue;
         const bool mix_slot = subtask != 0;
         const uint8_t lane_begin = mix_slot ? 1 : 0;
         const uint8_t lane_end = mix_slot ? PLATFORM_CORES_PER_BLOCKDIM : 1;
         bool found = false;
         for (uint8_t lane = lane_begin; lane < lane_end && !found; ++lane) {
-            if ((used_lanes & (1U << lane)) != 0) continue;
+            if (used[lane]) continue;
             // Two live AIV subtasks take a lane each; a lone one takes either.
             if (mix_slot && both_aiv && lane != subtask) continue;
             const uint64_t worker = local->config.worker_ids[lane];
@@ -1218,7 +1232,7 @@ inline __aicore__ bool scheduler_plan_mix_placement(
                 if (states[slot].state != SchedulerDispatchSlotState::FREE) continue;
                 placement->slots[placement->count] = {worker, slot, states[slot].generation, lane, mix_slot};
                 placement->subtasks[placement->count++] = subtask;
-                used_lanes |= 1U << lane;
+                used[lane] = true;
                 found = true;
                 break;
             }
@@ -1427,7 +1441,7 @@ inline __aicore__ SchedulerTaskMetadata scheduler_load_dispatch_metadata(
     metadata.kernel_ids[0] = source->kernel_ids[0];
     metadata.kernel_ids[1] = source->kernel_ids[1];
     metadata.kernel_ids[2] = source->kernel_ids[2];
-    metadata.active_mask = source->active_mask;
+    metadata.active_mask = scheduler_task_lanes(*source);
     metadata.flags = source->flags;
     metadata.timing_slot = source->timing_slot;
     metadata.logical_block_num = source->logical_block_num;
@@ -1449,10 +1463,11 @@ inline __aicore__ bool scheduler_prepare_dispatch_slot(
         return false;
     if (prepare_start_cycles != nullptr)
         *prepare_start_cycles = scheduler_phase_timing_enabled(profiling_level) ? scheduler_cycles() : 0;
-    if (subtask_slot == UINT8_MAX) subtask_slot = scheduler_metadata_single_subtask_slot(metadata.active_mask);
+    const LaneMask lanes = scheduler_task_lanes(metadata);
+    if (subtask_slot == UINT8_MAX) subtask_slot = scheduler_metadata_single_subtask_slot(lanes);
     __gm__ SchedulerWorkerContext *target =
         scheduler_worker_context_at(scheduler_state_base, scheduler, slot_claim.worker_id);
-    if (subtask_slot >= 3 || (metadata.active_mask & (1U << subtask_slot)) == 0 ||
+    if (subtask_slot >= 3 || !lanes.has(static_cast<SubtaskSlot>(subtask_slot)) ||
         (target->core_type != static_cast<int32_t>(CoreType::AIC) &&
          target->core_type != static_cast<int32_t>(CoreType::AIV)) ||
         !scheduler_task_is_executable(metadata.flags) ||
@@ -1553,7 +1568,10 @@ inline __aicore__ void scheduler_stage_dispatch_slot(
     // Only a Mix slot's holder has to be told what it is running; this core
     // reads its own slots out of the local state written just above.
     if (slot_claim.mix) {
-        scheduler_mix_dispatch_control(ssbuf_region, slot_claim)->task_ref = ready_claim.task_ref;
+        SCHEDULER_SSBUF SchedulerSsbufDispatchControl *dispatch_control =
+            scheduler_mix_dispatch_control(ssbuf_region, slot_claim);
+        dispatch_control->task_ref = ready_claim.task_ref;
+        dispatch_control->subtask_slot = subtask_slot;
     }
     scheduler_writeback_dispatch_payload(payload);
 }
@@ -1583,7 +1601,8 @@ inline __aicore__ void scheduler_commit_dispatch_slot(
         __gm__ SchedulerTaskTrace *traces =
             scheduler_state_at<SchedulerTaskTrace>(scheduler_state_base, scheduler->profiling->trace_cells_offset);
         __gm__ SchedulerTaskTrace *trace = &traces[scheduler_task_trace_index(
-            metadata.trace_index_base, metadata.active_mask, subtask_slot, scheduler->slot_state(slot_claim)->block_idx
+            metadata.trace_index_base, scheduler_task_lanes(metadata), static_cast<SubtaskSlot>(subtask_slot),
+            scheduler->slot_state(slot_claim)->block_idx
         )];
         trace->worker_id = slot_claim.worker_id;
         trace->task_ref = static_cast<uint64_t>(ready_claim.task_ref);
@@ -1656,7 +1675,7 @@ inline __aicore__ bool scheduler_fill_dispatch_slot(
             graph, scheduler_state_base, scheduler, run_control, ready_claim.task_ref, profiling_level
         );
     }
-    const uint8_t subtask_slot = scheduler_metadata_single_subtask_slot(metadata.active_mask);
+    const uint8_t subtask_slot = scheduler_metadata_single_subtask_slot(scheduler_task_lanes(metadata));
     uint64_t prepare_start_cycles = 0;
     if (!scheduler_prepare_dispatch_slot(
             graph, scheduler_state_base, scheduler, run_control, slot_claim, ready_claim, metadata, profiling_level,
@@ -1723,7 +1742,7 @@ inline __aicore__ bool scheduler_graph_child_completed(
     SchedulerReadyBatch batch{};
     if (!scheduler_ready_batch_append(base, local, instance->exit_ref, &batch, stats, profiling_level) ||
         !scheduler_ready_batch_push(
-            base, local, scheduler_task_ready_queue(metadata->flags, metadata->active_mask), &batch, stats
+            base, local, scheduler_task_ready_queue(metadata->flags, scheduler_task_lanes(*metadata)), &batch, stats
         )) {
         scheduler_record_error(
             run, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, local,
@@ -1797,7 +1816,8 @@ inline __aicore__ bool scheduler_resolve_completion(
                 );
                 return false;
             }
-            const uint8_t subtask_slot = scheduler_metadata_single_subtask_slot(metadata->active_mask);
+            const LaneMask lanes = scheduler_task_lanes(*metadata);
+            const uint8_t subtask_slot = scheduler_metadata_single_subtask_slot(lanes);
             if (subtask_slot == UINT8_MAX && !scheduler_task_is_mix(metadata->flags)) {
                 scheduler_record_error(
                     run_control, waiter, SchedulerGraphResult::UNSUPPORTED_SHAPE, &graph, context,
@@ -1805,7 +1825,7 @@ inline __aicore__ bool scheduler_resolve_completion(
                 );
                 return false;
             }
-            const uint32_t core_type = scheduler_task_ready_queue(metadata->flags, metadata->active_mask);
+            const uint32_t core_type = scheduler_task_ready_queue(metadata->flags, lanes);
             if (core_type == SCHEDULER_MIX_QUEUE && direct_mix_ready != nullptr &&
                 !scheduler_task_ref_is_null(direct_mix_ready->task_ref)) {
                 if (!scheduler_ready_batch_append(
@@ -1835,6 +1855,7 @@ inline __aicore__ bool scheduler_resolve_completion(
                 direct_claim->task_ref = waiter;
                 direct_claim->source = SchedulerReadySource::DIRECT_RESOLVE;
                 direct_claim->publication_mode = SchedulerPublicationMode::REFILL;
+
             } else if (!scheduler_ready_batch_append(
                            scheduler_state_base, context, waiter, &batches[core_type], ready_stats, profiling_level
                        )) {

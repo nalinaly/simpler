@@ -34,10 +34,10 @@ struct DefinitionObject {
 
     DefinitionObject() {
         header.magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-        header.full_key = 17;
+        header.graph_key = 17;
         header.definition_bytes = sizeof(Body);
         auto &def = body.definition;
-        def.full_key = header.full_key;
+        def.graph_key = header.graph_key;
         def.total_bytes = sizeof(Body);
         def.task_count = body.children.size();
         def.scalar_arg_count = body.scalars.size();
@@ -84,7 +84,7 @@ TEST(HbgGraphDefinitionView, RejectsMismatchedFramingBeforeAnySectionAccess) {
     object.header.definition_bytes--;
     EXPECT_FALSE(object.open(&view));
     object.header.definition_bytes++;
-    object.body.definition.full_key++;
+    object.body.definition.graph_key++;
     EXPECT_FALSE(object.open(&view));
 }
 

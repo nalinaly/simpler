@@ -143,9 +143,9 @@ inline __aicore__ bool scheduler_ordered_poll_may_progress(
     const bool releases = group.phase == SchedulerGmMixPhase::RELEASED && local->is_mix_coordinator();
     if (group.phase == SchedulerGmMixPhase::ARRIVED || releases) {
         if (group.group_seq == 0 || group.group_seq == UINT64_MAX) return true;
-        const uint8_t resources = scheduler_mix_resource_mask(admission.current_active_mask);
+        const LaneMask resources = scheduler_mix_resource_mask(admission.current_active_mask);
         for (uint32_t lane = 0; lane < PLATFORM_CORES_PER_BLOCKDIM; ++lane) {
-            if ((resources & (1U << lane)) == 0) continue;
+            if (!resources.has(static_cast<SubtaskSlot>(lane))) continue;
             auto &ack = releases ? mailbox->lanes[lane].released_seq : mailbox->lanes[lane].arrived_seq;
             if (scheduler_gm_query(ack) < group.group_seq) return false;
         }

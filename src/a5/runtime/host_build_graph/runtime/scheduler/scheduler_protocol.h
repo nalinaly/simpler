@@ -203,11 +203,14 @@ inline __aicore__ __gm__ SchedulerProtocolExecutionTrace *scheduler_protocol_exe
         return nullptr;
     }
     const auto &metadata = scheduler_state_at<SchedulerTaskMetadata>(base, local->config.task_metadata_offset)[task];
-    const uint8_t mask = metadata.active_mask;
+    const LaneMask mask = scheduler_task_lanes(metadata);
+    const auto lane = static_cast<SubtaskSlot>(subtask);
+    // Widened rather than taken from `scheduler_task_trace_index`, whose uint32
+    // result would wrap before the bound below could reject it.
     const uint64_t index = static_cast<uint64_t>(metadata.trace_index_base) +
-                           static_cast<uint64_t>(block) * __builtin_popcount(mask) +
-                           __builtin_popcount(mask & ((1U << subtask) - 1));
-    if ((mask & (1U << subtask)) == 0 || block >= metadata.logical_block_num || index >= layout->trace_count) {
+                           static_cast<uint64_t>(block) * static_cast<uint64_t>(mask.count()) +
+                           static_cast<uint64_t>(mask.rank_of(lane));
+    if (!mask.has(lane) || block >= metadata.logical_block_num || index >= layout->trace_count) {
         scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
         return nullptr;
     }

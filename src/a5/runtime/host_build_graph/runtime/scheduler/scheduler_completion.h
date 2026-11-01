@@ -120,9 +120,9 @@ static inline __aicore__ bool scheduler_service_cluster_completion_slot(
         if (local_slot->mix_tracker >= SCHEDULER_MIX_TRACKER_COUNT) valid_subtask = false;
         else {
             mix_tracker = &scheduler->mix_trackers[local_slot->mix_tracker];
-            const uint8_t bit = valid_subtask ? 1U << local_slot->subtask_slot : 0;
+            const auto subtask = static_cast<SubtaskSlot>(local_slot->subtask_slot);
             valid_subtask = valid_subtask && mix_tracker->task_ref == task_ref &&
-                            (mix_tracker->active_mask & bit) != 0 && (mix_tracker->completed_mask & bit) == 0;
+                            mix_tracker->active_mask.has(subtask) && !mix_tracker->completed_mask.has(subtask);
         }
     }
     if (!valid_subtask) {
@@ -158,7 +158,8 @@ static inline __aicore__ bool scheduler_service_cluster_completion_slot(
         __gm__ SchedulerTaskTrace *traces =
             scheduler_state_at<SchedulerTaskTrace>(scheduler_state_base, scheduler->profiling->trace_cells_offset);
         completed_trace = &traces[scheduler_trace_index_at(
-            scheduler_state_base, scheduler, task_ref, local_slot->subtask_slot, local_slot->block_idx
+            scheduler_state_base, scheduler, task_ref, static_cast<SubtaskSlot>(local_slot->subtask_slot),
+            local_slot->block_idx
         )];
     }
     if (chip_task_timing_enabled) {
@@ -243,7 +244,7 @@ static inline __aicore__ bool scheduler_service_cluster_completion_slot(
     uint64_t refill_end_cycles = 0;
     bool refilled = false;
     if (mix_tracker != nullptr) {
-        mix_tracker->completed_mask |= 1U << completed_subtask_slot;
+        mix_tracker->completed_mask.activate(static_cast<SubtaskSlot>(completed_subtask_slot));
         task_complete = mix_tracker->completed_mask == mix_tracker->active_mask;
         if (task_complete) mix_tracker->task_ref = SCHEDULER_TASK_REF_INVALID;
     }

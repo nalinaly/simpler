@@ -32,7 +32,8 @@ def native():
 
 @pytest.mark.parametrize("slot", (7, 17))
 @pytest.mark.parametrize("mask", (1, 2))
-def test_existing_slot_zero_is_preserved_and_own_registration_is_released_on_failure(native, slot, mask):
+@pytest.mark.parametrize("stop_at", ("arguments", "native_prepare"))
+def test_existing_slot_zero_is_preserved_and_own_registration_is_released_on_failure(native, slot, mask, stop_at):
     class PrepareStopped(RuntimeError):
         pass
 
@@ -61,19 +62,30 @@ def test_existing_slot_zero_is_preserved_and_own_registration_is_released_on_fai
         releases.append(value)
         assert registered.pop(slot) is target
 
+    def native_prepare(callable_id, args, config, slot_id, generation):
+        assert callable_id == slot
+        assert args is not None and config is not None
+        assert slot_id == 0 and generation == 1
+        raise PrepareStopped("native preparation interrupted")
+
     chip = SimpleNamespace(
-        _impl=SimpleNamespace(supports_concurrent_native_prepare=True),
+        supports_concurrent_native_prepare=True,
+        scheduler_mode_publish_count=0,
+        _prepare_native_run_with_pipeline_lease=native_prepare,
         _register_callable_at_slot=register_at_slot,
     )
     worker = SimpleNamespace(_chip_worker=chip, register=register, _resolve_handle=resolve, unregister=unregister)
     probe = native.TestHbgGraphNativeLifecycle()
+    generate_args = probe.generate_args
 
-    def stop_before_prepare(_params):
+    def stop_before_prepare(params):
         assert registered == {0: unrelated, slot: target}
-        raise PrepareStopped("argument preparation interrupted")
+        if stop_at == "arguments":
+            raise PrepareStopped("argument preparation interrupted")
+        return generate_args(params)
 
     probe.generate_args = stop_before_prepare
-    with pytest.raises(PrepareStopped, match="argument preparation interrupted"):
+    with pytest.raises(PrepareStopped, match="preparation interrupted"):
         probe._run_and_validate_l2(worker, target, {"params": {"mask": mask}})
     assert releases == [handle]
     assert registered == {0: unrelated}

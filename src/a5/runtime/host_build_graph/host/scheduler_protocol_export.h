@@ -27,7 +27,6 @@
 #include "scheduler_graph_protocol_export.h"
 
 namespace scheduler_protocol_export {
-
 inline void actor(JsonObject &parent, const char *name, const SchedulerProtocolTaskActor &record) {
     auto &out = parent.field(name);
     if (!populated(record)) {
@@ -67,7 +66,7 @@ inline void block_owner(JsonObject &parent, const SchedulerProtocolBlockOwner &r
     row.number("block_idx", record.block_idx);
     row.number("cluster_index", record.cluster_index);
     row.number("block_num", record.logical_block_num);
-    row.number("active_mask", record.active_mask);
+    row.lane_mask("active_mask", record.active_mask);
     row.number("flags", record.flags);
     row.numbers("released_seq", record.released_seq, 3);
 }
@@ -103,10 +102,10 @@ inline void lane(JsonObject &row, const SchedulerProtocolLaneTrace &record) {
     row.number("block_idx", record.block_idx);
     row.number("cluster_index", record.cluster_index);
     row.number("lane", record.lane);
-    row.number("active_mask", record.active_mask);
+    row.lane_mask("active_mask", record.active_mask);
     row.number("flags", record.flags);
     row.number("block_num", record.logical_block_num);
-    row.number("resource_mask", record.resource_mask);
+    row.lane_mask("resource_mask", record.resource_mask);
     row.numbers("arrived_seq", record.arrived_seq, 3);
     row.numbers("lane_subtasks", record.lane_subtasks, 3);
     row.numbers("previous_lane_seq", record.previous_lane_seq, 3);
@@ -204,7 +203,7 @@ inline void admissions(JsonObject &root, const Image &image, const AicoreSchedul
         row.number("order_key", record.order_key);
         row.number("block_num", record.logical_block_num);
         row.number("member_count", record.member_count);
-        row.number("active_mask", record.active_mask);
+        row.lane_mask("active_mask", record.active_mask);
         row.number("flags", record.flags);
         row.number("member_words_offset", record.member_words_offset);
         row.number("close_seals_offset", record.mix_close_seals_offset);
@@ -281,7 +280,7 @@ inline std::string scheduler_export_protocol(
             const auto &task = tasks[index];
             row.number("task_ref", index);
             row.number("flags", task.metadata.flags);
-            row.number("active_mask", task.metadata.active_mask);
+            row.lane_mask("active_mask", task.metadata.active_mask);
             row.number("block_num", task.metadata.logical_block_num);
             row.number("trace_base", task.metadata.trace_index_base);
             row.numbers("kernel_ids", task.metadata.kernel_ids, 3);

@@ -26,12 +26,14 @@ add_library(hierarchical_objs OBJECT
     ${HIERARCHICAL_SRC_DIR}/scope.cpp
     ${HIERARCHICAL_SRC_DIR}/remote_wire.cpp
     ${HIERARCHICAL_SRC_DIR}/remote_endpoint.cpp
+    ${HIERARCHICAL_SRC_DIR}/mpi_direct_transport.cpp
     ${HIERARCHICAL_SRC_DIR}/orchestrator.cpp
     ${HIERARCHICAL_SRC_DIR}/worker_manager.cpp
     ${HIERARCHICAL_SRC_DIR}/scheduler.cpp
     ${HIERARCHICAL_SRC_DIR}/worker.cpp
     ${WORKER_SRC_DIR}/chip_run_lane.cpp
     ${WORKER_SRC_DIR}/chip_worker.cpp
+    ${WORKER_SRC_DIR}/runtime_module.cpp
     # ChipWorker binds the process's device-fault monitor into every host
     # runtime it loads, so the owner that defines it comes along. In production
     # this pair is exactly the same: both are compiled into the module the
@@ -99,3 +101,7 @@ hierarchical_case(test_pipeline_contract_loader.cpp
         RUNTIME_LIBRARY_ROOT="${SIMPLER_REPO_ROOT}/build/lib")
 
 simpler_ut_glob_cases(hierarchical_case)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(test_device_execution_owners PRIVATE "LINKER:--wrap=pthread_atfork")
+endif()

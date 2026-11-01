@@ -9,7 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "host_build_graph/graph_submit.h"
+#include "host_build_graph/host/graph_submit.h"
 
 #include <stdint.h>
 #include <string.h>
@@ -32,22 +32,22 @@
 #include "assert_compat.h"
 #include "common/host_phase_kind.h"
 #include "common/unified_log.h"
-#include "host_build_graph/dep_compute.h"
-#include "host_build_graph/dep_gen_host_graph.h"
-#include "host_build_graph/graph_boundary_match.h"
 #include "host_build_graph/graph_execution.h"
-#include "host_build_graph/graph_host_state.h"
-#include "host_build_graph/graph_recording.h"
-#include "host_build_graph/host_phase_trace.h"
-#include "host_build_graph/orch_profiling.h"
-#include "host_build_graph/orchestrator_internal.h"
+#include "host_build_graph/host/dep_compute.h"
+#include "host_build_graph/host/dep_gen_host_graph.h"
+#include "host_build_graph/host/graph_boundary_match.h"
+#include "host_build_graph/host/graph_host_state.h"
+#include "host_build_graph/host/graph_recording.h"
+#include "host_build_graph/host/host_phase_trace.h"
+#include "host_build_graph/host/orch_profiling.h"
+#include "host_build_graph/host/orchestrator_internal.h"
 #include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 #include "host_build_graph/shared_memory.h"
 #include "host_build_graph/task_id.h"
-#include "host_build_graph/tensormap.h"
+#include "host_build_graph/host/tensormap.h"
 #include "host_build_graph/types.h"
-#include "tensor.h"
+#include "host_build_graph/tensor.h"
 
 namespace {
 
@@ -85,7 +85,7 @@ bool graph_recording_reset(GraphRecording &recording, const GraphInflightRecordi
         return false;
     }
     recording.tensor_map.reset();
-    recording.full_key = entry.full_key;
+    recording.graph_key = entry.graph_key;
     recording.boundary = &entry.boundary;
     recording.next_virtual_offset = 0;
     recording.unsupported = false;
@@ -222,7 +222,7 @@ void graph_reset_outer_payload(TaskPayload &payload) {
 }
 
 bool graph_submit_outer(
-    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, int32_t owned_heap, bool defer_heap,
+    OrchestratorState *orch, GraphHostState *state, uint64_t graph_key, int32_t owned_heap, bool defer_heap,
     const GraphTaskArgs &args, TaskId *submitted_id
 ) {
     always_assert(orch->scope_stack_top >= 0 && "Cannot submit Graph outside a scope");
@@ -270,7 +270,7 @@ bool graph_submit_outer(
     }
 
     GraphPendingUpload pending;
-    pending.full_key = full_key;
+    pending.graph_key = graph_key;
     pending.deferred_heap = defer_heap;
 
     DepInputs boundary_inputs{
@@ -308,7 +308,7 @@ bool graph_submit_outer(
     );
     orch->tensor_pool_cursor += tensor_slots;
     orch->scalar_pool_cursor += scalar_span;
-    slot.active_mask = ActiveMask{};
+    slot.active_mask = LaneMask{};
     slot.task_attrs = TaskAttrs{};
     slot.total_required_subtasks = 0;
     // A shell places no block, but this must stay positive: an early-released
@@ -319,6 +319,7 @@ bool graph_submit_outer(
     // activates — visible only as SIMPLER_ERROR_SCHEDULER_TIMEOUT.
     slot.logical_block_num = 1;
     slot.task_kind = TaskKind::GRAPH;
+    orch->ready_queue_populations.add_task(slot.active_mask, slot.task_attrs, slot.task_kind);
 
     task.task_id = task_id;
     std::fill(std::begin(task.kernel_id), std::end(task.kernel_id), INVALID_KERNEL_ID);
@@ -441,38 +442,38 @@ bool graph_submit_definition(
         return false;
     }
     return graph_submit_outer(
-        orch, state, definition->full_key, static_cast<int32_t>(owned_heap), false, args, submitted_id
+        orch, state, definition->graph_key, static_cast<int32_t>(owned_heap), false, args, submitted_id
     );
 }
 
 bool graph_submit_pending_definition(
-    OrchestratorState *orch, GraphHostState *state, uint64_t full_key, const GraphTaskArgs &args, TaskId *submitted_id
+    OrchestratorState *orch, GraphHostState *state, uint64_t graph_key, const GraphTaskArgs &args, TaskId *submitted_id
 ) {
-    return graph_submit_outer(orch, state, full_key, 0, true, args, submitted_id);
+    return graph_submit_outer(orch, state, graph_key, 0, true, args, submitted_id);
 }
 
 bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState *state, uint64_t *failed_key) {
     for (GraphPendingUpload &pending : state->pending_uploads) {
         if (!pending.deferred_heap) continue;
-        auto definition_it = state->definitions.find(pending.full_key);
+        auto definition_it = state->definitions.find(pending.graph_key);
         const GraphDefinition *definition = definition_it == state->definitions.end() ?
                                                 nullptr :
                                                 graph_record_definition(*state, definition_it->second);
         if (definition == nullptr || definition->execution_storage_bytes == 0 ||
             definition->required_heap > UINT64_MAX - definition->execution_storage_bytes ||
             pending.outer_slot == nullptr || pending.outer_slot->task_kind != TaskKind::GRAPH) {
-            if (failed_key != nullptr) *failed_key = pending.full_key;
+            if (failed_key != nullptr) *failed_key = pending.graph_key;
             return false;
         }
         const uint64_t owned_heap = definition->required_heap + definition->execution_storage_bytes;
         if (owned_heap > static_cast<uint64_t>(INT32_MAX)) {
-            if (failed_key != nullptr) *failed_key = pending.full_key;
+            if (failed_key != nullptr) *failed_key = pending.graph_key;
             return false;
         }
         void *packed_base = nullptr;
         void *packed_end = nullptr;
         if (!orch->task_allocator.reserve_deferred_heap(static_cast<int32_t>(owned_heap), &packed_base, &packed_end)) {
-            if (failed_key != nullptr) *failed_key = pending.full_key;
+            if (failed_key != nullptr) *failed_key = pending.graph_key;
             return false;
         }
         TaskDescriptor &outer_task = pending.outer_slot->to_descriptor();
@@ -486,7 +487,7 @@ bool graph_finalize_pending_submissions(OrchestratorState *orch, GraphHostState 
 }  // namespace
 
 TaskOutputTensors graph_record_submit_sub_task(
-    OrchestratorState *orch, const CoreTaskArgs &args, ActiveMask active_mask, TaskAttrs task_attrs,
+    OrchestratorState *orch, const CoreTaskArgs &args, LaneMask active_mask, TaskAttrs task_attrs,
     int32_t aic_kernel_id, int32_t aiv0_kernel_id, int32_t aiv1_kernel_id
 ) {
     ORCH_PHASE_START();
@@ -505,7 +506,8 @@ TaskOutputTensors graph_record_submit_sub_task(
         recording.unsupported = true;
     }
 
-    const OutputLayout layout = calculate_output_layout(args);
+    OutputLayout layout;
+    calculate_output_layout(args, layout);
     const uint64_t aligned_output = CHIP_ALIGN_UP(static_cast<uint64_t>(layout.total_output_size), CHIP_ALIGN_SIZE);
     // Outputs are bumped past the parameter windows: both regions belong to one simulated
     // heap, so the bound counts them together. That is deliberately conservative -- the
@@ -542,8 +544,7 @@ TaskOutputTensors graph_record_submit_sub_task(
     // recording unsupported and makes commit fail-fast, rather than baking a
     // truncated or negative count into the cached Definition (which the device
     // would expand into a sub-task that never completes).
-    const int32_t required_subtasks =
-        static_cast<int32_t>(task.logical_block_num) * __builtin_popcount(active_mask.core_mask());
+    const int32_t required_subtasks = static_cast<int32_t>(task.logical_block_num) * active_mask.count();
     if (task.logical_block_num <= 0 || required_subtasks > std::numeric_limits<int16_t>::max()) {
         recording.unsupported = true;
         task.total_required_subtasks = 0;
@@ -775,24 +776,25 @@ TaskOutputTensors graph_record_submit_sub_task(
     // Published last: until this advances, the slot is not part of the recording, so
     // nothing that scans the recorded tasks can see the task being built.
     recording.task_count = task_index + 1;
-    ORCH_PHASE_END(HostPhaseKind::OrchRecordSubTask, TaskId::to_uint64(task_id));
+    ORCH_PHASE_END_WITH_INDEX(
+        HostPhaseKind::OrchRecordSubTask, TaskId::to_uint64(task_id), g_active_graph_entry->submit_idx
+    );
     return result;
 }
 
-GraphScopeResult OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+GraphScopeResult OrchestratorState::graph_begin(uint64_t graph_key, const GraphTaskArgs &args) {
     if (!require_device_arguments(this, args)) {
         GraphScopeResult rejected;
         rejected.has_error = true;
         return rejected;
     }
-    ORCH_PHASE_START_SPANNING();
-    const GraphScopeResult result = graph_begin_inner(graph_key, args, callable_hash);
+    ORCH_PHASE_START_SPANNING(g_active_graph_entry != nullptr ? g_active_graph_entry->submit_idx : g_orch_submit_idx);
+    const GraphScopeResult result = graph_begin_inner(graph_key, args);
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphBegin, graph_key);
     return result;
 }
 
-GraphScopeResult
-OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args, uint64_t callable_hash) {
+GraphScopeResult OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &args) {
     auto *orch = this;
     GraphScopeResult result;
     GraphHostState *state = graph_state_from(orch);
@@ -817,13 +819,12 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
         return result;
     }
 
-    const uint64_t full_key = graph_full_key(callable_hash, graph_key);
     std::unique_lock<std::mutex> lock(state->recording_mutex);
 
     // A published Definition is immutable, so the cache lookup comes first and
     // answers regardless of what else is recording. Gating it on an idle recorder
     // would make an already-built Definition wait for an unrelated one.
-    auto definition_it = state->definitions.find(full_key);
+    auto definition_it = state->definitions.find(graph_key);
     if (definition_it != state->definitions.end()) {
         TaskId submitted = TaskId::invalid();
         ORCH_PHASE_START();
@@ -848,7 +849,7 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
     // This key is already recording: publish another zero-heap shell against it.
     // A recording that ended has its Definition in the cache, so reaching here
     // with a spent status means the recording failed and this key is spent.
-    auto inflight_it = state->inflight.find(full_key);
+    auto inflight_it = state->inflight.find(graph_key);
     if (inflight_it != state->inflight.end()) {
         GraphInflightRecording &entry = *inflight_it->second;
         if (entry.status() != GraphRecordingStatus::RECORDING) {
@@ -857,7 +858,7 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
             orch->report_fatal(
                 SIMPLER_ERROR_EXPLICIT_ORCH_FATAL, __FUNCTION__,
                 "[GraphExecution] key 0x%llx cannot be submitted: its recording failed",
-                static_cast<unsigned long long>(full_key)
+                static_cast<unsigned long long>(graph_key)
             );
             result.has_error = true;
             return result;
@@ -871,7 +872,7 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
         }
         TaskId submitted = TaskId::invalid();
         ORCH_PHASE_START();
-        if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
+        if (graph_submit_pending_definition(orch, state, graph_key, args, &submitted)) {
             result.task_id = submitted;
             ORCH_PHASE_END(HostPhaseKind::OrchGraphSubmit, TaskId::to_uint64(submitted));
 #if SIMPLER_DFX
@@ -896,7 +897,7 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
             "[GraphExecution] Definition cache is full (%zu published, %zu in flight, limit %d); "
             "rejected key 0x%llx; claimed: %s",
             state->definitions.size(), state->inflight.size(), GRAPH_MAX_DEFINITIONS,
-            static_cast<unsigned long long>(full_key), claimed.c_str()
+            static_cast<unsigned long long>(graph_key), claimed.c_str()
         );
         result.has_error = true;
         return result;
@@ -907,7 +908,10 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
     // allocates the boundary copy and nothing else — a megabyte-scale hazard map stood
     // up here would sit on the submitting thread, between two outer shells.
     auto entry = std::make_unique<GraphInflightRecording>();
-    entry->full_key = full_key;
+    entry->graph_key = graph_key;
+#if SIMPLER_DFX
+    entry->submit_idx = g_orch_submit_idx;
+#endif
     // The boundary is built once, here, and only read afterwards -- by the recorder that
     // picks this entry up, and by later same-key submissions comparing against it.
     //
@@ -968,12 +972,12 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
     }
     boundary.params.set_predicate(args.predicate());
     GraphInflightRecording *entry_ptr = entry.get();
-    state->inflight.emplace(full_key, std::move(entry));
+    state->inflight.emplace(graph_key, std::move(entry));
     state->inflight_count.store(state->inflight.size(), std::memory_order_release);
 
     TaskId submitted = TaskId::invalid();
     ORCH_PHASE_START();
-    if (graph_submit_pending_definition(orch, state, full_key, args, &submitted)) {
+    if (graph_submit_pending_definition(orch, state, graph_key, args, &submitted)) {
         result.recording = true;
         result.recording_handle = entry_ptr;
         result.params = &entry_ptr->boundary.params;
@@ -987,7 +991,7 @@ OrchestratorState::graph_begin_inner(uint64_t graph_key, const GraphTaskArgs &ar
 #endif
     } else {
         result.has_error = true;
-        state->inflight.erase(full_key);
+        state->inflight.erase(graph_key);
         state->inflight_count.store(state->inflight.size(), std::memory_order_release);
     }
     return result;
@@ -1098,7 +1102,7 @@ bool OrchestratorState::graph_end() {
         // The counts are not copied: they are in the image, where the device checks this
         // invocation's argument counts against them.
         record.boundary_match_info = recording->bound_boundary().match_info;
-        ORCH_PHASE_END(HostPhaseKind::OrchBuildDefinition, recording->task_count);
+        ORCH_PHASE_END_WITH_INDEX(HostPhaseKind::OrchBuildDefinition, recording->task_count, entry->submit_idx);
     }
     const GraphDefinition *header = built ? graph_record_definition(*state, record) : nullptr;
     if (header == nullptr) {
@@ -1108,16 +1112,16 @@ bool OrchestratorState::graph_end() {
         return false;
     }
     LOG_DEBUG(
-        "[GraphExecution] define key=0x%llx tasks=%d bytes=%u", static_cast<unsigned long long>(header->full_key),
+        "[GraphExecution] define key=0x%llx tasks=%d bytes=%u", static_cast<unsigned long long>(header->graph_key),
         header->task_count, header->total_bytes
     );
     bool ready = false;
     {
         std::scoped_lock lock(state->recording_mutex);
-        if (entry->status() != GraphRecordingStatus::RECORDING || entry->full_key != header->full_key) {
+        if (entry->status() != GraphRecordingStatus::RECORDING || entry->graph_key != header->graph_key) {
             entry->set_status(GraphRecordingStatus::FAILED);
         } else {
-            state->definitions.emplace(header->full_key, std::move(record));
+            state->definitions.emplace(header->graph_key, std::move(record));
             entry->set_status(GraphRecordingStatus::READY);
         }
         ready = entry->status() == GraphRecordingStatus::READY;
@@ -1133,7 +1137,7 @@ bool OrchestratorState::graph_end() {
 // Join every recording in flight and back-patch all deferred shells in submit
 // order. Orchestration completion is the only normal-path barrier.
 void OrchestratorState::graph_commit() {
-    ORCH_PHASE_START_SPANNING();
+    ORCH_PHASE_START_SPANNING(g_active_graph_entry != nullptr ? g_active_graph_entry->submit_idx : g_orch_submit_idx);
     graph_commit_inner();
     ORCH_PHASE_END_SPANNING(HostPhaseKind::OrchGraphCommit, 0);
 }

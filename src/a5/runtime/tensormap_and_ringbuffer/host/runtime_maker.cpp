@@ -93,10 +93,17 @@ extern "C" const PipelineContract *get_pipeline_contract(void) {
     // callable sizing and then served from the prebuilt-arena cache
     // (build_and_cache_prebuilt_arena runs only on a miss), so a run reuses the
     // instance the previous run left behind.
+    //
+    // One shared scratch serves any number of runs because the AICPU stream is a
+    // FIFO and that order is transitive: a run ordered behind the run ahead of
+    // it is ordered behind everything that run was ordered behind. So
+    // `pipeline_depth` declares no limit either — what bounds concurrency here
+    // is the per-run task-args region, and a context gets one of those per set
+    // it was granted.
     static const PipelineContract contract = {
         PTO_PIPELINE_CONTRACT_ABI_VERSION,
         6,
-        2,
+        UINT32_MAX,
         {
             {PTO_PIPELINE_TASK_ARGS, PTO_PIPELINE_HOST_PER_RUN, 0},
             {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_DEVICE_SCRATCH, 0},
@@ -134,6 +141,28 @@ extern "C" int concurrent_native_prepare_supported_impl(void) { return 1; }
  * platform refuses while a predecessor holds the bank.
  */
 extern "C" int joined_native_launch_supported_impl(void) { return 1; }
+
+extern "C" int joined_diagnostic_launch_supported_impl(void) {
+    // The five device owners can hold two runs open on this runtime. Every
+    // producer stamps the run epoch its AICPU op was launched with onto the
+    // buffer it publishes, and settles that run's own accounting into the
+    // terminal bank its pipeline slot reserves, so the host tells the two
+    // apart by identity rather than by arrival order.
+    //
+    // The ordering above is what makes that sufficient here: a successor's
+    // AICPU op cannot begin before its predecessor's has returned, so the two
+    // runs' device producers never record at the same instant. Only their host
+    // collection overlaps.
+    return 1;
+}
+
+extern "C" int args_dump_capture_supported_impl(void) {
+    // An AICPU scheduler thread hands each task to its core and reaps its
+    // completion, so `dump_args_for_task` runs at both of a task's own
+    // boundaries (scheduler_dispatch.cpp, scheduler_completion.cpp, and the
+    // cold path's inline dispatch).
+    return 1;
+}
 
 // Helper: return current time in milliseconds
 static int64_t _now_ms() {
@@ -622,11 +651,10 @@ static void apply_orch_sched_env_flags(Runtime *runtime) {
 // shot, at the sizes derive_arena_static_sizes already resolved. Idempotent
 // across runs — the pools are owned by DeviceRunner and freed in
 // DeviceRunner::finalize().
-static bool ensure_static_arenas(const HostApi *api, const ArenaStaticSizes &sizes, StaticArenaPtrs *out) {
+static int ensure_static_arenas(const HostApi *api, const ArenaStaticSizes &sizes, StaticArenaPtrs *out) {
     int64_t t_setup_start = _now_ms();
-    if (api->setup_static_arena(sizes.total_heap, sizes.sm_size, sizes.runtime_image_size) != 0) {
-        LOG_ERROR("Failed to setup pooled static arena");
-        return false;
+    if (const int rc = api->setup_static_arena(sizes.total_heap, sizes.sm_size, sizes.runtime_image_size); rc != 0) {
+        return rc;
     }
     int64_t t_setup_end = _now_ms();
 
@@ -635,7 +663,7 @@ static bool ensure_static_arenas(const HostApi *api, const ArenaStaticSizes &siz
     int64_t t_heap_end = _now_ms();
     if (out->gm_heap == nullptr) {
         LOG_ERROR("Failed to acquire pooled GM heap");
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int64_t t_sm_start = _now_ms();
@@ -643,19 +671,19 @@ static bool ensure_static_arenas(const HostApi *api, const ArenaStaticSizes &siz
     int64_t t_sm_end = _now_ms();
     if (out->gm_sm == nullptr) {
         LOG_ERROR("Failed to acquire pooled shared memory");
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     out->runtime_arena_dev = api->acquire_pooled_runtime_arena();
     if (out->runtime_arena_dev == nullptr) {
         LOG_ERROR("Failed to acquire pooled runtime arena");
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     LOG_INFO("TIMING: static_arena_setup = %" PRId64 "ms", t_setup_end - t_setup_start);
     LOG_INFO("TIMING: gm_heap_acquire = %" PRId64 "ms", t_heap_end - t_heap_start);
     LOG_INFO("TIMING: shared_mem_acquire = %" PRId64 "ms", t_sm_end - t_sm_start);
-    return true;
+    return 0;
 }
 
 // per-(cid,config): build the prebuilt runtime-arena image on host. Pure host
@@ -698,6 +726,18 @@ static bool build_runtime_image(
     return true;
 }
 
+static simpler::dfx::scope_stats_runs::Capacities scope_stats_capacities(const RuntimeArenaLayout &layout) {
+    static_assert(CHIP_MAX_RING_DEPTH == SCOPE_STATS_MAX_RING_DEPTH);
+    simpler::dfx::scope_stats_runs::Capacities caps;
+    for (int r = 0; r < CHIP_MAX_RING_DEPTH; r++) {
+        caps.task_window[r] = static_cast<int32_t>(layout.sizing.task_window_sizes[r]);
+        caps.heap[r] = layout.sizing.heap_sizes[r];
+        caps.dep_pool[r] = layout.sizing.dep_pool_capacities[r];
+    }
+    caps.tensormap = layout.offsets.orch.tensor_map.pool_size;
+    return caps;
+}
+
 static int bind_cached_runtime_image(
     Runtime *runtime, const HostApi *api, const PrebuiltRuntimeArenaCacheProbe &probe,
     const ChipStorageTaskArgs &device_args
@@ -716,9 +756,20 @@ static int bind_cached_runtime_image(
         return 1;
     }
 
+    // The cache retains the host image copied into this arena. Its layout is
+    // immutable even while a predecessor executes against the device image.
+    if (cached_image == nullptr || runtime_off > cached_image_size ||
+        sizeof(RuntimeContext) > cached_image_size - runtime_off) {
+        LOG_ERROR("Cached runtime arena has no complete host layout");
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    RuntimeArenaLayout layout;
+    std::memcpy(
+        &layout, static_cast<const char *>(cached_image) + runtime_off + offsetof(RuntimeContext, prebuilt_layout),
+        sizeof(layout)
+    );
+    runtime->scope_stats_capacity_.values = scope_stats_capacities(layout);
     runtime->set_orch_args(device_args);
-    (void)cached_image;
-    (void)cached_image_size;
     runtime->set_gm_sm_ptr(sm_ptr);
     runtime->set_prebuilt_arena(runtime_arena_dev, runtime_off);
     return 0;
@@ -742,30 +793,30 @@ static void store_prebuilt_runtime_image(
 // the run path can wire the runtime directly instead of depending on a cache
 // round-trip. Shared by the lazy first-run miss path and the eager
 // prewarm_config_impl entry, so both build the arena identically.
-static bool build_and_cache_prebuilt_arena(
+static int build_and_cache_prebuilt_arena(
     const HostApi *api, const ArenaSizingConfig &sizing, StaticArenaPtrs *out_ptrs = nullptr,
     RuntimeArenaLayout *out_layout = nullptr
 ) {
     ArenaStaticSizes sizes;
     if (!derive_arena_static_sizes(sizing, &sizes)) {
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     StaticArenaPtrs ptrs;
-    if (!ensure_static_arenas(api, sizes, &ptrs)) {
-        return false;
+    if (const int rc = ensure_static_arenas(api, sizes, &ptrs); rc != 0) {
+        return rc;
     }
 
     DeviceArena host_arena;  // libc malloc backend; owns the image until upload
     RuntimeArenaLayout layout;
     if (!build_runtime_image(sizing, sizes, ptrs, &host_arena, &layout)) {
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     int rc_upload = api->copy_to_device(ptrs.runtime_arena_dev, host_arena.base(), layout.offsets.arena_size);
     if (rc_upload != 0) {
         LOG_ERROR("Failed to rtMemcpy prebuilt runtime arena to device (rc=%d)", rc_upload);
-        return false;
+        return PTO_RUNTIME_ERR_INTERNAL;
     }
 
     PrebuiltRuntimeArenaCacheProbe probe = make_prebuilt_runtime_arena_cache_probe(sizing);
@@ -776,7 +827,7 @@ static bool build_and_cache_prebuilt_arena(
     if (out_layout != nullptr) {
         *out_layout = layout;
     }
-    return true;
+    return 0;
 }
 
 /**
@@ -814,6 +865,7 @@ extern "C" int bind_callable_to_runtime_impl(
         LOG_ERROR("Runtime pointer is null");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
+    runtime->scope_stats_capacity_ = {};
     if (api == nullptr) {
         LOG_ERROR("HostApi pointer is null");
         return PTO_RUNTIME_ERR_INTERNAL;
@@ -851,12 +903,12 @@ extern "C" int bind_callable_to_runtime_impl(
     // bump-slice from it.
     RetainedTempBump bump;
     const size_t required_temp_bytes = packed_temp_bytes(orch_args);
-    if (!bump.begin(api, required_temp_bytes)) {
-        LOG_ERROR("Retained temp buffer grow failed: required bytes %zu", required_temp_bytes);
-        return PTO_RUNTIME_ERR_INTERNAL;
+    if (const int rc = bump.begin_status(api, required_temp_bytes); rc != 0) {
+        return rc;
     }
 
     auto bind_cleanup = RAIIScopeGuard([&]() {
+        runtime->scope_stats_capacity_ = {};
         release_run_tensor_leases(runtime, api);
     });
 
@@ -884,12 +936,13 @@ extern "C" int bind_callable_to_runtime_impl(
             // binds successfully.
             StaticArenaPtrs ptrs;
             RuntimeArenaLayout layout;
-            if (!build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout)) {
-                return PTO_RUNTIME_ERR_INTERNAL;
+            if (const int rc = build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout); rc != 0) {
+                return rc;
             }
             runtime->set_orch_args(device_args);
             runtime->set_gm_sm_ptr(ptrs.gm_sm);
             runtime->set_prebuilt_arena(ptrs.runtime_arena_dev, layout.offsets.off_runtime);
+            runtime->scope_stats_capacity_.values = scope_stats_capacities(layout);
         }
     }
     int64_t t_prebuilt_end = _now_ms();
@@ -927,7 +980,7 @@ extern "C" int prewarm_config_impl(
     }
 
     STRACE("chip.prewarm.build");
-    return build_and_cache_prebuilt_arena(api, sizing) ? 0 : PTO_RUNTIME_ERR_INTERNAL;
+    return build_and_cache_prebuilt_arena(api, sizing);
 }
 
 /**

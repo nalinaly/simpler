@@ -37,7 +37,7 @@
 
 #include "callable.h"
 #include "prepare_callable_common.h"
-#include "runtime_c_api.h"  // PTO_PIPELINE_MAX_DEPTH
+#include "runtime_c_api.h"
 #include "host/run_stream_pair.h"
 #include "common/kernel_args.h"
 #include "common/memory_barrier.h"
@@ -105,7 +105,6 @@ public:
         Runtime &runtime, const CallConfig &config, uint32_t pipeline_slot, const NativeRunIdentity &identity,
         std::unique_ptr<PreparedExecution> *prepared
     ) override;
-    LaunchOutcome launch_execution(std::unique_ptr<PreparedExecution> prepared, LaunchPermit permit) override;
     void abandon_prepared_execution(PreparedExecution &prepared) noexcept override;
     int poll_execution(const ActiveExecution &active) override;
     DrainOutcome drain_execution(ActiveExecution &active) override;
@@ -147,7 +146,14 @@ public:
     void arm_host_dep_gen_capture(bool enable) override;
     void configure_dep_gen_retention(bool enabled, std::size_t budget_bytes) override;
     bool dep_gen_retains_runs() const override;
-    int admit_dep_gen_run(const DfxRunConfig &dfx, uint64_t run_epoch) override;
+    int admit_dep_gen_run(
+        const DfxRunConfig &dfx, uint64_t run_epoch, simpler::dfx::runs::AdmissionRefusal *why = nullptr
+    ) override;
+    bool dep_gen_can_admit_joined_run(uint64_t run_epoch) const override;
+    uint64_t dep_gen_run_terminal_bank(uint64_t run_epoch) const override;
+    int open_dep_gen_run_terminal_banks(const DfxRunConfig &dfx) override;
+    void install_dep_gen_credit_release_notifier(const std::function<void()> &notify) override;
+    bool dep_gen_retained_runs_outstanding() const override;
     void withdraw_dep_gen_run(uint64_t run_epoch) noexcept override;
     bool dep_gen_flush_retained(int timeout_ms, std::string *error) override;
     void dep_gen_finish_retained() override;
@@ -220,6 +226,8 @@ public:
     size_t run_stream_set_create_count() const override { return run_streams_.created_count(); }
 
 private:
+    LaunchTransactionResult launch_execution_impl(PreparedExecution &prepared, LaunchPermit permit) override;
+
     int finalize_impl() override;
 
     // Most lifecycle state (device_id_, block_dim_, cores_per_blockdim_,
@@ -268,6 +276,20 @@ private:
             return rtStreamDestroy(static_cast<rtStream_t>(stream));
         }
     };
+
+protected:
+    /** The unretired-owner table holds one entry per run this context may hold. */
+    ArchRunResourceStaging build_arch_run_resources(size_t granted) override {
+        ArchRunResourceStaging staged;
+        staged.run_streams = RunStreamPair::build(granted);
+        return staged;
+    }
+    void commit_arch_run_resources(ArchRunResourceStaging &&staged) noexcept override {
+        run_streams_.commit(std::move(staged.run_streams));
+    }
+    bool arch_run_resources_are_replaceable() const override { return run_streams_.grant_is_replaceable(); }
+
+private:
     int create_run_stream(void **out);
     int ensure_run_streams();
     // Retires the run pair on behalf of `owner`, the PreparedExecution that
@@ -338,12 +360,13 @@ private:
      * nothing shared and publishes nothing, and the default path is not
      * reached at all.
      */
-    void emit_device_dep_gen_graph(const DfxRunConfig &dfx, uint64_t run_epoch, bool device_execution_complete);
+    void emit_device_dep_gen_graph(
+        const DfxRunConfig &dfx, uint64_t run_epoch, bool device_execution_complete, bool device_producers_stopped
+    );
 
-    // On an AICore launch/sync error, best-effort drain the device so a later
-    // enqueue on the same DeviceRunner can recover in place; if the drain itself
-    // errors the context is unrecoverable without a full reset, so flip
-    // device_unusable_ and let admission/enqueue fail fast.
+    // Quarantine needs no current device; recovery may drain an owned device.
+    // Both keep admission closed until owner recovery or terminal quarantine.
+    void mark_device_unusable(int runtime_rc) override;
     void recover_device_or_mark_unusable(int aicore_rc) override;
 
     // Force-reset the card via aclrtResetDeviceForce to clear an op-timeout
@@ -458,6 +481,7 @@ private:
      * failure is the more useful diagnosis and keeps priority.
      */
     int finalize_collectors(bool abandon_device_resources = false);
+    bool terminal_backing_retained() const override;
     // Shared enable flags (`enable_chip_swimlane_`, `enable_dump_args_`,
     // `enable_pmu_`, `enable_scope_stats_`, `chip_swimlane_level_`,
     // `pmu_event_type_`, `output_prefix_`) live on `DeviceRunnerBase`.

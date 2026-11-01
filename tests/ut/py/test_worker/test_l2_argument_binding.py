@@ -16,7 +16,15 @@ from types import SimpleNamespace
 
 import pytest
 from simpler.buffer import AccessMode, Buffer, mint_owner_instance_id, wrap_device_malloc, wrap_fork_inherited
-from simpler.task_interface import CallConfig, DataType, ExecutionContextRefused, TaskArgs, Tensor, TensorArgType
+from simpler.task_interface import (
+    CallConfig,
+    DataType,
+    ExecutionContextRefused,
+    RunPreparationRefused,
+    TaskArgs,
+    Tensor,
+    TensorArgType,
+)
 from simpler.worker import Worker, _Lifecycle
 
 
@@ -26,10 +34,12 @@ def l2():
     calls = []
     frees = []
     impl = SimpleNamespace(
+        _execution_environment=(os.getpid(), 1, 1, 0, False),
         _validate_execution_context=lambda: None,
         _submit_chip_run_direct=lambda cid, args, cfg: calls.append(args) or object(),
     )
-    worker._chip_worker = SimpleNamespace(_impl=impl, free=frees.append)
+    impl.free = frees.append
+    worker._chip_worker = impl
     worker._lifecycle = _Lifecycle.READY
     yield worker, calls, frees
     worker._chip_runs.clear()
@@ -241,6 +251,39 @@ def test_source_wrap_context_and_descriptor_checks_precede_materialization(l2, m
     assert not mapped and not calls
 
 
+@pytest.mark.parametrize("changed_field", [0, 1, 2, 3, 4, None])
+def test_source_environment_change_refuses_before_identity_or_attachment(l2, monkeypatch, changed_field):
+    worker, calls, _ = l2
+    location = worker.device_location
+    backing = Buffer.wrap(address=0x8000, nbytes=64, location=location)
+    args = arguments(backing)
+    environment = worker._chip_worker._execution_environment
+    changed = list(environment)
+    if changed_field is not None:
+        changed[changed_field] += 1
+    worker._chip_worker._execution_environment = None if changed_field is None else tuple(changed)
+    identities = []
+    original = worker._buffer_identity_allocator.burn_identity
+    monkeypatch.setattr(
+        worker._buffer_identity_allocator, "burn_identity", lambda: identities.append(True) or original()
+    )
+    materialize = worker._materialize_l2_args
+    mapped = []
+    monkeypatch.setattr(worker, "_materialize_l2_args", lambda args: mapped.append(args))
+    with pytest.raises(ValueError, match="live device context"):
+        Buffer.wrap(address=0x9000, nbytes=64, location=location)
+    with pytest.raises(ValueError, match="live device context"):
+        backing.to_descriptor()
+    with pytest.raises(ValueError, match="live device context"):
+        worker._submit_l2_locked(3, args, CallConfig())
+    assert not identities and not mapped and not calls
+    assert not worker._source_attachments and not worker._chip_source_uses
+    worker._chip_worker._execution_environment = environment
+    monkeypatch.setattr(worker, "_materialize_l2_args", materialize)
+    worker._submit_l2_locked(3, args, CallConfig())
+    assert calls[0].tensor(0).data == backing.base
+
+
 def test_source_wrap_reservation_precedes_mapping_and_unwinds_on_bind_failure(l2, monkeypatch):
     worker, calls, _ = l2
     backing = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
@@ -257,15 +300,16 @@ def test_source_wrap_reservation_precedes_mapping_and_unwinds_on_bind_failure(l2
     assert not calls
 
 
-def test_source_wrap_unknown_native_completion_retains_source(l2, monkeypatch):
+@pytest.mark.parametrize("message", ["unproven native completion", "prepare_native_run failed with code -1000"])
+def test_source_wrap_unknown_native_completion_retains_source(l2, monkeypatch, message):
     worker, _, _ = l2
     backing = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
 
     def fail(*args):
-        raise RuntimeError("unproven native completion")
+        raise RuntimeError(message)
 
-    monkeypatch.setattr(worker._chip_worker._impl, "_submit_chip_run_direct", fail)
-    with pytest.raises(RuntimeError, match="unproven"):
+    monkeypatch.setattr(worker._chip_worker, "_submit_chip_run_direct", fail)
+    with pytest.raises(RuntimeError, match="unproven|prepare_native_run"):
         worker._submit_l2_locked(3, arguments(backing), CallConfig())
     with pytest.raises(RuntimeError, match="in-flight"):
         backing.close()
@@ -409,7 +453,7 @@ def test_native_error_invalidates_source_context_token(l2, monkeypatch, failure)
         def fail(*args):
             raise RuntimeError("native failure")
 
-        monkeypatch.setattr(worker._chip_worker._impl, "_submit_chip_run_direct", fail)
+        monkeypatch.setattr(worker._chip_worker, "_submit_chip_run_direct", fail)
         with pytest.raises(RuntimeError, match="native failure"):
             worker._submit_l2_locked(3, arguments(source), CallConfig())
     else:
@@ -439,9 +483,10 @@ def test_source_attach_interruption_rolls_back_registration_and_use(l2, monkeypa
 def test_worker_close_drains_an_unawaited_source_use(l2):
     worker, _, _ = l2
     source = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
+    worker._chip_worker._submit_chip_run_direct = lambda *_: SimpleNamespace(wait=lambda timeout: True)
     worker._submit_l2_locked(3, arguments(source), CallConfig())
-    worker._chip_worker._impl._close_chip_run_lane = lambda: None
-    worker._chip_worker._impl.workspace_report = lambda: ("disabled", {})
+    worker._chip_worker._close_chip_run_lane = lambda: None
+    worker._chip_worker.workspace_report = lambda: ("disabled", {})
     worker._chip_worker.finalize = lambda: None
     worker.close()
     source.close()
@@ -463,7 +508,7 @@ def test_wrong_context_wait_preserves_the_run_and_source_use(l2, operation):
         waits.append(timeout)
         return True
 
-    impl = worker._chip_worker._impl
+    impl = worker._chip_worker
     impl._submit_chip_run_direct = lambda *_args: SimpleNamespace(wait=wait, done=lambda: True)
     backing = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
     handle = worker._submit_l2_locked(3, arguments(backing), CallConfig())
@@ -499,7 +544,7 @@ def test_valid_context_device_failure_remains_terminal_and_retains_source(l2, me
         waits.append(timeout)
         raise failure
 
-    impl = worker._chip_worker._impl
+    impl = worker._chip_worker
     impl._submit_chip_run_direct = lambda *_args: SimpleNamespace(wait=wait)
     backing = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
     handle = worker._submit_l2_locked(3, arguments(backing), CallConfig())
@@ -560,3 +605,41 @@ def test_source_inherited_with_locked_mutex_rejects_before_locking(l2):
         _, status = os.waitpid(pid, 0)
     assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, status
     backing.close()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_clean_prepare_refusal_releases_only_its_source_reservation(l2, monkeypatch, deferred):
+    worker, _, _ = l2
+    backing = Buffer.wrap(address=0x8000, nbytes=64, location=worker.device_location)
+    failure = RunPreparationRefused("prepare_native_run failed with code -1000")
+    active = SimpleNamespace(wait=lambda timeout: True)
+    monkeypatch.setattr(worker._chip_worker, "_submit_chip_run_direct", lambda *_: active)
+    first = worker._submit_l2_locked(3, arguments(backing), CallConfig())
+
+    def fail(*_):
+        raise failure
+
+    monkeypatch.setattr(
+        worker._chip_worker, "_submit_chip_run_direct", lambda *_: SimpleNamespace(wait=fail) if deferred else fail()
+    )
+    if deferred:
+        refused = worker._submit_l2_locked(3, arguments(backing), CallConfig())
+        for _ in range(2):
+            with pytest.raises(RunPreparationRefused) as error:
+                refused.wait()
+            assert error.value is failure
+        assert refused.done
+    else:
+        with pytest.raises(RunPreparationRefused) as error:
+            worker._submit_l2_locked(3, arguments(backing), CallConfig())
+        assert error.value is failure
+    assert not worker._source_context_failed
+    assert len(worker._chip_source_uses) == 1
+    with pytest.raises(RuntimeError, match="in-flight"):
+        backing.close()
+    first.wait()
+    assert not worker._chip_source_uses
+    monkeypatch.setattr(worker._chip_worker, "_submit_chip_run_direct", lambda *_: active)
+    worker._submit_l2_locked(3, arguments(backing), CallConfig()).wait()
+    backing.close()
+    assert backing.closed

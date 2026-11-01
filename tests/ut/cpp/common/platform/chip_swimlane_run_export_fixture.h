@@ -119,7 +119,7 @@ inline void populate(ChipSwimlaneCollector &collector, PhaseBuffers &buffers, co
     set_platform_chip_swimlane_run_terminal_bank(
         reinterpret_cast<uint64_t>(collector.arm_run_terminal_bank(/*bank_index=*/0, kEpoch))
     );
-    chip_swimlane_aicpu_init(kNumAicore);
+    chip_swimlane_aicpu_init(kNumAicore, ChipSwimlaneLevel::SCHED_PHASES);
 
     // AICore records through the real dispatch/flush path.
     for (int core = 0; core < kNumAicore; core++) {
@@ -207,7 +207,7 @@ inline void populate(ChipSwimlaneCollector &collector, PhaseBuffers &buffers, co
     collector.reconcile_counters();
     collector.report_run_terminal_snapshot(/*bank_index=*/0, kEpoch);
 
-    collector.set_json_extension(ChipSwimlaneExtensionSection::AicpuLifecycleRecords, "[[11, 12]]");
+    collector.set_json_extension(kEpoch, ChipSwimlaneExtensionSection::AicpuLifecycleRecords, "[[11, 12]]", 10);
 
     std::vector<HostPhaseRecord> submits(1);
     submits[0].index = 1;

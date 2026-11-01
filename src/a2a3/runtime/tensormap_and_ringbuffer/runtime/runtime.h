@@ -39,6 +39,7 @@
 
 #include "common/core_type.h"
 #include "common/host_api.h"
+#include "host/scope_stats_capacity.h"
 #include "common/chip_swimlane_profiling.h"
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
@@ -108,7 +109,7 @@ struct Handshake {
 // dcci(..., CACHELINE_OUT) on its report and again on exit. A word the AICPU
 // must publish independently cannot live here — a stale line writeback would
 // overwrite it. The post-close return gates live in
-// DeviceRuntimeLaunchDesc::teardown_gates, one isolated line each.
+// DeviceRuntimeLaunchDesc::teardown_gates, one AICPU-owned request/release line per worker.
 static_assert(sizeof(Handshake) == 64);
 static_assert(std::is_standard_layout_v<Handshake> && std::is_trivially_copyable_v<Handshake>);
 // The payload offsets are the device-side wire contract: AICore writes them and
@@ -231,6 +232,11 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     uint32_t entry_scalar_count_;
     uint32_t entry_args_source_;  // EntryArgsSource
 
+    // Per-invocation granularity travels in every descriptor publication.
+    uint32_t chip_swimlane_level;
+    uint32_t pmu_event_type;   // PmuEventType; zero while PMU is disabled.
+    uint32_t dump_args_level;  // DumpArgsLevel; zero while argument dumping is disabled.
+
     // Entry args, adopted on the host. Last of the uploaded fields, because it
     // is the only one whose useful length is a property of the run: a
     // steady-state publication stops after `tensor_count_` of its
@@ -257,12 +263,14 @@ struct alignas(64) DeviceRuntimeLaunchDesc {
     // Separate from workers[] because the AICore flushes its whole Handshake
     // line, which would overwrite a gate sharing it.
     //
-    // Last, and outside the uploaded prefix: the AICPU zeroes every active entry
+    // Last, and outside the uploaded prefix: the AICPU resets each active request/release line
     // in `pre_handshake_init` and executes `wmb()` before it publishes
     // `hs_setup_done_`, and no register window opens before that publication. So
     // the meaningful initial value is produced on the device ahead of every read
     // of it, and no host-supplied gate value is consumed. The allocation still
     // covers this array.
+    // Each 64-byte control is written only by AICPU and cleared before READY
+    // or EXIT. AICore bypass-loads the request and returns its nonce in COND.
     AicoreTeardownControl teardown_gates[RUNTIME_MAX_WORKER];
 };
 
@@ -414,6 +422,11 @@ public:
     // copy_in_run_inputs_impl and copy_back_run_outputs_impl, and released by
     // release_run_bindings_impl. Host-only (after `dev`): never uploaded.
     std::vector<TensorLease> tensor_leases_;
+
+    simpler::dfx::scope_stats_runs::CapacityMetadata scope_stats_capacity_;
+    const simpler::dfx::scope_stats_runs::CapacityMetadata &scope_stats_capacity() const {
+        return scope_stats_capacity_;
+    }
 
     // Host view of the active callable's registration-owned object-address
     // table, borrowed for as long as that callable stays registered, plus the

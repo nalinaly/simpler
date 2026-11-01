@@ -57,7 +57,7 @@ struct GraphServices {
                 if (node.kind == Kind::CHILD) dependency(ref, range.begin);
             }
             auto &metadata = storage.metadata[ref];
-            metadata.active_mask = 2;
+            metadata.active_mask = LaneMask::aiv0();
             metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_INLINE;
             if (!deps[ref].empty()) metadata.flags |= SCHEDULER_TASK_HAS_FANIN;
             metadata.logical_block_num = 1;

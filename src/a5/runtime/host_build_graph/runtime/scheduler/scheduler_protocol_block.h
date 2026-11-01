@@ -24,10 +24,10 @@ inline __aicore__ __gm__ SchedulerProtocolBlockTrace *scheduler_protocol_block_a
         return nullptr;
     }
     const auto *metadata = scheduler_task_metadata_at(base, local, admission->current_task_ref);
-    const uint8_t mask = metadata->active_mask;
+    const LaneMask mask = scheduler_task_lanes(*metadata);
     const uint64_t index =
-        static_cast<uint64_t>(metadata->trace_index_base) + static_cast<uint64_t>(block) * __builtin_popcount(mask);
-    if (mask == 0 || (mask & ~7U) != 0 || mask != admission->current_active_mask ||
+        static_cast<uint64_t>(metadata->trace_index_base) + static_cast<uint64_t>(block) * mask.count();
+    if (mask.is_empty() || !mask.is_valid() || mask != admission->current_active_mask ||
         metadata->logical_block_num != admission->current_block_num || index >= layout->trace_count) {
         scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
         return nullptr;
@@ -63,7 +63,7 @@ inline __aicore__ void scheduler_protocol_block_claim(
     owner->block_idx = block;
     owner->cluster_index = static_cast<uint32_t>(local->config.shared_context->cluster_index);
     owner->logical_block_num = admission.current_block_num;
-    owner->active_mask = admission.current_active_mask;
+    scheduler_lane_mask_store(owner->active_mask, admission.current_active_mask);
     owner->flags = admission.current_flags;
     owner->completion_ticket = UINT64_MAX;
     scheduler_protocol_stamp_at(base, local, layout, &owner->claim_after, after);
@@ -159,10 +159,10 @@ inline __aicore__ void scheduler_protocol_group_descriptor(
     lane->block_idx = descriptor->block_idx;
     lane->cluster_index = descriptor->cluster_index;
     lane->lane = local->config.self_lane;
-    lane->active_mask = descriptor->active_mask;
+    scheduler_lane_mask_store(lane->active_mask, scheduler_lane_mask_load(descriptor->active_mask));
     lane->flags = descriptor->flags;
     lane->logical_block_num = descriptor->logical_block_num;
-    lane->resource_mask = descriptor->resource_mask;
+    scheduler_lane_mask_store(lane->resource_mask, scheduler_lane_mask_load(descriptor->resource_mask));
     for (uint32_t peer = 0; peer < 3; ++peer) {
         lane->lane_subtasks[peer] = descriptor->lane_subtasks[peer];
         lane->previous_lane_seq[peer] = descriptor->previous_lane_seq[peer];
@@ -213,9 +213,9 @@ inline __aicore__ void scheduler_protocol_group_acks(
     }
     auto *stamp = releases ? &record->owner.releases_observed : &lane->arrivals_observed;
     auto *values = releases ? record->owner.released_seq : lane->arrived_seq;
-    const uint8_t resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
+    const LaneMask resources = scheduler_mix_resource_mask(local->admission->current_active_mask);
     for (uint32_t peer = 0; peer < 3; ++peer) {
-        const uint64_t expected = (resources & (1U << peer)) != 0 ? group.group_seq : 0;
+        const uint64_t expected = resources.has(static_cast<SubtaskSlot>(peer)) ? group.group_seq : 0;
         if (observed[peer] != expected || (stamp->sequence != 0 && values[peer] != observed[peer])) {
             scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);
             return;

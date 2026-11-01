@@ -21,6 +21,7 @@
 #include <utility>
 
 #include "remote_endpoint.h"
+#include "mpi_direct_transport.h"
 
 // ---------------------------------------------------------------------------
 // Fork hygiene
@@ -115,16 +116,18 @@ Worker::~Worker() {
     if (initialized_) close();
 }
 
-void Worker::add_worker(WorkerType type, void *mailbox, int child_pid, uint32_t task_frame_count) {
+void Worker::add_worker(WorkerType type, void *mailbox, size_t mailbox_bytes, int child_pid, uint32_t granted_sets) {
     if (initialized_) throw std::runtime_error("Worker: add_worker after init");
     if (type == WorkerType::NEXT_LEVEL) {
-        manager_.add_next_level(mailbox, child_pid, task_frame_count);
-    } else manager_.add_sub(mailbox, child_pid);
+        manager_.add_next_level(mailbox, mailbox_bytes, child_pid, granted_sets);
+    } else manager_.add_sub(mailbox, mailbox_bytes, child_pid);
 }
 
-void Worker::add_next_level_worker(int32_t worker_id, void *mailbox, int child_pid, uint32_t task_frame_count) {
+void Worker::add_next_level_worker(
+    int32_t worker_id, void *mailbox, size_t mailbox_bytes, int child_pid, uint32_t granted_sets
+) {
     if (initialized_) throw std::runtime_error("Worker: add_next_level_worker after init");
-    manager_.add_next_level_at(worker_id, mailbox, child_pid, task_frame_count);
+    manager_.add_next_level_at(worker_id, mailbox, mailbox_bytes, child_pid, granted_sets);
 }
 
 void Worker::add_remote_l3_socket(
@@ -159,6 +162,18 @@ void Worker::add_mpi_group_mailbox(
             )
         );
     }
+}
+
+void Worker::add_remote_l3_mpi(
+    int32_t worker_id, uint64_t session_id, const std::string &transport_name,
+    const std::shared_ptr<MpiDirectTransportHub> &hub, double attach_timeout_s, double runtime_timeout_s
+) {
+    if (initialized_) throw std::runtime_error("Worker: add_remote_l3_mpi after init");
+    auto transport = std::make_unique<MpiDirectTransport>(hub, worker_id, attach_timeout_s, runtime_timeout_s);
+    transport->expect_hello_ready();
+    manager_.add_next_level_endpoint(
+        std::make_unique<RemoteL3Endpoint>(worker_id, session_id, transport_name, std::move(transport))
+    );
 }
 
 void Worker::init() {
@@ -214,6 +229,9 @@ void Worker::init() {
     };
     cfg.on_consumed_cb = [this](TaskSlot slot) {
         orchestrator_.on_consumed(slot);
+    };
+    cfg.note_endpoint_capacity_cb = [this](int32_t worker_id, uint32_t sets) {
+        orchestrator_.note_endpoint_capacity(worker_id, sets);
     };
     cfg.on_task_failed_cb = [this](TaskSlot slot, const std::string &message) {
         orchestrator_.report_task_error(slot, message);

@@ -24,6 +24,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <new>
 #include <string>
 #include <unordered_map>
@@ -32,7 +33,7 @@
 
 #include "call_config.h"
 #include "host/caller_device_buffers.h"
-#include "pipeline_slot_pool.h"
+#include "run_resource_arena.h"
 #include "runtime_c_api.h"
 #include "task_args.h"
 #include "tensor.h"
@@ -50,6 +51,8 @@ namespace {
 std::unordered_map<void *, uint32_t> g_slots;
 std::array<bool, 2> g_complete{};
 std::array<int, 2> g_launch_rc{};
+std::array<int, 2> g_prepare_rc{};
+std::array<uint64_t, 2> g_prepare_epochs{};
 std::array<bool, 2> g_joinable_boundary_requested{};
 int g_joined_rc{0};
 bool g_joined_throws{false};
@@ -68,9 +71,10 @@ int prepare_run(
 ) {
     EXPECT_EQ(slot_of(runtime), descriptor->pipeline_slot);
     g_complete[descriptor->pipeline_slot] = false;
+    g_prepare_epochs[descriptor->pipeline_slot] = descriptor->run_epoch;
     g_joinable_boundary_requested[descriptor->pipeline_slot] = descriptor->joinable_boundary != 0;
     g_events.push_back("prepare" + std::to_string(descriptor->pipeline_slot));
-    return 0;
+    return g_prepare_rc[descriptor->pipeline_slot];
 }
 
 int launch_run(void *, void *runtime) {
@@ -117,6 +121,8 @@ void prime_worker(ChipWorker &worker, unsigned launch_depth = 2) {
     g_slots.clear();
     g_complete = {};
     g_launch_rc = {};
+    g_prepare_rc = {};
+    g_prepare_epochs = {};
     g_joinable_boundary_requested = {};
     g_joined_rc = 0;
     g_joined_throws = false;
@@ -129,8 +135,12 @@ void prime_worker(ChipWorker &worker, unsigned launch_depth = 2) {
     worker.launch_depth_ = launch_depth;
     worker.initialized_ = true;
     worker.pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 2, {}};
-    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t));
-    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t));
+    // One generation per granted set, as `init` sizes it: an unsized filter has no entry for
+    // slot 0, and `is_admissible` refuses a lease outside it, so every preparation would be
+    // refused as stale before reaching the stubs below.
+    worker.pipeline_generations_.resize(2);
+    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t), nullptr);
+    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t), nullptr);
     for (uint32_t slot = 0; slot < worker.runtime_bufs_.size(); ++slot) {
         g_slots.emplace(worker.runtime_bufs_[slot].data(), slot);
     }
@@ -278,6 +288,56 @@ TEST(ChipRunLaneJoinedLaunchTest, CallerValidationRefusesBeforeAdmissionOrPredec
     ChipRun second = lane.submit(1, host_args(), CallConfig{}, nullptr, 0, &caller);
     EXPECT_TRUE(second.launched());
     lane.close();
+}
+
+TEST(ChipRunLaneJoinedLaunchTest, CleanPrepareRefusalDoesNotReleaseAPredecessorsBorrow) {
+    ChipWorker worker;
+    prime_worker(worker);
+    prime_caller_buffers(worker);
+    prime_caller_streams(worker);
+    ChipRunLane lane(worker);
+    int caller;
+    ChipRun first = lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller);
+    worker.prepare_run_fn_ = [](void *, void *runtime, int32_t, const void *, const CallConfig *,
+                                const NativeRunDescriptor *descriptor) {
+        publish_released_preparation(runtime, descriptor->run_epoch);
+        return -77;
+    };
+    EXPECT_THROW(lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller), RunPreparationRefused);
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 0}}));
+    EXPECT_FALSE(first.done());
+    EXPECT_FALSE(lane.poisoned());
+    lane.close();
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 0}, {1, 0}}));
+}
+
+TEST(ChipRunLaneJoinedLaunchTest, UnstartedSuccessorReleasesOnlyItsBorrowAndRetriesBesideThePredecessor) {
+    ChipWorker worker;
+    prime_worker(worker);
+    prime_caller_buffers(worker);
+    prime_caller_streams(worker);
+    ChipRunLane lane(worker);
+    int caller;
+    ChipRun first = lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller);
+    g_joined_rc = -777;
+    worker.finalize_run_fn_ = [](void *ctx, void *runtime) {
+        const int rc = finalize_run(ctx, runtime);
+        if (rc == 0 && slot_of(runtime) == 1) publish_released_preparation(runtime, g_prepare_epochs[1]);
+        return rc;
+    };
+    EXPECT_THROW(lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller), RunPreparationRefused);
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 0}}));
+    EXPECT_FALSE(first.done());
+    EXPECT_FALSE(lane.poisoned());
+
+    worker.finalize_run_fn_ = finalize_run;
+    g_joined_rc = 0;
+    ChipRun retry = lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller);
+    EXPECT_TRUE(retry.launched());
+    EXPECT_FALSE(first.done());
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 0}}));
+    lane.close();
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 0}, {1, 0}, {2, 0}}));
 }
 
 TEST(ChipRunLaneJoinedLaunchTest, FailedCallerLaunchThrowsInsteadOfReturningAnUnorderedHandle) {
@@ -498,7 +558,7 @@ TEST(ChipRunLaneJoinedLaunchTest, ADeviceSpaceTensorOnEitherRunFallsBackToTheSer
     worker.finalize();
 }
 
-TEST(ChipRunLaneJoinedLaunchTest, DiagnosticsOtherThanSwimlaneStayExclusive) {
+TEST(ChipRunLaneJoinedLaunchTest, AChannelOnOneSideOnlyIsNotAPair) {
     ChipWorker worker;
     prime_worker(worker);
     ChipRunLane lane(worker);
@@ -507,20 +567,45 @@ TEST(ChipRunLaneJoinedLaunchTest, DiagnosticsOtherThanSwimlaneStayExclusive) {
     diagnostic.output_prefix[0] = 'x';
 
     // Preparation is not special-cased — the successor still prepares natively
-    // — but every collector other than the swimlane is armed for one run at
-    // launch, so a second launched run would publish one run's records as the
-    // other's.
+    // — but an owner that is on for one run and off for the other is one
+    // shared device setting with two answers, so the pair is refused by the
+    // lane without the backend being asked.
     ChipRun first = submit(lane, 101, 0, true, host_args());
     ChipRun second = submit(lane, 102, 1, false, host_args(), diagnostic);
     EXPECT_EQ(second.preparation_disposition(), ChipRunPreparationDisposition::NATIVE_PREPARED);
     second.activate();
     EXPECT_FALSE(second.launched());
     EXPECT_EQ(g_events, (Events{"prepare0", "launch0", "prepare1"}));
-    EXPECT_EQ(g_diagnostic_queries, 0) << "a channel the lane can rule out never reaches the backend";
+    EXPECT_EQ(g_diagnostic_queries, 0) << "a disagreement the lane can see never reaches the backend";
 
     g_complete[0] = true;
     EXPECT_TRUE(first.done());
     EXPECT_TRUE(second.launched());
+    lane.close();
+    worker.finalize();
+}
+
+TEST(ChipRunLaneJoinedLaunchTest, AnAgreeingChannelWithoutSwimlaneReachesTheBackend) {
+    ChipWorker worker;
+    prime_worker(worker);
+    ChipRunLane lane(worker);
+    // No swimlane at all: each queue-pair owner publishes its own run's
+    // accounting into a bank that run reserved, so swimlane is not a
+    // precondition for the others. Whether this pair may actually join is the
+    // backend's answer — what this proves is that the lane asks.
+    CallConfig pmu_only;
+    pmu_only.enable_pmu = true;
+    pmu_only.output_prefix[0] = 'x';
+
+    ChipRun first = submit(lane, 109, 0, true, host_args(), pmu_only);
+    ChipRun second = submit(lane, 110, 1, false, host_args(), pmu_only);
+    second.activate();
+
+    EXPECT_EQ(g_diagnostic_queries, 1) << "the lane ruled out a pair only the backend can judge";
+    EXPECT_TRUE(second.launched()) << "the backend agreed and the successor was not launched";
+
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
     lane.close();
     worker.finalize();
 }
@@ -579,13 +664,15 @@ TEST(ChipRunLaneJoinedLaunchTest, ALevelTransitionDeclinesWithoutAskingTheBacken
     worker.finalize();
 }
 
-TEST(ChipRunLaneJoinedLaunchTest, ASwimlaneRunBesideAnotherChannelDeclines) {
+TEST(ChipRunLaneJoinedLaunchTest, ASwimlaneRunBesideADisagreeingChannelDeclines) {
     ChipWorker worker;
     prime_worker(worker);
     ChipRunLane lane(worker);
     CallConfig mixed = swimlane_config(1);
     mixed.enable_dep_gen = 1;
 
+    // The two agree on the swimlane level and disagree on dep_gen. Agreement
+    // is required of every owner, not of the one that happens to be loudest.
     ChipRun first = submit(lane, 205, 0, true, host_args(), swimlane_config(1));
     ChipRun second = submit(lane, 206, 1, false, host_args(), mixed);
     second.activate();
@@ -633,6 +720,115 @@ TEST(ChipRunLaneJoinedLaunchTest, ABackendDeclineIsRetriedRatherThanRemembered) 
     worker.finalize();
 }
 
+namespace {
+
+// The fixed terminal-bank table, as the runner's own predicate sees it. `can_take_run_terminal_bank`
+// is the last thing `DeviceRunnerBase::can_join_diagnostic_run` asks, so for a swimlane pair this
+// *is* the backend's answer — which is why a case about it belongs here, where the lane's response
+// to that answer is observable.
+constexpr size_t kTerminalBanks = 3;
+std::map<uint64_t, int> g_bank_of;
+std::vector<uint64_t> g_bank_declined;
+std::vector<uint64_t> g_bank_permitted;
+std::array<uint64_t, 2> g_run_of_slot{};
+
+bool bank_available_for(uint64_t run_epoch) {
+    if (g_bank_of.count(run_epoch) != 0) return true;
+    return g_bank_of.size() < kTerminalBanks;
+}
+
+int supports_joined_diagnostic_banked(void *, void *successor, void *predecessor) {
+    g_diagnostic_queries++;
+    g_diagnostic_pairs.emplace_back(slot_of(successor), slot_of(predecessor));
+    const uint64_t run_epoch = g_run_of_slot[slot_of(successor)];
+    const bool permitted = bank_available_for(run_epoch);
+    (permitted ? g_bank_permitted : g_bank_declined).push_back(run_epoch);
+    return permitted ? 1 : 0;
+}
+
+size_t count_event(const std::string &event) {
+    size_t seen = 0;
+    for (const std::string &recorded : g_events) {
+        if (recorded == event) ++seen;
+    }
+    return seen;
+}
+
+}  // namespace
+
+// Contract row 37 at the layer that decides it: a diagnostic successor that could not take a
+// terminal bank is **not launched at all**. It stays prepared, its permission is re-asked on a
+// later round, and the same run joins once a bank comes back.
+//
+// This is the lane's half, and it is the half that makes the row's "waits for a bank" true.
+// `DeviceRunnerBase::can_join_diagnostic_run` ends with
+// `can_take_run_terminal_bank(succ.identity.run_epoch)`, and `launch_ready_prefix` returns on a
+// false permission *before* it calls `launch_native_run_joined` — so the successor is left
+// `PREPARED` rather than ordered onto the device without somewhere to publish. That is a wait in
+// lane state; no thread blocks. The bank table's own behaviour — held by epoch, refused when
+// full, handed on at release — is `test_chip_swimlane_run_terminal.cpp`'s, and the two are
+// layered rather than repeated.
+//
+// The invariant this asserts about dropped output is the one the product actually has: a join is
+// permitted only in a round where a bank was available for that epoch. It does not claim the
+// successor has acquired one — the acquire happens later, at the arm.
+TEST(ChipRunLaneJoinedLaunchTest, ADiagnosticSuccessorWithNoTerminalBankStaysPreparedUntilOneIsReleased) {
+    ChipWorker worker;
+    prime_worker(worker);
+    worker.supports_joined_diagnostic_launch_fn_ = supports_joined_diagnostic_banked;
+    ChipRunLane lane(worker);
+    const CallConfig level_one = swimlane_config(1);
+
+    constexpr uint64_t kFrontRun = 371;
+    constexpr uint64_t kSuccessorRun = 372;
+    g_run_of_slot = {kFrontRun, kSuccessorRun};
+    g_bank_of.clear();
+    g_bank_declined.clear();
+    g_bank_permitted.clear();
+    // Every bank held, and none of them this successor's: the state a run ordered behind the
+    // open ones meets.
+    g_bank_of = {{9001, 0}, {9002, 1}, {9003, 2}};
+    ASSERT_EQ(g_bank_of.size(), kTerminalBanks);
+
+    ChipRun first = submit(lane, kFrontRun, 0, true, host_args(), level_one);
+    ChipRun second = submit(lane, kSuccessorRun, 1, false, host_args(), level_one);
+    second.activate();
+
+    // Declined, and declined *before* the device: nothing was handed to the joined launch.
+    EXPECT_FALSE(second.launched());
+    EXPECT_EQ(count_event("joined1behind0"), 0u)
+        << "a successor with no terminal bank was ordered onto the device anyway";
+    EXPECT_EQ(count_event("launch1"), 0u) << "the successor was launched on its own ahead of the front";
+    ASSERT_EQ(g_bank_declined, (std::vector<uint64_t>{kSuccessorRun}))
+        << "the run the bank table refused was not this successor";
+    EXPECT_TRUE(g_bank_permitted.empty());
+    EXPECT_EQ(g_bank_of.count(kSuccessorRun), 0u) << "a declined successor was given a bank anyway";
+    const int asked_once = g_diagnostic_queries;
+    EXPECT_GT(asked_once, 0) << "the lane never asked, so this case is not about the bank";
+
+    // A run ahead reports and releases its bank. The decline was about this round only, so the
+    // same successor — same run, same slot — is asked again.
+    g_bank_of.erase(9002);
+    second.activate();
+
+    EXPECT_TRUE(second.launched()) << "a freed bank did not resume the successor that was waiting for one";
+    EXPECT_GT(g_diagnostic_queries, asked_once) << "the decline was remembered rather than re-asked";
+    ASSERT_EQ(g_bank_permitted, (std::vector<uint64_t>{kSuccessorRun}))
+        << "the run that joined is not the run that had been waiting";
+    EXPECT_EQ(g_bank_declined.size(), 1u) << "the successor was refused again after a bank came free";
+    ASSERT_FALSE(g_diagnostic_pairs.empty());
+    EXPECT_EQ(g_diagnostic_pairs.back().first, 1u) << "the successor asked about is not the waiting run";
+    EXPECT_EQ(g_diagnostic_pairs.back().second, 0u) << "it was not ordered behind the front";
+    EXPECT_EQ(count_event("joined1behind0"), 1u) << "the resumed successor was launched twice, or not as a join";
+
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
+    g_complete[1] = true;
+    EXPECT_TRUE(second.done());
+    lane.close();
+    worker.finalize();
+}
+
 TEST(ChipRunLaneJoinedLaunchTest, ARuntimeWithoutTheDiagnosticSymbolKeepsTheOldRefusal) {
     ChipWorker worker;
     prime_worker(worker);
@@ -657,7 +853,7 @@ TEST(ChipRunLaneJoinedLaunchTest, DepthThreeKeepsOrdinaryJoinsAndRefusesTheDiagn
     ChipWorker worker;
     prime_worker(worker, /*launch_depth=*/3);
     worker.pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 3, {}};
-    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t));
+    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t), nullptr);
     g_slots.emplace(worker.runtime_bufs_[2].data(), 2u);
     ChipRunLane lane(worker);
     const CallConfig level_one = swimlane_config(1);
@@ -683,7 +879,7 @@ TEST(ChipRunLaneJoinedLaunchTest, DepthThreeStillJoinsNonDiagnosticRuns) {
     ChipWorker worker;
     prime_worker(worker, /*launch_depth=*/3);
     worker.pipeline_contract_ = {PTO_PIPELINE_CONTRACT_ABI_VERSION, 0, 3, {}};
-    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t));
+    worker.runtime_bufs_.emplace_back(64, alignof(std::max_align_t), nullptr);
     g_slots.emplace(worker.runtime_bufs_[2].data(), 2u);
     ChipRunLane lane(worker);
 
@@ -938,6 +1134,37 @@ TEST(ChipRunLaneCallerBuffersTest, AnUnprovenLastConsumerKeepsTheReference) {
     worker.finalize();
 }
 
+TEST(ChipRunLaneCallerBuffersTest, ARefusedPlanAbortKeepsTheWaitingRunsBorrow) {
+    ChipWorker worker;
+    prime_worker(worker);
+    prime_caller_buffers(worker);
+    worker.automatic_admission_ = true;
+    unsigned aborts = 0;
+    // The callback ABI has no capture, so the context owns the observed count.
+    worker.device_ctx_ = &aborts;
+    worker.abort_run_plan_fn_ = [](void *ctx, uint32_t slot, uint64_t epoch) -> int {
+        ++*static_cast<unsigned *>(ctx);
+        EXPECT_EQ(slot, 1u);
+        EXPECT_EQ(epoch, 0u);
+        return PTO_RUNTIME_ERR_INVALID_STATE;
+    };
+    ChipRunLane lane(worker);
+    ChipRun first = submit(lane, 101, 0, true, device_args());
+    ASSERT_TRUE(first.launched());
+    g_prepare_rc[1] = SIMPLER_RUNTIME_ERR_RESOURCE_WAIT;
+    ChipRun waiting = submit(lane, 102, 1, true, device_args());
+    ASSERT_FALSE(waiting.launched());
+    EXPECT_THROW(waiting.abandon(), std::runtime_error);
+    EXPECT_EQ(aborts, 1u);
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 1}}));
+    g_complete[0] = true;
+    EXPECT_TRUE(first.done());
+    EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 1}, {1, 0}}));
+    EXPECT_THROW(lane.close(), std::runtime_error);
+    worker.device_ctx_ = nullptr;
+    worker.finalize();
+}
+
 // The lane, borrow table and guarded free are real; only device execution is stubbed.
 TEST(ChipRunLaneCallerBuffersTest, MixedExternalOutputCannotDropOwnedInputOnUnprovenCompletion) {
     for (bool external_output : {false, true}) {
@@ -1002,3 +1229,37 @@ TEST(ChipRunLaneCallerBuffersTest, MixedExternalOutputCannotDropOwnedInputOnUnpr
 }
 
 }  // namespace
+
+TEST(ChipRunLaneJoinedLaunchTest, MissingOrStalePrepareReleaseKeepsItsBorrow) {
+    for (const bool stale : {false, true}) {
+        SCOPED_TRACE(stale);
+        ChipWorker worker;
+        prime_worker(worker);
+        prime_caller_buffers(worker);
+        prime_caller_streams(worker);
+        ChipRunLane lane(worker);
+        int caller;
+        ChipRun first = lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller);
+        worker.prepare_run_fn_ =
+            stale ?
+                +[](void *, void *runtime, int32_t, const void *, const CallConfig *,
+                    const NativeRunDescriptor *descriptor) {
+                    publish_released_preparation(runtime, descriptor->run_epoch - 1);
+                    return -77;
+                } :
+                +[](void *, void *, int32_t, const void *, const CallConfig *, const NativeRunDescriptor *) {
+                    return -77;
+                };
+        try {
+            lane.submit(1, device_args(), CallConfig{}, nullptr, 0, &caller);
+            FAIL() << "unproven preparation must fail";
+        } catch (const RunPreparationRefused &) {
+            FAIL() << "this attempt has no release proof";
+        } catch (const std::runtime_error &) {}
+        EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 1}}));
+        EXPECT_FALSE(first.done());
+        EXPECT_TRUE(lane.poisoned());
+        EXPECT_THROW(lane.close(), std::runtime_error);
+        EXPECT_EQ(g_released, (std::vector<std::pair<uint64_t, int>>{{2, 1}, {1, 0}}));
+    }
+}

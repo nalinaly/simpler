@@ -81,8 +81,9 @@ LoopAction SchedulerContext::handle_orchestrator_exit(
     bool orch_done = orchestrator_done_.load(std::memory_order_acquire);
     if (!orch_done) return LoopAction::NONE;
 
+    // orchestrator_done_ publishes the final task count, including zero.
     task_count = total_tasks_;
-    if (task_count > 0 && completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
+    if (completed_tasks_.load(std::memory_order_relaxed) >= task_count) {
         completed_.store(true, std::memory_order_release);
         LOG_INFO(
             "Thread %d: completed tasks %d/%d", thread_idx, completed_tasks_.load(std::memory_order_relaxed), task_count
@@ -474,11 +475,7 @@ int32_t SchedulerContext::handle_timeout_exit(
                 [this, thread_idx](const ChipTaskSlotState &slot_state) {
                     dump_args_for_task<SUBTASK_SLOT_COUNT>(
                         thread_idx, *slot_state.task, *slot_state.payload, slot_state.active_mask,
-                        ArgsDumpStage::AFTER_COMPLETION,
-                        [](ActiveMask active_mask, int raw_subtask_id) {
-                            return active_mask.subtask_active(static_cast<SubtaskSlot>(raw_subtask_id));
-                        },
-                        [this](int32_t func_id) {
+                        ArgsDumpStage::AFTER_COMPLETION, [this](int32_t func_id) {
                             return get_function_bin_addr(func_id);
                         }
                     );
@@ -658,6 +655,10 @@ int32_t SchedulerContext::shutdown(int32_t thread_idx, Runtime *runtime) {
     // not survive into the next generation. Retirement below still runs: it is
     // what releases this thread's workers, and no other path will.
     if (is_pmu_enabled() && !fatal_shutdown_started_.load(std::memory_order_acquire)) {
+        // Settle this run's per-core accounting before the registers are
+        // restored and the cores retired: those are what stop the producer,
+        // and this reads what the producer wrote.
+        pmu_aicpu_close_run_cores(cores, core_num);
         pmu_aicpu_finalize(cores, core_num);
     }
 #endif
@@ -737,7 +738,10 @@ int32_t SchedulerContext::retire_claimed_cores(Runtime *runtime, const int32_t *
     // platform_retire_aicore_group fills every entry on every path it returns
     // from, so this needs no initializer.
     bool released[PLATFORM_MAX_CORES];
-    const int32_t rc = platform_retire_aicore_group(targets, count, platform_aicore_exit_deadline(), released);
+    // READY commits the current report, reset gate/request, and register
+    // metadata before a unique retirement claimant can enter this helper.
+    const uint64_t deadline = platform_aicore_exit_deadline();
+    const int32_t rc = platform_retire_aicore_group(targets, count, deadline, released);
     if (rc != 0) {
         // Naming the cores is the only signal an unreleased worker leaves: it
         // spins on a gate it cannot log about, and the host sees just a stream
@@ -1104,13 +1108,14 @@ void SchedulerContext::abort_and_shutdown(Runtime *runtime) { emergency_shutdown
 // Profiling-subsystem init (leader-only). pmu_aicpu_init needs every core's
 // physical_core_id, so the barrier-free init path calls this behind an
 // all-thread barrier compiled only into DFX builds. No-op otherwise.
-void SchedulerContext::post_handshake_profiling_init() {
+void SchedulerContext::post_handshake_profiling_init(Runtime *runtime) {
+    (void)runtime;
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
-        dump_args_init(active_sched_threads_);
+        dump_args_init(active_sched_threads_, static_cast<DumpArgsLevel>(runtime->dev.dump_args_level));
     }
     if (is_pmu_enabled()) {
-        pmu_aicpu_init(physical_core_ids_, cores_total_num_);
+        pmu_aicpu_init(physical_core_ids_, cores_total_num_, static_cast<PmuEventType>(runtime->dev.pmu_event_type));
     }
 #endif
 }
@@ -1230,16 +1235,16 @@ int32_t SchedulerContext::pre_handshake_init(
     regs_ = regs_base;
 
 #if SIMPLER_DFX
-    // chip_swimlane_aicpu_init promotes g_chip_swimlane_level from the shared-memory
-    // header — must be called BEFORE caching the level, otherwise the cached
-    // value would still be 0 (only the binary enable bit has been seeded by
-    // kernel.cpp at this point). Reset the cached level on disabled runs so a
-    // prior enabled launch's level can't leak into the phase-record gates in
+    // chip_swimlane_aicpu_init latches this run's descriptor level — must be called BEFORE caching the level, otherwise
+    // the cached value would still be 0 (only the binary enable bit has been seeded by kernel.cpp at this point). Reset
+    // the cached level on disabled runs so a prior enabled launch's level can't leak into the phase-record gates in
     // scheduler_dispatch. This runs on the leader before it publishes
     // hs_setup_done_, so it happens-before every thread's handshake_partition
     // and therefore before any register window is opened.
     if (is_chip_swimlane_enabled()) {
-        chip_swimlane_aicpu_init(runtime->dev.worker_count);
+        chip_swimlane_aicpu_init(
+            runtime->dev.worker_count, static_cast<ChipSwimlaneLevel>(runtime->dev.chip_swimlane_level)
+        );
         chip_swimlane_level_ = get_chip_swimlane_level();
         if (chip_swimlane_level_ >= ChipSwimlaneLevel::SCHED_PHASES) {
             // Sched-phase pool count must match the dump_args_init thread count
@@ -1365,10 +1370,10 @@ int32_t SchedulerContext::post_handshake_init(Runtime *runtime) {
     // orchestrator thread (see aicpu_executor.cpp).
 #if SIMPLER_DFX
     if (is_dump_args_enabled()) {
-        dump_args_init(active_sched_threads_);
+        dump_args_init(active_sched_threads_, static_cast<DumpArgsLevel>(runtime->dev.dump_args_level));
     }
     if (is_pmu_enabled()) {
-        pmu_aicpu_init(physical_core_ids_, cores_total_num_);
+        pmu_aicpu_init(physical_core_ids_, cores_total_num_, static_cast<PmuEventType>(runtime->dev.pmu_event_type));
     }
 #endif
 

@@ -53,10 +53,10 @@ struct MaterializeFixture {
 
     MaterializeFixture() {
         object.header.magic = GRAPH_DEFINITION_OBJECT_MAGIC;
-        object.header.full_key = 17;
+        object.header.graph_key = 17;
         object.header.definition_bytes = sizeof(Body);
         auto &def = object.body.definition;
-        def.full_key = 17;
+        def.graph_key = 17;
         def.total_bytes = sizeof(Body);
         def.required_heap = heap.size();
         def.task_count = 2;
@@ -81,7 +81,7 @@ struct MaterializeFixture {
             auto &task = object.body.tasks[i];
             task.kernel_id[0] = task.kernel_id[2] = INVALID_KERNEL_ID;
             task.kernel_id[1] = 7;
-            task.active_mask = 2;
+            task.active_mask = LaneMask::aiv0();
             task.logical_block_num = task.total_required_subtasks = 1;
             task.total_output_size = 64;
             task.tensor_count = task.scalar_count = 1;

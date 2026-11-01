@@ -180,7 +180,7 @@ TEST(SwimlaneDeviceResetTest, EveryHeadOnTheGridStartsAtZero) {
 
     // Two cores, which is fewer than the grid and fewer than the platform
     // maximum: the device acquisition loop visits only these.
-    chip_swimlane_aicpu_init(/*worker_count=*/2);
+    chip_swimlane_aicpu_init(/*worker_count=*/2, ChipSwimlaneLevel::SCHED_PHASES);
 
     for (int i = 0; i < PLATFORM_MAX_CORES; i++) {
         EXPECT_TRUE(DeviceResetFixture::all_zero(get_perf_buffer_state(fx.shm(), i)->head, "task head"))
@@ -209,23 +209,20 @@ TEST(SwimlaneDeviceResetTest, EveryLevelClearsTheWholeGrid) {
           ChipSwimlaneLevel::ORCH_PHASES}) {
         DeviceResetFixture fx(level);
         fx.dirty_every_head(13);
-        chip_swimlane_aicpu_init(/*worker_count=*/2);
+        chip_swimlane_aicpu_init(/*worker_count=*/2, level);
         EXPECT_TRUE(fx.whole_grid_is_zero()) << " at level " << static_cast<uint32_t>(level);
     }
 }
 
 TEST(SwimlaneDeviceResetTest, ANarrowerRunAtALowerLevelInheritsNothingFromAWiderOne) {
-    // The 4-to-2 transition on one region, and the level has to actually move:
-    // `begin_run` is the production arm path, and `publish_run_config` inside
-    // it is what writes the device's single level word. Changing only the core
-    // count would leave the device latched at the higher level and prove
-    // nothing about a run that collects less than the one before it.
+    // Each producer latches its invocation's level; host admission does not
+    // change the shared header while a predecessor still uses the pools.
     DeviceResetFixture fx(ChipSwimlaneLevel::ORCH_PHASES, /*num_aicore=*/4, /*aicpu_thread_num=*/2);
     ChipSwimlaneDataHeader *header = get_chip_swimlane_header(fx.shm());
 
     fx.collector.begin_run(/*output_prefix=*/"", ChipSwimlaneLevel::ORCH_PHASES);
     ASSERT_EQ(header->chip_swimlane_level, static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES));
-    chip_swimlane_aicpu_init(/*worker_count=*/4);
+    chip_swimlane_aicpu_init(/*worker_count=*/4, ChipSwimlaneLevel::ORCH_PHASES);
 
     // What the wide, high-level run leaves behind: dirty heads on every core
     // and both phase pools, and a buffer each core still owns.
@@ -236,16 +233,40 @@ TEST(SwimlaneDeviceResetTest, ANarrowerRunAtALowerLevelInheritsNothingFromAWider
     fx.dirty_every_head(17);
 
     fx.collector.begin_run(/*output_prefix=*/"", ChipSwimlaneLevel::SCHEDULE_TIMING);
-    ASSERT_EQ(header->chip_swimlane_level, static_cast<uint32_t>(ChipSwimlaneLevel::SCHEDULE_TIMING))
-        << "the device's level word did not follow the run that armed it";
-
-    chip_swimlane_aicpu_init(/*worker_count=*/1);
+    ASSERT_EQ(header->chip_swimlane_level, static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES));
+    chip_swimlane_aicpu_init(/*worker_count=*/1, ChipSwimlaneLevel::SCHEDULE_TIMING);
+    ASSERT_EQ(get_chip_swimlane_level(), ChipSwimlaneLevel::SCHEDULE_TIMING);
 
     EXPECT_TRUE(fx.whole_grid_is_zero()) << " after narrowing from four cores at level 4 to one at level 2";
     for (int i = 0; i < PLATFORM_MAX_CORES; i++) {
         EXPECT_EQ(get_perf_buffer_state(fx.shm(), i)->head.current_buf_ptr, owned[i])
             << "the transition stranded or replaced a buffer core " << i << " still owned";
     }
+}
+
+TEST(SwimlaneDeviceResetTest, DeviceLatchesTheInvocationLevelInsteadOfTheHeader) {
+    DeviceResetFixture fx(ChipSwimlaneLevel::ORCH_PHASES);
+    for (const auto level :
+         {ChipSwimlaneLevel::TASK_TIMING, ChipSwimlaneLevel::SCHEDULE_TIMING, ChipSwimlaneLevel::SCHED_PHASES,
+          ChipSwimlaneLevel::ORCH_PHASES}) {
+        SCOPED_TRACE(static_cast<uint32_t>(level));
+        set_chip_swimlane_enabled(true);
+        chip_swimlane_aicpu_init(1, level);
+        EXPECT_EQ(get_chip_swimlane_level(), level);
+        EXPECT_EQ(
+            get_chip_swimlane_header(fx.shm())->chip_swimlane_level,
+            static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES)
+        );
+    }
+    set_chip_swimlane_enabled(false);
+    EXPECT_EQ(get_chip_swimlane_level(), ChipSwimlaneLevel::DISABLED);
+}
+
+TEST(SwimlaneDeviceResetTest, ArmingASuccessorDoesNotPublishItsDeviceLevel) {
+    DeviceResetFixture fx(ChipSwimlaneLevel::ORCH_PHASES);
+    auto *header = get_chip_swimlane_header(fx.shm());
+    fx.collector.begin_run("successor", ChipSwimlaneLevel::TASK_TIMING);
+    EXPECT_EQ(header->chip_swimlane_level, static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES));
 }
 
 TEST(SwimlaneDeviceResetTest, AHeadWithNoFreeBufferIsStillCleared) {
@@ -262,7 +283,7 @@ TEST(SwimlaneDeviceResetTest, AHeadWithNoFreeBufferIsStillCleared) {
     aicore->head.current_buf_ptr = 0;
     aicore->free_queue.head = aicore->free_queue.tail;
 
-    chip_swimlane_aicpu_init(/*worker_count=*/2);
+    chip_swimlane_aicpu_init(/*worker_count=*/2, ChipSwimlaneLevel::SCHED_PHASES);
 
     EXPECT_TRUE(DeviceResetFixture::all_zero(task->head, "dry task head"));
     EXPECT_TRUE(DeviceResetFixture::all_zero(aicore->head, "dry aicore head"));
@@ -270,7 +291,7 @@ TEST(SwimlaneDeviceResetTest, AHeadWithNoFreeBufferIsStillCleared) {
 
 TEST(SwimlaneDeviceResetTest, RetainedBufferOwnershipSurvivesTheReset) {
     DeviceResetFixture fx;
-    chip_swimlane_aicpu_init(/*worker_count=*/2);
+    chip_swimlane_aicpu_init(/*worker_count=*/2, ChipSwimlaneLevel::SCHED_PHASES);
 
     // What a run that could not hand its buffer over leaves behind: a head
     // still naming it, which only a successful enqueue ever releases.
@@ -280,7 +301,7 @@ TEST(SwimlaneDeviceResetTest, RetainedBufferOwnershipSurvivesTheReset) {
     const uint32_t free_head = task->free_queue.head;
     DeviceResetFixture::dirty(task->head, 5);
 
-    chip_swimlane_aicpu_init(/*worker_count=*/2);
+    chip_swimlane_aicpu_init(/*worker_count=*/2, ChipSwimlaneLevel::SCHED_PHASES);
 
     EXPECT_EQ(task->head.current_buf_ptr, retained_ptr) << "the reset must not strand a retained buffer";
     EXPECT_EQ(task->free_queue.head, free_head) << "a retained buffer is reused in place, not replaced";
@@ -483,7 +504,7 @@ TEST(SwimlaneRunLocalMetadataTest, ARefusedCoreTypeCopyIsStillIncompleteAtClose)
     // The close's own charge is a different allocation, and the budget has room
     // for it by then -- which is exactly how the completeness flag used to come
     // out true for a run whose core types were dropped.
-    fx.collector.run_close(31, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(31, /*device_execution_complete=*/false);
 
     const std::string artifact = published_artifact(fx.collector, fx.root, 31);
     EXPECT_NE(artifact.find("\"metadata_complete\": false"), std::string::npos)
@@ -494,7 +515,7 @@ TEST(SwimlaneRunLocalMetadataTest, AnAdmittedCoreTypeCopyPublishesCompleteMetada
     AdmissionFixture fx("joined-metadata-complete");
     const CoreType types[] = {CoreType::AIC};
     ASSERT_TRUE(fx.collector.run_begin(33, fx.dir, ChipSwimlaneLevel::TASK_TIMING, types, 1, false));
-    fx.collector.run_close(33, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(33, /*device_execution_complete=*/false);
 
     const std::string artifact = published_artifact(fx.collector, fx.root, 33);
     EXPECT_NE(artifact.find("\"metadata_complete\": true"), std::string::npos)
@@ -828,8 +849,8 @@ TEST(SwimlanePairCapacityTest, TwoOpenRunsFillTheTableAndRefuseAThird) {
     EXPECT_FALSE(fx.collector.can_admit_retained_run())
         << "a full table must decline the next pair before it is admitted";
 
-    fx.collector.run_close(41, /*bank_index=*/0, /*device_execution_complete=*/false);
-    fx.collector.run_close(42, /*bank_index=*/1, /*device_execution_complete=*/false);
+    fx.collector.run_close(41, /*device_execution_complete=*/false);
+    fx.collector.run_close(42, /*device_execution_complete=*/false);
 }
 
 TEST(SwimlanePairCapacityTest, APublishedRunGivesItsSlotBackToTheNextPair) {
@@ -842,7 +863,7 @@ TEST(SwimlanePairCapacityTest, APublishedRunGivesItsSlotBackToTheNextPair) {
     // the predecessor publishes while its successor is still open, and the slot
     // it gives back is what the run after that is admitted into. A table that
     // only emptied when both runs had closed would serialize every third run.
-    fx.collector.run_close(51, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(51, /*device_execution_complete=*/false);
     EXPECT_FALSE(published_artifact(fx.collector, fx.root, 51).empty());
     ASSERT_TRUE(fx.collector.can_admit_retained_run()) << "the published run's bucket is free again";
 
@@ -850,8 +871,8 @@ TEST(SwimlanePairCapacityTest, APublishedRunGivesItsSlotBackToTheNextPair) {
         << "the next successor is admitted beside the run that is still open";
     EXPECT_FALSE(fx.collector.can_admit_retained_run());
 
-    fx.collector.run_close(52, /*bank_index=*/1, /*device_execution_complete=*/false);
-    fx.collector.run_close(53, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(52, /*device_execution_complete=*/false);
+    fx.collector.run_close(53, /*device_execution_complete=*/false);
     EXPECT_FALSE(published_artifact(fx.collector, fx.root, 53).empty())
         << "each run of the sustained sequence publishes its own file";
 }
@@ -916,7 +937,7 @@ TEST(SwimlaneGrantedCapacityTest, AGrantIsRefusedWhileARunIsHeld) {
     EXPECT_EQ(fx.collector.active_epoch_limit(), simpler::dfx::runs::kMaxOpenEpochs)
         << "and the refusal changed nothing";
 
-    fx.collector.run_close(61, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(61, /*device_execution_complete=*/false);
 }
 
 TEST(SwimlaneGrantedCapacityTest, AGrantedCollectorReservesForWhatItMayHold) {
@@ -954,9 +975,9 @@ TEST(SwimlaneGrantedCapacityTest, ThreeRunsAreHeldAndEachPublishesItsOwnFile) {
 
     // Each identity closes and seals on its own; three cuts are armed at once,
     // one per closed run, and each must retire with its own artifact.
-    fx.collector.run_close(71, /*bank_index=*/0, /*device_execution_complete=*/false);
-    fx.collector.run_close(72, /*bank_index=*/1, /*device_execution_complete=*/false);
-    fx.collector.run_close(73, /*bank_index=*/2, /*device_execution_complete=*/false);
+    fx.collector.run_close(71, /*device_execution_complete=*/false);
+    fx.collector.run_close(72, /*device_execution_complete=*/false);
+    fx.collector.run_close(73, /*device_execution_complete=*/false);
 
     for (const uint64_t epoch : {71u, 72u, 73u}) {
         const std::string artifact = published_artifact(fx.collector, fx.root, epoch);
@@ -976,16 +997,16 @@ TEST(SwimlaneGrantedCapacityTest, OnePublicationReclaimsOneCapacityAtAThreeDeepF
     // One terminal verdict returns one capacity. The other two stay held, so a
     // sustained sequence refills one run at a time rather than waiting for the
     // whole table to drain.
-    fx.collector.run_close(81, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(81, /*device_execution_complete=*/false);
     EXPECT_FALSE(published_artifact(fx.collector, fx.root, 81).empty());
     ASSERT_TRUE(fx.collector.can_admit_retained_run());
 
     ASSERT_TRUE(fx.collector.run_begin(84, fx.dir, ChipSwimlaneLevel::TASK_TIMING, nullptr, 0, false));
     EXPECT_FALSE(fx.collector.can_admit_retained_run()) << "the reclaimed capacity was exactly one";
 
-    fx.collector.run_close(82, /*bank_index=*/1, /*device_execution_complete=*/false);
-    fx.collector.run_close(83, /*bank_index=*/2, /*device_execution_complete=*/false);
-    fx.collector.run_close(84, /*bank_index=*/0, /*device_execution_complete=*/false);
+    fx.collector.run_close(82, /*device_execution_complete=*/false);
+    fx.collector.run_close(83, /*device_execution_complete=*/false);
+    fx.collector.run_close(84, /*device_execution_complete=*/false);
 }
 
 TEST(SwimlaneGrantedCapacityTest, OneRunsPublicationFailureDoesNotDisturbTheOtherTwo) {
@@ -1012,9 +1033,9 @@ TEST(SwimlaneGrantedCapacityTest, OneRunsPublicationFailureDoesNotDisturbTheOthe
 
     ASSERT_TRUE(fx.collector.run_begin(103, fx.dir, ChipSwimlaneLevel::TASK_TIMING, nullptr, 0, false));
 
-    fx.collector.run_close(101, /*bank_index=*/0, /*device_execution_complete=*/false);
-    fx.collector.run_close(102, /*bank_index=*/1, /*device_execution_complete=*/false);
-    fx.collector.run_close(103, /*bank_index=*/2, /*device_execution_complete=*/false);
+    fx.collector.run_close(101, /*device_execution_complete=*/false);
+    fx.collector.run_close(102, /*device_execution_complete=*/false);
+    fx.collector.run_close(103, /*device_execution_complete=*/false);
 
     std::string error;
     // The failing run is reported, and a write failure is not a quarantine: the

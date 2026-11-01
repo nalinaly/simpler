@@ -9,6 +9,11 @@ audited on 2026-10-09. The comparison describes source behavior, not measured
 performance. Paths below are relative to
 `src/{a2a3,a5}/runtime/tensormap_and_ringbuffer/` unless qualified otherwise.
 
+The file inventory and source comparisons below retain that audited baseline.
+The current retirement protocol also pairs each nonzero exit request with a
+fresh AICore ACK; see [exit ACK freshness](hardware/cache-coherency.md#exit-acknowledgement-freshness)
+for the writer ownership, compatible layout, ordering and timeout contract.
+
 ## Scope and File Inventory
 
 The two runtime trees contain 51 A2/A3 files and 55 A5 files: 51 matching
@@ -65,10 +70,6 @@ runtime/tensormap.h
 | `runtime/dispatch_payload.h`, `runtime/runtime_types.h` | Comments about platform context fields and worker capacity |
 | `runtime/runtime.h` | Includes/guards, comments, assertion messages, and accessor order; descriptor fields and size expressions match |
 | `runtime/shared/runtime.cpp` | Comments; device-copy prefix and extent calculations match |
-| `runtime/submit_types.h` | `LaunchSpec::block_num`/`set_block_num` on A2/A3 versus `core_num`/`set_core_num` on A5; both specify the logical SPMD block count |
-
-The `LaunchSpec` spelling difference matters to callers compiling directly
-against these headers, even though its stored value and scheduling meaning match.
 
 ### Behavioral or capability differences
 
@@ -147,8 +148,7 @@ A2/A3's `GlobalContext` contains `l2_cache_offset`, exposed through
 `get_l2_cache_offset(args)`. Scheduler initialization copies the driver-provided
 nocache-alias offset from resident device configuration. Zero leaves an ordinary
 cached address. A5 exposes neither this field nor its getter, so the context
-layouts differ. A5 also names local fields `s_block_idx`/`s_block_num` to avoid
-compiler built-in name collisions; the logical block semantics are shared.
+layouts differ. Both use `block_idx`/`block_num` for local logical block fields.
 See `common/intrinsic.h` ([A2/A3][a3-intrinsic], [A5][a5-intrinsic]).
 
 The field is A2/A3-only because its DMA load instruction does not encode the
@@ -283,6 +283,18 @@ Both runtimes use a dedicated fatal latch, per-core retirement ownership,
 grouped EXIT signaling with a shared ACK deadline, register close/readback/drain,
 and an isolated GM return gate. AICore waits for that gate before returning;
 a timed-out, unacknowledged core is not released and requires host recovery.
+
+A2/A3 and A5 HBG/TMR confirm retirement with a reserved COND nonce
+chosen to differ from the target physical core's retained value. The core
+completes preceding writes, echoes the request once, then only polls the GM
+post-close gate. Native, legacy and unstamped modes use the same protocol.
+A5 HBG accepts EXIT before the request arrives by waiting for the request;
+its early-failure paths wait for current AICPU EXIT before reading the reused
+control. AICPU clears both words in the 64-byte control before READY or EXIT.
+The retirement paths keep exclusive ownership, the shared deadline and
+close/readback/drain/release ordering; a silent core is not released.
+See [the freshness contract](hardware/cache-coherency.md#exit-acknowledgement-freshness).
+
 The AICPU initializes the gate tail before handshake. Host descriptor copies
 exclude that tail on both platforms.
 
