@@ -1,0 +1,20 @@
+diff --git a/src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp b/src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp
+index 4cc81cd12..e4b1be7d8 100644
+--- a/src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp
++++ b/src/a5/runtime/host_build_graph/aicore/aicore_executor.cpp
+@@ -298,1 +298,1 @@
+-template <bool WithProfiling>
++template <bool WithProfiling, bool WithPmu>
+@@ -310,1 +310,3 @@
+-        SIMPLER_GET_DFX_FLAG(get_aicore_profiling_flag(), SIMPLER_DFX_FLAG_PMU) ? get_aicore_pmu_reg_base() : 0;
++        WithPmu && SIMPLER_GET_DFX_FLAG(get_aicore_profiling_flag(), SIMPLER_DFX_FLAG_PMU)
++            ? get_aicore_pmu_reg_base()
++            : 0;
+@@ -711,0 +714,4 @@
++            } else if (SIMPLER_GET_DFX_FLAG(get_aicore_profiling_flag(), SIMPLER_DFX_FLAG_PMU)) {
++                (void)run_ready_dispatch_loop<WithProfiling, true>(
++                    graph, scheduler_state_base, &scheduler_local_state, run_control, &stats, profiling_level
++                );
+@@ -713,1 +719,1 @@
+-                (void)run_ready_dispatch_loop<WithProfiling>(
++                (void)run_ready_dispatch_loop<WithProfiling, false>(

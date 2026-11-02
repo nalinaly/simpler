@@ -744,7 +744,6 @@ enum class SchedulerReadySource : uint8_t {
     STOLEN = 1,
     DIRECT_RESOLVE = 2,
     COOPERATIVE = 3,
-    ORDINARY_POOL = 4,
 };
 
 enum class SchedulerPublicationMode : uint8_t {
@@ -916,38 +915,6 @@ inline __aicore__ bool scheduler_task_requires_admission(const SchedulerTaskMeta
             scheduler_task_requires_sync_start(metadata.flags));
 }
 
-// One bit is published once and retired once in a run. All words, including
-// the reused TaskControl counters, are atomic-only throughout that run.
-struct alignas(128) SchedulerOrdinaryPoolWord {
-    volatile uint64_t bits;
-    uint8_t padding[120];
-};
-static_assert(sizeof(SchedulerOrdinaryPoolWord) == 128 && alignof(SchedulerOrdinaryPoolWord) == 128);
-static_assert(
-    std::is_standard_layout_v<SchedulerOrdinaryPoolWord> && std::is_trivially_copyable_v<SchedulerOrdinaryPoolWord>
-);
-
-inline constexpr uint32_t SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY = 16;
-
-inline __aicore__ uint64_t scheduler_ordinary_pool_word_count(uint64_t tasks) {
-    return tasks / SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY +
-           (tasks % SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY != 0);
-}
-
-inline __aicore__ uint64_t scheduler_ordinary_pool_word_index(uint64_t task) {
-    return task / SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY;
-}
-
-inline __aicore__ uint64_t scheduler_ordinary_pool_task_bit(uint64_t task) {
-    return UINT64_C(1) << (task % SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY);
-}
-
-inline __aicore__ bool scheduler_ordinary_pool_shape(uint8_t flags, LaneMask mask, uint32_t blocks) {
-    constexpr uint8_t allowed = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_HAS_FANIN | SCHEDULER_TASK_SPMD;
-    return (flags & ~allowed) == 0 && scheduler_task_is_executable(flags) && (flags & SCHEDULER_TASK_SPMD) != 0 &&
-           mask.is_valid() && mask.count() == 1 && blocks > 1 && blocks <= INT16_MAX;
-}
-
 enum class SchedulerAdmissionState : uint64_t {
     UNCLAIMED = 0,
     CLAIMED = 1,
@@ -1091,9 +1058,7 @@ struct alignas(128) SchedulerGraphSummary {
     uint64_t run_epoch;
     uint64_t protocol_layout_offset;
     SchedulerTopologyLayout topology_layout;
-    uint32_t ordinary_pool_task_count;
-    uint32_t ordinary_pool_word_task_capacity;
-    uint64_t ordinary_pool_words_offset;
+    uint8_t cache_line_padding[16];
 };
 
 struct alignas(64) SchedulerReadyDirectoryShard {
@@ -1393,14 +1358,7 @@ enum SchedulerExecutionIdentityFlags : uint32_t {
     SCHEDULER_TRACE_EXECUTED = 1U << 1,
     SCHEDULER_TRACE_ORDERED = 1U << 2,
     SCHEDULER_TRACE_GROUP = 1U << 3,
-    SCHEDULER_TRACE_ORDINARY_POOL = 1U << 4,
 };
-
-inline constexpr uint32_t SCHEDULER_TRACE_TASK_FLAGS_SHIFT = 8;
-inline constexpr uint32_t SCHEDULER_TRACE_ACTIVE_MASK_SHIFT = 16;
-inline constexpr uint32_t SCHEDULER_TRACE_POOL_IDENTITY_MASK = UINT32_C(31) |
-                                                               (UINT32_C(127) << SCHEDULER_TRACE_TASK_FLAGS_SHIFT) |
-                                                               (UINT32_C(7) << SCHEDULER_TRACE_ACTIVE_MASK_SHIFT);
 
 struct alignas(128) SchedulerTaskTrace {
     // Dispatch publishes this line before READY; completion publishes valid.
@@ -1521,10 +1479,6 @@ static_assert(
 static_assert(sizeof(SchedulerReadyInbox) == 128, "ready inbox layout changed");
 static_assert(alignof(SchedulerReadyInbox) == 128, "ready inbox alignment changed");
 static_assert(sizeof(SchedulerGraphSummary) == 128, "graph summary layout changed");
-static_assert(offsetof(SchedulerGraphSummary, topology_layout) == 104);
-static_assert(offsetof(SchedulerGraphSummary, ordinary_pool_word_task_capacity) == 116);
-static_assert(offsetof(SchedulerGraphSummary, ordinary_pool_task_count) == 112);
-static_assert(offsetof(SchedulerGraphSummary, ordinary_pool_words_offset) == 120);
 static_assert(alignof(SchedulerGraphSummary) == 128, "graph summary alignment changed");
 static_assert(sizeof(SchedulerReadyDirectoryShard) == 64, "ready directory shard must occupy one cache line");
 static_assert(alignof(SchedulerReadyDirectoryShard) == 64, "ready directory shard alignment changed");
@@ -1676,30 +1630,15 @@ inline bool scheduler_layout_reserve(uint64_t *cursor, uint64_t size, uint64_t a
 }
 
 inline bool scheduler_spmd_requirements_valid(const SchedulerSpmdRequirements &spmd, uint64_t task_count) {
-    if (spmd.cooperative_task_count > task_count || spmd.mix_task_count > spmd.cooperative_task_count ||
-        spmd.ordinary_pool_task_count > task_count - spmd.cooperative_task_count)
-        return false;
+    if (spmd.cooperative_task_count > task_count || spmd.mix_task_count > spmd.cooperative_task_count) return false;
     if (spmd.worker_count == 0)
-        return spmd.cluster_count == 0 && spmd.cooperative_task_count == 0 && spmd.mix_task_count == 0 &&
-               spmd.ordinary_pool_task_count == 0;
+        return spmd.cluster_count == 0 && spmd.cooperative_task_count == 0 && spmd.mix_task_count == 0;
     return spmd.worker_count <= SCHEDULER_WORKER_CAPACITY && spmd.worker_count % PLATFORM_CORES_PER_BLOCKDIM == 0 &&
            spmd.cluster_count == spmd.worker_count / PLATFORM_CORES_PER_BLOCKDIM;
 }
 
 inline bool scheduler_plan_spmd_storage(uint64_t *cursor, AicoreSchedulerLayout *layout) {
     if (cursor == nullptr || layout == nullptr) return false;
-    if (layout->spmd.ordinary_pool_task_count != 0) {
-        if (layout->task_count > static_cast<uint64_t>(INT32_MAX)) return false;
-        uint64_t pool_bytes = 0;
-        if (!scheduler_layout_checked_mul(
-                2 * scheduler_ordinary_pool_word_count(layout->task_count), sizeof(SchedulerOrdinaryPoolWord),
-                &pool_bytes
-            ) ||
-            !scheduler_layout_reserve(
-                cursor, pool_bytes, alignof(SchedulerOrdinaryPoolWord), &layout->ordinary_pool_words_offset
-            ))
-            return false;
-    }
     if (layout->spmd.cooperative_task_count == 0) return true;
     layout->admission_member_word_count = (layout->spmd.worker_count + 63) / 64;
     uint64_t bytes = 0;
@@ -1737,7 +1676,6 @@ inline bool scheduler_plan_protocol_storage(uint64_t *cursor, AicoreSchedulerLay
     protocol.worker_count = layout->spmd.worker_count;
     protocol.trace_count = trace_count;
     protocol.cooperative_task_count = layout->spmd.cooperative_task_count;
-    protocol.ordinary_pool_task_count = layout->spmd.ordinary_pool_task_count;
     if (!scheduler_layout_checked_mul(protocol.cooperative_task_count, protocol.worker_count, &protocol.member_count))
         return false;
     uint64_t bytes = 0;
@@ -1750,10 +1688,7 @@ inline bool scheduler_plan_protocol_storage(uint64_t *cursor, AicoreSchedulerLay
         SCHEDULER_PROTOCOL_RESERVE(protocol.member_count, SchedulerProtocolMemberTrace, protocol.members_offset) &&
         SCHEDULER_PROTOCOL_RESERVE(protocol.trace_count, SchedulerProtocolBlockTrace, protocol.blocks_offset) &&
         SCHEDULER_PROTOCOL_RESERVE(protocol.trace_count, SchedulerProtocolExecutionTrace, protocol.executions_offset) &&
-        SCHEDULER_PROTOCOL_RESERVE(protocol.worker_count, SchedulerProtocolWorkerTrace, protocol.workers_offset) &&
-        (protocol.ordinary_pool_task_count == 0 ||
-         (scheduler_layout_checked_mul(protocol.task_count, sizeof(SchedulerProtocolTaskActor), &bytes) &&
-          scheduler_layout_reserve(cursor, bytes, SCHEDULER_STATE_ALIGNMENT, &protocol.pool_publications_offset)));
+        SCHEDULER_PROTOCOL_RESERVE(protocol.worker_count, SchedulerProtocolWorkerTrace, protocol.workers_offset);
 #undef SCHEDULER_PROTOCOL_RESERVE
     if (valid) protocol.storage_end_offset = *cursor;
     return valid;
@@ -1822,8 +1757,7 @@ inline bool
 scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout, uint64_t device_base_address) {
     if (base == nullptr || (reinterpret_cast<uintptr_t>(base) & (SCHEDULER_STATE_ALIGNMENT - 1)) != 0 ||
         device_base_address == 0 || (device_base_address & (SCHEDULER_STATE_ALIGNMENT - 1)) != 0 ||
-        layout.total_size > UINT64_MAX - device_base_address || layout.spmd.ordinary_pool_task_count > INT32_MAX ||
-        layout.spmd.ordinary_pool_task_count > layout.task_count)
+        layout.total_size > UINT64_MAX - device_base_address)
         return false;
     __builtin_memset(base, 0, static_cast<size_t>(layout.total_size));
     if (layout.protocol_layout_offset != 0) {
@@ -1887,10 +1821,6 @@ scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout,
     summary->group_mailboxes_offset = layout.group_mailboxes_offset;
     summary->mix_close_seals_offset = layout.mix_close_seals_offset;
     summary->protocol_layout_offset = layout.protocol_layout_offset;
-    summary->ordinary_pool_word_task_capacity =
-        layout.spmd.ordinary_pool_task_count != 0 ? SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY : 0;
-    summary->ordinary_pool_task_count = static_cast<uint32_t>(layout.spmd.ordinary_pool_task_count);
-    summary->ordinary_pool_words_offset = layout.ordinary_pool_words_offset;
     if (layout.spmd.cooperative_task_count != 0) {
         for (uint64_t task = 0; task < layout.task_count; ++task) {
             const uint64_t offset = layout.admission_records_offset + task * layout.admission_record_stride;
@@ -1925,7 +1855,6 @@ inline bool scheduler_init_spmd_task_records(void *base, const AicoreSchedulerLa
     auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(base, layout.task_metadata_offset);
     uint64_t cooperative_count = 0;
     uint64_t mix_count = 0;
-    uint64_t ordinary_pool_count = 0;
     for (uint64_t task = 0; task < layout.task_count; ++task) {
         const auto &meta = metadata[task];
         if (!scheduler_task_is_executable(meta.flags) || scheduler_task_is_inline(meta.flags)) continue;
@@ -1939,14 +1868,10 @@ inline bool scheduler_init_spmd_task_records(void *base, const AicoreSchedulerLa
             (scheduler_task_has_predicate(meta.flags) && (meta.logical_block_num != 1 || active_subtasks != 1)) ||
             meta.timing_slot < -1 || meta.timing_slot >= SCHEDULER_TASK_TIMING_SLOT_COUNT)
             return false;
-        if (layout.spmd.ordinary_pool_task_count != 0 &&
-            scheduler_ordinary_pool_shape(meta.flags, meta.active_mask, meta.logical_block_num))
-            ++ordinary_pool_count;
-        else if (scheduler_task_requires_admission(meta)) ++cooperative_count;
+        if (scheduler_task_requires_admission(meta)) ++cooperative_count;
         if (scheduler_task_is_mix(meta.flags)) ++mix_count;
     }
-    if (cooperative_count != layout.spmd.cooperative_task_count || mix_count != layout.spmd.mix_task_count ||
-        ordinary_pool_count != layout.spmd.ordinary_pool_task_count)
+    if (cooperative_count != layout.spmd.cooperative_task_count || mix_count != layout.spmd.mix_task_count)
         return false;
 
     auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, layout.graph_summary_offset);
@@ -1961,10 +1886,7 @@ inline bool scheduler_init_spmd_task_records(void *base, const AicoreSchedulerLa
     uint64_t mix_index = 0;
     for (uint64_t task = 0; task < layout.task_count; ++task) {
         const auto &meta = metadata[task];
-        if (!scheduler_task_requires_admission(meta) ||
-            (layout.spmd.ordinary_pool_task_count != 0 &&
-             scheduler_ordinary_pool_shape(meta.flags, meta.active_mask, meta.logical_block_num)))
-            continue;
+        if (!scheduler_task_requires_admission(meta)) continue;
         auto *record = scheduler_state_at<SchedulerAdmissionRecord>(
             base, layout.admission_records_offset + task * layout.admission_record_stride
         );

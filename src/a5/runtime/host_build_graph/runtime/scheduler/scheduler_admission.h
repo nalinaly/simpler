@@ -34,8 +34,7 @@ scheduler_initialize_admission(__gm__ void *base, const SchedulerLocalState *loc
     const uint64_t workers = local->config.runtime_worker_count;
     const uint64_t clusters = local->config.cluster_count;
     if (summary->cooperative_task_count > local->config.graph->task_count ||
-        summary->mix_task_count > summary->cooperative_task_count ||
-        summary->ordinary_pool_task_count > local->config.graph->task_count - summary->cooperative_task_count)
+        summary->mix_task_count > summary->cooperative_task_count)
         return false;
     SchedulerAdmissionLocalState next{};
     next.epoch = summary->run_epoch;
@@ -45,28 +44,6 @@ scheduler_initialize_admission(__gm__ void *base, const SchedulerLocalState *loc
     next.log_offset = summary->admission_log_offset;
     next.capacity = summary->cooperative_task_count;
     next.member_word_count = summary->admission_member_word_count;
-    next.ordinary_pool_words_offset = summary->ordinary_pool_words_offset;
-    if (summary->ordinary_pool_task_count != 0) {
-        uint64_t pool_end = 0;
-        if (summary->ordinary_pool_word_task_capacity != SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY ||
-            local->config.graph->node_map_address != 0 || local->config.graph->build_control_address != 0 ||
-            local->config.graph->task_count > static_cast<uint64_t>(INT32_MAX) || workers == 0 ||
-            workers > SCHEDULER_WORKER_CAPACITY || workers != clusters * PLATFORM_CORES_PER_BLOCKDIM ||
-            summary->worker_count != workers || summary->cluster_count != clusters ||
-            next.ordinary_pool_words_offset == 0 || (next.ordinary_pool_words_offset & 127) != 0 ||
-            next.ordinary_pool_words_offset < local->config.graph_summary_offset + sizeof(SchedulerGraphSummary) ||
-            !scheduler_admission_range_end(
-                next.ordinary_pool_words_offset,
-                2 * scheduler_ordinary_pool_word_count(local->config.graph->task_count),
-                sizeof(SchedulerOrdinaryPoolWord), &pool_end
-            ) ||
-            pool_end > UINT64_MAX - reinterpret_cast<uintptr_t>(base) ||
-            (next.capacity != 0 && pool_end > next.control_offset))
-            return false;
-        next.ordinary_pool_cursor = local->worker_id() % local->config.graph->task_count;
-    } else if (next.ordinary_pool_words_offset != 0 || summary->ordinary_pool_word_task_capacity != 0) {
-        return false;
-    }
     if (next.capacity == 0) {
         if (next.control_offset != 0 || next.records_offset != 0 || next.record_stride != 0 || next.log_offset != 0 ||
             next.member_word_count != 0)
@@ -326,10 +303,6 @@ inline __aicore__ SchedulerAdmissionResult scheduler_try_claim_admission(
     const int64_t task = candidate.task_ref;
     if (admission->capacity == 0 || !scheduler_task_ref_valid(graph, task) ||
         !scheduler_task_requires_admission(scheduler_load_dispatch_metadata(base, local, task, 0))) {
-        scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_RECORD);
-        return SchedulerAdmissionResult::ERROR;
-    }
-    if (scheduler_task_uses_ordinary_pool(local, scheduler_load_dispatch_metadata(base, local, task, 0))) {
         scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ADMISSION_INVALID_RECORD);
         return SchedulerAdmissionResult::ERROR;
     }
@@ -924,13 +897,6 @@ inline __aicore__ bool scheduler_ordered_park_ordinary(
             );
         candidate.predicate_cached = slot.predicate_cached;
         candidate.predicate_pass = slot.predicate_pass;
-        if (candidate.ready.source == SchedulerReadySource::ORDINARY_POOL &&
-            (candidate.pool_reservation.phase != SchedulerOrdinaryPoolPhase::CONFIRMED ||
-             candidate.pool_reservation.task_ref != slot.task_ref ||
-             candidate.pool_reservation.block_idx != slot.block_idx))
-            return scheduler_admission_fail(
-                graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
-            );
         candidate.slot_index = UINT8_MAX;
         local->local_ready_mask &= static_cast<uint8_t>(~(1U << index));
         scheduler_initialize_free_slot(&slot);
@@ -1005,25 +971,6 @@ static inline __aicore__ bool scheduler_ordered_can_enter_slot(
         return scheduler_admission_fail(
             graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
         );
-    auto &execution = admission->pool_executions[slot_index];
-    if (execution.phase != SchedulerOrdinaryPoolPhase::EMPTY)
-        return scheduler_admission_fail(graph, local, run, slot.task_ref, SchedulerErrorSite::BLOCK_COMPLETION_INVALID);
-    if (candidate.ready.source == SchedulerReadySource::ORDINARY_POOL) {
-        if (candidate.pool_reservation.task_ref != slot.task_ref ||
-            candidate.pool_reservation.block_idx != slot.block_idx ||
-            !scheduler_ordinary_pool_token_valid(
-                scheduler_ordinary_pool_view(base, local), candidate.pool_reservation,
-                SchedulerOrdinaryPoolPhase::CONFIRMED
-            ))
-            return scheduler_admission_fail(
-                graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
-            );
-        execution = candidate.pool_reservation;
-    } else if (candidate.pool_reservation.phase != SchedulerOrdinaryPoolPhase::EMPTY) {
-        return scheduler_admission_fail(
-            graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
-        );
-    }
     if constexpr (RecordProtocol)
         scheduler_protocol_execution_permit(base, local, slot_index, observed_tail, admission->capacity != 0);
     admission->next_candidate = static_cast<uint8_t>((slot.candidate_index + 1) % SCHEDULER_PENDING_SLOT_COUNT);

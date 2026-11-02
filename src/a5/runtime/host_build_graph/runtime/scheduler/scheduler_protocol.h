@@ -36,9 +36,6 @@ inline __aicore__ bool scheduler_protocol_bind(__gm__ void *base, const Local *l
     if (local->profiling != nullptr) local->profiling->protocol_layout_offset = 0;
     auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, local->config.graph_summary_offset);
     scheduler_observe_cache_line(&summary->protocol_layout_offset);
-    if (summary->ordinary_pool_word_task_capacity !=
-        (summary->ordinary_pool_task_count != 0 ? SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY : 0))
-        return false;
     const uint64_t offset = summary->protocol_layout_offset;
     if (offset == 0) return true;
     if (local->profiling == nullptr || (offset & 127) != 0 ||
@@ -53,7 +50,6 @@ inline __aicore__ bool scheduler_protocol_bind(__gm__ void *base, const Local *l
         layout->worker_count > SCHEDULER_WORKER_CAPACITY ||
         layout->worker_count != local->config.runtime_worker_count || local->worker_id() >= layout->worker_count ||
         layout->cooperative_task_count != summary->cooperative_task_count ||
-        layout->ordinary_pool_task_count != summary->ordinary_pool_task_count ||
         layout->cooperative_task_count > layout->task_count ||
         layout->member_count != layout->cooperative_task_count * layout->worker_count ||
         layout->storage_end_offset > UINT64_MAX - reinterpret_cast<uintptr_t>(base))
@@ -74,17 +70,9 @@ inline __aicore__ bool scheduler_protocol_bind(__gm__ void *base, const Local *l
         ) ||
         !scheduler_protocol_check_region(
             layout->workers_offset, layout->worker_count, sizeof(SchedulerProtocolWorkerTrace), limit, &end
-        ))
+        ) ||
+        end != limit)
         return false;
-    if (layout->ordinary_pool_task_count != 0) {
-        if (!scheduler_protocol_check_region(
-                layout->pool_publications_offset, layout->task_count, sizeof(SchedulerProtocolTaskActor), limit, &end
-            ))
-            return false;
-    } else if (layout->pool_publications_offset != 0) {
-        return false;
-    }
-    if (end != limit) return false;
     auto *worker = scheduler_state_at<SchedulerProtocolWorkerTrace>(base, layout->workers_offset) + local->worker_id();
     scheduler_observe_cache_line(worker);
     if (worker->run_epoch != layout->run_epoch || worker->worker_index != local->worker_id() ||
@@ -314,10 +302,7 @@ inline __aicore__ void scheduler_protocol_task_done(__gm__ void *base, const Loc
     metadata.flags = source->flags;
     metadata.logical_block_num = source->logical_block_num;
     uint64_t order = UINT64_MAX;
-    const bool pooled =
-        local->admission != nullptr && local->admission->ordinary_pool_words_offset != 0 &&
-        scheduler_ordinary_pool_shape(metadata.flags, scheduler_task_lanes(*source), metadata.logical_block_num);
-    if (scheduler_task_requires_admission(metadata) && !pooled) {
+    if (scheduler_task_requires_admission(metadata)) {
         const auto *admission = local->admission;
         if (admission == nullptr || admission->current_task_ref != task || admission->epoch != layout->run_epoch) {
             scheduler_protocol_fail(base, local, layout, SCHEDULER_PROTOCOL_INVALID_IDENTITY);

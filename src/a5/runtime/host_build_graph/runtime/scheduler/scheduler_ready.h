@@ -15,7 +15,6 @@
 #include "scheduler_graph.h"
 #include "scheduler_error.h"
 #include "scheduler_ssbuf.h"
-#include "scheduler_ordinary_pool.h"
 
 enum class SchedulerRouteResult : uint64_t {
     READY_TO_ENQUEUE = 1,
@@ -124,7 +123,6 @@ struct SchedulerReadyClaim {
 
 struct SchedulerOrderedCandidate {
     SchedulerReadyClaim ready{};
-    SchedulerOrdinaryPoolReservation pool_reservation{};
     uint8_t slot_index{UINT8_MAX};
     bool predicate_cached{false};
     bool predicate_pass{true};
@@ -165,9 +163,6 @@ struct SchedulerAdmissionLocalState {
     bool ticket_exhausted{false};
     SchedulerOrderedCandidate candidates[SCHEDULER_PENDING_SLOT_COUNT]{};
     SchedulerGmMixLocalState gm_mix{};
-    uint64_t ordinary_pool_words_offset{0};
-    uint64_t ordinary_pool_cursor{0};
-    SchedulerOrdinaryPoolReservation pool_executions[SCHEDULER_PENDING_SLOT_COUNT]{};
     // READY freezes topology for this run. This cache contains membership
     // facts only, never a task frontier or an execution permission.
     uint64_t topology_cube_words[(SCHEDULER_WORKER_CAPACITY + 63) / 64]{};
@@ -175,9 +170,9 @@ struct SchedulerAdmissionLocalState {
     uint64_t topology_worker_count{0};
 };
 
-static_assert(sizeof(SchedulerOrderedCandidate) == 72, "ordered candidate size changed");
+static_assert(sizeof(SchedulerOrderedCandidate) == 48, "ordered candidate size changed");
 static_assert(sizeof(SchedulerGmMixLocalState) == 56, "GM group-local state size changed");
-static_assert(sizeof(SchedulerAdmissionLocalState) == 400, "admission-local state size changed");
+static_assert(sizeof(SchedulerAdmissionLocalState) == 288, "admission-local state size changed");
 
 struct SchedulerFreeSlotClaim {
     uint64_t worker_id{UINT64_MAX};
@@ -390,31 +385,6 @@ static_assert(
     sizeof(void *) != 8 || sizeof(SchedulerLocalProfilingState) == 248, "64-bit local profiling size changed"
 );
 
-inline __aicore__ SchedulerOrdinaryPoolView
-scheduler_ordinary_pool_view(__gm__ void *base, const SchedulerLocalState *local) {
-    if (base == nullptr || local == nullptr || local->admission == nullptr ||
-        local->admission->ordinary_pool_words_offset == 0 || local->config.graph == nullptr ||
-        local->config.graph->node_map_address != 0 || local->config.graph->build_control_address != 0)
-        return {};
-    const uint64_t count = local->config.graph->task_count;
-    const uint64_t words = scheduler_ordinary_pool_word_count(count);
-    return {
-        scheduler_state_at<SchedulerOrdinaryPoolWord>(base, local->admission->ordinary_pool_words_offset) +
-            local->config.self_core_type * words,
-        scheduler_state_at<SchedulerTaskControl>(base, local->config.task_controls_offset),
-        scheduler_state_at<SchedulerTaskMetadata>(base, local->config.task_metadata_offset),
-        count,
-        local->admission->epoch,
-        local->config.self_core_type,
-    };
-}
-
-inline __aicore__ bool
-scheduler_task_uses_ordinary_pool(const SchedulerLocalState *local, const SchedulerTaskMetadata &metadata) {
-    return local->admission != nullptr && local->admission->ordinary_pool_words_offset != 0 &&
-           scheduler_ordinary_pool_shape(metadata.flags, metadata.active_mask, metadata.logical_block_num);
-}
-
 // Called once after READY acquire, before any bootstrap or mailbox operation.
 // Each invocation owns a fresh SchedulerLocalState; no cache survives a run.
 // Failure leaves local partially initialized; the caller must not use it.
@@ -608,7 +578,6 @@ inline __aicore__ uint32_t scheduler_metadata_core_type_index(uint8_t subtask_sl
 inline __aicore__ uint8_t scheduler_metadata_single_subtask_slot(LaneMask active_mask) {
     if (active_mask == LaneMask::aic()) return 0;
     if (active_mask == LaneMask::aiv0()) return 1;
-    if (active_mask == LaneMask::aiv1()) return 2;
     return UINT8_MAX;
 }
 
@@ -995,14 +964,6 @@ inline __aicore__ void scheduler_capture_execution_identity(
     trace->execution_order_key = UINT64_MAX;
     trace->execution_group_seq = 0;
     uint32_t flags = SCHEDULER_TRACE_IDENTITY_CAPTURED;
-    if (summary->ordinary_pool_task_count != 0) {
-        const auto *metadata = scheduler_task_metadata_at(base, local, slot.task_ref);
-        flags |= static_cast<uint32_t>(metadata->flags) << SCHEDULER_TRACE_TASK_FLAGS_SHIFT;
-        flags |= static_cast<uint32_t>(scheduler_task_lanes(*metadata).raw()) << SCHEDULER_TRACE_ACTIVE_MASK_SHIFT;
-        if (local->admission != nullptr &&
-            local->admission->pool_executions[pending_slot].phase == SchedulerOrdinaryPoolPhase::CONFIRMED)
-            flags |= SCHEDULER_TRACE_ORDINARY_POOL;
-    }
     if (payload->function_bin_addr != 0) flags |= SCHEDULER_TRACE_EXECUTED;
     if (slot.cooperative && local->admission != nullptr) {
         trace->execution_order_key = local->admission->scan_cursor;

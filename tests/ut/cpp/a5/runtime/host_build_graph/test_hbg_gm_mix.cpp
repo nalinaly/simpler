@@ -57,13 +57,11 @@ uint64_t gm_trace_capacity(const std::vector<GmShape> &shapes) {
     return maximum;
 }
 
-SchedulerSpmdRequirements
-gm_requirements(const std::vector<GmShape> &shapes, uint32_t clusters, bool ordinary_pool = false) {
+SchedulerSpmdRequirements gm_requirements(const std::vector<GmShape> &shapes, uint32_t clusters) {
     SchedulerSpmdRequirements result{clusters * 3, clusters, 0, 0};
     for (const auto &shape : shapes) {
         const bool mix = shape.mask.is_mix();
-        if (ordinary_pool && !mix && shape.blocks > 1 && !shape.sync_start) ++result.ordinary_pool_task_count;
-        else if (mix || shape.blocks > 1) ++result.cooperative_task_count;
+        if (mix || shape.blocks > 1) ++result.cooperative_task_count;
         if (mix) ++result.mix_task_count;
     }
     return result;
@@ -81,12 +79,9 @@ struct GmExecution {
 };
 
 struct GmMixFixture {
-    explicit GmMixFixture(
-        const std::vector<GmShape> &shapes, bool protocol_profiling = false, uint32_t clusters = 2,
-        bool ordinary_pool = false
-    ) :
+    explicit GmMixFixture(const std::vector<GmShape> &shapes, bool protocol_profiling = false, uint32_t clusters = 2) :
         storage(
-            shapes.size(), clusters * 3, gm_trace_capacity(shapes), gm_requirements(shapes, clusters, ordinary_pool),
+            shapes.size(), clusters * 3, gm_trace_capacity(shapes), gm_requirements(shapes, clusters),
             protocol_profiling
         ),
         graph(shapes.size()),
@@ -293,57 +288,6 @@ struct GmMixFixture {
 };
 
 class HbgGmMixResourceScope : public ::testing::TestWithParam<LaneMask> {};
-
-TEST(HbgGmMixOrdinaryPool, AllMixMasksPreemptPreparedPoolBlocksAndRetireEveryLane) {
-    for (const auto mask : kMixMasks) {
-        SCOPED_TRACE(lane_names(mask));
-        GmMixFixture fixture({{5, LaneMask::aic()}, {7, LaneMask::aiv1()}, {3, mask}}, true, 2, true);
-        ASSERT_TRUE(fixture.enqueue(0));
-        ASSERT_TRUE(fixture.enqueue(1));
-        for (uint32_t worker = 0; worker < fixture.locals.size(); ++worker)
-            ASSERT_TRUE(fixture.fill(worker));
-        ASSERT_GT(fixture.control(0)->claim_tickets, 0U);
-        ASSERT_GT(fixture.control(1)->claim_tickets, 0U);
-        ASSERT_TRUE(fixture.admit(2));
-        std::vector<std::tuple<int64_t, uint32_t, uint8_t>> observed;
-        const unsigned expected = 12 + 3 * mask.count();
-        for (unsigned pass = 0; pass < 128 && observed.size() < expected; ++pass) {
-            for (uint32_t worker = 0; worker < fixture.locals.size(); ++worker) {
-                ASSERT_TRUE(fixture.fill(worker)) << fixture.run()->error_site;
-                GmExecution execution{};
-                if (!fixture.begin(worker, &execution)) continue;
-                ASSERT_GE(execution.task, 0);
-                ASSERT_LT(execution.task, 3);
-                const auto &metadata = fixture.storage.metadata[execution.task];
-                ASSERT_LT(execution.block, metadata.logical_block_num);
-                ASSERT_TRUE(metadata.active_mask.has(static_cast<SubtaskSlot>(execution.subtask)));
-                if (execution.task != 2) EXPECT_NE(fixture.admissions[worker].current_task_ref, 2);
-                const auto key = std::make_tuple(execution.task, execution.block, execution.subtask);
-                ASSERT_EQ(std::find(observed.begin(), observed.end(), key), observed.end());
-                observed.push_back(key);
-                ASSERT_TRUE(fixture.complete(execution));
-            }
-        }
-        EXPECT_EQ(observed.size(), expected);
-        for (unsigned pass = 0; pass < 8; ++pass)
-            for (uint32_t worker = 0; worker < fixture.locals.size(); ++worker)
-                ASSERT_TRUE(fixture.fill(worker));
-        for (uint32_t task = 0; task < 3; ++task) {
-            EXPECT_EQ(fixture.control(task)->completed_blocks, fixture.storage.metadata[task].logical_block_num);
-            EXPECT_EQ(fixture.control(task)->state, static_cast<int64_t>(SchedulerTaskState::DONE));
-        }
-        EXPECT_EQ(fixture.admissions[0].capacity, 1U);
-        const auto *workers = scheduler_state_at<SchedulerProtocolWorkerTrace>(
-            fixture.base(), fixture.storage.layout.protocol.workers_offset
-        );
-        for (uint32_t worker = 0; worker < fixture.locals.size(); ++worker) {
-            bool done = false;
-            ASSERT_TRUE(fixture.drain(worker, &done));
-            EXPECT_TRUE(done);
-            EXPECT_EQ(workers[worker].error_flags, 0U);
-        }
-    }
-}
 
 TEST_P(HbgGmMixResourceScope, UnusedVectorDoesNotBlockAOneCubeOneVectorGroup) {
     const LaneMask mask = GetParam();

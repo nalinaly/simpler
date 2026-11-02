@@ -94,45 +94,6 @@ TEST_F(ProtocolExportFixture, IncompleteAndErroneousRecordsAreExportedRatherThan
 
 TEST_F(ProtocolExportFixture, RejectsStaleEpoch) { EXPECT_THROW(dump(1), std::invalid_argument); }
 
-TEST_F(ProtocolExportFixture, NonPoolImageCannotDeclareAPoolWordMapping) {
-    at<SchedulerGraphSummary>(layout.graph_summary_offset)->ordinary_pool_word_task_capacity = 16;
-    EXPECT_THROW(dump(), std::invalid_argument);
-}
-
-TEST(HbgPoolProtocolExport, SnapshotCarriesCheckedWordMappingAndEveryEngineWord) {
-    AicoreSchedulerLayout layout{};
-    ASSERT_TRUE(scheduler_plan_layout(33, 33, 0, &layout, false, 66, {3, 1, 0, 0, 33}, true));
-    scheduler_test::SchedulerStateBuffer storage(layout);
-    scheduler_test::BasicGraphBuffer<64> graph(33);
-    auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
-    for (uint32_t task = 0; task < 33; ++task) {
-        graph.executable(task, 0);
-        metadata[task].flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD;
-        metadata[task].active_mask = LaneMask::aic();
-        metadata[task].logical_block_num = 2;
-        metadata[task].trace_index_base = task * 2;
-        metadata[task].timing_slot = -1;
-        metadata[task].kernel_ids[0] = 1;
-        metadata[task].kernel_ids[1] = metadata[task].kernel_ids[2] = UINT16_MAX;
-    }
-    ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
-    const auto tasks =
-        scheduler_protocol_freeze_graph(graph.graph(), std::vector<SchedulerTaskMetadata>(metadata, metadata + 33));
-    const auto dump = [&] {
-        return scheduler_export_protocol(storage.base(), layout.total_size, layout, 37, tasks);
-    };
-    const auto json = dump();
-    EXPECT_NE(json.find("\"schema\":\"hbg-native-protocol-v11\""), std::string::npos);
-    EXPECT_NE(json.find("\"word_task_capacity\":16"), std::string::npos);
-    EXPECT_NE(json.find("\"word_count\":3"), std::string::npos);
-    EXPECT_NE(json.find("\"words\":[0,0,0,0,0,0]"), std::string::npos);
-    auto *summary = scheduler_state_at<SchedulerGraphSummary>(storage.base(), layout.graph_summary_offset);
-    for (uint32_t capacity : {0U, 8U, 64U, UINT32_MAX}) {
-        summary->ordinary_pool_word_task_capacity = capacity;
-        EXPECT_THROW(dump(), std::invalid_argument);
-    }
-}
-
 TEST_F(ProtocolExportFixture, RejectsCorruptHeaderBeforeFollowingItsOffsets) {
     at<SchedulerProtocolLayout>(layout.protocol_layout_offset)->executions_offset = UINT64_MAX;
     EXPECT_THROW(dump(), std::invalid_argument);

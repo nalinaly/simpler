@@ -1,0 +1,49 @@
+{
+  "baseline": "b6eebb80cdc29b78c6acf5eedc82658f81b2dbae",
+  "reverted_commit": "f0722c567aba2e59c9dbc4bce7c0188af1e09597",
+  "runtime_sha256": {
+    "before": {
+      "libhost_runtime.so": "e3606aeadcc58fb455a83aee8fdc65cc5d4495664705978305e8b5c4b2f1d9b1",
+      "libaicpu_kernel.so": "b4ac69992e7e68a7c22656b58e1b0c0489839d4f8459eb022b2ed63e8023521f",
+      "aicore_kernel.o": "688167d1f11b7911a857a10e687f9ffd1ed9c535b4f23aef751d94459ac94363"
+    },
+    "after": {
+      "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+      "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+      "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+    }
+  },
+  "binding_commit": "b6eebb80cdc29b78c6acf5eedc82658f81b2dbae",
+  "binding_sha256": "8363355b80a4e4d0c357e4359a1d0b39326e6b06e7a71ce4da7ce9cf932ec498",
+  "callables": {
+    "csa": {
+      "file": "csa-callable.bin",
+      "sha256": "8fea231c62f22fb1ae5fc18c8d0139daab8cb33466418505abd606c0dbbcbadb",
+      "children": 54,
+      "tensors": 52
+    },
+    "swa": {
+      "file": "swa-callable.bin",
+      "sha256": "d3234284f28000a1ea9c3eb8e7c96775b2201b8168e8e7ac6637b236aba3a9bd",
+      "children": 28,
+      "tensors": 28
+    }
+  },
+  "level": 1,
+  "comparison_task": "task_20261102_193434_288713321682",
+  "device": 3,
+  "warmup_per_batch": 5,
+  "measured_per_batch": 100,
+  "batches_per_case": 4,
+  "sample_filtering": "none",
+  "validation": {
+    "cpp_targets_passed": 8,
+    "python_checks_passed": 1179,
+    "initial_python_failures_fixed": 42,
+    "l1_captures": 840,
+    "golden_rounds": 48,
+    "formal_samples": 800,
+    "full_repository_suite_run": false
+  },
+  "scope": "Ordinary-pool rollback; latest Graph v12 and Qwen changes retained; healthy-error cleanup and simulation timeout retained."
+}

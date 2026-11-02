@@ -161,4 +161,6 @@ Newest first.
 
 - [2026-11 — A5 SWA publisher-local adoption](2026-11-a5-swa-publisher-adoption.md): correctness and L4 passed, but only 2/4 frozen pairs improved (median +0.162%); candidate reverted to idle-nop1024.
 
-- [2026-11 — A5 SWA ordinary block pool](../zh-cn/investigations/2026-11-a5-swa-ordinary-pool.md): 16-task words have provisional baseline gains; the pool-only startup fix passes the full simulation suite and native SWA audit. The final frozen comparison is 37.03% slower than TMR. Work stopped after that comparison; the full hardware sweep remains incomplete.
+- [2026-11 — A5 SWA ordinary block pool](../zh-cn/investigations/2026-11-a5-swa-ordinary-pool.md): candidate rolled back at the user's request. Same-card L1 comparisons on the latest Graph baseline improve CSA Device by 6.44% and SWA by 8.73%; focused C++/Python checks and numerical validation pass. Earlier candidate experiments and incomplete full hardware sweep remain documented.
+
+- [2026-11 — CSA historical latency regression](../zh-cn/investigations/2026-11-csa-historical-latency-regression.md): historical 1.893 ms rebuilds to 2.205 ms on the current environment; same-card current source takes 2.552 ms. Recent ordinary-pool commit adds 2.19%; PMU specialization recovers only 0.74% and is not adopted.

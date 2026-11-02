@@ -1,0 +1,85 @@
+{
+  "passed": true,
+  "commit": "b6eebb80cdc29b78c6acf5eedc82658f81b2dbae",
+  "github_branch": "feat/fully_distributed_within_core",
+  "local_modification": "ordinary pool rollback retained",
+  "device": 3,
+  "profile_level": 1,
+  "warmup": 5,
+  "formal_rounds": 100,
+  "scheduler": "resident AICore, mode 1 freshly published each call",
+  "parameters": {
+    "layers": 40,
+    "batch": 16,
+    "seq_len": 3500,
+    "max_seq": 5500,
+    "seed": 1234,
+    "rtol": 0.05,
+    "atol": 0.1
+  },
+  "metrics": {
+    "device_us": {
+      "samples": 100,
+      "median_ms": 52.319979,
+      "mean_ms": 52.329505319999996,
+      "p95_ms": 53.7375227,
+      "min_ms": 50.438190000000006,
+      "max_ms": 55.135309
+    },
+    "host_us": {
+      "samples": 100,
+      "median_ms": 90.495235,
+      "mean_ms": 98.149145,
+      "p95_ms": 120.71166399999998,
+      "min_ms": 85.97208,
+      "max_ms": 160.03631
+    },
+    "kernel_window_us": {
+      "samples": 100,
+      "median_ms": 51.214831999999994,
+      "mean_ms": 51.22885589,
+      "p95_ms": 52.63553105,
+      "min_ms": 49.338741,
+      "max_ms": 54.03685
+    },
+    "startup_us": {
+      "samples": 100,
+      "median_ms": 1.0316939999999999,
+      "mean_ms": 1.0318349,
+      "p95_ms": 1.0364446,
+      "min_ms": 1.024769,
+      "max_ms": 1.043045
+    },
+    "tail_us": {
+      "samples": 100,
+      "median_ms": 0.068901,
+      "mean_ms": 0.0688146,
+      "p95_ms": 0.07056925,
+      "min_ms": 0.066133,
+      "max_ms": 0.073718
+    }
+  },
+  "golden_passed": [
+    "out",
+    "k_cache",
+    "v_cache"
+  ],
+  "physical_executions_per_call": 19208,
+  "actual_kernel_count": 37,
+  "committed_device_bytes": 41035621292,
+  "sample_filtering": "none",
+  "scope": "40-layer decoder fixed-input replay, replicated fixture weights, no LM head or sampling; KV writes idempotent",
+  "initial_attempt": "Failed after one successful L1 capture due to an unnecessary L3-only flush call in the measurement driver; excluded from formal results; corrected retry passed.",
+  "runtime_sha256": {
+    "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+    "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+    "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+  },
+  "callable_sha256": "39949fcf6aa82728312959e92640f106ab68cdbac92935fd79c838464cab7f58",
+  "source_state": "b6eebb80c with the ordinary pool rollback in this commit",
+  "github_recheck": {
+    "branch": "feat/fully_distributed_within_core",
+    "sha": "b6eebb80cdc29b78c6acf5eedc82658f81b2dbae",
+    "checked_at": "2026-11-02T12:14:01.044Z"
+  }
+}

@@ -96,7 +96,6 @@ inline __aicore__ bool scheduler_ordered_poll_may_progress(
     if (ready_probe_empty != nullptr) *ready_probe_empty = false;
     if (ack_prefilter_phase != nullptr) *ack_prefilter_phase = SchedulerGmMixPhase::IDLE;
     const auto &admission = *local->admission;
-    if (admission.ordinary_pool_words_offset != 0) return true;
     if (admission.capacity == 0 || admission.scan_cursor > admission.capacity || local->local_ready_mask != 0 ||
         !scheduler_task_ref_is_null(admission.pending_task_ref))
         return true;
@@ -217,7 +216,6 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
             progress = true;
         }
         const auto metadata = scheduler_load_dispatch_metadata(base, local, candidate.ready.task_ref, profiling_level);
-        if (candidate.ready.source == SchedulerReadySource::ORDINARY_POOL) continue;
         if (scheduler_task_is_inline(metadata.flags)) {
             const int64_t task_ref = candidate.ready.task_ref;
             candidate = {};
@@ -225,24 +223,6 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
                 *failed = true;
                 return progress;
             }
-            progress = true;
-            continue;
-        }
-        if (scheduler_task_uses_ordinary_pool(local, metadata)) {
-            if constexpr (RecordProtocol)
-                scheduler_protocol_pool_publication(base, local, candidate.ready.task_ref, true);
-            if (candidate.slot_index != UINT8_MAX ||
-                candidate.pool_reservation.phase != SchedulerOrdinaryPoolPhase::EMPTY ||
-                !scheduler_ordinary_pool_publish(scheduler_ordinary_pool_view(base, local), candidate.ready.task_ref)) {
-                scheduler_admission_fail(
-                    graph, local, run, candidate.ready.task_ref, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID
-                );
-                *failed = true;
-                return progress;
-            }
-            if constexpr (RecordProtocol)
-                scheduler_protocol_pool_publication(base, local, candidate.ready.task_ref, false);
-            candidate = {};
             progress = true;
             continue;
         }
@@ -317,73 +297,14 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
         if (!closed) return progress;
     }
     bool may_prepare = false;
-    SchedulerOrdinaryPoolDiscovery pool_observation{};
     for (uint32_t offset = 0; offset < SCHEDULER_PENDING_SLOT_COUNT; ++offset) {
         const uint32_t candidate_index = (admission->next_candidate + offset) % SCHEDULER_PENDING_SLOT_COUNT;
         auto &candidate = admission->candidates[candidate_index];
-        // Execute a Ready kernel before reserving or rebuilding another pool
-        // block. Task publication and cooperative discovery remain active above.
-        if (local->local_ready_mask != 0 && admission->ordinary_pool_words_offset != 0 &&
-            (scheduler_task_ref_is_null(candidate.ready.task_ref) ||
-             candidate.ready.source == SchedulerReadySource::ORDINARY_POOL))
-            continue;
-        if (scheduler_task_ref_is_null(candidate.ready.task_ref) && admission->ordinary_pool_words_offset != 0) {
-            bool free_slot = false;
-            for (const auto &slot : local->slots)
-                free_slot = free_slot || slot.state == SchedulerDispatchSlotState::FREE;
-            if (!free_slot) continue;
-            if (!may_prepare) {
-                if (!scheduler_can_enter_ordinary(graph, base, local, run, admission, &may_prepare)) {
-                    *failed = true;
-                    return progress;
-                }
-                if (!may_prepare) return progress;
-            }
-            const auto pool = scheduler_ordinary_pool_view(base, local);
-            int64_t task = SCHEDULER_TASK_REF_INVALID;
-            const auto found =
-                scheduler_ordinary_pool_discover(pool, &admission->ordinary_pool_cursor, &task, &pool_observation);
-            if (found == SchedulerOrdinaryPoolResult::ERROR) {
-                scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::ORDERED_CANDIDATE_INVALID);
-                *failed = true;
-                return progress;
-            }
-            if (found != SchedulerOrdinaryPoolResult::FOUND) continue;
-            const uint64_t claim_before = RecordProtocol && scheduler_protocol_enabled(local) ? scheduler_cycles() : 0;
-            const auto reserved =
-                scheduler_ordinary_pool_reserve(pool, task, &candidate.pool_reservation, &pool_observation);
-            const uint64_t claim_after = RecordProtocol && scheduler_protocol_enabled(local) ? scheduler_cycles() : 0;
-            if (reserved == SchedulerOrdinaryPoolResult::ERROR) {
-                scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::BLOCK_CURSOR_INVALID);
-                *failed = true;
-                return progress;
-            }
-            if (reserved != SchedulerOrdinaryPoolResult::RESERVED) continue;
-            if constexpr (RecordProtocol)
-                scheduler_protocol_pool_claim(base, local, candidate.pool_reservation, claim_before, claim_after);
-            uint64_t previous = UINT64_MAX;
-            if (scheduler_ordinary_pool_confirm(
-                    pool, &candidate.pool_reservation, &previous,
-                    SchedulerPoolConfirmationObserver<RecordProtocol>{base, local, &candidate.pool_reservation}
-                ) != SchedulerOrdinaryPoolResult::CONFIRMED) {
-                scheduler_admission_fail(graph, local, run, task, SchedulerErrorSite::BLOCK_CURSOR_INVALID);
-                *failed = true;
-                return progress;
-            }
-            candidate.ready.task_ref = task;
-            candidate.ready.source = SchedulerReadySource::ORDINARY_POOL;
-            progress = true;
-        }
         if (scheduler_task_ref_is_null(candidate.ready.task_ref) || candidate.slot_index != UINT8_MAX) continue;
         // Completion can retain a direct successor after discovery. Inline
         // services and cooperative successors still require that path.
         const auto metadata = scheduler_load_dispatch_metadata(base, local, candidate.ready.task_ref, profiling_level);
-        if (scheduler_task_is_inline(metadata.flags) ||
-            (scheduler_task_requires_admission(metadata) && !scheduler_task_uses_ordinary_pool(local, metadata)))
-            continue;
-        if (scheduler_task_uses_ordinary_pool(local, metadata) &&
-            candidate.ready.source != SchedulerReadySource::ORDINARY_POOL)
-            continue;
+        if (scheduler_task_is_inline(metadata.flags) || scheduler_task_requires_admission(metadata)) continue;
         for (uint32_t index = 0; index < SCHEDULER_PENDING_SLOT_COUNT; ++index) {
             auto &slot = local->slots[index];
             if (slot.state != SchedulerDispatchSlotState::FREE) continue;
@@ -398,8 +319,6 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
             slot.candidate_index = static_cast<uint8_t>(candidate_index);
             slot.predicate_cached = candidate.predicate_cached;
             slot.predicate_pass = candidate.predicate_pass;
-            if (candidate.ready.source == SchedulerReadySource::ORDINARY_POOL)
-                slot.block_idx = candidate.pool_reservation.block_idx;
             slot.state = SchedulerDispatchSlotState::FILLING;
             candidate.ready.publication_mode = SchedulerPublicationMode::DISPATCH;
             const SchedulerFreeSlotClaim claim{local->worker_id(), index, slot.generation, local->config.self_lane};
@@ -441,11 +360,6 @@ static inline __aicore__ bool scheduler_drain_ordered_exit(
         if (!scheduler_task_ref_is_null(candidate.ready.task_ref))
             return scheduler_admission_fail(
                 graph, local, run, candidate.ready.task_ref, SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
-            );
-    for (const auto &execution : admission->pool_executions)
-        if (execution.phase != SchedulerOrdinaryPoolPhase::EMPTY)
-            return scheduler_admission_fail(
-                graph, local, run, execution.task_ref, SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
             );
     for (const auto &slot : local->slots)
         if (slot.state != SchedulerDispatchSlotState::FREE)

@@ -1,0 +1,805 @@
+{
+  "baseline": "b6eebb80cdc29b78c6acf5eedc82658f81b2dbae",
+  "level": 1,
+  "order_per_case": [
+    "before",
+    "after",
+    "after",
+    "before"
+  ],
+  "batches": [
+    {
+      "case": "csa",
+      "arm": "before",
+      "batch": "01",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 2401.8105,
+          "mean_us": 2403.58491,
+          "p95_us": 2442.24975,
+          "min_us": 2360.125,
+          "max_us": 2464.759
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 2401.811,
+          "mean_us": 2403.58502,
+          "p95_us": 2442.24975,
+          "min_us": 2360.125,
+          "max_us": 2464.759
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 29023.46,
+          "mean_us": 34469.3163,
+          "p95_us": 60272.756499999996,
+          "min_us": 26111.3,
+          "max_us": 129822.66
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 151.38,
+          "mean_us": 151.74198,
+          "p95_us": 157.36005,
+          "min_us": 145.329,
+          "max_us": 163.108
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 2186.358,
+          "mean_us": 2188.19124,
+          "p95_us": 2225.4807499999997,
+          "min_us": 2145.949,
+          "max_us": 2247.456
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 63.556,
+          "mean_us": 63.6518,
+          "p95_us": 65.88795,
+          "min_us": 61.125,
+          "max_us": 74.632
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "e3606aeadcc58fb455a83aee8fdc65cc5d4495664705978305e8b5c4b2f1d9b1",
+        "libaicpu_kernel.so": "b4ac69992e7e68a7c22656b58e1b0c0489839d4f8459eb022b2ed63e8023521f",
+        "aicore_kernel.o": "688167d1f11b7911a857a10e687f9ffd1ed9c535b4f23aef751d94459ac94363"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "csa",
+      "arm": "after",
+      "batch": "02",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 2246.273,
+          "mean_us": 2247.55073,
+          "p95_us": 2282.7076500000003,
+          "min_us": 2210.254,
+          "max_us": 2303.04
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 2246.273,
+          "mean_us": 2247.55084,
+          "p95_us": 2282.7076500000003,
+          "min_us": 2210.254,
+          "max_us": 2303.04
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 40579.13,
+          "mean_us": 38777.7808,
+          "p95_us": 49091.322499999995,
+          "min_us": 25477.94,
+          "max_us": 63118.86
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 149.74349999999998,
+          "mean_us": 149.89771,
+          "p95_us": 155.9117,
+          "min_us": 140.362,
+          "max_us": 158.847
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 2040.8925,
+          "mean_us": 2041.74343,
+          "p95_us": 2073.4251,
+          "min_us": 2005.808,
+          "max_us": 2098.695
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 55.7725,
+          "mean_us": 55.9097,
+          "p95_us": 57.09785,
+          "min_us": 54.173,
+          "max_us": 58.087
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+        "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+        "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "csa",
+      "arm": "after",
+      "batch": "03",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 2247.227,
+          "mean_us": 2249.53424,
+          "p95_us": 2280.0141000000003,
+          "min_us": 2206.529,
+          "max_us": 2296.444
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 2247.227,
+          "mean_us": 2249.53437,
+          "p95_us": 2280.0141000000003,
+          "min_us": 2206.53,
+          "max_us": 2296.445
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 27957.555,
+          "mean_us": 29622.3627,
+          "p95_us": 46450.537,
+          "min_us": 24967.11,
+          "max_us": 63446.66
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 149.647,
+          "mean_us": 150.00439,
+          "p95_us": 155.7892,
+          "min_us": 144.709,
+          "max_us": 161.507
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 2041.0684999999999,
+          "mean_us": 2042.19868,
+          "p95_us": 2074.3340000000003,
+          "min_us": 2000.862,
+          "max_us": 2093.188
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 57.198499999999996,
+          "mean_us": 57.3313,
+          "p95_us": 58.778099999999995,
+          "min_us": 55.949,
+          "max_us": 59.437
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+        "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+        "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "csa",
+      "arm": "before",
+      "batch": "04",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 2399.2905,
+          "mean_us": 2404.57018,
+          "p95_us": 2441.98335,
+          "min_us": 2369.303,
+          "max_us": 2472.158
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 2399.291,
+          "mean_us": 2404.57031,
+          "p95_us": 2441.98335,
+          "min_us": 2369.303,
+          "max_us": 2472.159
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 43496.33,
+          "mean_us": 43837.0443,
+          "p95_us": 60718.89799999999,
+          "min_us": 25964.8,
+          "max_us": 160693.49
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 150.414,
+          "mean_us": 151.1093,
+          "p95_us": 156.55974999999998,
+          "min_us": 142.734,
+          "max_us": 160.678
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 2185.307,
+          "mean_us": 2190.76202,
+          "p95_us": 2225.0856,
+          "min_us": 2155.616,
+          "max_us": 2255.394
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 62.7575,
+          "mean_us": 62.69899,
+          "p95_us": 64.68285,
+          "min_us": 60.09,
+          "max_us": 65.5
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "e3606aeadcc58fb455a83aee8fdc65cc5d4495664705978305e8b5c4b2f1d9b1",
+        "libaicpu_kernel.so": "b4ac69992e7e68a7c22656b58e1b0c0489839d4f8459eb022b2ed63e8023521f",
+        "aicore_kernel.o": "688167d1f11b7911a857a10e687f9ffd1ed9c535b4f23aef751d94459ac94363"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "swa",
+      "arm": "before",
+      "batch": "05",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 953.3755,
+          "mean_us": 954.84264,
+          "p95_us": 978.35155,
+          "min_us": 928.38,
+          "max_us": 989.586
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 953.3755,
+          "mean_us": 954.84274,
+          "p95_us": 978.35255,
+          "min_us": 928.38,
+          "max_us": 989.586
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 35093.425,
+          "mean_us": 32640.3507,
+          "p95_us": 41966.2915,
+          "min_us": 12505.76,
+          "max_us": 45911.42
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 147.3,
+          "mean_us": 147.46,
+          "p95_us": 151.8963,
+          "min_us": 142.142,
+          "max_us": 157.04
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 736.5425,
+          "mean_us": 737.80381,
+          "p95_us": 756.5029,
+          "min_us": 714.716,
+          "max_us": 768.307
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 68.1745,
+          "mean_us": 69.57893,
+          "p95_us": 79.85785,
+          "min_us": 60.852,
+          "max_us": 83.999
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "e3606aeadcc58fb455a83aee8fdc65cc5d4495664705978305e8b5c4b2f1d9b1",
+        "libaicpu_kernel.so": "b4ac69992e7e68a7c22656b58e1b0c0489839d4f8459eb022b2ed63e8023521f",
+        "aicore_kernel.o": "688167d1f11b7911a857a10e687f9ffd1ed9c535b4f23aef751d94459ac94363"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "swa",
+      "arm": "after",
+      "batch": "06",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 865.78,
+          "mean_us": 868.29257,
+          "p95_us": 891.6541,
+          "min_us": 843.605,
+          "max_us": 920.749
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 865.7805000000001,
+          "mean_us": 868.29266,
+          "p95_us": 891.65415,
+          "min_us": 843.605,
+          "max_us": 920.749
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 29249.155,
+          "mean_us": 25154.8572,
+          "p95_us": 38280.1645,
+          "min_us": 11348.91,
+          "max_us": 40132.64
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 143.403,
+          "mean_us": 143.95444,
+          "p95_us": 150.98024999999998,
+          "min_us": 135.494,
+          "max_us": 156.655
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 666.5695000000001,
+          "mean_us": 669.08514,
+          "p95_us": 692.62595,
+          "min_us": 643.475,
+          "max_us": 720.84
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 55.0085,
+          "mean_us": 55.25308,
+          "p95_us": 57.05845,
+          "min_us": 52.732,
+          "max_us": 62.854
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+        "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+        "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "swa",
+      "arm": "after",
+      "batch": "07",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 873.8,
+          "mean_us": 876.75216,
+          "p95_us": 903.05335,
+          "min_us": 853.197,
+          "max_us": 931.04
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 873.8005,
+          "mean_us": 876.75231,
+          "p95_us": 903.05335,
+          "min_us": 853.197,
+          "max_us": 931.04
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 35511.965,
+          "mean_us": 28273.769,
+          "p95_us": 42484.775,
+          "min_us": 11770.1,
+          "max_us": 43702.75
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 143.099,
+          "mean_us": 143.77087,
+          "p95_us": 151.91395,
+          "min_us": 136.331,
+          "max_us": 156.927
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 675.44,
+          "mean_us": 676.32296,
+          "p95_us": 702.67265,
+          "min_us": 654.909,
+          "max_us": 728.87
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 56.5625,
+          "mean_us": 56.65848,
+          "p95_us": 58.570499999999996,
+          "min_us": 54.255,
+          "max_us": 67.608
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "fdce8bbafccafe6e15528c1a583e3ebcf3a7e9a18c12160dab2a79ee639a0cb4",
+        "libaicpu_kernel.so": "cd715f1e158ce72837ac3150e117d5b1f0ab3dd026d2ce9526f5f6ba1fc93380",
+        "aicore_kernel.o": "5d9ebd3f013544bf566ab8df55b837ba6aa3b24eb4291b4c2d5a1be122a587dc"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    },
+    {
+      "case": "swa",
+      "arm": "before",
+      "batch": "08",
+      "device": 3,
+      "metrics": {
+        "device_us": {
+          "samples": 100,
+          "median_us": 954.0845,
+          "mean_us": 955.11332,
+          "p95_us": 976.7817,
+          "min_us": 925.092,
+          "max_us": 993.154
+        },
+        "device_raw_us": {
+          "samples": 100,
+          "median_us": 954.0845,
+          "mean_us": 955.11352,
+          "p95_us": 976.7817,
+          "min_us": 925.092,
+          "max_us": 993.155
+        },
+        "host_us": {
+          "samples": 100,
+          "median_us": 36230.71,
+          "mean_us": 31969.4315,
+          "p95_us": 43653.4595,
+          "min_us": 12524.43,
+          "max_us": 50453.63
+        },
+        "startup_us": {
+          "samples": 100,
+          "median_us": 149.058,
+          "mean_us": 149.00878,
+          "p95_us": 153.18345,
+          "min_us": 141.816,
+          "max_us": 160.516
+        },
+        "kernel_window_us": {
+          "samples": 100,
+          "median_us": 733.9165,
+          "mean_us": 734.93176,
+          "p95_us": 756.5674,
+          "min_us": 714.404,
+          "max_us": 770.714
+        },
+        "tail_us": {
+          "samples": 100,
+          "median_us": 71.2385,
+          "mean_us": 71.17298,
+          "p95_us": 82.71679999999999,
+          "min_us": 58.815,
+          "max_us": 89.121
+        }
+      },
+      "runtime_sha256": {
+        "libhost_runtime.so": "e3606aeadcc58fb455a83aee8fdc65cc5d4495664705978305e8b5c4b2f1d9b1",
+        "libaicpu_kernel.so": "b4ac69992e7e68a7c22656b58e1b0c0489839d4f8459eb022b2ed63e8023521f",
+        "aicore_kernel.o": "688167d1f11b7911a857a10e687f9ffd1ed9c535b4f23aef751d94459ac94363"
+      },
+      "golden_rounds": [
+        0,
+        1,
+        2,
+        102,
+        103,
+        104
+      ]
+    }
+  ],
+  "fixtures": "Original frozen inputs and golden, no regeneration",
+  "sample_filtering": "none",
+  "timestamp_rounding": "Canonical emitted Device duration; raw cycle-derived duration differs by at most 1 ns",
+  "cases": {
+    "csa": {
+      "before": {
+        "device_us": {
+          "samples": 200,
+          "median_us": 2401.3955,
+          "mean_us": 2404.077545,
+          "p95_us": 2442.24975,
+          "min_us": 2360.125,
+          "max_us": 2472.158
+        },
+        "device_raw_us": {
+          "samples": 200,
+          "median_us": 2401.3955,
+          "mean_us": 2404.077665,
+          "p95_us": 2442.24975,
+          "min_us": 2360.125,
+          "max_us": 2472.159
+        },
+        "host_us": {
+          "samples": 200,
+          "median_us": 31877.65,
+          "mean_us": 39153.1803,
+          "p95_us": 60584.118999999984,
+          "min_us": 25964.8,
+          "max_us": 160693.49
+        },
+        "startup_us": {
+          "samples": 200,
+          "median_us": 151.0895,
+          "mean_us": 151.42564,
+          "p95_us": 157.32184999999998,
+          "min_us": 142.734,
+          "max_us": 163.108
+        },
+        "kernel_window_us": {
+          "samples": 200,
+          "median_us": 2185.818,
+          "mean_us": 2189.47663,
+          "p95_us": 2225.4807499999997,
+          "min_us": 2145.949,
+          "max_us": 2255.394
+        },
+        "tail_us": {
+          "samples": 200,
+          "median_us": 63.0725,
+          "mean_us": 63.175395,
+          "p95_us": 65.42685,
+          "min_us": 60.09,
+          "max_us": 74.632
+        }
+      },
+      "after": {
+        "device_us": {
+          "samples": 200,
+          "median_us": 2246.768,
+          "mean_us": 2248.542485,
+          "p95_us": 2280.3414,
+          "min_us": 2206.529,
+          "max_us": 2303.04
+        },
+        "device_raw_us": {
+          "samples": 200,
+          "median_us": 2246.768,
+          "mean_us": 2248.542605,
+          "p95_us": 2280.3414,
+          "min_us": 2206.53,
+          "max_us": 2303.04
+        },
+        "host_us": {
+          "samples": 200,
+          "median_us": 29545.265,
+          "mean_us": 34200.07175,
+          "p95_us": 48767.70849999999,
+          "min_us": 24967.11,
+          "max_us": 63446.66
+        },
+        "startup_us": {
+          "samples": 200,
+          "median_us": 149.647,
+          "mean_us": 149.95105,
+          "p95_us": 155.83435,
+          "min_us": 140.362,
+          "max_us": 161.507
+        },
+        "kernel_window_us": {
+          "samples": 200,
+          "median_us": 2040.8925,
+          "mean_us": 2041.971055,
+          "p95_us": 2074.3340000000003,
+          "min_us": 2000.862,
+          "max_us": 2098.695
+        },
+        "tail_us": {
+          "samples": 200,
+          "median_us": 56.6665,
+          "mean_us": 56.6205,
+          "p95_us": 58.5747,
+          "min_us": 54.173,
+          "max_us": 59.437
+        }
+      },
+      "device_delta_us": -154.62750000000005,
+      "device_change_percent": -6.439068449990848,
+      "pairs": [
+        {
+          "before_batch": "01",
+          "after_batch": "02",
+          "change_percent": -6.475843951885462,
+          "delta_us": -155.5374999999999
+        },
+        {
+          "before_batch": "04",
+          "after_batch": "03",
+          "change_percent": -6.337852794399024,
+          "delta_us": -152.0635000000002
+        }
+      ]
+    },
+    "swa": {
+      "before": {
+        "device_us": {
+          "samples": 200,
+          "median_us": 953.5250000000001,
+          "mean_us": 954.97798,
+          "p95_us": 978.35155,
+          "min_us": 925.092,
+          "max_us": 993.154
+        },
+        "device_raw_us": {
+          "samples": 200,
+          "median_us": 953.5250000000001,
+          "mean_us": 954.97813,
+          "p95_us": 978.35255,
+          "min_us": 925.092,
+          "max_us": 993.155
+        },
+        "host_us": {
+          "samples": 200,
+          "median_us": 35772.46000000001,
+          "mean_us": 32304.8911,
+          "p95_us": 42637.62499999999,
+          "min_us": 12505.76,
+          "max_us": 50453.63
+        },
+        "startup_us": {
+          "samples": 200,
+          "median_us": 147.917,
+          "mean_us": 148.23439,
+          "p95_us": 152.91805,
+          "min_us": 141.816,
+          "max_us": 160.516
+        },
+        "kernel_window_us": {
+          "samples": 200,
+          "median_us": 735.5515,
+          "mean_us": 736.367785,
+          "p95_us": 756.55515,
+          "min_us": 714.404,
+          "max_us": 770.714
+        },
+        "tail_us": {
+          "samples": 200,
+          "median_us": 69.71600000000001,
+          "mean_us": 70.375955,
+          "p95_us": 80.40695,
+          "min_us": 58.815,
+          "max_us": 89.121
+        }
+      },
+      "after": {
+        "device_us": {
+          "samples": 200,
+          "median_us": 870.2815,
+          "mean_us": 872.522365,
+          "p95_us": 899.04745,
+          "min_us": 843.605,
+          "max_us": 931.04
+        },
+        "device_raw_us": {
+          "samples": 200,
+          "median_us": 870.2815,
+          "mean_us": 872.522485,
+          "p95_us": 899.04745,
+          "min_us": 843.605,
+          "max_us": 931.04
+        },
+        "host_us": {
+          "samples": 200,
+          "median_us": 32522.075,
+          "mean_us": 26714.3131,
+          "p95_us": 41319.907,
+          "min_us": 11348.91,
+          "max_us": 43702.75
+        },
+        "startup_us": {
+          "samples": 200,
+          "median_us": 143.23149999999998,
+          "mean_us": 143.862655,
+          "p95_us": 151.5043,
+          "min_us": 135.494,
+          "max_us": 156.927
+        },
+        "kernel_window_us": {
+          "samples": 200,
+          "median_us": 670.8615,
+          "mean_us": 672.70405,
+          "p95_us": 693.9474,
+          "min_us": 643.475,
+          "max_us": 728.87
+        },
+        "tail_us": {
+          "samples": 200,
+          "median_us": 55.8035,
+          "mean_us": 55.95578,
+          "p95_us": 58.4325,
+          "min_us": 52.732,
+          "max_us": 67.608
+        }
+      },
+      "device_delta_us": -83.24350000000004,
+      "device_change_percent": -8.73008049081042,
+      "pairs": [
+        {
+          "before_batch": "05",
+          "after_batch": "06",
+          "change_percent": -9.187932771505036,
+          "delta_us": -87.59550000000002
+        },
+        {
+          "before_batch": "08",
+          "after_batch": "07",
+          "change_percent": -8.414820699843684,
+          "delta_us": -80.2845000000001
+        }
+      ]
+    }
+  }
+}

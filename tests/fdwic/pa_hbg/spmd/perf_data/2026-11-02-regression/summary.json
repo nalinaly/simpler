@@ -1,0 +1,440 @@
+{
+  "historical_retained_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+  "historical_retained_device_us": 1893.461,
+  "historical_latest_bounded_context_device_us": 1890.006,
+  "historical_environment": {
+    "device": "Ascend950PR_958b",
+    "cann": "9.1.0-weekly-20260708",
+    "pto_isa": "418de18dde8fa33773dc5c384fdfe5506463b628"
+  },
+  "current_environment": {
+    "device": "Ascend950DT_9581",
+    "cann": "9.3.0",
+    "pto_isa": "217bb98952a8f9004b95fe938da97d8d5f68f702",
+    "shared_local_compiler_flag": "-fno-jump-tables"
+  },
+  "historical_source_environment_build_delta": {
+    "before_us": 1893.461,
+    "after_us": 2205.2799999999997,
+    "delta_us": 311.81899999999973,
+    "change_percent": 16.46820293631608
+  },
+  "source_delta_on_current_environment": {
+    "before_us": 2205.2799999999997,
+    "after_us": 2551.858,
+    "delta_us": 346.57800000000043,
+    "change_percent": 15.715827468620791
+  },
+  "recent_idle_context_delta": {
+    "before_us": 3088.207,
+    "after_us": 2502.0924999999997,
+    "delta_us": -586.1145000000001,
+    "change_percent": -18.979119599171955
+  },
+  "recent_ordinary_pool_commit_delta": {
+    "before_us": 2502.0924999999997,
+    "after_us": 2556.9575,
+    "delta_us": 54.86500000000024,
+    "change_percent": 2.1927646559829483
+  },
+  "pmu_specialization_experiment_delta": {
+    "before_us": 2547.6485000000002,
+    "after_us": 2528.876,
+    "delta_us": -18.772500000000036,
+    "change_percent": -0.7368559673754049
+  },
+  "business_kernel_count": 54,
+  "validation": "All 14 benchmark batches: 3 x 7 golden checks, 5 warmups, 100 unfiltered measurements; strict L4 for H/A/B/P and original current C; PMU on: C/P each 7 outputs and 2308 positive-cycle rows.",
+  "limits": [
+    "Hardware, CANN/compiler, PTO-ISA and build-flag contributions are not individually isolated.",
+    "The historical latest 1.890006 ms includes an uncommitted candidate; the exact retained source at 1.893461 ms was used for reconstruction.",
+    "The older-source-to-current runtime gap is reproduced, but no single mechanism explains the whole gap.",
+    "PMU specialization recovers less than 1%; this experiment is not promoted.",
+    "Ordinary-pool commit attribution is to the whole commit, not an individual branch or data structure.",
+    "Focused CSA validation only; full repository tests were not run."
+  ],
+  "date": "2026-11-02",
+  "decision": "Investigation; no production runtime change. PMU specialization not adopted.",
+  "comparisons": {
+    "recent-full": {
+      "device": 5,
+      "order": [
+        "A",
+        "B",
+        "C",
+        "C",
+        "B",
+        "A"
+      ],
+      "sample_filtering": "none",
+      "arms": {
+        "A": {
+          "name": "before_recent_changes",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "1b3208eb55b1a5f7ffa3c6d898dd17718c58d2b6",
+            "simpler_branch": "",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "b359ecd62f42e98495d806d4b35105205b0f5dd5afece644bf0d4d50f7c9458b",
+              "libaicpu_kernel.so": "0838da0d6d71f64070e38faa22f66677d7366a07c70ae8f90f03541d2af4d276",
+              "aicore_kernel.o": "4ade78d6bbe0c7c83fc2e2336e9ba049fd3d0162cda05ba6058d129c41d9538c"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 3088.207,
+              "mean_us": 3027.52393,
+              "p95_us": 3170.0416,
+              "min_us": 2612.912,
+              "max_us": 3212.06,
+              "batch_medians_us": [
+                3065.822,
+                3096.602
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 22145.11,
+              "mean_us": 22360.01035,
+              "p95_us": 27064.631499999992,
+              "min_us": 16192.91,
+              "max_us": 39371.6,
+              "batch_medians_us": [
+                22343.879999999997,
+                22145.11
+              ]
+            }
+          }
+        },
+        "B": {
+          "name": "after_idle_context",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "c8b1fa12baaabf1e56022bb3846ae11dc70fc4bb",
+            "simpler_branch": "",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "59df7d471921e020d30c1976626ebbb99ce44eb90b24701f6a9885a6461eafed",
+              "libaicpu_kernel.so": "ec7be203b61d9e6f305760d54dd8b93734aedc8673c5546d97ad86efc05bf1e0",
+              "aicore_kernel.o": "d1afb2eac34de19ac901588eae23d69ed22c84de6b962d521e1e28006fab7da1"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2502.0924999999997,
+              "mean_us": 2501.58703,
+              "p95_us": 2540.03445,
+              "min_us": 2447.967,
+              "max_us": 2566.1,
+              "batch_medians_us": [
+                2502.0924999999997,
+                2502.8689999999997
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 21635.505,
+              "mean_us": 23738.86795,
+              "p95_us": 35094.29899999999,
+              "min_us": 14745.78,
+              "max_us": 46169.7,
+              "batch_medians_us": [
+                20273.395,
+                25277.16
+              ]
+            }
+          }
+        },
+        "C": {
+          "name": "current",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "4ca09a7d2499e99ea1d57a5c5491bf11d0d1fc9b",
+            "simpler_branch": "feat/fully_distributed_within_core",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "44ef88b56e00ecd126d4a63015e9566ed3980835a703d93a581390ed21a80b7b",
+              "libaicpu_kernel.so": "28a09c1a8286d7e450eef2667f7794f251c40edd6419a170627545149ec7b7e4",
+              "aicore_kernel.o": "b1c3c30d776922b8266fb5ffe1faf260b1bd523f12aca3675179c42fc04e54b9"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2556.9575,
+              "mean_us": 2555.98975,
+              "p95_us": 2599.44755,
+              "min_us": 2472.917,
+              "max_us": 2633.766,
+              "batch_medians_us": [
+                2552.057,
+                2561.545
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 29685.83,
+              "mean_us": 28460.01415,
+              "p95_us": 37077.2555,
+              "min_us": 14976.06,
+              "max_us": 40089.25,
+              "batch_medians_us": [
+                30759.0,
+                29240.495
+              ]
+            }
+          }
+        }
+      }
+    },
+    "historical": {
+      "device": 1,
+      "order": [
+        "H",
+        "C",
+        "C",
+        "H"
+      ],
+      "sample_filtering": "none",
+      "arms": {
+        "H": {
+          "name": "historical_1893us_current_toolchain",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "5274c328d60c1157ea54169a3cb05901bfeb94a9",
+            "simpler_branch": "",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "9b7990367154802548a83ebd441150bac86b10fc3212cc9f117a1c91a9cf0d9f",
+              "libaicpu_kernel.so": "8ee4b81d10a9fe88782a1e4db0aab38286d927c44e3c0409ef9ee7d4448108b4",
+              "aicore_kernel.o": "b7e86ab1e521be203e1708f0e057ef861e79cfd7ed4d40a6f74880f53eb3a5fa"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2205.2799999999997,
+              "mean_us": 2208.206305,
+              "p95_us": 2238.19585,
+              "min_us": 2166.228,
+              "max_us": 2275.915,
+              "batch_medians_us": [
+                2204.242,
+                2205.482
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 24327.75,
+              "mean_us": 24906.24565,
+              "p95_us": 30969.647499999995,
+              "min_us": 18311.15,
+              "max_us": 46285.89,
+              "batch_medians_us": [
+                22465.64,
+                26449.455
+              ]
+            }
+          }
+        },
+        "C": {
+          "name": "current",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "4ca09a7d2499e99ea1d57a5c5491bf11d0d1fc9b",
+            "simpler_branch": "feat/fully_distributed_within_core",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "44ef88b56e00ecd126d4a63015e9566ed3980835a703d93a581390ed21a80b7b",
+              "libaicpu_kernel.so": "28a09c1a8286d7e450eef2667f7794f251c40edd6419a170627545149ec7b7e4",
+              "aicore_kernel.o": "b1c3c30d776922b8266fb5ffe1faf260b1bd523f12aca3675179c42fc04e54b9"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2551.858,
+              "mean_us": 2550.15855,
+              "p95_us": 2593.19685,
+              "min_us": 2477.883,
+              "max_us": 2649.276,
+              "batch_medians_us": [
+                2547.9965,
+                2554.3775
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 22857.345,
+              "mean_us": 23187.27525,
+              "p95_us": 33425.051999999996,
+              "min_us": 16226.54,
+              "max_us": 37170.29,
+              "batch_medians_us": [
+                22470.75,
+                23644.605
+              ]
+            }
+          }
+        }
+      }
+    },
+    "pmu": {
+      "device": 1,
+      "order": [
+        "P",
+        "C",
+        "C",
+        "P"
+      ],
+      "sample_filtering": "none",
+      "arms": {
+        "P": {
+          "name": "current_pmu_compile_specialization",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "4ca09a7d2499e99ea1d57a5c5491bf11d0d1fc9b",
+            "simpler_branch": "",
+            "tracked_diff_sha256": "d71fed6bc1f77ade10ae723c61bcf73568d19510e6c4f29195e1ff56109af2f4",
+            "runtime_sha256": {
+              "libhost_runtime.so": "3f957ee5e97b598c717fb04884d7803e25ec8389b3c835ac6fd3b2256fde0a49",
+              "libaicpu_kernel.so": "1d851ea72fa47cef6556758b7c7666b2d0b2c1260735bd60ff7adfa6ae081b8e",
+              "aicore_kernel.o": "db536c0176eabb9acd6579ab582fcd2ebd69083bfe0598d52d8f6eac8d14ea0f"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2528.876,
+              "mean_us": 2530.2783,
+              "p95_us": 2572.10325,
+              "min_us": 2459.504,
+              "max_us": 2608.679,
+              "batch_medians_us": [
+                2527.6805,
+                2532.5874999999996
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 23573.78,
+              "mean_us": 25083.22245,
+              "p95_us": 37850.3705,
+              "min_us": 16209.78,
+              "max_us": 39217.16,
+              "batch_medians_us": [
+                23169.825,
+                23957.565000000002
+              ]
+            }
+          }
+        },
+        "C": {
+          "name": "current",
+          "identity": {
+            "runtime": "host_build_graph",
+            "fixture_id": "deepseek-v4-pro-csa-b4-s2-seed0-torch212",
+            "fixture_manifest_sha256": "d1511befaae48a3b692a723320a076064e2ebb1bced193175866c692f9909b45",
+            "torch": "2.12.0+cpu",
+            "simpler_commit": "4ca09a7d2499e99ea1d57a5c5491bf11d0d1fc9b",
+            "simpler_branch": "feat/fully_distributed_within_core",
+            "tracked_diff_sha256": "38d6758fb4c5ea0c0b7c66a0e1807c02eb1851fb54c406700c67295c7bd0c2a6",
+            "runtime_sha256": {
+              "libhost_runtime.so": "44ef88b56e00ecd126d4a63015e9566ed3980835a703d93a581390ed21a80b7b",
+              "libaicpu_kernel.so": "28a09c1a8286d7e450eef2667f7794f251c40edd6419a170627545149ec7b7e4",
+              "aicore_kernel.o": "b1c3c30d776922b8266fb5ffe1faf260b1bd523f12aca3675179c42fc04e54b9"
+            },
+            "case_sources_match_baseline": true,
+            "hbg_orchestration_sha256": "0a516fb17e870b3872f54245a702e4235258aef8d18de4b98a0be57f656810f0",
+            "host_only_arguments": [
+              "hc_attn_scale"
+            ]
+          },
+          "metrics": {
+            "device_us": {
+              "samples": 200,
+              "median_us": 2547.6485000000002,
+              "mean_us": 2549.78476,
+              "p95_us": 2595.1943,
+              "min_us": 2466.901,
+              "max_us": 2634.582,
+              "batch_medians_us": [
+                2542.4575,
+                2551.6490000000003
+              ]
+            },
+            "host_us": {
+              "samples": 200,
+              "median_us": 25230.98,
+              "mean_us": 27647.55785,
+              "p95_us": 39995.988000000005,
+              "min_us": 17798.97,
+              "max_us": 42545.85,
+              "batch_medians_us": [
+                24169.53,
+                28234.510000000002
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "historical_to_current_business_code": {
+    "identical_fingerprints": 1,
+    "same_size": 35,
+    "count": 54
+  },
+  "local_artifacts": "../logs/csa-regression-20261102-153519/ (relative to repository root)"
+}
