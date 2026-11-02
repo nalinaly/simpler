@@ -13,12 +13,57 @@ from collections import defaultdict
 
 from .graph_lane import assign_instance_lanes, graph_lane_metadata
 from .native_graph_audit import CHILD, ENTER_GATE
+from .native_protocol import has_parallel_graph_protocol
+
+
+def _parallel_materialization(graph, instance, operation):
+    plans = {row["index"]: row for row in graph["work_plan"]}
+    rows = [row for row in graph["work"] if row["instance_index"] == instance["index"]]
+    prepared = []
+    for record in rows:
+        plan = plans[record["index"]]
+        prepared.append(
+            operation(
+                "Graph.materialize.work",
+                record,
+                "begin",
+                "writeback_after",
+                instance=instance["index"],
+                public_task_id=instance["parent_id"],
+                work_index=record["index"],
+                region=plan["region"],
+                write_bytes=plan["write_bytes"],
+                first_range=plan["first_range"],
+                range_count=plan["range_count"],
+            )
+        )
+        operation(
+            "Graph.work_contribution",
+            record,
+            "complete_before",
+            "complete_after",
+            instance=instance["index"],
+            work_index=record["index"],
+            remaining_before=record["remaining_before"],
+        )
+    return dict(
+        name="Graph.materialize.parallel",
+        start_time_us=min(row["start_time_us"] for row in prepared),
+        end_time_us=max(row["end_time_us"] for row in prepared),
+        args=dict(
+            instance_index=instance["index"],
+            public_task_id=instance["parent_id"],
+            work_count=len(rows),
+            worker_count=len({row["worker_index"] for row in rows}),
+        ),
+    )
 
 
 def decode_graph_lane(section, tasks, to_us):
     graph = section["graph"]
+    parallel = has_parallel_graph_protocol(section)
     actors = {row["index"]: row["completion"] for row in section["task_events"]}
-    materializations = {row["index"]: row for row in graph["materializations"]}
+    materializations = {row["index"]: row for row in graph["publications" if parallel else "materializations"]}
     nodes = {row["task_ref"]: row for row in graph["nodes"]}
     executions = {row["index"]: row for row in section["executions"]}
     specifications = {row["task_ref"]: row for row in section["tasks"]}
@@ -58,15 +103,19 @@ def decode_graph_lane(section, tasks, to_us):
         index, parent = instance["index"], instance["parent_id"]
         materialize = materializations[index]
         enter, exit_record = actors[instance["enter_ref"]], actors[instance["exit_ref"]]
-        prepared = operation(
-            "Graph.materialize",
-            materialize,
-            "materialize_before",
-            "materialize_after",
-            instance=index,
-            public_task_id=parent,
-            definition_key=materialize["definition_key"],
-            child_count=instance["child_count"],
+        prepared = (
+            _parallel_materialization(graph, instance, operation)
+            if parallel
+            else operation(
+                "Graph.materialize",
+                materialize,
+                "materialize_before",
+                "materialize_after",
+                instance=index,
+                public_task_id=parent,
+                definition_key=materialize["definition_key"],
+                child_count=instance["child_count"],
+            )
         )
         operation(
             "Graph.publish",

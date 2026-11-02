@@ -12,7 +12,8 @@
 from collections import defaultdict
 
 from .native_causality import EXECUTABLE, FANIN, INLINE, MIX, PREDICATE, SPMD, SYNC, point, require
-from .native_protocol import STAMPS, _event_records
+from .native_graph_work import audit_work_events, audit_work_plan
+from .native_protocol import STAMPS, _event_records, has_parallel_graph_protocol
 from .task_id import Space, TaskId
 
 ORDINARY, ENTER, CHILD, EXIT = range(4)
@@ -111,12 +112,13 @@ def _instance(graph, group, instance, definition, epoch):
 
 def validate_graph_manifest(audit):
     graph = audit.raw["graph"]
+    parallel = has_parallel_graph_protocol(audit.raw)
     require(
         0 < graph["instance_count"] <= graph["public_task_count"]
         and graph["remaining_instances"] == 0
         and graph["public_completed"] == graph["public_task_count"]
         and graph["run_epoch"] == audit.raw["run_epoch"]
-        and graph["next_instance"] == graph["instance_count"] + audit.raw["worker_count"],
+        and graph["next_instance"] == graph["instance_count"] + (0 if parallel else audit.raw["worker_count"]),
         "Graph public/build terminal counts mismatch",
     )
     require(
@@ -226,6 +228,8 @@ def validate_graph_manifest(audit):
         all(left[1] <= right[0] for left, right in zip(storage, storage[1:], strict=False)),
         "Graph instances alias mutable child storage",
     )
+    if parallel:
+        audit_work_plan(audit)
 
 
 def _ticket_chain(audit, rows, count, name, first, last):
@@ -244,8 +248,9 @@ def _ticket_chain(audit, rows, count, name, first, last):
 
 def audit_graph_events(audit):
     graph = audit.raw["graph"]
+    parallel = has_parallel_graph_protocol(audit.raw)
     instances = {row["index"]: row for row in graph["instances"]}
-    materializations = {row["index"]: row for row in graph["materializations"]}
+    materializations = {row["index"]: row for row in graph["publications" if parallel else "materializations"]}
     waiters = {row["index"]: row for row in graph["bootstrap"]}
     nodes = {node["task_ref"]: node for node in graph["nodes"]}
     contributions = {row["index"]: row for row in graph["contributions"]}
@@ -266,14 +271,19 @@ def audit_graph_events(audit):
             and instance["materialize_owner"] == record["worker_index"] + 1,
             "Graph materialization identity, owner or status mismatch",
         )
-        audit.before(
-            point(record, "materialize_before"), point(record, "materialize_after"), "reversed Graph materialization"
-        )
-        audit.before(
-            point(record, "materialize_after"),
-            point(record, "publish_before"),
-            "Graph publication before materialization",
-        )
+        if not parallel:
+            audit.before(
+                point(record, "materialize_before"),
+                point(record, "materialize_after"),
+                "reversed Graph materialization",
+            )
+            audit.before(
+                point(record, "materialize_after"),
+                point(record, "publish_before"),
+                "Graph publication before materialization",
+            )
+    if parallel:
+        audit_work_events(audit, instances, materializations)
     last_publish = _ticket_chain(
         audit, list(materializations.values()), len(instances), "GraphPublish", "publish_before", "publish_after"
     )

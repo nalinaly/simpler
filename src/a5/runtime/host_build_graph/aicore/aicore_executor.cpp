@@ -20,6 +20,7 @@
 #include "runtime.h"
 #include "scheduler/scheduler_memory.h"
 #include "scheduler/scheduler_graph_materialize.h"
+#include "scheduler/scheduler_graph_work_state.h"
 #include "scheduler/scheduler_ready.h"
 #include "scheduler/scheduler_watchdog.h"
 
@@ -503,6 +504,143 @@ __aicore__ bool run_ready_dispatch_loop(
 
 struct SchedulerNoProfilingState {};
 
+template <bool WithProfiling>
+__aicore__ bool bootstrap_graph_work(
+    const SchedulerGraphView &graph, __gm__ SchedulerWorkerContext *context, __gm__ SchedulerRunControl *run,
+    __gm__ SchedulerGraphBuildControl *build, const __gm__ SchedulerGraphInstance *instances, uint64_t start,
+    uint64_t timeout_cycles, SchedulerLocalState *local
+) {
+    if (build->work_count > UINT32_MAX || build->work_range_count > UINT32_MAX || build->work_address == 0 ||
+        build->work_address % alignof(SchedulerGraphWork) != 0 || build->work_states_address == 0 ||
+        build->work_states_address % 128 != 0 || build->work_ranges_address == 0 ||
+        build->work_ranges_address % alignof(SchedulerGraphWorkRange) != 0 ||
+        build->work_count > (UINT64_MAX - build->work_address) / sizeof(SchedulerGraphWork) ||
+        build->work_count > (UINT64_MAX - build->work_states_address) / sizeof(SchedulerGraphWorkState) ||
+        build->work_range_count > (UINT64_MAX - build->work_ranges_address) / sizeof(SchedulerGraphWorkRange) ||
+        context->worker_index >= context->runtime_worker_count) {
+        scheduler_record_error(
+            run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+            SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+        );
+        return false;
+    }
+    auto *base = reinterpret_cast<__gm__ void *>(context->scheduler_state_base_address);
+    const auto *work_items = reinterpret_cast<const __gm__ SchedulerGraphWork *>(build->work_address);
+    const auto *ranges = reinterpret_cast<const __gm__ SchedulerGraphWorkRange *>(build->work_ranges_address);
+    auto *states = reinterpret_cast<__gm__ SchedulerGraphWorkState *>(build->work_states_address);
+    const uint64_t epoch = build->run_epoch;
+    while (scheduler_read_error(run) == 0) {
+        const uint64_t index = scheduler_gm_fetch_add(build->next_work, UINT64_C(1));
+        if (index >= build->work_count) break;
+        if (scheduler_watchdog_expired(start, get_sys_cnt_aicore(), timeout_cycles)) {
+            scheduler_record_error(
+                run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::TIMEOUT, &graph, context,
+                SchedulerErrorSite::GRAPH_MATERIALIZE_TIMEOUT
+            );
+            return false;
+        }
+        const auto &work = work_items[index];
+        if (work.instance_index >= build->instance_count || instances[work.instance_index].control_address == 0 ||
+            instances[work.instance_index].control_address % alignof(SchedulerGraphInstanceControl) != 0) {
+            scheduler_record_error(
+                run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+            );
+            return false;
+        }
+        const auto &instance = instances[work.instance_index];
+        auto *control = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(instance.control_address);
+        SchedulerGraphWorkToken token{};
+        if (control->run_epoch != epoch || control->instance_index != work.instance_index ||
+            control->work.begin > build->work_count || control->work.count > build->work_count - control->work.begin ||
+            !scheduler_graph_work_claim(
+                control->work, states[index], index, static_cast<uint32_t>(context->worker_index), epoch, &token
+            )) {
+            scheduler_record_error(
+                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+            );
+            return false;
+        }
+        const uint64_t prior_state =
+            scheduler_gm_compare_exchange(control->materialize_state, UINT64_C(0), UINT64_C(1));
+        if (prior_state == 0) {
+            scheduler_gm_fetch_add(build->next_instance, UINT64_C(1));
+        } else if (prior_state != 1) {
+            scheduler_graph_work_fail(control->work, states[index], token, epoch);
+            scheduler_record_error(
+                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+            );
+            return false;
+        }
+        __gm__ SchedulerGraphProtocolWork *record = nullptr;
+        if constexpr (WithProfiling) record = scheduler_graph_protocol_work_begin(base, local, build, index, work);
+        int32_t failed_child = -1;
+        auto status = scheduler_graph_materialize_work(
+            instance, graph, work, ranges, static_cast<uint32_t>(build->work_range_count), &failed_child
+        );
+        if constexpr (WithProfiling) {
+            if (status == SchedulerGraphResult::OK) scheduler_graph_protocol_work_written(base, local, record);
+            scheduler_graph_protocol_work_complete(base, local, record, true);
+        }
+        if (status == SchedulerGraphResult::OK &&
+            scheduler_watchdog_expired(start, get_sys_cnt_aicore(), timeout_cycles))
+            status = SchedulerGraphResult::TIMEOUT;
+        if (status != SchedulerGraphResult::OK) {
+            scheduler_graph_work_fail(control->work, states[index], token, epoch);
+            if constexpr (WithProfiling) scheduler_graph_protocol_work_complete(base, local, record, false, status);
+            const int64_t failed_ref =
+                failed_child < 0 ? control->enter_ref : static_cast<int64_t>(control->child_begin) + failed_child;
+            scheduler_record_error(
+                run, failed_ref, status, &graph, context,
+                status == SchedulerGraphResult::TIMEOUT ? SchedulerErrorSite::GRAPH_MATERIALIZE_TIMEOUT :
+                                                          SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+            );
+            // The first-error claim precedes this terminal state, so peers
+            // cannot win the claim with a generic invalid-instance error.
+            scheduler_gm_store(control->materialize_state, UINT64_C(3));
+            return false;
+        }
+        uint64_t prior_work = 0;
+        const auto completion =
+            scheduler_graph_work_complete(control->work, states[index], token, build->run_epoch, &prior_work);
+        if constexpr (WithProfiling)
+            scheduler_graph_protocol_work_complete(
+                base, local, record, false,
+                completion == SchedulerGraphWorkCompletion::REJECTED ? SchedulerGraphResult::INVALID_ARGUMENTS :
+                                                                       SchedulerGraphResult::OK,
+                prior_work
+            );
+        if (completion == SchedulerGraphWorkCompletion::REJECTED) {
+            scheduler_record_error(
+                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+            );
+            scheduler_gm_store(control->materialize_state, UINT64_C(3));
+            return false;
+        }
+        if (completion != SchedulerGraphWorkCompletion::LAST) continue;
+        if (scheduler_read_error(run) != 0) return false;
+        __gm__ SchedulerGraphProtocolInstance *publication = nullptr;
+        if constexpr (WithProfiling)
+            publication = scheduler_graph_protocol_parallel_publish_begin(
+                base, local, build, work.instance_index, instance, control->child_count
+            );
+        uint64_t prior_instances = 0;
+        if (!scheduler_graph_work_publish(*control, *build, token, &prior_instances)) {
+            scheduler_record_error(
+                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+            );
+            return false;
+        }
+        if (prior_instances == 1) scheduler_publish_signal(build->materialized, UINT64_C(1));
+        if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, publication, false, prior_instances);
+    }
+    return scheduler_read_error(run) == 0;
+}
+
 template <bool WithProfiling = false>
 __aicore__ bool bootstrap_graph_instances(
     const SchedulerGraphView &graph, __gm__ SchedulerWorkerContext *context, __gm__ SchedulerRunControl *run,
@@ -528,51 +666,58 @@ __aicore__ bool bootstrap_graph_instances(
     }
     auto *base = reinterpret_cast<__gm__ void *>(context->scheduler_state_base_address);
     const uint64_t start = get_sys_cnt_aicore();
-    while (scheduler_read_error(run) == 0) {
-        const uint64_t index = scheduler_gm_fetch_add(build->next_instance, UINT64_C(1));
-        if (index >= build->instance_count) break;
-        const auto &instance = instances[index];
-        if (instance.control_address == 0 || instance.control_address % alignof(SchedulerGraphInstanceControl) != 0) {
-            scheduler_record_error(
-                run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
-                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
-            );
+    if (build->work_count != 0) {
+        if (!bootstrap_graph_work<WithProfiling>(graph, context, run, build, instances, start, timeout_cycles, local))
             return false;
+    } else
+        while (scheduler_read_error(run) == 0) {
+            const uint64_t index = scheduler_gm_fetch_add(build->next_instance, UINT64_C(1));
+            if (index >= build->instance_count) break;
+            const auto &instance = instances[index];
+            if (instance.control_address == 0 ||
+                instance.control_address % alignof(SchedulerGraphInstanceControl) != 0) {
+                scheduler_record_error(
+                    run, SCHEDULER_TASK_REF_INVALID, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                    SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+                );
+                return false;
+            }
+            auto *control = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(instance.control_address);
+            if (control->run_epoch != build->run_epoch ||
+                scheduler_gm_fetch_add(control->materialize_state, UINT64_C(0)) != 0 ||
+                scheduler_gm_compare_exchange(control->materialize_owner, UINT64_C(0), context->worker_index + 1) !=
+                    0) {
+                scheduler_record_error(
+                    run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
+                    SchedulerErrorSite::GRAPH_INSTANCE_INVALID
+                );
+                return false;
+            }
+            __gm__ SchedulerGraphProtocolInstance *record = nullptr;
+            if constexpr (WithProfiling)
+                record = scheduler_graph_protocol_materialize_begin(
+                    base, local, build, index, instance, control->child_count
+                );
+            scheduler_gm_store(control->materialize_state, UINT64_C(1));
+            int32_t failed_child = -1;
+            const auto status = scheduler_graph_materialize(instance, graph, &failed_child);
+            if constexpr (WithProfiling) scheduler_graph_protocol_materialize_end(base, local, record, status);
+            if (status != SchedulerGraphResult::OK) {
+                scheduler_gm_store(control->materialize_state, UINT64_C(3));
+                const int64_t failed_ref =
+                    failed_child < 0 ? control->enter_ref : static_cast<int64_t>(control->child_begin) + failed_child;
+                scheduler_record_error(
+                    run, failed_ref, status, &graph, context, SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
+                );
+                return false;
+            }
+            if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, true);
+            scheduler_gm_store(control->materialize_state, UINT64_C(2));
+            const uint64_t prior = scheduler_gm_fetch_add(build->remaining_instances, UINT64_MAX);
+            if (prior == 1) scheduler_publish_signal(build->materialized, UINT64_C(1));
+            if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, false, prior);
+            if (prior == 0 || prior > build->instance_count) return false;
         }
-        auto *control = reinterpret_cast<__gm__ SchedulerGraphInstanceControl *>(instance.control_address);
-        if (control->run_epoch != build->run_epoch ||
-            scheduler_gm_fetch_add(control->materialize_state, UINT64_C(0)) != 0 ||
-            scheduler_gm_compare_exchange(control->materialize_owner, UINT64_C(0), context->worker_index + 1) != 0) {
-            scheduler_record_error(
-                run, control->enter_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, context,
-                SchedulerErrorSite::GRAPH_INSTANCE_INVALID
-            );
-            return false;
-        }
-        __gm__ SchedulerGraphProtocolInstance *record = nullptr;
-        if constexpr (WithProfiling)
-            record =
-                scheduler_graph_protocol_materialize_begin(base, local, build, index, instance, control->child_count);
-        scheduler_gm_store(control->materialize_state, UINT64_C(1));
-        int32_t failed_child = -1;
-        const auto status = scheduler_graph_materialize(instance, graph, &failed_child);
-        if constexpr (WithProfiling) scheduler_graph_protocol_materialize_end(base, local, record, status);
-        if (status != SchedulerGraphResult::OK) {
-            scheduler_gm_store(control->materialize_state, UINT64_C(3));
-            const int64_t failed_ref =
-                failed_child < 0 ? control->enter_ref : static_cast<int64_t>(control->child_begin) + failed_child;
-            scheduler_record_error(
-                run, failed_ref, status, &graph, context, SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED
-            );
-            return false;
-        }
-        if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, true);
-        scheduler_gm_store(control->materialize_state, UINT64_C(2));
-        const uint64_t prior = scheduler_gm_fetch_add(build->remaining_instances, UINT64_MAX);
-        if (prior == 1) scheduler_publish_signal(build->materialized, UINT64_C(1));
-        if constexpr (WithProfiling) scheduler_graph_protocol_publish(base, local, record, false, prior);
-        if (prior == 0 || prior > build->instance_count) return false;
-    }
     __gm__ SchedulerGraphProtocolWorker *wait = nullptr;
     if constexpr (WithProfiling) wait = scheduler_graph_protocol_wait_begin(base, local, build);
     uint64_t polls = 0;

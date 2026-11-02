@@ -241,10 +241,12 @@ inline std::string scheduler_export_protocol(
     std::ostringstream out;
     {
         JsonObject root(out);
-        // v9 combines Graph evidence with resource-scoped Mix membership.
+        // Parallel Graph evidence adds work owners without changing the
+        // resource-scoped Mix contract or relabelling older captures.
         root.string(
             "schema", plan.ordinary_pool_task_count != 0 ? "hbg-native-protocol-v11" :
                       graph_manifest == nullptr          ? "hbg-native-protocol-v8" :
+                      layout.graph.work_count != 0       ? "hbg-native-protocol-v12" :
                                                            "hbg-native-protocol-v9"
         );
         root.number("close_seal_stride", sizeof(SchedulerMixCloseSeal));

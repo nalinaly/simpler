@@ -31,9 +31,29 @@ struct SchedulerGraphWork {
     uint64_t write_bytes;
 };
 
+// Host initializes these words before launch. Device access is atomic only;
+// no cached store or writeback may overlap the work-state allocation.
+struct SchedulerGraphWorkState {
+    volatile uint64_t owner_state;
+};
+
+struct SchedulerGraphWorkGroup {
+    volatile uint64_t remaining;
+    uint32_t begin;
+    uint32_t count;
+};
+
 static_assert(sizeof(SchedulerGraphWorkRange) == 8);
 static_assert(sizeof(SchedulerGraphWork) == 24);
+static_assert(sizeof(SchedulerGraphWorkState) == 8);
+static_assert(sizeof(SchedulerGraphWorkGroup) == 16);
 static_assert(std::is_standard_layout_v<SchedulerGraphWork> && std::is_trivially_copyable_v<SchedulerGraphWork>);
 static_assert(
     std::is_standard_layout_v<SchedulerGraphWorkRange> && std::is_trivially_copyable_v<SchedulerGraphWorkRange>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerGraphWorkState> && std::is_trivially_copyable_v<SchedulerGraphWorkState>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerGraphWorkGroup> && std::is_trivially_copyable_v<SchedulerGraphWorkGroup>
 );

@@ -38,10 +38,11 @@ pytestmark = [
 ]
 
 
-def _compile(platform):
+def _compile(platform, *, parallel=False):
+    source = "graph_parallel_materialize_failure_orch.cpp" if parallel else "graph_materialize_failure_orch.cpp"
     spec = {
         "orchestration": {
-            "source": str(_HERE / "kernels/orchestration/graph_materialize_failure_orch.cpp"),
+            "source": str(_HERE / "kernels/orchestration" / source),
             "function_name": "aicpu_orchestration_entry",
             "signature": [ArgDirection.INOUT, ArgDirection.INOUT, ArgDirection.IN],
         },
@@ -56,7 +57,7 @@ def _compile(platform):
         ],
     }
     return compile_chip_callable_spec(
-        spec, platform, "host_build_graph", (__name__, platform, _pto_isa_compile_cache_token())
+        spec, platform, "host_build_graph", (__name__, platform, parallel, _pto_isa_compile_cache_token())
     )
 
 
@@ -80,8 +81,22 @@ def test_graph_child_timeout_does_not_release_parent(
     )
 
 
-def _run_materialization_pass(platform, device_id, artifacts, *, recovery):
-    callable_obj = _compile(platform)
+def _check_materialization_failure_record(graph, error, *, parallel):
+    if not parallel:
+        record = graph["materializations"][1]
+        assert record["status"] == error
+        assert record["publish_before"] == record["publish_after"] == [0, 0]
+        return
+    assert graph["instances"][1]["remaining_work"] >= 1
+    assert not any(row["instance_index"] == 1 for row in graph["publications"])
+    failures = [row for row in graph["work"] if row["status"] == error]
+    assert len(failures) == 1 and failures[0]["instance_index"] == 1
+    assert failures[0]["writeback_after"] == [0, 0]
+    assert failures[0]["remaining_before"] == 0
+
+
+def _run_materialization_pass(platform, device_id, artifacts, *, recovery, parallel=False):
+    callable_obj = _compile(platform, parallel=parallel)
     evidence = []
     worker = Worker(level=2, platform=platform, runtime="host_build_graph", device_id=device_id)
     buffers = []
@@ -89,7 +104,12 @@ def _run_materialization_pass(platform, device_id, artifacts, *, recovery):
     try:
         handle = worker.register(callable_obj)
         worker.init()
-        values = [torch.full((16,), -1.0), torch.full((16,), -1.0), torch.ones(16, dtype=torch.int32)]
+        children = 64 if parallel else 1
+        values = [
+            torch.full((16 * children,), -1.0),
+            torch.full((16 * children,), -1.0),
+            torch.ones(16, dtype=torch.int32),
+        ]
         buffers = [worker.malloc(value.nbytes) for value in values]
         for malformed in (False,) if recovery else (False, True):
             args = TaskArgs()
@@ -124,12 +144,12 @@ def _run_materialization_pass(platform, device_id, artifacts, *, recovery):
             assert len(paths) == 1, paths
             raw = json.loads(paths[0].read_text())
             protocol = raw["aicore_protocol"]
-            assert protocol["schema"] == "hbg-native-protocol-v9"
+            assert protocol["schema"] == ("hbg-native-protocol-v12" if parallel else "hbg-native-protocol-v9")
             for buffer, value in zip(buffers[:2], values[:2], strict=True):
                 worker.copy_from(value, buffer)
                 expected = torch.full_like(value, -1)
                 if not malformed:
-                    expected[0] = 42
+                    expected[::16] = 42
                 torch.testing.assert_close(value, expected, rtol=0, atol=0)
             if malformed:
                 assert protocol["scheduler_error"] != 0
@@ -151,9 +171,7 @@ def _run_materialization_pass(platform, device_id, artifacts, *, recovery):
                 assert graph["remaining_instances"] >= 1
                 assert graph["instances"][1]["materialize_state"] == 3
                 assert not graph["contributions"]
-                record = graph["materializations"][1]
-                assert record["status"] == protocol["scheduler_error"]
-                assert record["publish_before"] == record["publish_after"] == [0, 0]
+                _check_materialization_failure_record(graph, protocol["scheduler_error"], parallel=parallel)
                 published = worker.scheduler_mode_publish_count
                 with pytest.raises(RuntimeError, match="poisoned"):
                     worker.run(handle, args, config)
@@ -190,7 +208,7 @@ def _run_materialization_pass(platform, device_id, artifacts, *, recovery):
 _RECOVERY_MARKER = "GRAPH_MATERIALIZATION_RECOVERY "
 
 
-def _recover_materialization_pass(platform, device_id, artifacts):
+def _recover_materialization_pass(platform, device_id, artifacts, *, parallel=False):
     result = subprocess.run(
         [
             sys.executable,
@@ -202,6 +220,7 @@ def _recover_materialization_pass(platform, device_id, artifacts):
             str(device_id),
             "--artifacts",
             str(artifacts),
+            *(["--parallel"] if parallel else []),
         ],
         capture_output=True,
         text=True,
@@ -218,17 +237,27 @@ def _recover_materialization_pass(platform, device_id, artifacts):
     return rows[0]
 
 
-def test_scalar_materialization_error_retires_before_kernel_entry(st_platform, st_device_ids):
+def _exercise_materialization_error(st_platform, st_device_ids, *, parallel):
     output_root = _ROOT / "outputs"
     output_root.mkdir(exist_ok=True)
-    artifacts = Path(tempfile.mkdtemp(prefix=f"graph-materialize-failure-{st_platform}-", dir=output_root))
+    artifacts = Path(
+        tempfile.mkdtemp(prefix=f"graph-materialize-failure-{st_platform}-parallel{int(parallel)}-", dir=output_root)
+    )
     device_id = int(st_device_ids[0])
-    evidence = _run_materialization_pass(st_platform, device_id, artifacts, recovery=False)
+    evidence = _run_materialization_pass(st_platform, device_id, artifacts, recovery=False, parallel=parallel)
     if st_platform.endswith("sim"):
-        evidence += _run_materialization_pass(st_platform, device_id, artifacts, recovery=True)
+        evidence += _run_materialization_pass(st_platform, device_id, artifacts, recovery=True, parallel=parallel)
     else:
-        evidence += _recover_materialization_pass(st_platform, device_id, artifacts)
+        evidence += _recover_materialization_pass(st_platform, device_id, artifacts, parallel=parallel)
     (artifacts / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def test_scalar_materialization_error_retires_before_kernel_entry(st_platform, st_device_ids):
+    _exercise_materialization_error(st_platform, st_device_ids, parallel=False)
+
+
+def test_parallel_materialization_error_retires_before_kernel_entry(st_platform, st_device_ids):
+    _exercise_materialization_error(st_platform, st_device_ids, parallel=True)
 
 
 if __name__ == "__main__":
@@ -236,11 +265,14 @@ if __name__ == "__main__":
     parser.add_argument("--platform", required=True)
     parser.add_argument("--device", type=int, required=True)
     parser.add_argument("--artifacts", required=True)
+    parser.add_argument("--parallel", action="store_true")
     options = parser.parse_args()
     print(
         _RECOVERY_MARKER
         + json.dumps(
-            _run_materialization_pass(options.platform, options.device, Path(options.artifacts), recovery=True)
+            _run_materialization_pass(
+                options.platform, options.device, Path(options.artifacts), recovery=True, parallel=options.parallel
+            )
         ),
         flush=True,
     )

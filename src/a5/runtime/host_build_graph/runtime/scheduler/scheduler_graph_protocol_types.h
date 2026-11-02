@@ -51,9 +51,23 @@ struct alignas(128) SchedulerGraphProtocolWorker {
     uint32_t status;
 };
 
+struct alignas(128) SchedulerGraphProtocolWork {
+    SchedulerProtocolStamp begin;
+    SchedulerProtocolStamp writeback_after;
+    SchedulerProtocolStamp complete_before;
+    SchedulerProtocolStamp complete_after;
+    uint64_t run_epoch;
+    uint64_t remaining_before;
+    uint32_t work_index;
+    uint32_t instance_index;
+    uint32_t worker_index;
+    uint32_t status;
+};
+
 static_assert(sizeof(SchedulerGraphProtocolInstance) == 128);
 static_assert(sizeof(SchedulerGraphProtocolContribution) == 128);
 static_assert(sizeof(SchedulerGraphProtocolWorker) == 128);
+static_assert(sizeof(SchedulerGraphProtocolWork) == 128);
 static_assert(
     std::is_standard_layout_v<SchedulerGraphProtocolInstance> &&
     std::is_trivially_copyable_v<SchedulerGraphProtocolInstance>
@@ -65,4 +79,7 @@ static_assert(
 static_assert(
     std::is_standard_layout_v<SchedulerGraphProtocolWorker> &&
     std::is_trivially_copyable_v<SchedulerGraphProtocolWorker>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerGraphProtocolWork> && std::is_trivially_copyable_v<SchedulerGraphProtocolWork>
 );
