@@ -32,8 +32,18 @@ thread_local bool startup_observing_register = false;
 uint64_t startup_kernel_calls = 0;
 uint64_t startup_ssbuf_calls = 0;
 DispatchPayload *identity_test_payload = nullptr;
+std::array<uint32_t, 8> pool_startup_block_calls{};
 
 void count_kernel_entry(__gm__ int64_t *) { ++startup_kernel_calls; }
+
+void pool_startup_kernel(__gm__ int64_t *args) {
+    const auto *context = reinterpret_cast<const LocalContext *>(args[PAYLOAD_LOCAL_CONTEXT_INDEX]);
+    ++startup_kernel_calls;
+    EXPECT_EQ(context->block_num, pool_startup_block_calls.size());
+    ASSERT_GE(context->block_idx, 0);
+    ASSERT_LT(static_cast<size_t>(context->block_idx), pool_startup_block_calls.size());
+    ++pool_startup_block_calls[context->block_idx];
+}
 
 void idle_ready_kernel(__gm__ int64_t *) {
     ++startup_kernel_calls;
@@ -224,6 +234,72 @@ struct StartupFixture {
     SchedulerGraphView graph_view{};
     alignas(64) std::array<uint8_t, SIM_REG_TOTAL_SIZE> registers{};
 };
+
+class HbgPoolOnlyStartup : public ::testing::TestWithParam<std::tuple<uint32_t, bool>> {};
+
+TEST_P(HbgPoolOnlyStartup, RealExecutorCompletesEveryBlockWithoutCooperativeTasks) {
+    const auto [worker, profiling] = GetParam();
+    constexpr uint16_t blocks = 8;
+    scheduler_test::FixtureStorage storage(1, 3, blocks, SchedulerSpmdRequirements{3, 1, 0, 0, 1}, profiling);
+    scheduler_test::BasicGraphBuffer<1> graph(1);
+    const uint8_t subtask = worker == 0 ? 0 : 1;
+    graph.executable(0, subtask);
+    auto &metadata = storage.metadata[0];
+    metadata.active_mask = worker == 0 ? LaneMask::aic() : LaneMask::aiv0();
+    metadata.logical_block_num = blocks;
+    metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD;
+    metadata.timing_slot = -1;
+    for (uint8_t lane = 0; lane < 3; ++lane)
+        metadata.kernel_ids[lane] = lane == subtask ? 1 : UINT16_MAX;
+    auto *base = storage.scheduler_state->base();
+    ASSERT_TRUE(scheduler_init_spmd_task_records(base, storage.layout, 97));
+    storage.callable_addresses[1] = reinterpret_cast<uint64_t>(&pool_startup_kernel);
+    const auto view = graph.graph();
+    auto &context = storage.contexts[worker];
+    context.is_scheduler = 1;
+    context.scheduler_index = 0;
+    context.scheduler_count = 3;
+    context.graph_storage_address = view.storage_address;
+    context.graph_task_count = view.task_count;
+    context.task_window_last_index = view.task_window_last_index;
+    for (uint32_t lane = 0; lane < 3; ++lane)
+        context.cluster_worker_ids[lane] = lane;
+    auto *run = storage.run_control;
+    run->active_worker_count = 3;
+    run->aic_active_worker_count = 1;
+    run->aiv_active_worker_count = 2;
+    run->expected_task_count = 1;
+    run->scheduler_timeout_cycles = PLATFORM_PROF_SYS_CNT_FREQ;
+    run->bootstrap_scan_arrived_count = 2;
+    run->bootstrap_arrived_count = 2;
+    alignas(64) std::array<uint8_t, SIM_REG_TOTAL_SIZE> registers{};
+    startup_reg_base = registers.data();
+    startup_kernel_calls = 0;
+    pool_startup_block_calls.fill(0);
+    write_reg(RegId::DATA_MAIN_BASE, AICPU_IDLE_TASK_ID);
+    uint32_t observations = 0;
+    ScopedStartupRegisterObserver observer([&] {
+        if (++observations == 10000 || scheduler_gm_query(run->resolved_task_count) == 1 ||
+            scheduler_read_error(run) != 0)
+            write_reg(RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+    });
+    if (profiling) run_resident_scheduler<true>(&context, run, base, 4, 0, 0);
+    else run_resident_scheduler<false>(&context, run, base, 0, 0, 0);
+    EXPECT_LT(observations, 10000u);
+    EXPECT_EQ(scheduler_read_error(run), 0u);
+    EXPECT_EQ(run->resolved_task_count, 1u);
+    EXPECT_EQ(startup_kernel_calls, blocks);
+    for (const uint32_t calls : pool_startup_block_calls)
+        EXPECT_EQ(calls, 1u);
+    const auto *control = scheduler_state_at<SchedulerTaskControl>(base, storage.layout.task_controls_offset);
+    EXPECT_EQ(control->next_block, blocks);
+    EXPECT_EQ(control->completed_blocks, blocks);
+    EXPECT_EQ(control->admission_claim_lock, SCHEDULER_ORDINARY_POOL_OWNER);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    LanesAndProfiling, HbgPoolOnlyStartup, ::testing::Combine(::testing::Values(0u, 1u, 2u), ::testing::Bool())
+);
 
 class HbgGmMixStartupExit : public ::testing::TestWithParam<std::array<LaneMask, 2>> {};
 

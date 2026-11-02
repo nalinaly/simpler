@@ -11,12 +11,13 @@
 
 from collections import defaultdict
 
-from .execution_identity import FIELDS, _validate_record
+from .execution_identity import FIELDS, POOL_FIELDS, _validate_record
 from .native_order import CausalOrder
 from .native_protocol import (
     _error,
     audit_protocol_sequences,
     has_graph_protocol,
+    has_pool_protocol,
     protocol_version,
     uses_resource_scoped_mix,
 )
@@ -24,6 +25,7 @@ from .native_protocol import (
 MAX = (1 << 64) - 1
 EXECUTABLE, FANIN, MIX, SPMD, SYNC, INLINE, PREDICATE = (1, 2, 4, 8, 16, 32, 64)
 ENTRY, EXECUTED, COOPERATIVE, GM_GROUP, PERMIT_TAIL, PERMIT_NO_LOG, PUBLISHED = (1, 2, 4, 8, 16, 32, 64)
+ORDINARY_POOL = 128
 
 
 def require(condition, message):
@@ -46,6 +48,18 @@ class NativeAudit:
         self.before = self.causal.before
         self.identities = identities
         self.tasks = {row["task_ref"]: row for row in section["tasks"]}
+        self.pool_tasks = {
+            ref
+            for ref, task in self.tasks.items()
+            if has_pool_protocol(section)
+            and task["flags"] & EXECUTABLE
+            and task["block_num"] > 1
+            and task["active_mask"] in (1, 2, 4)
+            and not task["flags"] & (MIX | SYNC | INLINE | PREDICATE)
+        }
+        self.pool_publication_points = {}
+        self.pool_publication_before = {}
+        self.pool_retirement_points = {}
         self.public_task_ids: dict[int, int] = {ref: ref for ref in self.tasks}
         self.workers = {row["index"]: row for row in section["workers"]}
         self.controls = {row["task_ref"]: row for row in section["task_controls"]}
@@ -165,7 +179,7 @@ class NativeAudit:
         require(set(self.blocks) == set(self.expected_blocks), "missing or extraneous block owner")
 
     def admission(self):
-        cooperative = {ref for ref, task in self.tasks.items() if task["flags"] & (MIX | SPMD)}
+        cooperative = {ref for ref, task in self.tasks.items() if task["flags"] & (MIX | SPMD)} - self.pool_tasks
         log = self.raw["admission_log"]
         require(len(log) == len(cooperative) and set(log) == cooperative, "admission log is not a task bijection")
         require(
@@ -335,7 +349,7 @@ class NativeAudit:
             self.causal.add(published_after, point(execution, "permit"))
             self.payload_points[index] = published_before, published_after
             require(
-                execution["ready_source"] in (0, 1, 2, 3)
+                execution["ready_source"] in ((0, 1, 2, 3, 4) if has_pool_protocol(self.raw) else (0, 1, 2, 3))
                 and execution["publication_mode"] in (0, 1)
                 and (execution["publication_mode"] == 0 or execution["ready_source"] == 2),
                 "invalid source/publication mode",
@@ -361,7 +375,8 @@ class NativeAudit:
 
     def permit(self, execution, task):
         ref, worker = task["task_ref"], execution["worker_index"]
-        cooperative, mixed = bool(task["flags"] & (MIX | SPMD)), bool(task["flags"] & MIX)
+        pooled = ref in self.pool_tasks
+        cooperative, mixed = ref in self.orders, bool(task["flags"] & MIX)
         flags = ENTRY | PUBLISHED | (EXECUTED if execution["flags"] & EXECUTED else 0)
         if cooperative:
             flags |= COOPERATIVE | (GM_GROUP if mixed else 0)
@@ -380,6 +395,9 @@ class NativeAudit:
             self.before(point(execution, "trace_published"), point(member, "closed"), "execution after member closure")
         else:
             flags |= PERMIT_TAIL if self.orders else PERMIT_NO_LOG
+            if pooled:
+                flags |= ORDINARY_POOL
+            require((execution["ready_source"] == 4) == pooled, "pool Ready source disagrees with task contract")
             require(
                 execution["order_key"] == MAX and execution["ready_source"] != 3,
                 "ordinary execution used a cooperative identity",
@@ -447,9 +465,12 @@ class NativeAudit:
         require(isinstance(self.identities, list), "missing execution identity rows")
         found = set()
         for identity in self.identities:
-            require(isinstance(identity, dict) and FIELDS <= identity.keys(), "incomplete execution identity")
+            fields = POOL_FIELDS if has_pool_protocol(self.raw) else FIELDS
+            require(isinstance(identity, dict) and fields <= identity.keys(), "incomplete execution identity")
             try:
-                _validate_record({field: identity[field] for field in FIELDS})
+                _validate_record(
+                    {field: identity[field] for field in fields}, version=2 if has_pool_protocol(self.raw) else 1
+                )
             except ValueError as error:
                 _error(str(error))
             index = identity["reg_task_id"]
@@ -473,6 +494,17 @@ class NativeAudit:
                 cluster_lane=execution["cluster_lane"],
                 executed=bool(execution["flags"] & EXECUTED),
             )
+            if has_pool_protocol(self.raw):
+                task = self.tasks[execution["task_ref"]]
+                expected.update(
+                    dispatch_kind="pool"
+                    if execution["task_ref"] in self.pool_tasks
+                    else "ordered"
+                    if execution["task_ref"] in self.orders
+                    else "single",
+                    task_flags=task["flags"],
+                    active_mask=task["active_mask"],
+                )
             require(
                 all(identity[field] == value for field, value in expected.items()),
                 "protocol/execution identity join mismatch",
@@ -487,7 +519,8 @@ class NativeAudit:
             task = self.tasks[ref]
             self.record_identity(owner, ref)
             worker = owner["worker_index"]
-            member = self.member(ref, worker)
+            require(worker in self.positions, "unknown block owner worker")
+            member = None if ref in self.pool_tasks else self.member(ref, worker)
             require(
                 owner["block_idx"] == block_idx
                 and owner["block_num"] == task["block_num"]
@@ -496,10 +529,11 @@ class NativeAudit:
                 "block identity/owner shape mismatch",
             )
             self.chain(owner, "claim_before", "claim_after", "completion_before", "completion_after")
-            self.before(point(member, "observed"), point(owner, "claim_before"), "block claimed before obligation")
-            self.before(
-                point(owner, "completion_after"), point(member, "closed"), "owner closed with an unretired block"
-            )
+            if member is not None:
+                self.before(point(member, "observed"), point(owner, "claim_before"), "block claimed before obligation")
+                self.before(
+                    point(owner, "completion_after"), point(member, "closed"), "owner closed with an unretired block"
+                )
             self.task_blocks[ref].append(block)
             if task["flags"] & MIX:
                 continue
@@ -533,6 +567,8 @@ class NativeAudit:
                 "duplicate or missing block completion ticket",
             )
             self.ordered_intervals([b["owner"] for b in by_ticket], "completion_before", "completion_after")
+            if ref in self.pool_tasks:
+                continue
             if protocol_version(self.raw) >= 6:
                 self.claim_certificates(ref, blocks)
             owned = defaultdict(list)
@@ -647,17 +683,22 @@ class NativeAudit:
     def completions(self):
         for ref, task in self.tasks.items():
             cooperative = ref in self.orders
+            pooled = ref in self.pool_tasks
             control = self.controls[ref]
             require(
                 control["state"] == 2 and control["admission_state"] == (3 if cooperative else 0),
                 "invalid terminal task state",
             )
             require(
-                control["next_block"] == control["completed_blocks"] == (task["block_num"] if cooperative else 0),
+                control["next_block"]
+                == control["completed_blocks"]
+                == (task["block_num"] if cooperative or pooled else 0),
                 "terminal block counters mismatch",
             )
             if protocol_version(self.raw) >= 5:
-                require(control["admission_claim_lock"] == 0, "invalid terminal admission claim lock")
+                require(
+                    control["admission_claim_lock"] == (2 if pooled else 0), "invalid terminal admission claim lock"
+                )
             if protocol_version(self.raw) >= 6:
                 require(
                     control["claim_seal"] == (task["block_num"] if cooperative else 0), "invalid terminal claim seal"
@@ -669,10 +710,14 @@ class NativeAudit:
                     if protocol_version(self.raw) >= 4
                     else positions * 2 + (1 if self.raw["schema"] == "hbg-native-protocol-v2" else 0)
                 )
-                uses_tickets = cooperative and not task["flags"] & SYNC and task["block_num"] >= minimum_blocks
+                uses_tickets = (
+                    (cooperative or pooled) and not task["flags"] & SYNC and task["block_num"] >= minimum_blocks
+                )
                 tickets = control["claim_tickets"]
                 require(
-                    task["block_num"] <= tickets <= task["block_num"] + positions if uses_tickets else tickets == 0,
+                    task["block_num"] <= tickets <= task["block_num"] + positions - int(pooled)
+                    if uses_tickets
+                    else tickets == 0,
                     "invalid terminal claim ticket counter",
                 )
             if not task["flags"] & EXECUTABLE:
@@ -680,7 +725,9 @@ class NativeAudit:
             done = self.actors[ref]["completion"]
             require(done is not None, "missing TaskDone")
             self.actor(done, ref)
-            if cooperative:
+            if cooperative or pooled:
+                if pooled:
+                    require(self.actors[ref]["admission"] is None, "pool task fabricated an admission event")
                 last = max(self.task_blocks[ref], key=lambda block: block["owner"]["completion_ticket"])
                 owner = last["owner"]
                 require(owner["worker_index"] == done["worker_index"], "TaskDone not owned by last contributor")
@@ -703,7 +750,7 @@ class NativeAudit:
                         point(done, "before"),
                         "ordinary TaskDone before consumption",
                     )
-                    if self.orders:
+                    if self.orders or self.pool_tasks:
                         self.before(
                             point(execution, "trace_published"),
                             point(done, "before"),
@@ -721,6 +768,8 @@ class NativeAudit:
         ref = task["task_ref"]
         if ref in self.orders:
             earliest = point(self.actors[ref]["admission"], "before")
+        elif ref in self.pool_tasks:
+            earliest = self.pool_publication_before[ref]
         elif task["flags"] & INLINE:
             earliest = point(done, "before")
         else:
@@ -738,9 +787,13 @@ class NativeAudit:
         if has_graph_protocol(self.raw):
             validate_graph_manifest(self)
         self.admission()
+        from .native_pool_audit import audit_pool_claims, audit_pool_publications  # noqa: PLC0415
+
+        audit_pool_publications(self)
         self.membership()
         self.execution()
         self.block_owners()
+        audit_pool_claims(self)
         from .native_mix_audit import audit_mix  # noqa: PLC0415
 
         audit_mix(self)
@@ -755,6 +808,7 @@ class NativeAudit:
             cooperative_tasks=len(self.orders),
             member_obligations=len(self.members),
             blocks=len(self.blocks),
+            **({"ordinary_pool_tasks": len(self.pool_tasks)} if has_pool_protocol(self.raw) else {}),
             **graph_result,
         )
 

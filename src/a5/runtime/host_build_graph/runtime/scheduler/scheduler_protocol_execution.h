@@ -68,7 +68,11 @@ inline __aicore__ void scheduler_protocol_execution_permit(
                     (slot.cooperative ? SCHEDULER_PROTOCOL_COOPERATIVE :
                      has_log          ? SCHEDULER_PROTOCOL_PERMIT_TAIL :
                                         SCHEDULER_PROTOCOL_PERMIT_NO_LOG) |
-                    (slot.gm_mix ? SCHEDULER_PROTOCOL_GM_GROUP : 0);
+                    (slot.gm_mix ? SCHEDULER_PROTOCOL_GM_GROUP : 0) |
+                    (local->admission != nullptr && local->admission->pool_executions[pending_slot].phase ==
+                                                        SchedulerOrdinaryPoolPhase::CONFIRMED ?
+                         SCHEDULER_PROTOCOL_ORDINARY_POOL :
+                         0);
     record->permit_tail = slot.cooperative ? UINT64_MAX : tail;
     scheduler_protocol_publish_record(record);
 }

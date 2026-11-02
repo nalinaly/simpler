@@ -29,6 +29,7 @@ struct SchedulerSpmdRequirements {
     uint64_t cluster_count{0};
     uint64_t cooperative_task_count{0};
     uint64_t mix_task_count{0};
+    uint64_t ordinary_pool_task_count{0};
 };
 
 struct AicoreSchedulerLayout {
@@ -63,6 +64,7 @@ struct AicoreSchedulerLayout {
     uint64_t group_mailboxes_offset;
     uint64_t mix_close_seals_offset;
     uint64_t mix_close_seal_count;
+    uint64_t ordinary_pool_words_offset;
     uint64_t protocol_layout_offset;
     SchedulerProtocolLayout protocol;
     SchedulerGraphStorageLayout graph;

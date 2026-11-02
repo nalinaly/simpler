@@ -635,12 +635,17 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
     }
 
     std::ostringstream identities_json;
-    identities_json << "{\"schema\":\"hbg-execution-identity-v1\",\"producer\":\"aicore\",\"records\":[";
+    const bool pool_identity = owner.layout.spmd.ordinary_pool_task_count != 0;
+    identities_json << "{\"schema\":\"" << (pool_identity ? "hbg-execution-identity-v2" : "hbg-execution-identity-v1")
+                    << "\",\"producer\":\"aicore\",\"records\":[";
     bool first_identity = true;
     for (uint64_t trace_index : emitted_traces) {
         const SchedulerTaskTrace &trace = traces[trace_index];
         const uint32_t flags = trace.execution_identity_flags;
-        if ((flags & SCHEDULER_TRACE_IDENTITY_CAPTURED) == 0 || (flags & ~UINT32_C(15)) != 0 ||
+        const uint32_t allowed_identity_flags = pool_identity ? SCHEDULER_TRACE_POOL_IDENTITY_MASK : UINT32_C(15);
+        if ((flags & SCHEDULER_TRACE_IDENTITY_CAPTURED) == 0 || (flags & ~allowed_identity_flags) != 0 ||
+            ((flags & SCHEDULER_TRACE_ORDINARY_POOL) != 0 &&
+             (flags & (SCHEDULER_TRACE_ORDERED | SCHEDULER_TRACE_GROUP)) != 0) ||
             trace.execution_run_epoch != swimlane_run_epoch) {
             LOG_WARN("A5 HBG: missing or stale execution identity at trace=%" PRIu64, trace_index);
             return false;
@@ -661,7 +666,16 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
         identities_json << ",\"group_seq\":";
         if ((flags & SCHEDULER_TRACE_GROUP) != 0) identities_json << trace.execution_group_seq;
         else identities_json << "null";
-        identities_json << ",\"executed\":" << ((flags & SCHEDULER_TRACE_EXECUTED) != 0 ? "true" : "false") << "}";
+        identities_json << ",\"executed\":" << ((flags & SCHEDULER_TRACE_EXECUTED) != 0 ? "true" : "false");
+        if (pool_identity) {
+            const char *kind = (flags & SCHEDULER_TRACE_ORDINARY_POOL) != 0 ? "pool" :
+                               (flags & SCHEDULER_TRACE_ORDERED) != 0       ? "ordered" :
+                                                                              "single";
+            identities_json << ",\"dispatch_kind\":\"" << kind
+                            << "\",\"task_flags\":" << ((flags >> SCHEDULER_TRACE_TASK_FLAGS_SHIFT) & 127U)
+                            << ",\"active_mask\":" << ((flags >> SCHEDULER_TRACE_ACTIVE_MASK_SHIFT) & 7U);
+        }
+        identities_json << "}";
     }
     identities_json << "]}";
     const std::string identities_payload = identities_json.str();
@@ -1230,6 +1244,7 @@ bool create_scheduler_state(
     uint64_t executable_subtask_count = 0;
     uint64_t cooperative_task_count = 0;
     uint64_t mix_task_count = 0;
+    uint64_t ordinary_pool_task_count = 0;
     uint64_t aic_worker_demand = 0;
     uint64_t aiv_worker_demand = 0;
     int64_t legacy_shape_task_ref = -1;
@@ -1400,7 +1415,9 @@ bool create_scheduler_state(
         aiv_worker_demand = std::max<uint64_t>(aiv_worker_demand, demand.aiv);
         if (!inline_dispatch_task) {
             if (scheduler_task_is_mix(metadata.flags)) ++mix_task_count;
-            if (logical_block_num > 1 || active_subtasks > 1 || slot.task_attrs.requires_sync_start())
+            if (!graph_binding && scheduler_ordinary_pool_shape(metadata.flags, active_mask, logical_block_num))
+                ++ordinary_pool_task_count;
+            else if (logical_block_num > 1 || active_subtasks > 1 || slot.task_attrs.requires_sync_start())
                 ++cooperative_task_count;
         }
         executable_subtask_count = next_subtask_count;
@@ -1432,6 +1449,7 @@ bool create_scheduler_state(
         static_cast<uint64_t>(worker_count / PLATFORM_CORES_PER_BLOCKDIM),
         cooperative_task_count,
         mix_task_count,
+        ordinary_pool_task_count,
     };
     const bool protocol_profiling = api->chip_swimlane_level() >= static_cast<uint32_t>(ChipSwimlaneLevel::ORCH_PHASES);
     std::vector<SchedulerProtocolTaskSpec> protocol_tasks;

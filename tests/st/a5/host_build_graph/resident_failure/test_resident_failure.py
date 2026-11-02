@@ -25,6 +25,7 @@ from simpler.worker import Worker
 
 from simpler_setup.kernel_compiler import KernelCompiler
 from simpler_setup.scene_test import _pto_isa_compile_cache_token, compile_chip_callable_spec
+from simpler_setup.tools.hbg.native_protocol import read_native_protocol
 from simpler_setup.tools.swimlane_converter import read_perf_data
 
 _ROOT = Path(__file__).resolve().parents[5]
@@ -138,7 +139,56 @@ def _check_output(values, capacity, blocks, mask, *, failed):
     torch.testing.assert_close(values[1], summary, rtol=0, atol=0)
 
 
-def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_tail=None):
+def _check_failed_pool_capture(protocol, root, controls):
+    read_native_protocol(protocol)
+    assert protocol["cooperative_task_count"] == protocol["mix_task_count"] == protocol["commit_tail"] == 0
+    assert not protocol["admissions"] and not protocol["admission_log"] and not protocol["members"]
+    assert all(row["admission"] is None and row["completion"] is None for row in protocol["task_events"])
+    pool = protocol["ordinary_pool"]
+    ref, blocks = root["task_ref"], root["block_num"]
+    capacity = pool["word_task_capacity"]
+    assert capacity == 16 and pool["task_count"] == 1
+    assert len(pool["publications"]) == 1 and pool["publications"][0]["index"] == ref
+    publication = pool["publications"][0]["publication"]
+    assert publication["run_epoch"] == protocol["run_epoch"] and publication["task_ref"] == ref
+    assert publication["order_key"] == (1 << 64) - 1
+    assert 0 < publication["before"][0] <= publication["after"][0]
+    assert 0 < publication["before"][1] < publication["after"][1]
+    workers = {row["worker_index"]: row for row in protocol["workers"]}
+    engine = int(root["active_mask"] != 1)
+    assert workers[publication["worker_index"]]["core_type"] == engine
+    assert all(control["admission_claim_lock"] == (2 if task == ref else 0) for task, control in controls.items())
+    assert all(control["claim_seal"] == control["admission_state"] == 0 for control in controls.values())
+    claimed = controls[ref]["next_block"]
+    assert 1 <= claimed <= blocks
+    bit = 1 << (ref % capacity)
+    word_index = engine * pool["word_count"] + ref // capacity
+    assert pool["words"] == [
+        bit if index == word_index and claimed < blocks else 0 for index in range(2 * pool["word_count"])
+    ]
+    rows = protocol["blocks"]
+    assert len(rows) == claimed
+    assert {row["owner"]["block_idx"] for row in rows} == set(range(claimed))
+    assert sorted(row["pool_claim"]["confirmed_count"] for row in rows) == list(range(1, claimed + 1))
+    for row in rows:
+        owner, claim = row["owner"], row["pool_claim"]
+        assert owner["task_ref"] == ref and owner["block_num"] == blocks and not row["lanes"]
+        assert owner["order_key"] == (1 << 64) - 1 and owner["group_seq"] == 0
+        assert owner["run_epoch"] == claim["run_epoch"] == protocol["run_epoch"]
+        assert owner["block_idx"] == claim["block_idx"]
+        assert owner["worker_index"] == claim["worker_index"]
+        assert workers[owner["worker_index"]]["core_type"] == engine
+        assert 0 < owner["claim_before"][1] < owner["claim_after"][1]
+        if claim["confirmed_count"] == blocks:
+            assert claim["retired_word_before"] == bit
+            assert 0 < claim["retire_before"][0] <= claim["retire_after"][0]
+            assert owner["claim_after"][1] < claim["retire_before"][1] < claim["retire_after"][1]
+        else:
+            assert claim["retired_word_before"] == 0
+            assert claim["retire_before"] == claim["retire_after"] == [0, 0]
+
+
+def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_tail=None, stall_ms=_STALL_MS):
     protocol = raw["aicore_protocol"]
     assert protocol["producer"] == "aicore"
     assert protocol["scheduler_error"] == 10
@@ -177,7 +227,7 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_
         assert all(worker["finished"] == 2 for worker in protocol["workers"])
         assert 0 < execution["entry"][1] < execution["returned"][1] < execution["visible"][1]
         assert execution["entry"][0] <= execution["returned"][0] <= execution["visible"][0]
-        assert execution["returned"][0] - execution["entry"][0] >= _STALL_MS * frequency // 1000
+        assert execution["returned"][0] - execution["entry"][0] >= stall_ms * frequency // 1000
     lifecycle = raw["aicpu_lifecycle_records"]
     assert len(lifecycle) == 2
     assert {record["aicpu_thread_id"] for record in lifecycle} == {0, 1}
@@ -208,6 +258,10 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_
     assert controls[root["task_ref"]]["completed_blocks"] < blocks
     assert controls[consumer["task_ref"]]["completed_blocks"] == 0
     positions = protocol["cluster_count"] * (2 if mask in (2, 4) else 1)
+    pooled = protocol["schema"] == "hbg-native-protocol-v11"
+    if pooled:
+        assert graph_tail is None and mask in (1, 2, 4) and blocks > 1
+        _check_failed_pool_capture(protocol, root, controls)
     assert protocol["schema"] in (
         "hbg-native-protocol-v2",
         "hbg-native-protocol-v3",
@@ -217,8 +271,9 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_
         "hbg-native-protocol-v7",
         "hbg-native-protocol-v8",
         "hbg-native-protocol-v9",
+        "hbg-native-protocol-v11",
     )
-    if protocol["schema"] in ("hbg-native-protocol-v7", "hbg-native-protocol-v8", "hbg-native-protocol-v9"):
+    if pooled or protocol["schema"] in ("hbg-native-protocol-v7", "hbg-native-protocol-v8", "hbg-native-protocol-v9"):
         assert type(protocol.get("close_seal_stride")) is int and protocol["close_seal_stride"] == 128
     else:
         assert "close_seal_stride" not in protocol
@@ -255,13 +310,14 @@ def _check_failed_capture(raw, blocks, mask, lane, *, nonreturning=False, graph_
             "hbg-native-protocol-v7",
             "hbg-native-protocol-v8",
             "hbg-native-protocol-v9",
+            "hbg-native-protocol-v11",
         )
         else positions * 2 + (1 if protocol["schema"] == "hbg-native-protocol-v2" else 0)
     )
     uses_tickets = blocks >= minimum_blocks
     tickets = controls[root["task_ref"]]["claim_tickets"]
     if uses_tickets:
-        assert 1 <= tickets <= blocks + positions
+        assert 1 <= tickets <= blocks + positions - int(pooled)
         assert controls[root["task_ref"]]["next_block"] <= min(blocks, tickets)
     else:
         assert tickets == 0
@@ -345,6 +401,7 @@ def _check_two_wave_topology(protocol, blocks, mask, required):
         "hbg-native-protocol-v7",
         "hbg-native-protocol-v8",
         "hbg-native-protocol-v9",
+        "hbg-native-protocol-v11",
     )
     positions = protocol["cluster_count"] * _lane_positions_per_cluster(mask)
     assert blocks == positions * 2, "two-wave fault must use the actual device topology"
@@ -420,16 +477,26 @@ def _run_pass(
                 with pytest.raises(RuntimeError, match=rf"finalize_native_run failed with code {codes}\b") as error:
                     worker.run(handle, args, config)
             else:
-                worker.run(handle, args, config)
+                try:
+                    worker.run(handle, args, config)
+                except RuntimeError:
+                    failed = True
+                    raise
             elapsed = time.monotonic() - started
             assert elapsed < 20
             assert worker.scheduler_mode_publish_count > before
             assert worker.scheduler_runtime_mode in (1, 2)
             path, raw = _capture(prefix)
-            expected_schema = "hbg-native-protocol-v8" if graph_tail is None else "hbg-native-protocol-v9"
-            assert raw["aicore_protocol"]["schema"] == expected_schema
             launched = _root_block_num(raw["aicore_protocol"])
             assert blocks < 0 or launched == blocks
+            expected_schema = (
+                "hbg-native-protocol-v9"
+                if graph_tail is not None
+                else "hbg-native-protocol-v11"
+                if mask in (1, 2, 4) and launched > 1
+                else "hbg-native-protocol-v8"
+            )
+            assert raw["aicore_protocol"]["schema"] == expected_schema
             # A STARS-killed op can poison device access; its D2H output is
             # not readable evidence. Host-exported failure records remain
             # mandatory and must not masquerade as a successful capture.
@@ -440,7 +507,9 @@ def _run_pass(
             _check_two_wave_topology(raw["aicore_protocol"], launched, mask, two_wave)
             if failed:
                 assert raw["aicore_protocol"]["run_epoch"] > evidence[-1]["run_epoch"]
-                _check_failed_capture(raw, launched, mask, lane, nonreturning=nonreturning, graph_tail=graph_tail)
+                _check_failed_capture(
+                    raw, launched, mask, lane, nonreturning=nonreturning, graph_tail=graph_tail, stall_ms=stall_ms
+                )
                 if not nonreturning:
                     assert values[0].view(-1, 16)[lane, 0] == 1
                 rejected_count = worker.scheduler_mode_publish_count
@@ -523,7 +592,12 @@ def _recovery_pass(platform, device_id, artifacts, mask, lane, blocks, stall_ms,
 def _exercise_failure(
     st_platform, st_device_ids, mask, lane, blocks, monkeypatch, stall_ms, *, two_wave=False, graph_tail=None
 ):
-    monkeypatch.setenv("SIMPLER_SCHEDULER_TIMEOUT_MS", str(_TIMEOUT_MS))
+    timeout_ms = _TIMEOUT_MS
+    # The 257-block Mix simulation takes more than two seconds on two CPU cores.
+    # Its injected stall still exceeds the watchdog, with the same containment checks.
+    if st_platform.endswith("sim") and mask == 7 and blocks == 257 and stall_ms > 0:
+        timeout_ms, stall_ms = 6000, 8000
+    monkeypatch.setenv("SIMPLER_SCHEDULER_TIMEOUT_MS", str(timeout_ms))
     failure_kind = "nonreturning" if stall_ms < 0 else "bounded"
     output_root = _ROOT / "outputs"
     output_root.mkdir(exist_ok=True)

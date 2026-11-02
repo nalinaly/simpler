@@ -158,3 +158,5 @@ Newest first.
 - [2026-11 — A5 SWA idle NOP cap](2026-11-a5-swa-idle-nop-cap.md): steady-state cap 256 to 1024, with bootstrap/drain caps unchanged; all four frozen pairs improve, median paired improvement 2.80%, with focused exit/error checks.
 
 - [2026-11 — A5 SWA publisher-local adoption](2026-11-a5-swa-publisher-adoption.md): correctness and L4 passed, but only 2/4 frozen pairs improved (median +0.162%); candidate reverted to idle-nop1024.
+
+- [2026-11 — A5 SWA ordinary block pool](../zh-cn/investigations/2026-11-a5-swa-ordinary-pool.md): 16-task words have provisional baseline gains; the pool-only startup fix passes the full simulation suite and native SWA audit. The final frozen comparison is 37.03% slower than TMR. Work stopped after that comparison; the full hardware sweep remains incomplete.

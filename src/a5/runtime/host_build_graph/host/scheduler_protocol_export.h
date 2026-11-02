@@ -71,17 +71,17 @@ inline void block_owner(JsonObject &parent, const SchedulerProtocolBlockOwner &r
     row.numbers("released_seq", record.released_seq, 3);
 }
 
-inline void claim_certificate(JsonObject &parent, const SchedulerProtocolClaimTrace &record) {
-    auto &out = parent.field("claim");
+inline void claim_certificate(JsonObject &parent, const SchedulerProtocolClaimTrace &record, bool pooled = false) {
+    auto &out = parent.field(pooled ? "pool_claim" : "claim");
     if (!populated(record)) {
         out << "null";
         return;
     }
     JsonObject row(out);
-    row.stamp("published_before", record.published_before);
-    row.stamp("published_after", record.published_after);
+    row.stamp(pooled ? "retire_before" : "published_before", record.published_before);
+    row.stamp(pooled ? "retire_after" : "published_after", record.published_after);
     row.number("confirmed_count", record.confirmed_count);
-    row.number("seal_value", record.seal_value);
+    row.number(pooled ? "retired_word_before" : "seal_value", record.seal_value);
     row.number("worker_index", record.worker_index);
     row.number("block_idx", record.block_idx);
     row.number("run_epoch", record.run_epoch);
@@ -149,6 +149,8 @@ inline void validate_layout(const Image &image, const AicoreSchedulerLayout &lay
         wire.member_count != plan.member_count || wire.tasks_offset != plan.tasks_offset ||
         wire.members_offset != plan.members_offset || wire.blocks_offset != plan.blocks_offset ||
         wire.executions_offset != plan.executions_offset || wire.workers_offset != plan.workers_offset ||
+        wire.ordinary_pool_task_count != plan.ordinary_pool_task_count ||
+        wire.pool_publications_offset != plan.pool_publications_offset ||
         std::any_of(std::begin(wire.reserved), std::end(wire.reserved), [](uint64_t value) {
             return value != 0;
         }))
@@ -158,6 +160,10 @@ inline void validate_layout(const Image &image, const AicoreSchedulerLayout &lay
         summary.worker_count != layout.spmd.worker_count || summary.cluster_count != layout.spmd.cluster_count ||
         summary.cooperative_task_count != layout.spmd.cooperative_task_count ||
         summary.mix_task_count != layout.spmd.mix_task_count ||
+        summary.ordinary_pool_task_count != layout.spmd.ordinary_pool_task_count ||
+        summary.ordinary_pool_words_offset != layout.ordinary_pool_words_offset ||
+        summary.ordinary_pool_word_task_capacity !=
+            (layout.spmd.ordinary_pool_task_count != 0 ? SCHEDULER_ORDINARY_POOL_WORD_TASK_CAPACITY : 0) ||
         summary.admission_member_word_count != layout.admission_member_word_count ||
         summary.admission_records_offset != layout.admission_records_offset ||
         summary.admission_record_stride != layout.admission_record_stride ||
@@ -226,7 +232,8 @@ inline std::string scheduler_export_protocol(
     using namespace scheduler_protocol_export;
     if (size != layout.total_size || tasks.size() != layout.task_count || layout.protocol_layout_offset == 0)
         throw std::invalid_argument("protocol image size or frozen task count mismatch");
-    if ((layout.graph.instance_count != 0) != (graph_manifest != nullptr))
+    if ((layout.graph.instance_count != 0) != (graph_manifest != nullptr) ||
+        (layout.spmd.ordinary_pool_task_count != 0 && graph_manifest != nullptr))
         throw std::invalid_argument("Graph protocol requires its frozen manifest");
     const Image image(base, size);
     validate_layout(image, layout, epoch);
@@ -235,7 +242,11 @@ inline std::string scheduler_export_protocol(
     {
         JsonObject root(out);
         // v9 combines Graph evidence with resource-scoped Mix membership.
-        root.string("schema", graph_manifest == nullptr ? "hbg-native-protocol-v8" : "hbg-native-protocol-v9");
+        root.string(
+            "schema", plan.ordinary_pool_task_count != 0 ? "hbg-native-protocol-v11" :
+                      graph_manifest == nullptr          ? "hbg-native-protocol-v8" :
+                                                           "hbg-native-protocol-v9"
+        );
         root.number("close_seal_stride", sizeof(SchedulerMixCloseSeal));
         root.string("producer", "aicore");
         root.number("run_epoch", epoch);
@@ -246,6 +257,30 @@ inline std::string scheduler_export_protocol(
         root.number("cooperative_task_count", plan.cooperative_task_count);
         root.number("cluster_count", layout.spmd.cluster_count);
         root.number("mix_task_count", layout.spmd.mix_task_count);
+        if (plan.ordinary_pool_task_count != 0) {
+            JsonObject pool(root.field("ordinary_pool"));
+            pool.number("task_count", plan.ordinary_pool_task_count);
+            const auto &summary = *image.array<SchedulerGraphSummary>(layout.graph_summary_offset, 1);
+            pool.number("word_task_capacity", summary.ordinary_pool_word_task_capacity);
+            const uint64_t word_count = scheduler_ordinary_pool_word_count(plan.task_count);
+            pool.number("word_count", word_count);
+            const auto *words =
+                image.array<SchedulerOrdinaryPoolWord>(layout.ordinary_pool_words_offset, 2 * word_count);
+            auto &bits = pool.field("words");
+            bits << '[';
+            for (uint64_t index = 0; index < 2 * word_count; ++index) {
+                if (index != 0) bits << ',';
+                bits << static_cast<uint64_t>(words[index].bits);
+            }
+            bits << ']';
+            sparse(
+                pool, "publications",
+                image.array<SchedulerProtocolTaskActor>(plan.pool_publications_offset, plan.task_count),
+                plan.task_count, [](JsonObject &row, const auto &record) {
+                    actor(row, "publication", record);
+                }
+            );
+        }
         const auto &run = *image.array<SchedulerRunControl>(layout.run_control_offset, 1);
         root.number("expected_task_count", run.expected_task_count);
         root.number("inline_completed_count", run.inline_completed_count);
@@ -352,9 +387,13 @@ inline std::string scheduler_export_protocol(
         );
         sparse(
             root, "blocks", image.array<SchedulerProtocolBlockTrace>(plan.blocks_offset, plan.trace_count),
-            plan.trace_count, [](JsonObject &row, const auto &record) {
+            plan.trace_count, [&](JsonObject &row, const auto &record) {
                 block_owner(row, record.owner);
-                claim_certificate(row, record.claim);
+                const bool pooled = plan.ordinary_pool_task_count != 0 &&
+                                    scheduler_ordinary_pool_shape(
+                                        record.owner.flags, record.owner.active_mask, record.owner.logical_block_num
+                                    );
+                claim_certificate(row, record.claim, pooled);
                 sparse(row, "lanes", record.lanes, 3, lane);
             }
         );

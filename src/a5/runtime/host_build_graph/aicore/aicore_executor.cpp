@@ -639,7 +639,8 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
         scheduler_initialize_local_config(scheduler_state_base, context, &graph, &scheduler_local_state);
     if (config_valid) {
         config_valid = scheduler_initialize_admission(scheduler_state_base, &scheduler_local_state, &admission);
-        if (config_valid && admission.capacity != 0) scheduler_local_state.admission = &admission;
+        if (config_valid && (admission.capacity != 0 || admission.ordinary_pool_words_offset != 0))
+            scheduler_local_state.admission = &admission;
     }
     if (!config_valid)
         scheduler_record_error(

@@ -1419,6 +1419,9 @@ def _with_execution_identity(args, row):
             "executed",
         ):
             args[field] = row[field]
+        for field in ("dispatch_kind", "task_flags", "active_mask"):
+            if field in row:
+                args[field] = row[field]
     return args
 
 

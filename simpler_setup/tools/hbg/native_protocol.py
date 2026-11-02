@@ -15,7 +15,7 @@ execution coverage, membership, dependency ordering or Mix resource correctness.
 
 from . import native_graph_protocol
 
-SCHEMAS = tuple(f"hbg-native-protocol-v{version}" for version in range(1, 10))
+SCHEMAS = tuple(f"hbg-native-protocol-v{version}" for version in range(1, 12))
 
 ROOT_NUMBERS = frozenset(
     """
@@ -44,6 +44,7 @@ NUMBERS = {
     ),
     "control": "task_ref state next_block completed_blocks admission_state",
     "claim": "run_epoch worker_index block_idx confirmed_count seal_value",
+    "pool_claim": "run_epoch worker_index block_idx confirmed_count retired_word_before",
     "actor": "run_epoch task_ref order_key worker_index flags",
     "member": (
         "index run_epoch task_ref order_key observed_tail closed_cursor "
@@ -65,6 +66,7 @@ NUMBERS = {
 }
 STAMPS = {
     "claim": "published_before published_after",
+    "pool_claim": "retire_before retire_after",
     "actor": "before after",
     "member": "observed closed",
     "owner": (
@@ -98,10 +100,19 @@ def has_graph_protocol(section):
     return version == 9 or (version == 8 and "graph" in section)
 
 
+def has_pool_protocol(section):
+    return protocol_version(section) in (10, 11)
+
+
+def pool_word_task_capacity(section):
+    """v10 fixes 64 tasks per word; v11 records its independently checked mapping."""
+    return section["ordinary_pool"]["word_task_capacity"] if protocol_version(section) == 11 else 64
+
+
 def uses_resource_scoped_mix(section):
     """Resource-scoped v8 has no Graph section; v9 combines both contracts."""
     version = protocol_version(section)
-    return version == 9 or (version == 8 and not has_graph_protocol(section))
+    return version in (9, 10, 11) or (version == 8 and not has_graph_protocol(section))
 
 
 def _error(message):
@@ -163,7 +174,10 @@ def read_native_protocol(section):
     version = protocol_version(section)
     root_numbers = ROOT_NUMBERS | ({"close_seal_stride"} if version >= 7 else set())
     graph_fields = {"graph"} if has_graph_protocol(section) else set()
-    _object(section, root_numbers | ROOT_TABLES | {"schema", "producer", "first_error"} | graph_fields, "root")
+    pool_fields = {"ordinary_pool"} if has_pool_protocol(section) else set()
+    _object(
+        section, root_numbers | ROOT_TABLES | {"schema", "producer", "first_error"} | graph_fields | pool_fields, "root"
+    )
     if not version or section["producer"] != "aicore":
         _error("unknown schema or producer")
     for field in root_numbers:
@@ -191,11 +205,7 @@ def read_native_protocol(section):
             if kind == "control" and version >= 6:
                 extra += ("claim_seal",)
             _record(row, kind, f"{table}[{row[key]}]", extra)
-    for row in section["admissions"]:
-        if len(row["member_words"]) != (section["worker_count"] + 63) // 64:
-            _error("member bitmap length mismatch")
-        if len(row["close_seals"]) not in (0, section["cluster_count"]):
-            _error("close seal array length mismatch")
+    _read_admission_arrays(section)
     for table, kind, count in (
         ("members", "member", section["member_count"]),
         ("executions", "execution", section["trace_count"]),
@@ -205,9 +215,42 @@ def read_native_protocol(section):
             extra = ("claim_seal_seen", "claim_cursor_seen") if kind == "member" and version >= 6 else ()
             _record(row, kind, f"{table}[{row['index']}]", extra)
     _read_nested_events(section)
+    if pool_fields:
+        _read_pool_metadata(section)
     if graph_fields:
         native_graph_protocol.read_graph_protocol(section)
     return section
+
+
+def _read_admission_arrays(section):
+    for row in section["admissions"]:
+        if len(row["member_words"]) != (section["worker_count"] + 63) // 64:
+            _error("member bitmap length mismatch")
+        if len(row["close_seals"]) not in (0, section["cluster_count"]):
+            _error("close seal array length mismatch")
+
+
+def _read_pool_metadata(section):
+    pool = section["ordinary_pool"]
+    extra = {"word_task_capacity"} if protocol_version(section) == 11 else set()
+    _object(pool, {"task_count", "word_count", "words", "publications"} | extra, "ordinary_pool")
+    if extra:
+        _number(pool["word_task_capacity"], "ordinary_pool.word_task_capacity")
+        if pool["word_task_capacity"] != 16:
+            _error("v11 ordinary_pool.word_task_capacity must be 16")
+    _number(pool["task_count"], "ordinary_pool.task_count")
+    _number(pool["word_count"], "ordinary_pool.word_count")
+    capacity = pool_word_task_capacity(section)
+    if (
+        not 0 < pool["task_count"] <= section["task_count"]
+        or pool["word_count"] != (section["task_count"] + capacity - 1) // capacity
+    ):
+        _error("invalid ordinary pool capacity")
+    _array(pool["words"], "ordinary_pool.words", 2 * pool["word_count"])
+    _indices(pool["publications"], section["task_count"], "ordinary_pool.publications")
+    for row in pool["publications"]:
+        _object(row, {"index", "publication"}, "ordinary pool publication row")
+        _record(row["publication"], "actor", f"ordinary_pool.publications[{row['index']}]")
 
 
 def _read_nested_events(section):
@@ -220,10 +263,13 @@ def _read_nested_events(section):
     _indices(section["blocks"], section["trace_count"], "blocks")
     for row in section["blocks"]:
         fields = {"index", "owner", "lanes"}
+        pooled = has_pool_protocol(section) and "pool_claim" in row
         if protocol_version(section) >= 6:
-            fields.add("claim")
+            fields.add("pool_claim" if pooled else "claim")
         _object(row, fields, "block row")
-        if protocol_version(section) >= 6 and row["claim"] is not None:
+        if pooled:
+            _record(row["pool_claim"], "pool_claim", f"blocks[{row['index']}].pool_claim")
+        elif protocol_version(section) >= 6 and row["claim"] is not None:
             _record(row["claim"], "claim", f"blocks[{row['index']}].claim")
         if row["owner"] is not None:
             _record(row["owner"], "owner", f"blocks[{row['index']}].owner")
@@ -234,12 +280,17 @@ def _read_nested_events(section):
 
 
 def _event_records(section):
+    if has_pool_protocol(section):
+        for row in section["ordinary_pool"]["publications"]:
+            yield row["publication"], "actor", f"ordinary_pool.publications[{row['index']}]"
     for row in section["task_events"]:
         for name in ("admission", "completion"):
             if row[name] is not None:
                 yield row[name], "actor", f"task_events[{row['index']}].{name}"
     for row in section["blocks"]:
-        if protocol_version(section) >= 6 and row["claim"] is not None:
+        if has_pool_protocol(section) and "pool_claim" in row:
+            yield row["pool_claim"], "pool_claim", f"blocks[{row['index']}].pool_claim"
+        elif protocol_version(section) >= 6 and row["claim"] is not None:
             yield row["claim"], "claim", f"blocks[{row['index']}].claim"
         if row["owner"] is not None:
             yield row["owner"], "owner", f"blocks[{row['index']}].owner"

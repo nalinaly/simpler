@@ -11,6 +11,8 @@
 
 #pragma once
 
+#include "scheduler_protocol_pool.h"
+
 // AICore-resident completion library; scheduler_completion.cpp is the independent AICPU scheduler implementation.
 
 #include "scheduler_gm_mix.h"
@@ -216,7 +218,39 @@ static inline __aicore__ bool scheduler_service_cluster_completion_slot(
         return false;
     }
     bool task_complete = !gm_mix;
-    if (local_slot->cooperative && !gm_mix) {
+    auto *pool_execution =
+        scheduler->admission == nullptr ? nullptr : &scheduler->admission->pool_executions[pending_slot];
+    const bool pooled = pool_execution != nullptr && pool_execution->phase != SchedulerOrdinaryPoolPhase::EMPTY;
+    if (pooled) {
+        if (local_slot->cooperative || gm_mix || mix_slot || mix_tracker != nullptr ||
+            cluster_lane != scheduler->config.self_lane || pool_execution->task_ref != task_ref ||
+            pool_execution->block_idx != completed_block_idx ||
+            !scheduler_admission_context_valid(
+                graph, scheduler_state_base, scheduler, run_control, scheduler->admission
+            )) {
+            scheduler_record_error(
+                run_control, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, scheduler,
+                SchedulerErrorSite::BLOCK_COMPLETION_INVALID, local_slot
+            );
+            return false;
+        }
+        uint64_t previous = UINT64_MAX;
+        if constexpr (RecordProtocol)
+            scheduler_protocol_pool_complete(scheduler_state_base, scheduler, *pool_execution, true, UINT64_MAX);
+        const auto result = scheduler_ordinary_pool_finish(
+            scheduler_ordinary_pool_view(scheduler_state_base, scheduler), pool_execution, &previous
+        );
+        if constexpr (RecordProtocol)
+            scheduler_protocol_pool_complete(scheduler_state_base, scheduler, *pool_execution, false, previous);
+        if (result != SchedulerOrdinaryPoolResult::COMPLETED && result != SchedulerOrdinaryPoolResult::TASK_LAST) {
+            scheduler_record_error(
+                run_control, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, scheduler,
+                SchedulerErrorSite::BLOCK_COMPLETION_INVALID, local_slot
+            );
+            return false;
+        }
+        task_complete = result == SchedulerOrdinaryPoolResult::TASK_LAST;
+    } else if (local_slot->cooperative && !gm_mix) {
         if (mix_slot || mix_tracker != nullptr || cluster_lane != scheduler->config.self_lane) {
             scheduler_record_error(
                 run_control, task_ref, SchedulerGraphResult::INVALID_ARGUMENTS, &graph, scheduler,
@@ -240,6 +274,7 @@ static inline __aicore__ bool scheduler_service_cluster_completion_slot(
     if constexpr (RecordProtocol)
         if (!mix_slot)
             scheduler_protocol_execution_consumed(scheduler_state_base, scheduler, pending_slot, *local_slot);
+    if (pooled) *pool_execution = {};
     uint64_t refill_start_cycles = 0;
     uint64_t refill_end_cycles = 0;
     bool refilled = false;

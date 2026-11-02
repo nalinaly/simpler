@@ -1109,4 +1109,100 @@ TEST(HbgProtocolTrace, RequiresAnActualTopologyEvenForOrdinaryOnlyGraphs) {
     EXPECT_EQ(layout.protocol.worker_count, 3u);
 }
 
+TEST(HbgOrdinaryPoolLayout, PureOrdinaryPoolNeedsNoAdmissionStorage) {
+    AicoreSchedulerLayout layout{};
+    const SchedulerSpmdRequirements spmd{6, 2, 0, 0, 2};
+    ASSERT_TRUE(scheduler_plan_layout(3, 2, 1, &layout, false, 21, spmd));
+    expect_no_protocol_storage(layout);
+    EXPECT_NE(layout.ordinary_pool_words_offset, 0U);
+    EXPECT_EQ(layout.ordinary_pool_words_offset % 128, 0U);
+    EXPECT_GE(layout.total_size, layout.ordinary_pool_words_offset + 2 * sizeof(SchedulerOrdinaryPoolWord));
+    scheduler_test::SchedulerStateBuffer storage(layout);
+    set_metadata(storage.base(), layout, 0, 3, LaneMask::aic());
+    set_metadata(storage.base(), layout, 1, 17, LaneMask::aiv1());
+    set_metadata(storage.base(), layout, 2, 1, LaneMask::aic());
+    ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
+    const auto *summary = scheduler_state_at<SchedulerGraphSummary>(storage.base(), layout.graph_summary_offset);
+    EXPECT_EQ(summary->ordinary_pool_task_count, 2U);
+    EXPECT_EQ(summary->ordinary_pool_word_task_capacity, 16U);
+    EXPECT_EQ(summary->ordinary_pool_words_offset, layout.ordinary_pool_words_offset);
+    EXPECT_EQ(summary->run_epoch, 37U);
+    auto *words = scheduler_state_at<SchedulerOrdinaryPoolWord>(storage.base(), layout.ordinary_pool_words_offset);
+    EXPECT_EQ(words[0].bits, 0U);
+    EXPECT_EQ(words[1].bits, 0U);
+}
+
+TEST(HbgOrdinaryPoolLayout, HybridGraphKeepsMixAndSyncStartInOrderedRecords) {
+    AicoreSchedulerLayout layout{};
+    const SchedulerSpmdRequirements spmd{6, 2, 2, 1, 1};
+    ASSERT_TRUE(scheduler_plan_layout(3, 3, 1, &layout, false, 14, spmd));
+    EXPECT_LE(
+        layout.ordinary_pool_words_offset + 2 * sizeof(SchedulerOrdinaryPoolWord), layout.admission_control_offset
+    );
+    scheduler_test::SchedulerStateBuffer storage(layout);
+    set_metadata(storage.base(), layout, 0, 3, LaneMask::aic());
+    set_metadata(storage.base(), layout, 1, 2, LaneMask::aic(), SCHEDULER_TASK_SYNC_START);
+    set_metadata(storage.base(), layout, 2, 3, LaneMask::all());
+    ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
+    for (uint64_t task = 0; task < 3; ++task) {
+        auto *record = scheduler_state_at<SchedulerAdmissionRecord>(
+            storage.base(), layout.admission_records_offset + task * layout.admission_record_stride
+        );
+        EXPECT_EQ(record->task_ref, task == 0 ? SCHEDULER_TASK_REF_INVALID : static_cast<int64_t>(task));
+    }
+    EXPECT_EQ(layout.spmd.cooperative_task_count, 2U);
+    EXPECT_EQ(layout.mix_close_seal_count, 2U);
+}
+
+TEST(HbgOrdinaryPoolLayout, CapabilityCountsAndEveryBitmapWordAreChecked) {
+    AicoreSchedulerLayout layout{};
+    EXPECT_FALSE(scheduler_plan_layout(3, 1, 2, &layout, false, 3, {6, 2, 2, 0, 2}));
+    EXPECT_FALSE(scheduler_plan_layout(1, 1, 0, &layout, false, 3, {0, 0, 0, 0, 1}));
+    ASSERT_TRUE(scheduler_plan_layout(65, 1, 1, &layout, false, 66, {6, 2, 0, 0, 2}));
+    EXPECT_GE(layout.total_size, layout.ordinary_pool_words_offset + 10 * sizeof(SchedulerOrdinaryPoolWord));
+    scheduler_test::SchedulerStateBuffer storage(layout);
+    set_metadata(storage.base(), layout, 0, 3, LaneMask::aic());
+    set_metadata(storage.base(), layout, 64, 3, LaneMask::aiv0());
+    ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
+    auto *metadata = scheduler_state_at<SchedulerTaskMetadata>(storage.base(), layout.task_metadata_offset);
+    metadata[64].flags |= SCHEDULER_TASK_SYNC_START;
+    EXPECT_FALSE(scheduler_init_spmd_task_records(storage.base(), layout, 38));
+    EXPECT_EQ(scheduler_state_at<SchedulerGraphSummary>(storage.base(), layout.graph_summary_offset)->run_epoch, 37U);
+    AicoreSchedulerLayout overflow{};
+    overflow.task_count = UINT64_MAX;
+    overflow.spmd = {6, 2, 0, 0, 1};
+    uint64_t cursor = 128;
+    EXPECT_FALSE(scheduler_plan_spmd_storage(&cursor, &overflow));
+}
+
+TEST(HbgOrdinaryPoolLayout, EveryWordIncludingUnusedTailBitsStartsClear) {
+    AicoreSchedulerLayout layout{};
+    ASSERT_TRUE(scheduler_plan_layout(33, 1, 0, &layout, false, 4, {6, 2, 0, 0, 2}));
+    scheduler_test::SchedulerStateBuffer storage(layout);
+    set_metadata(storage.base(), layout, 0, 2, LaneMask::aic());
+    set_metadata(storage.base(), layout, 32, 2, LaneMask::aic());
+    ASSERT_TRUE(scheduler_init_spmd_task_records(storage.base(), layout, 37));
+    ASSERT_GE(layout.total_size, layout.ordinary_pool_words_offset + 6 * sizeof(SchedulerOrdinaryPoolWord));
+    const auto *words =
+        scheduler_state_at<SchedulerOrdinaryPoolWord>(storage.base(), layout.ordinary_pool_words_offset);
+    for (uint64_t index = 0; index < 6; ++index)
+        EXPECT_EQ(words[index].bits, 0U);
+}
+
+TEST(HbgOrdinaryPoolLayout, UnrepresentablePoolCountIsRejectedBeforeTouchingStorage) {
+    AicoreSchedulerLayout layout{};
+    ASSERT_TRUE(scheduler_plan_layout(1, 1, 0, &layout, false, 2, {3, 1, 0, 0, 1}));
+    scheduler_test::SchedulerStateBuffer storage(layout);
+    const auto *bytes = static_cast<const uint8_t *>(storage.base());
+    const std::vector<uint8_t> before(bytes, bytes + layout.total_size);
+    for (uint64_t count : {UINT64_C(2), static_cast<uint64_t>(INT32_MAX) + 1}) {
+        auto invalid = layout;
+        invalid.spmd.ordinary_pool_task_count = count;
+        EXPECT_FALSE(
+            scheduler_init_data_from_layout(storage.base(), invalid, reinterpret_cast<uint64_t>(storage.base()))
+        );
+        EXPECT_EQ(std::memcmp(storage.base(), before.data(), before.size()), 0);
+    }
+}
+
 }  // namespace

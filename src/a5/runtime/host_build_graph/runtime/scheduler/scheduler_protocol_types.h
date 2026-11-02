@@ -43,7 +43,9 @@ struct alignas(128) SchedulerProtocolLayout {
     uint64_t blocks_offset;
     uint64_t executions_offset;
     uint64_t workers_offset;
-    uint64_t reserved[3];
+    uint64_t ordinary_pool_task_count;
+    uint64_t pool_publications_offset;
+    uint64_t reserved[1];
 };
 
 // Sequence zero denotes an unrecorded point, not cycle zero or epoch zero.
@@ -182,6 +184,7 @@ enum SchedulerProtocolExecutionFlags : uint32_t {
     SCHEDULER_PROTOCOL_PERMIT_TAIL = 1U << 4,
     SCHEDULER_PROTOCOL_PERMIT_NO_LOG = 1U << 5,
     SCHEDULER_PROTOCOL_PAYLOAD_PUBLISHED = 1U << 6,
+    SCHEDULER_PROTOCOL_ORDINARY_POOL = 1U << 7,
 };
 
 // One worker owns this record; no global event counter participates in scheduling.
