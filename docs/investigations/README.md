@@ -84,6 +84,8 @@ that ...".
 
 Newest first.
 
+- [2026-11 — A5 Graph materialization proposal review](../zh-cn/investigations/2026-11-a5-graph-materialization-review.md): startup serialization confirmed; the original ENTER move is deferred pending failure, visibility and progress proofs. The follow-up design selects parallel construction with the startup barrier retained, followed by conditional staged publication. Legacy also counts child completion. Six CPU targets (64 cases) passed during review; the new optimization is not implemented or measured.
+
 - [2026-11 — A5 SWA host preparation of initial Ready and wake lists](2026-11-a5-swa-host-bootstrap.md): scan removal and native protocol audit passed; frozen alternating comparison won 2/4 pairs with 0.397% median paired improvement, so the extra path was reverted.
 
 - [2026-11 — A5 SWA full propagation of disabled protocol recording](2026-11-a5-swa-full-recording-propagation.md): full propagation reduced static loop instructions but was 8.98% slower in screening; no end-to-end gain established.
