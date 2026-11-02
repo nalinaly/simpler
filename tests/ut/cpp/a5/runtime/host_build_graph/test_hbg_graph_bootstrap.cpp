@@ -330,4 +330,205 @@ TEST(HbgGraphBootstrap, AbandonedOwnerTraceIsABoundedWaitWithTheObservedCounter)
     EXPECT_EQ(f.state.workers[1].next_sequence, 2u);
 }
 
+struct ParallelBootstrapFixture : BootstrapFixture {
+    std::array<SchedulerGraphWork, 8> work{};
+    std::array<SchedulerGraphWorkRange, 3> ranges{{{0, 1}, {1, 1}, {0, 2}}};
+    alignas(128) std::array<SchedulerGraphWorkState, 8> work_states{};
+    std::array<SchedulerGraphProtocolWork, 8> records{};
+
+    ParallelBootstrapFixture() {
+        for (uint32_t index = 0; index < 2; ++index) {
+            payloads[index].control.work = {4, index * 4, 4};
+            work[index * 4] = {index, SchedulerGraphWorkRegion::TASK_STORAGE, 0, 1, 320};
+            work[index * 4 + 1] = {index, SchedulerGraphWorkRegion::TASK_STORAGE, 1, 1, 320};
+            work[index * 4 + 2] = {index, SchedulerGraphWorkRegion::TENSOR_POOL, 2, 1, 256};
+            work[index * 4 + 3] = {index, SchedulerGraphWorkRegion::SCALAR_POOL, 2, 1, 16};
+        }
+        build.work_address = reinterpret_cast<uint64_t>(work.data());
+        build.work_ranges_address = reinterpret_cast<uint64_t>(ranges.data());
+        build.work_states_address = reinterpret_cast<uint64_t>(work_states.data());
+        build.work_count = work.size();
+        build.work_range_count = ranges.size();
+    }
+
+    void enable_work_protocol() {
+        enable_protocol();
+        build.protocol_work_address = reinterpret_cast<uint64_t>(records.data());
+    }
+};
+
+TEST(HbgGraphBootstrap, RegionQueueMaterializesInstancesWithoutCompletingChildren) {
+    ParallelBootstrapFixture f;
+    ASSERT_TRUE(f.execute());
+    EXPECT_EQ(f.build.next_instance, 2u);
+    EXPECT_EQ(f.build.remaining_instances, 0u);
+    EXPECT_EQ(f.build.materialized, 1u);
+    EXPECT_EQ(f.run.resolved_task_count, 0u);
+    for (uint32_t index = 0; index < 2; ++index) {
+        const auto &payload = f.payloads[index];
+        EXPECT_EQ(payload.control.work.remaining, 0u);
+        EXPECT_EQ(payload.control.remaining_children, 2u);
+        EXPECT_EQ(payload.control.materialize_state, 2u);
+        EXPECT_EQ(payload.control.materialize_owner, 2u);
+        EXPECT_EQ(payload.output.scalars[0], payload.scalar[0]);
+        EXPECT_EQ(payload.output.scalars[1], 29u);
+        EXPECT_EQ(payload.output.tasks[1].task.task_id, TaskId::make_sub_task(index, 1));
+    }
+    for (uint32_t index = 0; index < f.work.size(); ++index) {
+        EXPECT_EQ(f.work_states[index].owner_state, (2u << 2) | 2u);
+        EXPECT_EQ(f.records[index].begin.sequence, 0u);
+    }
+}
+
+TEST(HbgGraphBootstrap, ConcurrentWorkersClaimAndCompleteEveryRangeOnce) {
+    ParallelBootstrapFixture f;
+    std::array<bool, 3> success{};
+    std::array<std::thread, 3> threads;
+    for (uint32_t worker = 0; worker < threads.size(); ++worker)
+        threads[worker] = std::thread([&, worker] {
+            success[worker] = f.execute(worker);
+        });
+    for (auto &thread : threads)
+        thread.join();
+    for (bool done : success)
+        EXPECT_TRUE(done);
+    EXPECT_EQ(f.build.remaining_instances, 0u);
+    EXPECT_EQ(f.build.next_instance, 2u);
+    EXPECT_EQ(scheduler_read_error(&f.run), 0u);
+    for (const auto &state : f.work_states) {
+        EXPECT_EQ(state.owner_state & 3u, 2u);
+        EXPECT_GE(state.owner_state >> 2, 1u);
+        EXPECT_LE(state.owner_state >> 2, 3u);
+    }
+}
+
+TEST(HbgGraphBootstrap, DuplicateWorkAndOldInstanceEpochFailBeforeConstruction) {
+    for (bool old_epoch : {false, true}) {
+        ParallelBootstrapFixture f;
+        if (old_epoch) f.payloads[0].control.run_epoch = 6;
+        else f.work_states[0].owner_state = (3u << 2) | 1u;
+        EXPECT_FALSE(f.execute());
+        EXPECT_NE(scheduler_read_error(&f.run), 0u);
+        EXPECT_EQ(f.build.materialized, 0u);
+        EXPECT_EQ(f.build.remaining_instances, 2u);
+        EXPECT_EQ(f.payloads[0].control.work.remaining, 4u);
+        EXPECT_EQ(f.payloads[0].control.materialize_state, 0u);
+        EXPECT_EQ(f.payloads[0].output.scalars[0], 0u);
+    }
+}
+
+TEST(HbgGraphBootstrap, FailedParameterWorkKeepsHealthyAndFailedInstancesBehindTheGate) {
+    ParallelBootstrapFixture f;
+    f.instances[1].definition_section_address = reinterpret_cast<uint64_t>(&f.payloads[1].object);
+    f.payloads[1].object.body.sources[1] = GraphScalarInheritance::from_boundary(99);
+    EXPECT_FALSE(f.execute());
+    EXPECT_EQ(f.payloads[0].control.materialize_state, 2u);
+    EXPECT_EQ(f.payloads[1].control.materialize_state, 3u);
+    EXPECT_EQ(f.payloads[1].control.work.remaining, 1u);
+    EXPECT_EQ(f.payloads[1].control.materialize_owner, 0u);
+    EXPECT_EQ(f.build.remaining_instances, 1u);
+    EXPECT_EQ(f.build.materialized, 0u);
+    EXPECT_EQ(f.run.resolved_task_count, 0u);
+    EXPECT_EQ(f.run.error_task_ref, 6u);
+    EXPECT_EQ(f.run.error_public_task_id, 1u);
+    EXPECT_EQ(f.run.error_sub_task_id, 1u);
+}
+
+TEST(HbgGraphBootstrap, MissingContributionTimesOutWithoutOpeningTheRunGate) {
+    ParallelBootstrapFixture f;
+    f.build.next_work = f.build.work_count;
+    EXPECT_FALSE(f.execute(1, PLATFORM_PROF_SYS_CNT_FREQ / 1000));
+    EXPECT_EQ(f.build.materialized, 0u);
+    EXPECT_EQ(f.build.remaining_instances, 2u);
+    EXPECT_EQ(f.run.resolved_task_count, 0u);
+    EXPECT_EQ(scheduler_read_error(&f.run), static_cast<uint64_t>(SchedulerGraphResult::TIMEOUT));
+}
+
+TEST(HbgGraphBootstrap, CompletedWorkDoesNotPublishALateBootstrapTimeout) {
+    ParallelBootstrapFixture f;
+    ASSERT_TRUE(f.execute());
+    EXPECT_TRUE(bootstrap_graph_work<false>(f.graph, &f.context, &f.run, &f.build, f.instances.data(), 1, 1, nullptr));
+    EXPECT_EQ(scheduler_read_error(&f.run), 0u);
+    EXPECT_EQ(f.build.materialized, 1u);
+    EXPECT_EQ(f.build.remaining_instances, 0u);
+}
+
+TEST(HbgGraphBootstrap, WorkTraceSeparatesWritersFromTheUniquePublisher) {
+    ParallelBootstrapFixture f;
+    ASSERT_NO_FATAL_FAILURE(f.enable_work_protocol());
+    ASSERT_TRUE(bootstrap_graph_instances<true>(f.graph, &f.context, &f.run, PLATFORM_PROF_SYS_CNT_FREQ, &f.local));
+    for (uint32_t index = 0; index < f.work.size(); ++index) {
+        const auto &record = f.records[index];
+        EXPECT_EQ(record.work_index, index);
+        EXPECT_EQ(record.instance_index, index / 4);
+        EXPECT_EQ(record.worker_index, 1u);
+        EXPECT_EQ(record.status, 0u);
+        EXPECT_EQ(record.remaining_before, 4u - index % 4);
+        EXPECT_LT(record.begin.sequence, record.writeback_after.sequence);
+        EXPECT_LT(record.writeback_after.sequence, record.complete_before.sequence);
+        EXPECT_LT(record.complete_before.sequence, record.complete_after.sequence);
+    }
+    for (uint32_t instance = 0; instance < 2; ++instance) {
+        const auto &publication = f.state.graph_instances[instance];
+        EXPECT_EQ(publication.materialize_before.sequence, 0u);
+        EXPECT_EQ(publication.materialize_after.sequence, 0u);
+        EXPECT_LT(f.records[instance * 4 + 3].complete_after.sequence, publication.publish_before.sequence);
+        EXPECT_LT(publication.publish_before.sequence, publication.publish_after.sequence);
+        EXPECT_LT(publication.publish_after.sequence, f.state.graph_workers[1].after.sequence);
+    }
+}
+
+TEST(HbgGraphBootstrap, ParallelFailurePublishesItsChildIdentityBeforePeersObserveFailedState) {
+    for (uint32_t attempt = 0; attempt < 256; ++attempt) {
+        SCOPED_TRACE(attempt);
+        ParallelBootstrapFixture f;
+        f.payloads[0].object.body.task_offsets[0] = UINT64_MAX;
+        ASSERT_NO_FATAL_FAILURE(f.enable_work_protocol());
+        std::atomic<uint32_t> arrived{0};
+        std::atomic<bool> start{false};
+        std::atomic<bool> finished{false}, unclaimed_failure{false};
+        std::array<bool, 3> success{};
+        std::array<std::thread, 3> threads;
+        std::thread observer([&] {
+            ++arrived;
+            while (!start.load()) {}
+            while (!finished.load()) {
+                const bool failed = scheduler_gm_fetch_add(f.payloads[0].control.materialize_state, UINT64_C(0)) == 3 ||
+                                    scheduler_gm_fetch_add(f.payloads[1].control.materialize_state, UINT64_C(0)) == 3;
+                if (failed && scheduler_gm_fetch_add(f.run.error_claimed, UINT64_C(0)) == 0) {
+                    unclaimed_failure.store(true);
+                    break;
+                }
+            }
+        });
+        for (uint32_t worker = 0; worker < threads.size(); ++worker) {
+            threads[worker] = std::thread([&, worker] {
+                auto context = f.context;
+                context.worker_index = worker;
+                SchedulerLocalProfilingState profile{};
+                auto local = f.local;
+                local.profiling = &profile;
+                local.config.worker_ids[0] = worker;
+                ++arrived;
+                while (!start.load()) {}
+                success[worker] =
+                    bootstrap_graph_instances<true>(f.graph, &context, &f.run, PLATFORM_PROF_SYS_CNT_FREQ, &local);
+            });
+        }
+        while (arrived.load() != threads.size() + 1) {}
+        start.store(true);
+        for (auto &thread : threads)
+            thread.join();
+        finished.store(true);
+        observer.join();
+        ASSERT_FALSE(unclaimed_failure.load());
+        for (bool result : success)
+            ASSERT_FALSE(result);
+        ASSERT_EQ(f.run.error_site, static_cast<uint64_t>(SchedulerErrorSite::GRAPH_MATERIALIZE_FAILED));
+        ASSERT_EQ(f.run.error_sub_task_id, 0u);
+        ASSERT_EQ(f.build.materialized, 0u);
+        ASSERT_EQ(f.run.resolved_task_count, 0u);
+    }
+}
+
 }  // namespace

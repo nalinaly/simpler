@@ -13,6 +13,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -184,6 +185,160 @@ TEST(HbgGraphMaterialize, MatchesLegacyParameterBindingForTheSameDefinition) {
         EXPECT_EQ(native.payload.predicate.elem_size, legacy.payload.predicate.elem_size);
         EXPECT_EQ(native.payload.predicate.op, legacy.payload.predicate.op);
     }
+}
+
+SchedulerGraphView work_graph(const MaterializeFixture &fixture) {
+    return {0, 0, fixture.nodes.size(), fixture.nodes.size() - 1, reinterpret_cast<uint64_t>(fixture.nodes.data())};
+}
+
+using StorageBytes = std::array<uint8_t, sizeof(MaterializeFixture::Storage)>;
+
+StorageBytes storage_bytes(const MaterializeFixture &fixture) {
+    StorageBytes result{};
+    std::copy_n(reinterpret_cast<const uint8_t *>(&fixture.output), result.size(), result.begin());
+    return result;
+}
+
+void poison_storage(MaterializeFixture *fixture) {
+    std::fill_n(reinterpret_cast<uint8_t *>(&fixture->output), sizeof(fixture->output), 0xa5);
+}
+
+TEST(HbgGraphMaterialize, RegionWorkMatchesSerialBytesInEveryConstructionOrder) {
+    MaterializeFixture f;
+    f.enable_predicates();
+    poison_storage(&f);
+    ASSERT_EQ(f.materialize(), SchedulerGraphResult::OK);
+    const auto expected = storage_bytes(f);
+    const std::array<SchedulerGraphWorkRange, 3> ranges{{{0, 1}, {1, 1}, {0, 2}}};
+    const std::array<SchedulerGraphWork, 4> work{{
+        {0, SchedulerGraphWorkRegion::TASK_STORAGE, 0, 1, SCHEDULER_GRAPH_TASK_STORAGE_STRIDE},
+        {0, SchedulerGraphWorkRegion::TASK_STORAGE, 1, 1, SCHEDULER_GRAPH_TASK_STORAGE_STRIDE},
+        {0, SchedulerGraphWorkRegion::TENSOR_POOL, 2, 1, 2 * TASKPAYLOAD_TENSOR_STRIDE},
+        {0, SchedulerGraphWorkRegion::SCALAR_POOL, 2, 1, 2 * sizeof(uint64_t)},
+    }};
+    std::array<uint32_t, 4> order{0, 1, 2, 3};
+    do {
+        poison_storage(&f);
+        for (uint32_t index : order) {
+            int32_t failed_child = 99;
+            ASSERT_EQ(
+                scheduler_graph_materialize_work(
+                    f.instance, work_graph(f), work[index], ranges.data(), ranges.size(), &failed_child
+                ),
+                SchedulerGraphResult::OK
+            );
+            EXPECT_EQ(failed_child, -1);
+        }
+        EXPECT_EQ(storage_bytes(f), expected);
+    } while (std::next_permutation(order.begin(), order.end()));
+}
+
+TEST(HbgGraphMaterialize, SharedSlotsDoNotValidateOrWriteUnusedPoolEntries) {
+    MaterializeFixture f;
+    f.object.body.tasks[1].tensor_offset = 0;
+    f.object.body.tasks[1].scalar_offset = 0;
+    f.object.body.tensors[1].owner_task_id = TaskId::make_param(99);
+    f.object.body.sources[1] = GraphScalarInheritance::from_boundary(99);
+    poison_storage(&f);
+    ASSERT_EQ(f.materialize(), SchedulerGraphResult::OK);
+    const auto expected = storage_bytes(f);
+    poison_storage(&f);
+    const std::array<SchedulerGraphWorkRange, 2> ranges{{{0, 2}, {0, 1}}};
+    const std::array<SchedulerGraphWork, 3> work{{
+        {0, SchedulerGraphWorkRegion::SCALAR_POOL, 1, 1, sizeof(uint64_t)},
+        {0, SchedulerGraphWorkRegion::TENSOR_POOL, 1, 1, TASKPAYLOAD_TENSOR_STRIDE},
+        {0, SchedulerGraphWorkRegion::TASK_STORAGE, 0, 1, 2 * SCHEDULER_GRAPH_TASK_STORAGE_STRIDE},
+    }};
+    for (const auto &item : work)
+        ASSERT_EQ(
+            scheduler_graph_materialize_work(f.instance, work_graph(f), item, ranges.data(), ranges.size()),
+            SchedulerGraphResult::OK
+        );
+    EXPECT_EQ(storage_bytes(f), expected);
+}
+
+TEST(HbgGraphMaterialize, ParameterWorkReportsTheOriginalChildOnBindingFailure) {
+    MaterializeFixture f;
+    const SchedulerGraphWorkRange range{1, 1};
+    const SchedulerGraphWork scalar{0, SchedulerGraphWorkRegion::SCALAR_POOL, 0, 1, sizeof(uint64_t)};
+    f.object.body.sources[1] = GraphScalarInheritance::from_boundary(99);
+    int32_t failed_child = -1;
+    EXPECT_EQ(
+        scheduler_graph_materialize_work(f.instance, work_graph(f), scalar, &range, 1, &failed_child),
+        SchedulerGraphResult::INVALID_ARGUMENTS
+    );
+    EXPECT_EQ(failed_child, 1);
+    EXPECT_EQ(f.output.scalars[1], 0u);
+    f.object.body.sources[1] = GraphScalarInheritance::self_value();
+    f.object.body.tensors[1].owner_task_id = TaskId::make_param(99);
+    const SchedulerGraphWork tensor{0, SchedulerGraphWorkRegion::TENSOR_POOL, 0, 1, TASKPAYLOAD_TENSOR_STRIDE};
+    EXPECT_EQ(
+        scheduler_graph_materialize_work(f.instance, work_graph(f), tensor, &range, 1, &failed_child),
+        SchedulerGraphResult::INVALID_ARGUMENTS
+    );
+    EXPECT_EQ(failed_child, 1);
+}
+
+TEST(HbgGraphMaterialize, InvalidWorkCannotWriteOutsideItsValidatedRanges) {
+    MaterializeFixture f;
+    poison_storage(&f);
+    const auto initial = storage_bytes(f);
+    std::array<SchedulerGraphWorkRange, 2> ranges{{{0, 1}, {0, 1}}};
+    SchedulerGraphWork work{0, SchedulerGraphWorkRegion::SCALAR_POOL, 0, 2, 2 * sizeof(uint64_t)};
+    auto execute = [&] {
+        return scheduler_graph_materialize_work(f.instance, work_graph(f), work, ranges.data(), ranges.size());
+    };
+    EXPECT_EQ(execute(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    ranges[1] = {1, 2};
+    EXPECT_EQ(execute(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    ranges[1] = {1, 1};
+    work.write_bytes = 8;
+    EXPECT_EQ(execute(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    work.write_bytes = 16;
+    work.instance_index = 1;
+    EXPECT_EQ(execute(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    work.instance_index = 0;
+    work.first_range = UINT32_MAX;
+    EXPECT_EQ(execute(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    EXPECT_EQ(storage_bytes(f), initial);
+}
+
+TEST(HbgGraphMaterialize, SerialWorkPreservesWholeInstanceBinding) {
+    MaterializeFixture f;
+    const SchedulerGraphWork work{0, SchedulerGraphWorkRegion::SERIAL_INSTANCE, 0, 0, 0};
+    ASSERT_EQ(scheduler_graph_materialize_work(f.instance, work_graph(f), work, nullptr, 0), SchedulerGraphResult::OK);
+    EXPECT_EQ(f.output.scalars[0], 97u);
+    EXPECT_EQ(f.output.scalars[1], 29u);
+    EXPECT_EQ(f.output.tasks[1].task.task_id, TaskId::make_sub_task(5, 1));
+}
+
+TEST(HbgGraphMaterialize, WritebackSpanIncludesBothSidesOfAnUnalignedRange) {
+    SchedulerGraphWritebackSpan span{};
+    ASSERT_TRUE(scheduler_graph_writeback_span(0x1038, 16, &span));
+    EXPECT_EQ(span.first, 0x1000u);
+    EXPECT_EQ(span.count, 2u);
+    ASSERT_TRUE(scheduler_graph_writeback_span(0x1008, 64, &span));
+    EXPECT_EQ(span.first, 0x1000u);
+    EXPECT_EQ(span.count, 2u);
+    ASSERT_TRUE(scheduler_graph_writeback_span(0x1000, 64, &span));
+    EXPECT_EQ(span.count, 1u);
+    ASSERT_TRUE(scheduler_graph_writeback_span(0, 0, &span));
+    EXPECT_EQ(span.count, 0u);
+    EXPECT_FALSE(scheduler_graph_writeback_span(UINT64_MAX - 7, 16, &span));
+    EXPECT_FALSE(scheduler_graph_writeback_span(0x1000, 8, nullptr));
+}
+
+TEST(HbgGraphMaterialize, PoolAddressOverflowIsRejectedBeforeAnyConstruction) {
+    MaterializeFixture f;
+    poison_storage(&f);
+    const auto initial = storage_bytes(f);
+    f.instance.scalar_pool_address = UINT64_MAX - 7;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    EXPECT_EQ(storage_bytes(f), initial);
+    f.instance.scalar_pool_address = reinterpret_cast<uint64_t>(f.output.scalars.data());
+    f.instance.tensor_pool_address = UINT64_MAX - 63;
+    EXPECT_EQ(f.materialize(), SchedulerGraphResult::INVALID_ARGUMENTS);
+    EXPECT_EQ(storage_bytes(f), initial);
 }
 
 }  // namespace

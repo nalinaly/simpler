@@ -2,6 +2,14 @@
 
 日期：2026-10-30。状态：**设计范围内的首版已实现并通过 A5sim/A5 验证；原生 Graph L4、故障回收、参数发布、同负载性能及资源报告已交付**。不宣称所有场景更快：2D Device 有小幅回退，部分 Graph 的 Host 发布成本增加，CSA Host 存在未归因的批间波动。进度和测试证据见[实现过程](a5-hbg-aicore-graph-implementation.md)，完整数据见[性能/资源报告](a5-hbg-aicore-graph-p4-performance.md)。
 
+2026-11-02 方案修订：后续优化先做**保留启动屏障的并行物化**，
+再有条件评估验证/生成分离和按实例发布；完成计数器保持现状。
+具体所有权、发布、缓存和验收条件见[物化优化方案](a5-hbg-aicore-graph-materialization-plan.md)。
+本次交付按用户确认以**稳定、可用的 Graph 版本**为目标：并行物化已接入，
+以功能、缓存可见性、并发发布、故障恢复及完整回归为验收门槛。
+性能仅做轻量方向检查；完整性能 A/B、细粒度资源分析和 P5b 属于后续工作，
+不阻塞本次交付，也不据此宣称已获得严格测量的性能收益。
+
 开发基线：`02335c0f46d6f12a0fd0adaeccf4869b1164ff64`，来自 `feat/fully_distributed_within_core`；独立分支 `feat/a5-hbg-aicore-graph`，工作目录 `simpler-aicore-graph`。不包含其他工作目录的未跟踪文件，不以旧精简 PR 的版本代替当前基线。
 
 目标分支集成以 `feat/fully_distributed_within_core@5274c328d` 和 Graph `a83bb9c69` 为两个父版本，保留资源范围 Mix、两 lane 资源需求及无记录热路径优化。合并版本的 Graph 捕获使用 v9，普通捕获保持资源范围 v8；独立 Graph 分支已有 v8 捕获继续兼容。历史性能表对应其明确标注的旧版本，不作为合并后性能数据。
@@ -38,7 +46,7 @@
 - 每次 Graph 仍只占一个公共顶层 task slot、只贡献一次公共顶层完成；不把内部节点重新调用 Host submit 塞进顶层 TensorMap。
 - 保留所有原本合法核/cluster 的领取资格。不得固定小 N 任务的执行核、缩减 Mix 候选集合、常驻占用一个 AIV 代调度，或改变三 lane 资源合同。
 - 不改计算 kernel、输入、block 数、数值容差或 task 模拟负载；不在 Scalar 动态分配 heap，不在 Scalar 重新推导 tensor 依赖。
-- 无 Graph 的路径不分配 Graph 专属存储，不进入新增物化阶段；普通任务热路径必须有独立回归和性能对照。
+- 无 Graph 的路径不分配 Graph 专属存储，不进入新增物化阶段；普通任务热路径保留独立回归，当前仅做轻量性能方向检查，完整性能对照后续开展。
 - 不新增环境开关/编译宏。按实际图的已验证能力选择整轮 resident 或 legacy；不得执行到一半才回退，也不以“数值相同”掩盖回退。
 
 ## 2. 推荐结构：共享定义、稠密引用、分层完成
@@ -52,9 +60,12 @@
 | AICPU 持续展开/调度 Graph，AICore 只接收 leaf | 不满足本次目标；不能声称已完成 resident Graph |
 | 共享 Definition + AICore 实例化 + 原 resident 执行体系 | 推荐；复用 Host 录制、存储规划和既有 ready/完成/协同协议 |
 
-**首个可验收版本建议在 Graph run 的启动阶段完成全部实例物化，再开放 kernel 执行。** 这是明确的首版折中：不保留旧 AICPU 路径“边物化边执行”的重叠，不声称性能等价。物化属于设备工作，必须计入完整 Device 时间。
+**现有首版在 Graph run 的启动阶段完成全部实例物化，再开放 kernel 执行。** 这是明确的首版折中：不保留旧 AICPU 路径“边物化边执行”的重叠，不声称性能等价。物化属于设备工作，必须计入完整 Device 时间。
 
-增量物化作为后续独立阶段，只有确认存在显著物化瓶颈并完成进度证明才接入。不能把首版启动屏障扩展成每个 Graph 执行前的全核屏障，更不能等前一个 Graph 全局结束才运行独立的另一个 Graph。
+下一阶段先把大单实例分成写回范围不交叠的构造工作项，多个核协作、唯一发布，
+继续保留“启动物化失败时零 kernel 进入”的行为。小图合并工作项以控制额外开销。
+只有完成全部可失败验证、消费端可见性和进度证明后，才评估按实例延后生成/发布。
+不能把首版启动屏障扩展成每个 Graph 执行前的全核屏障，更不能等前一个 Graph 全局结束才运行独立的另一个 Graph。
 
 ### 2.2 Definition 载体与复用
 
@@ -104,6 +115,10 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 
 拟议最小实例控制状态：物化 owner/终态、ENTER/EXIT 引用、子任务起始引用和数量、剩余子任务数、epoch。它不是另一套 TensorMap。先复用可兼容字段；不能直接把含 `std::atomic<uint8_t>` 和 AICPU 指针的 `GraphExecution` 原样交给 Scalar。
 
+P5a 另计构造工作项、区间映射和剩余构造项状态，不能与 `remaining_children` 混用。
+新增预算按实际实例、工作项和区间数计算，包含对齐及诊断空间；不复制每核全图，
+不预设旧结构 padding 足够，无 Graph run 的新增分配和扫描必须为零。
+
 设普通顶层节点数为 O，Graph 实例数为 I，第 i 个实例含 N_i 个子任务，则内部节点预算 `R = O + Σ(N_i + 2)`。检查 int32 引用、字段窄化、CSR/trace 前缀、所有乘积和总分配溢出；不把 R 与公共顶层 task_count 混用。
 
 | 存储 | 预算原则 |
@@ -130,7 +145,11 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 
 物化 owner 只能等待有限的发布事务，不能等待 kernel 或外部 fanin；不持锁进入 kernel。任一失败立即走现有 first-error/退出收敛，等待启动完成的 worker 必须持续检查错误和生命周期状态，不能无限等失败 owner。
 
-若后续把同一实例拆成并行 chunk，必须先证明 descriptor/参数区的写回粒度不交叠、边界元数据只读、发布者唯一；首版不默认这些性质已经成立。
+P5a 保留步骤 5，仅替换步骤 3–4 的工作划分：descriptor、Tensor pool、Scalar pool
+按实际写回单元确定唯一 writer，共享参数槽位归并，不能直接按 child 编号并发写参数池。
+每项写回和 barrier 后才贡献完成；最后一个成功贡献者取得实例发布权。
+失败状态不能被成功覆盖，错误退出不等待成功计数归零，回收仍需证明在途 writer 静止。
+详细状态、边界和资源预算见[物化优化方案 §2](a5-hbg-aicore-graph-materialization-plan.md)。
 
 ### 3.2 ENTER、子任务和 EXIT
 
@@ -152,7 +171,7 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 | 数据 | writer / reader | 必须保持的合同 |
 | ---- | --------------- | -------------- |
 | Definition、映射、实例地址 | Host → Scalar | launch 前完整上传，本轮只读，run-owned，不读 AICPU 参数包 |
-| 子任务 descriptor/payload/参数池 | 唯一物化 owner → 执行/调度 worker | 完整写回和 barrier 在物化完成信号之前；消费者 acquire 后失效相应缓存再读 |
+| 子任务 descriptor/payload/参数池 | 首版每实例 owner；P5a 每写回范围唯一 writer → 执行/调度 worker | 完整写回和 barrier 先于构造完成贡献；实例发布后，消费者 acquire 并失效相应缓存再读 |
 | 物化 owner、remaining、唯一 EXIT 发布权 | 竞争者/完成者 → 同组读者 | 使用现有原子所有权原语；布局隔离，不被 cached 写回覆盖 |
 | 物化完成信号 | 最后一个完成物化的 owner → 其他 worker | 复用 bypass signal，独占 128B 行；整行不混 atomic/cached 写回；看到信号后仍 atomic 确认 remaining 为零 |
 | ready/wake、claim/ack/seal | 原调度器参与者 | 复用基线协议，包括 claim_seal、ACK 原子强确认与 128B close seal |
@@ -163,11 +182,19 @@ Graph 子任务原 payload 的 `fanin_count` 为零，依赖保存在 CSR。统�
 
 每个并发 writer 的物化范围按实际 DCache 写回粒度隔离；尤其检查相邻实例 heap 尾部、scalar pool 边界和控制字，避免整行写回覆盖其他 writer 的字节。
 
+P5a 继续保留现有启动消费端缓存观察。逐行失效单独评估，必须覆盖普通 parser、
+早于 prepare 的 MIX parser、独立 Scalar pool 和实际执行核读取的 Tensor 描述符，
+并保留 callable 等其他启动数据的可见性，不能仅刷新 child storage 或物化核。
+
 ### 3.4 进度、兼容边界和后续增量物化
 
 Graph 本身不占一个执行核等待其子任务，也不整体持有协同 admission。普通子任务可分波，sync_start 仍是“一个子任务的 blocks”共同驻留，不能把多个 roots 或整个 Graph 合成一个 cohort。
 
 首版在启动阶段完成物化，进入 kernel 后没有“尚未构造的必要同伴”，使现有共同准入的进度前提不被悄悄破坏。增量版本必须独立证明：必要的构造/发布/释放不会被后序阻塞 kernel 卡住；不能仅把控制 pass 移到主循环靠前的位置。[已有 Graph/drain 反例](../investigations/2026-09-hbg-graph-release-vs-drain-reorder.md)必须变成回归门禁。
+
+P5b 必须先对整轮完成原本可能失败的验证，再允许延后生成；Definition、绑定元数据
+和实例地址在本轮只读。若仍需全 run 验证屏障，就保留并计入成本。
+不能把物化失败后已有健康实例执行的行为当成等价替换，也不提前声称消除了所有屏障。
 
 同一个 Graph 的物化/记录错误、边界不匹配、越界、非法拓扑仍然是错误，不转成 legacy 成功。合法但尚未开放的组合在 launch 前整轮 legacy，清楚报告具体 Graph/子任务原因；strict resident 测试必须拒绝该回退。单 block predicate、Mix 等资格须扫描到 Definition 内部，不能只检查外层 GRAPH。
 
@@ -184,7 +211,8 @@ Graph 本身不占一个执行核等待其子任务，也不整体持有协同 a
 | P2：最小 native Graph | Graph run 启动物化、纯 C/V 子任务、外部 gate 和 EXIT | A5sim/A5 原样数值、多个实例不同地址/scalar、混排依赖、fresh resident 来源 |
 | P3：能力对齐 | 原 N 分波、GM Mix、Dummy、单 block predicate、sync_start | masks/容量两侧/慢核/跨 Graph 重叠/失败矩阵及旧 resident 全部相关回归 |
 | P4：完整观测与端到端 | 父子身份、原生协议因果证明、泳道导出和内存/时间报告 | 严格 L4，无缺失/重复/截断；无插桩结果与 legacy 同业务对照 |
-| P5：有证据再优化 | 物化分块、缓存观察或增量执行等独立方案 | 不改变负载和公平性，完整 Host+Device 数据支持，回退或无收益不并入功能主线 |
+| P5a：并行构造 | 按写回范围分块，保留启动屏障、失败行为及 child 完成计数 | 唯一 writer/发布、数值、缓存可见性和故障恢复通过 CPU/A5sim/A5 回归；轻量性能方向检查 |
+| P5b：后续有条件分阶段发布 | 完整验证与数据生成分离；独立评估消费端缓存维护和按实例发布 | 后续先证明失败语义、可见性和服务进度，再做同一 native 基线的受控性能对照；不属于本次稳定版交付 |
 
 P2 只能开放已验收的子集，其余继续整轮 legacy；P3/P4 完成前不宣称完整 Graph 支持。每阶段小步提交，是否 push 由用户另行授权。用户已要求实施本设计，实际证据在实现过程记录。
 
@@ -202,6 +230,7 @@ P2 只能开放已验收的子集，其余继续整轮 legacy；P3/P4 完成前�
 | 局部推进 | G1 的慢远端仍在运行时，空闲成员可执行独立 G2；真实 G1→G2 时不得提前 |
 | 服务/predicate | Dummy、Host inline 完成、predicate true/false/失败；skip 不伪造 kernel，unsupported 不误放行 |
 | 发布与复用 | 物化 owner 暂停、信号先后交错、旧 epoch/旧组 token、重复 run/不同大小、pipeline slot 回收 |
+| P5a 构造划分 | 应写范围完整覆盖、每物理行唯一 writer、共享参数槽位、Scalar 尾部、相邻实例；乱序/重复完成和最后成功贡献与失败竞争 |
 | 故障 | 构造失败、子任务失败、超时、错误发生在最后贡献前后；首现场含父/子身份，不发布假成功、不提前 free |
 | 无 Graph 回归 | 固定 CSA、PA、ordinary/Mix/sync_start/错误路径；没有新增 Graph 存储和每轮扫描开销 |
 
@@ -221,9 +250,15 @@ pytest 与 standalone 都需逐轮检查 `scheduler_mode_publish_count` 增加�
 
 ### 4.4 性能与资源验收
 
-比较同一编排/Definition/输入/kernel/原 N 的旧 AICPU Graph 与新 resident Graph。可另设普通展开形式解释开销，但不能用它替代同负载 Graph A/B，更不能把 PyPTO 重生成 kernel 的差异算作 scheduler 收益。
+首版比较同一编排/Definition/输入/kernel/原 N 的旧 AICPU Graph 与新 resident Graph。
+P5 则固定同一 native 基线，只改变被评估的物化方案；native/legacy 差异不能单独归因于物化。
+可另设普通展开形式解释开销，但不能用它替代同负载 Graph A/B，更不能把 PyPTO 重生成 kernel 的差异算作 scheduler 收益。
 
 至少分别报告 Host bind（录制/pack/新增 GM 发布）、完整 Device RunWall（含物化/启动/执行/退出）、Host 调用总窗口、物化独占时间、kernel span、实际 GM 占用。冷启动与预热后分开，记录 A/B 交替批次、样本数、中位数/P90/P99和版本/二进制摘要。
+
+P5 以设备启动到首个真实 kernel 的延迟及完整 Device RunWall 为主要指标，
+同时分解验证、构造、写回/发布和等待。覆盖小图、1024-child 大单图及合法容量内的多实例，
+以交替 A/B 和同二进制重复对照识别波动；不能只报告局部 helper 的时间。
 
 无 Graph 的固定 CSA 在相同计时范围下独立对照，不把旧 2.084ms 或后续优化数字当成本分支已测结果。当前未设 Graph 的绝对性能目标，也未证明首版启动前物化比增量物化更快；先获得完整功能基线，再由数据决定优化。
 
@@ -247,7 +282,9 @@ pytest 与 standalone 都需逐轮检查 `scheduler_mode_publish_count` 增加�
 
 1. **首版全部物化后执行**：功能与进度基线简单，但增加启动串行窗口；建议接受为第一阶段，不将增量执行能力隐去或宣称已经保留。
 2. **ENTER/EXIT 内部服务节点**：建议复用 ready/wake 执行模型、避免根节点等待父 DONE 的环；成本为每实例两个内部节点。若减少节点，必须提供同等清晰的 gate/终态唯一性证明，不能仅删计数。
-3. **一个实例一个临时物化 owner**：避免首版共享参数池的多 writer 问题；大单 Graph 的构造并行度有限。是否拆 chunk 由后续实测和发布证明决定，不牺牲计算任务公平性。
+3. **构造 writer 与发布 owner 分离**：下一阶段按写回范围并行构造，一个实例仍只有唯一成功发布者；共享参数槽位和尾部先证明独占。是否保留优化由实测决定，不牺牲计算任务公平性。
 4. **小量 carrier/metadata 扩展**：优先只动 A5 resident 私有布局；若需要公共 HostApi 或 Definition ABI 变更，实施前单独列出影响，不把它当成已获确认的接口。
 
-这些是设计选择而非已完成的技术结论。实施从 P0 的可失败门禁和映射模型开始，不从删除 fallback 开始；完成度以实现过程中的实际测试证据为准。
+首版实施及验收以过程记录为准。P5a/P5b 是已选定的后续路线，
+应从范围规划与失败/发布模型开始，不从删除屏障或改完成计数器开始；
+没有新实现和同负载证据前，不宣称这些优化已经可用或更快。

@@ -15,7 +15,7 @@ execution coverage, membership, dependency ordering or Mix resource correctness.
 
 from . import native_graph_protocol
 
-SCHEMAS = tuple(f"hbg-native-protocol-v{version}" for version in range(1, 12))
+SCHEMAS = tuple(f"hbg-native-protocol-v{version}" for version in range(1, 13))
 
 ROOT_NUMBERS = frozenset(
     """
@@ -84,6 +84,9 @@ ARRAYS = {
 }
 SIGNED_FIELDS = frozenset(("task_ref", "core_id", "core_type", "state"))
 SIGNED_FIELDS |= frozenset(("instance_index", "fanin_ref_base"))
+SIGNED_FIELDS |= frozenset(
+    ("tensor_offset", "scalar_offset", "tensor_count", "scalar_count", "tensor_arg_count", "scalar_arg_count")
+)
 NUMBERS.update(native_graph_protocol.NUMBERS)
 STAMPS.update(native_graph_protocol.STAMPS)
 ARRAYS.update(native_graph_protocol.ARRAYS)
@@ -97,7 +100,11 @@ def protocol_version(section):
 def has_graph_protocol(section):
     """Graph v8 carries a graph section; v9 requires it with scoped Mix records."""
     version = protocol_version(section)
-    return version == 9 or (version == 8 and "graph" in section)
+    return version in (9, 12) or (version == 8 and "graph" in section)
+
+
+def has_parallel_graph_protocol(section):
+    return protocol_version(section) == 12
 
 
 def has_pool_protocol(section):
@@ -112,7 +119,7 @@ def pool_word_task_capacity(section):
 def uses_resource_scoped_mix(section):
     """Resource-scoped v8 has no Graph section; v9 combines both contracts."""
     version = protocol_version(section)
-    return version in (9, 10, 11) or (version == 8 and not has_graph_protocol(section))
+    return version in (9, 10, 11, 12) or (version == 8 and not has_graph_protocol(section))
 
 
 def _error(message):

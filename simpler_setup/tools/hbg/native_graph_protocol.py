@@ -9,6 +9,8 @@
 
 """The v8 Graph extension: frozen expectations, actual bindings, and bounded device records."""
 
+from . import native_graph_work
+
 NUMBERS = {
     "graph_range": "public_task_id begin end children instance_index",
     "graph_definition": "index full_key image_offset image_bytes fanin_indices_offset task_count edge_count",
@@ -33,6 +35,8 @@ STAMPS = {
     "graph_contribution": "before after",
     "graph_bootstrap": "before after",
 }
+NUMBERS.update(native_graph_work.NUMBERS)
+STAMPS.update(native_graph_work.STAMPS)
 ARRAYS = {
     "graph_definition": {"fanin_rows": None, "fanin_indices": None},
     "graph_definition_task": {"kernel_ids": 3},
@@ -55,40 +59,74 @@ EVENT_TABLES = (
 
 
 def read_graph_protocol(section):
-    from .native_protocol import _array, _error, _indices, _number, _object, _record  # noqa: PLC0415
+    from .native_protocol import (  # noqa: PLC0415
+        _array,
+        _error,
+        _indices,
+        _number,
+        _object,
+        _record,
+        has_parallel_graph_protocol,
+    )
 
     graph = section["graph"]
-    _object(graph, ROOT_NUMBERS | ROOT_TABLES, "graph")
-    for field in ROOT_NUMBERS:
+    parallel = has_parallel_graph_protocol(section)
+    numbers = ROOT_NUMBERS | (native_graph_work.ROOT_NUMBERS if parallel else set())
+    tables = (ROOT_TABLES - {"materializations"}) | native_graph_work.ROOT_TABLES if parallel else ROOT_TABLES
+    _object(graph, numbers | tables, "graph")
+    for field in numbers:
         _number(graph[field], f"graph.{field}")
     _array(graph["instance_definitions"], "graph.instance_definitions", graph["instance_count"])
     for table, kind, count, key, dense in (
         ("ranges", "graph_range", graph["public_task_count"], "public_task_id", True),
         ("nodes", "graph_node", section["task_count"], "task_ref", True),
         ("instances", "graph_instance", graph["instance_count"], "index", True),
-        ("materializations", "graph_materialize", graph["instance_count"], "index", False),
+        (
+            "publications" if parallel else "materializations",
+            "graph_publication" if parallel else "graph_materialize",
+            graph["instance_count"],
+            "index",
+            False,
+        ),
         ("contributions", "graph_contribution", section["task_count"], "index", False),
         ("bootstrap", "graph_bootstrap", section["worker_count"], "index", False),
     ):
         _indices(graph[table], count, f"graph.{table}", key=key, dense=dense)
         for row in graph[table]:
-            _record(row, kind, f"graph.{table}[{row[key]}]")
+            extra = native_graph_work.INSTANCE_NUMBERS if parallel and kind == "graph_instance" else ()
+            _record(row, kind, f"graph.{table}[{row[key]}]", extra)
+    if parallel:
+        native_graph_work.read_work_tables(graph)
     definitions = graph["definitions"]
     if not isinstance(definitions, list):
         _error("graph.definitions must be a table")
     _indices(definitions, len(definitions), "graph.definitions", dense=True)
     for definition in definitions:
         header = {key: value for key, value in definition.items() if key != "tasks"}
-        _record(header, "graph_definition", "graph.definition")
+        _record(
+            header, "graph_definition", "graph.definition", native_graph_work.DEFINITION_NUMBERS if parallel else ()
+        )
         _array(header["fanin_rows"], "graph.definition.fanin_rows", header["task_count"] + 1)
         _array(header["fanin_indices"], "graph.definition.fanin_indices", header["edge_count"])
         tasks = definition.get("tasks")
         _indices(tasks, header["task_count"], "graph.definition.tasks", key="local_id", dense=True)
         for task in tasks:
-            _record(task, "graph_definition_task", "graph.definition.task")
+            _record(
+                task,
+                "graph_definition_task",
+                "graph.definition.task",
+                native_graph_work.TASK_NUMBERS if parallel else (),
+            )
 
 
 def graph_event_records(section):
-    for table, kind in EVENT_TABLES:
+    from .native_protocol import has_parallel_graph_protocol  # noqa: PLC0415
+
+    tables = (
+        (("publications", "graph_publication"), ("work", "graph_work"), *EVENT_TABLES[1:])
+        if has_parallel_graph_protocol(section)
+        else EVENT_TABLES
+    )
+    for table, kind in tables:
         for row in section["graph"][table]:
             yield row, kind, f"graph.{table}[{row['index']}]"

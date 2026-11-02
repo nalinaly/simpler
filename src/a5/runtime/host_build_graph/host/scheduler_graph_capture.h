@@ -28,6 +28,8 @@ struct SchedulerGraphManifest {
     std::vector<SchedulerGraphPlanRange> ranges;
     std::vector<uint32_t> instance_definitions;
     std::vector<SchedulerGraphDefinitionCapture> definitions;
+    std::vector<SchedulerGraphWork> materialize_work;
+    std::vector<SchedulerGraphWorkRange> materialize_ranges;
 };
 
 struct SchedulerGraphCapture {

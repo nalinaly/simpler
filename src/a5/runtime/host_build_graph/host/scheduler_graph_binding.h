@@ -20,6 +20,7 @@
 #include "host_build_graph/graph_image_view.h"
 #include "host_build_graph/shared_memory.h"
 #include "scheduler_graph_capture.h"
+#include "scheduler_graph_materialize_plan.h"
 #include "scheduler/scheduler_graph_materialize.h"
 #include "scheduler/scheduler_graph_protocol_types.h"
 
@@ -52,8 +53,10 @@ struct SchedulerGraphSubmitState {
 
 class SchedulerGraphBinding {
 public:
-    static std::optional<SchedulerGraphBinding>
-    prepare(SharedMemoryTaskHeader &tasks, int32_t public_count, const std::byte *section, uint64_t bytes) {
+    static std::optional<SchedulerGraphBinding> prepare(
+        SharedMemoryTaskHeader &tasks, int32_t public_count, const std::byte *section, uint64_t bytes,
+        uint32_t worker_count = 1
+    ) {
         if (public_count < 0 || section == nullptr || bytes == 0 || bytes > UINT32_MAX) return std::nullopt;
         SchedulerGraphBinding result;
         result.tasks_ = &tasks;
@@ -91,6 +94,7 @@ public:
         auto plan = SchedulerGraphPlan::build(shapes);
         if (!plan || plan->instance_count() == 0) return std::nullopt;
         result.plan_ = std::move(*plan);
+        if (!result.prepare_materialization(worker_count)) return std::nullopt;
         return result;
     }
 
@@ -102,6 +106,8 @@ public:
             throw std::invalid_argument("expanded protocol graph task count mismatch");
         SchedulerGraphCapture capture;
         capture.manifest.ranges = plan_.ranges();
+        capture.manifest.materialize_work = materialize_work_;
+        capture.manifest.materialize_ranges = materialize_ranges_;
         capture.manifest.instance_definitions.resize(plan_.instance_count());
         std::unordered_map<const GraphDefinition *, uint32_t> distinct;
         for (size_t parent = 0; parent < definitions_.size(); ++parent) {
@@ -211,6 +217,8 @@ public:
         out.public_task_count = plan_.ranges().size();
         out.definition_bytes = bytes_;
         out.external_fanin_count = external_fanins_;
+        out.work_count = materialize_work_.size();
+        out.work_range_count = materialize_ranges_.size();
         uint64_t cursor = layout->total_size;
         auto array = [&](uint64_t count, uint64_t stride, uint64_t alignment, uint64_t *offset) {
             uint64_t bytes = 0;
@@ -232,6 +240,14 @@ public:
             !array(bytes_, 1, GRAPH_DEFINITION_OBJECT_ALIGN, &out.definitions_offset) ||
             !array(external_fanins_, sizeof(int32_t), alignof(int32_t), &out.external_fanins_offset))
             return false;
+        if (out.work_count != 0 &&
+            (!array(out.work_count, sizeof(SchedulerGraphWork), alignof(SchedulerGraphWork), &out.work_offset) ||
+             !array(
+                 out.work_range_count, sizeof(SchedulerGraphWorkRange), alignof(SchedulerGraphWorkRange),
+                 &out.work_ranges_offset
+             ) ||
+             !array(out.work_count, sizeof(SchedulerGraphWorkState), 128, &out.work_states_offset)))
+            return false;
         if (layout->protocol_layout_offset != 0 &&
             (!array(
                  out.instance_count, sizeof(SchedulerGraphProtocolInstance), alignof(SchedulerGraphProtocolInstance),
@@ -244,7 +260,11 @@ public:
              !array(
                  layout->protocol.worker_count, sizeof(SchedulerGraphProtocolWorker),
                  alignof(SchedulerGraphProtocolWorker), &out.protocol_workers_offset
-             )))
+             ) ||
+             (out.work_count != 0 && !array(
+                                         out.work_count, sizeof(SchedulerGraphProtocolWork),
+                                         alignof(SchedulerGraphProtocolWork), &out.protocol_work_offset
+                                     ))))
             return false;
         return scheduler_layout_checked_align(cursor, SCHEDULER_STATE_ALIGNMENT, &layout->total_size);
     }
@@ -254,6 +274,8 @@ public:
         const sm_layout::SegmentOffsets &segments, uint64_t epoch, uint64_t already_complete
     ) const {
         const auto &out = layout.graph;
+        if (out.work_count != materialize_work_.size() || out.work_range_count != materialize_ranges_.size())
+            return false;
         auto *nodes = scheduler_state_at<SchedulerGraphNode>(host, out.nodes_offset);
         auto *instances = scheduler_state_at<SchedulerGraphInstance>(host, out.instances_offset);
         auto *controls = scheduler_state_at<SchedulerGraphInstanceControl>(host, out.instance_controls_offset);
@@ -265,10 +287,26 @@ public:
         build->public_task_count = out.public_task_count;
         build->public_completed = already_complete;
         build->run_epoch = epoch;
+        if (out.work_count != 0) {
+            build->work_address = device + out.work_offset;
+            build->work_ranges_address = device + out.work_ranges_offset;
+            build->work_states_address = device + out.work_states_offset;
+            build->work_count = out.work_count;
+            build->work_range_count = out.work_range_count;
+            std::memcpy(
+                scheduler_state_at<SchedulerGraphWork>(host, out.work_offset), materialize_work_.data(),
+                materialize_work_.size() * sizeof(SchedulerGraphWork)
+            );
+            std::memcpy(
+                scheduler_state_at<SchedulerGraphWorkRange>(host, out.work_ranges_offset), materialize_ranges_.data(),
+                materialize_ranges_.size() * sizeof(SchedulerGraphWorkRange)
+            );
+        }
         if (layout.protocol_layout_offset != 0) {
             build->protocol_instances_address = device + out.protocol_instances_offset;
             build->protocol_contributions_address = device + out.protocol_contributions_offset;
             build->protocol_workers_address = device + out.protocol_workers_offset;
+            if (out.work_count != 0) build->protocol_work_address = device + out.protocol_work_offset;
         }
         const auto *image = static_cast<const uint8_t *>(packed_image);
         const auto *packed_tasks = reinterpret_cast<const ChipTaskStorage *>(image + segments.storage);
@@ -317,6 +355,10 @@ public:
                 control.child_count = definition.task_count;
                 control.exit_ref = range.end - 1;
                 control.instance_index = static_cast<uint32_t>(source.instance_index);
+                if (out.work_count != 0) {
+                    const auto work = instance_work_[source.instance_index];
+                    control.work = {work.count, work.begin, work.count};
+                }
                 auto &instance = instances[source.instance_index];
                 instance.definition_section_address = device + out.definitions_offset;
                 instance.definition_section_bytes = bytes_;
@@ -366,10 +408,91 @@ public:
                                          definition.off_fanin_indices + static_cast<uint64_t>(begin) * sizeof(uint16_t);
             }
         }
-        return external_cursor == external_fanins_;
+        return external_cursor == external_fanins_ &&
+               (out.work_count == 0 || isolated_instance_writes(instances, out.instance_count));
     }
 
 private:
+    static uint64_t materialize_bytes(const GraphDefinition &definition) {
+        return static_cast<uint64_t>(definition.task_count) * sizeof(ChipTaskStorage) +
+               static_cast<uint64_t>(definition.tensor_arg_count) * sizeof(simpler::hbg::Tensor) +
+               static_cast<uint64_t>(definition.scalar_arg_count) * sizeof(uint64_t);
+    }
+
+    bool prepare_materialization(uint32_t workers) {
+        if (workers <= 1) return true;
+        constexpr uint64_t serial_bytes = 8192;
+        constexpr uint32_t minimum_chunk_bytes = 4096;
+        std::unordered_map<const GraphDefinition *, SchedulerGraphMaterializePlan> shared;
+        std::unordered_set<const GraphDefinition *> checked;
+        for (const auto *definition : definitions_) {
+            if (definition == nullptr || !checked.insert(definition).second ||
+                materialize_bytes(*definition) <= serial_bytes)
+                continue;
+            const uint64_t target = std::max<uint64_t>(
+                minimum_chunk_bytes, materialize_bytes(*definition) / (static_cast<uint64_t>(workers) * 2)
+            );
+            const uint32_t chunk_bytes = static_cast<uint32_t>(std::min<uint64_t>(target + 63, UINT32_MAX)) & ~63U;
+            auto ranges = SchedulerGraphMaterializePlan::from_definition(*definition, 0, chunk_bytes);
+            if (!ranges || ranges->work.size() <= 1) continue;
+            uint64_t used_bytes = 0;
+            for (const auto &work : ranges->work)
+                used_bytes += work.write_bytes;
+            if (used_bytes <= serial_bytes) continue;
+            if (ranges->ranges.size() > UINT32_MAX - materialize_ranges_.size()) return false;
+            const auto first_range = static_cast<uint32_t>(materialize_ranges_.size());
+            materialize_ranges_.insert(materialize_ranges_.end(), ranges->ranges.begin(), ranges->ranges.end());
+            for (auto &work : ranges->work)
+                work.first_range += first_range;
+            shared.emplace(definition, std::move(*ranges));
+        }
+        // A run containing only small instances keeps the instance queue and
+        // does not allocate per-work descriptors, counters or protocol rows.
+        if (shared.empty()) return true;
+        instance_work_.resize(plan_.instance_count());
+        for (size_t parent = 0; parent < definitions_.size(); ++parent) {
+            const auto *definition = definitions_[parent];
+            if (definition == nullptr) continue;
+            const auto instance = static_cast<uint32_t>(plan_.ranges()[parent].instance_index);
+            const auto found = shared.find(definition);
+            const size_t count = found == shared.end() ? 1 : found->second.work.size();
+            if (count > UINT32_MAX - materialize_work_.size()) return false;
+            instance_work_[instance] = {static_cast<uint32_t>(materialize_work_.size()), static_cast<uint32_t>(count)};
+            if (found == shared.end()) {
+                // Unplannable metadata is still checked by the native device
+                // materializer, with its original error and child identity.
+                materialize_work_.push_back(
+                    {instance, SchedulerGraphWorkRegion::SERIAL_INSTANCE, 0, 0, materialize_bytes(*definition)}
+                );
+            } else {
+                for (auto work : found->second.work) {
+                    work.instance_index = instance;
+                    materialize_work_.push_back(work);
+                }
+            }
+        }
+        return true;
+    }
+
+    static bool isolated_instance_writes(const SchedulerGraphInstance *instances, uint64_t count) {
+        std::vector<std::pair<uint64_t, uint64_t>> lines;
+        lines.reserve(count);
+        for (uint64_t index = 0; index < count; ++index) {
+            const auto &instance = instances[index];
+            // Invalid alignment remains a device materialization error. Such
+            // an instance cannot write before that check rejects it.
+            if (instance.task_storage_address % 64 != 0) continue;
+            const uint64_t end =
+                instance.scalar_pool_address + static_cast<uint64_t>(instance.scalar_arg_count) * sizeof(uint64_t);
+            if (end <= instance.task_storage_address) return false;
+            lines.emplace_back(instance.task_storage_address / 64, (end - 1) / 64);
+        }
+        std::sort(lines.begin(), lines.end());
+        for (size_t index = 1; index < lines.size(); ++index)
+            if (lines[index].first <= lines[index - 1].second) return false;
+        return true;
+    }
+
     template <class T>
     static std::vector<T> freeze_array(const GraphDefinition &definition, uint32_t offset, int32_t count) {
         if (count == 0) return {};
@@ -448,4 +571,7 @@ private:
     bool supported_{true};
     SchedulerGraphPlan plan_;
     std::vector<const GraphDefinition *> definitions_;
+    std::vector<SchedulerGraphWork> materialize_work_;
+    std::vector<SchedulerGraphWorkRange> materialize_ranges_;
+    std::vector<SchedulerGraphWorkRange> instance_work_;
 };

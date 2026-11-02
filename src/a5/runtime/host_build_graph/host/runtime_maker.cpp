@@ -1216,7 +1216,8 @@ bool create_scheduler_state(
     std::optional<SchedulerGraphBinding> graph_binding;
     if (contains_graph) {
         graph_binding = SchedulerGraphBinding::prepare(
-            host_sm_handle.header->tasks, total_tasks, definitions.section, definitions.bytes
+            host_sm_handle.header->tasks, total_tasks, definitions.section, definitions.bytes,
+            static_cast<uint32_t>(runtime->get_worker_count())
         );
         if (!graph_binding) {
             LOG_ERROR("A5 HBG: invalid resident Graph definition or dependency map");

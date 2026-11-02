@@ -111,6 +111,77 @@ inline __aicore__ __gm__ SchedulerGraphProtocolWorker *scheduler_graph_protocol_
 }
 
 template <class Local>
+inline __aicore__ __gm__ SchedulerGraphProtocolWork *scheduler_graph_protocol_work_begin(
+    __gm__ void *base, const Local *local, const __gm__ SchedulerGraphBuildControl *build, uint64_t index,
+    const __gm__ SchedulerGraphWork &work
+) {
+    auto *layout = scheduler_protocol_layout_at(base, local);
+    if (layout == nullptr) return nullptr;
+    auto *record = scheduler_graph_protocol_record_at<SchedulerGraphProtocolWork>(
+        base, local, build->protocol_work_address, index, build->work_count
+    );
+    if (record == nullptr) return nullptr;
+    scheduler_protocol_observe_record(record);
+    if (!scheduler_protocol_stamp(base, local, layout, &record->begin)) return nullptr;
+    record->run_epoch = layout->run_epoch;
+    record->worker_index = static_cast<uint32_t>(local->worker_id());
+    record->work_index = static_cast<uint32_t>(index);
+    record->instance_index = work.instance_index;
+    scheduler_protocol_publish_record(record);
+    return record;
+}
+
+template <class Local>
+inline __aicore__ void scheduler_graph_protocol_work_written(
+    __gm__ void *base, const Local *local, __gm__ SchedulerGraphProtocolWork *record
+) {
+    auto *layout = scheduler_graph_protocol_owned(base, local, record);
+    if (layout == nullptr) return;
+    scheduler_protocol_stamp(base, local, layout, &record->writeback_after);
+    scheduler_protocol_publish_record(record);
+}
+
+template <class Local>
+inline __aicore__ void scheduler_graph_protocol_work_complete(
+    __gm__ void *base, const Local *local, __gm__ SchedulerGraphProtocolWork *record, bool before,
+    SchedulerGraphResult status = SchedulerGraphResult::OK, uint64_t remaining_before = 0
+) {
+    auto *layout = scheduler_graph_protocol_owned(base, local, record);
+    if (layout == nullptr) return;
+    if (before) {
+        scheduler_protocol_stamp(base, local, layout, &record->complete_before);
+    } else {
+        record->status = static_cast<uint32_t>(status);
+        record->remaining_before = remaining_before;
+        scheduler_protocol_stamp(base, local, layout, &record->complete_after);
+    }
+    scheduler_protocol_publish_record(record);
+}
+
+template <class Local>
+inline __aicore__ __gm__ SchedulerGraphProtocolInstance *scheduler_graph_protocol_parallel_publish_begin(
+    __gm__ void *base, const Local *local, const __gm__ SchedulerGraphBuildControl *build, uint64_t index,
+    const __gm__ SchedulerGraphInstance &instance, uint32_t children
+) {
+    auto *layout = scheduler_protocol_layout_at(base, local);
+    if (layout == nullptr) return nullptr;
+    auto *record = scheduler_graph_protocol_record_at<SchedulerGraphProtocolInstance>(
+        base, local, build->protocol_instances_address, index, build->instance_count
+    );
+    if (record == nullptr) return nullptr;
+    scheduler_protocol_observe_record(record);
+    record->run_epoch = layout->run_epoch;
+    record->worker_index = static_cast<uint32_t>(local->worker_id());
+    record->instance_index = static_cast<uint32_t>(index);
+    record->parent_id = static_cast<uint32_t>(instance.parent_id);
+    record->definition_key = instance.definition_key;
+    record->child_count = children;
+    scheduler_protocol_stamp(base, local, layout, &record->publish_before);
+    scheduler_protocol_publish_record(record);
+    return record;
+}
+
+template <class Local>
 inline __aicore__ void scheduler_graph_protocol_wait_end(
     __gm__ void *base, const Local *local, __gm__ SchedulerGraphProtocolWorker *record, uint64_t polls,
     uint64_t remaining, uint32_t status

@@ -16,6 +16,7 @@
 #include <type_traits>
 
 #include "host_build_graph/task_id.h"
+#include "scheduler_graph_work.h"
 
 enum class SchedulerGraphNodeKind : uint32_t { ORDINARY, ENTER, CHILD, EXIT };
 
@@ -54,6 +55,7 @@ struct alignas(128) SchedulerGraphInstanceControl {
     int32_t child_count;
     int32_t exit_ref;
     uint32_t instance_index;
+    SchedulerGraphWorkGroup work;
 };
 
 static_assert(
@@ -99,6 +101,13 @@ struct alignas(128) SchedulerGraphBuildControl {
     uint64_t protocol_instances_address;
     uint64_t protocol_contributions_address;
     uint64_t protocol_workers_address;
+    uint64_t work_address;
+    uint64_t work_ranges_address;
+    uint64_t work_states_address;
+    uint64_t work_count;
+    uint64_t work_range_count;
+    volatile uint64_t next_work;
+    uint64_t protocol_work_address;
     // The last atomic contributor is the only signal writer. This line has
     // no atomic RMW or cached device stores, including diagnostic stores.
     alignas(128) volatile uint64_t materialized;
@@ -123,4 +132,10 @@ struct SchedulerGraphStorageLayout {
     uint64_t protocol_instances_offset;
     uint64_t protocol_contributions_offset;
     uint64_t protocol_workers_offset;
+    uint64_t work_offset;
+    uint64_t work_ranges_offset;
+    uint64_t work_states_offset;
+    uint64_t work_count;
+    uint64_t work_range_count;
+    uint64_t protocol_work_offset;
 };

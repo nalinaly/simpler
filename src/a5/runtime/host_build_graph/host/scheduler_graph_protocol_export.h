@@ -12,6 +12,7 @@
 #pragma once
 
 #include "scheduler_graph_capture.h"
+#include "scheduler_graph_work_export.h"
 #include "scheduler_protocol_export_common.h"
 #include "scheduler/scheduler_graph_protocol_types.h"
 
@@ -28,7 +29,7 @@ inline const T *graph_array(
     return image.array<T>(address - device, count);
 }
 
-inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &manifest) {
+inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &manifest, bool parallel) {
     auto &out = root.field("definitions");
     out << '[';
     for (size_t index = 0; index < manifest.definitions.size(); ++index) {
@@ -42,6 +43,10 @@ inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &ma
         row.number("fanin_indices_offset", saved.header.off_fanin_indices);
         row.number("task_count", saved.header.task_count);
         row.number("edge_count", saved.header.edge_count);
+        if (parallel) {
+            row.number("tensor_arg_count", saved.header.tensor_arg_count);
+            row.number("scalar_arg_count", saved.header.scalar_arg_count);
+        }
         row.numbers("fanin_rows", saved.fanin_rows.data(), saved.fanin_rows.size());
         row.numbers("fanin_indices", saved.fanin_indices.data(), saved.fanin_indices.size());
         row.field("tasks") << '[';
@@ -54,6 +59,12 @@ inline void graph_definitions(JsonObject &root, const SchedulerGraphManifest &ma
             task.number("task_attrs", source.task_attrs);
             task.number("block_num", source.logical_block_num);
             task.number("predicate_slot", source.predicate_slot);
+            if (parallel) {
+                task.number("tensor_offset", source.tensor_offset);
+                task.number("tensor_count", source.tensor_count);
+                task.number("scalar_offset", source.scalar_offset);
+                task.number("scalar_count", source.scalar_count);
+            }
             task.numbers("kernel_ids", source.kernel_id, 3);
         }
         out << ']';
@@ -157,6 +168,16 @@ inline void graph_instances(JsonObject &root, const Image &image, const AicoreSc
         row.number("child_begin", control.child_begin);
         row.number("child_count", control.child_count);
         row.number("exit_ref", control.exit_ref);
+        if (plan.work_count != 0) {
+            row.number("work_begin", control.work.begin);
+            row.number("work_count", control.work.count);
+            row.number("remaining_work", control.work.remaining);
+            row.number("tensor_pool_address", source.tensor_pool_address);
+            row.number("scalar_pool_address", source.scalar_pool_address);
+            row.number("tensor_arg_count", source.tensor_arg_count);
+            row.number("scalar_arg_count", source.scalar_arg_count);
+            row.number("control_address", source.control_address);
+        }
     }
     out << ']';
 }
@@ -176,6 +197,13 @@ inline void graph_protocol(
         build.protocol_contributions_address != device + plan.protocol_contributions_offset ||
         build.protocol_workers_address != device + plan.protocol_workers_offset)
         throw std::invalid_argument("Graph protocol addresses disagree with the Host layout");
+    const bool parallel = plan.work_count != 0;
+    if (parallel && (build.work_count != plan.work_count || build.work_range_count != plan.work_range_count ||
+                     build.work_address != device + plan.work_offset ||
+                     build.work_ranges_address != device + plan.work_ranges_offset ||
+                     build.work_states_address != device + plan.work_states_offset || plan.protocol_work_offset == 0 ||
+                     build.protocol_work_address != device + plan.protocol_work_offset))
+        throw std::invalid_argument("Graph work addresses disagree with the Host layout");
     JsonObject graph(root.field("graph"));
     graph.number("public_task_count", build.public_task_count);
     graph.number("instance_count", build.instance_count);
@@ -185,6 +213,19 @@ inline void graph_protocol(
     graph.number("run_epoch", build.run_epoch);
     graph.number("definitions_address", device + plan.definitions_offset);
     graph.number("definitions_bytes", plan.definition_bytes);
+    if (parallel) {
+        graph.number("work_count", build.work_count);
+        graph.number("work_range_count", build.work_range_count);
+        graph.number("next_work", build.next_work);
+        graph.number("build_control_address", device + plan.build_control_offset);
+        graph.number("work_address", build.work_address);
+        graph.number("work_ranges_address", build.work_ranges_address);
+        graph.number("work_states_address", build.work_states_address);
+        graph.number("protocol_work_address", build.protocol_work_address);
+        graph.number("scheduler_state_address", device);
+        graph.number("scheduler_state_bytes", layout.total_size);
+        graph_work_plan(graph, image, plan, manifest);
+    }
     auto &ranges = graph.field("ranges");
     ranges << '[';
     for (size_t parent = 0; parent < manifest.ranges.size(); ++parent) {
@@ -199,15 +240,17 @@ inline void graph_protocol(
     }
     ranges << ']';
     graph.numbers("instance_definitions", manifest.instance_definitions.data(), manifest.instance_definitions.size());
-    graph_definitions(graph, manifest);
+    graph_definitions(graph, manifest, parallel);
     graph_nodes(graph, image, layout, device);
     graph_instances(graph, image, layout);
     sparse(
-        graph, "materializations",
+        graph, parallel ? "publications" : "materializations",
         image.array<SchedulerGraphProtocolInstance>(plan.protocol_instances_offset, plan.instance_count),
-        plan.instance_count, [](JsonObject &row, const auto &record) {
-            row.stamp("materialize_before", record.materialize_before);
-            row.stamp("materialize_after", record.materialize_after);
+        plan.instance_count, [parallel](JsonObject &row, const auto &record) {
+            if (!parallel) {
+                row.stamp("materialize_before", record.materialize_before);
+                row.stamp("materialize_after", record.materialize_after);
+            }
             row.stamp("publish_before", record.publish_before);
             row.stamp("publish_after", record.publish_after);
             row.number("run_epoch", record.run_epoch);
