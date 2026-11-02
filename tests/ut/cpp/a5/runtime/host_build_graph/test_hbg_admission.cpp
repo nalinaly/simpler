@@ -60,7 +60,8 @@ SchedulerSpmdRequirements admission_requirements(const std::vector<AdmissionShap
 struct AdmissionFixture {
     explicit AdmissionFixture(
         const std::vector<AdmissionShape> &shapes, uint64_t workers = 6, uint64_t epoch = 17,
-        std::vector<uint64_t> permutation = {}, bool protocol_profiling = false
+        std::vector<uint64_t> permutation = {}, bool protocol_profiling = false,
+        SchedulerTopologyLayout topology_layout = SchedulerTopologyLayout::GENERAL
     ) :
         storage(shapes.size(), workers, 3, admission_requirements(shapes, workers), protocol_profiling),
         graph(shapes.size()),
@@ -107,6 +108,8 @@ struct AdmissionFixture {
                 context.cluster_worker_ids[peer] = permutation[cluster * 3 + peer];
             storage.test_graphs[worker] = graph.graph();
         }
+        scheduler_state_at<SchedulerGraphSummary>(base(), storage.layout.graph_summary_offset)->topology_layout =
+            topology_layout;
         for (uint64_t worker = 0; worker < workers; ++worker) {
             locals[worker] = storage.local_context(&storage.contexts[worker]);
             EXPECT_TRUE(scheduler_initialize_admission(base(), locals[worker], &admissions[worker]));
@@ -1440,6 +1443,68 @@ TEST(HbgAdmission, ConcurrentRealCommitsPublishUniqueCompleteContiguousLogEntrie
         EXPECT_EQ(fixture.admissions[thread * 3].pending_task_ref, SCHEDULER_TASK_REF_INVALID);
 }
 
+TEST(HbgAdmission, DiscoveryProvenCompactTopologyMatchesTheGeneralScanForEveryMask) {
+    for (uint64_t clusters : {1u, 2u, 22u, 32u, 36u}) {
+        const uint64_t workers = clusters * 3;
+        std::vector<uint64_t> compact(workers);
+        for (uint64_t cluster = 0; cluster < clusters; ++cluster) {
+            compact[3 * cluster] = cluster;
+            compact[3 * cluster + 1] = clusters + 2 * cluster;
+            compact[3 * cluster + 2] = clusters + 2 * cluster + 1;
+        }
+        for (const LaneMask mask : kAllMasks) {
+            for (const bool sync : {false, true}) {
+                if (sync && scheduler_block_claim_positions(mask, clusters) < 2) continue;
+                SCOPED_TRACE(clusters);
+                SCOPED_TRACE(lane_names(mask));
+                SCOPED_TRACE(sync);
+                const AdmissionShape shape{2, mask, static_cast<uint8_t>(sync ? SCHEDULER_TASK_SYNC_START : 0)};
+                AdmissionFixture general({shape}, workers, 17, compact);
+                AdmissionFixture proven({shape}, workers, 17, compact, false, SchedulerTopologyLayout::COMPACT_LAUNCH);
+                for (uint64_t worker = 0; worker < workers; ++worker) {
+                    EXPECT_EQ(proven.admissions[worker].topology_worker_count, workers);
+                    EXPECT_EQ(general.admissions[worker].topology_worker_count, 0u);
+                }
+                ASSERT_TRUE(general.publish(0));
+                ASSERT_TRUE(proven.publish(0));
+                EXPECT_EQ(proven.record(0)->member_count, general.record(0)->member_count);
+                for (uint64_t word = 0; word < (workers + 63) / 64; ++word)
+                    EXPECT_EQ(proven.members(0)[word], general.members(0)[word]);
+                for (uint64_t worker = 0; worker < workers; ++worker) {
+                    ASSERT_TRUE(general.refresh(worker));
+                    ASSERT_TRUE(proven.refresh(worker));
+                    EXPECT_EQ(proven.admissions[worker].current_task_ref, general.admissions[worker].current_task_ref);
+                    EXPECT_EQ(proven.admissions[worker].topology_worker_count, workers);
+                    EXPECT_EQ(proven.admissions[worker].scan_cursor, general.admissions[worker].scan_cursor);
+                }
+            }
+        }
+    }
+}
+
+TEST(HbgAdmission, UnknownTopologyProofAndInvalidLocalBindingCannotInitializeAdmission) {
+    for (uint32_t failure = 0; failure < 5; ++failure) {
+        AdmissionFixture fixture({{2, LaneMask::aic()}}, 6, 17, {0, 2, 3, 1, 4, 5});
+        auto *summary =
+            scheduler_state_at<SchedulerGraphSummary>(fixture.base(), fixture.storage.layout.graph_summary_offset);
+        summary->topology_layout = SchedulerTopologyLayout::COMPACT_LAUNCH;
+        if (failure == 0) summary->topology_layout = static_cast<SchedulerTopologyLayout>(2);
+        if (failure == 1) summary->worker_count = 3;
+        if (failure == 2) fixture.locals[0]->config.worker_ids[2] = 4;
+        if (failure == 3) fixture.locals[0]->config.self_lane = PLATFORM_CORES_PER_BLOCKDIM;
+        if (failure == 4) fixture.locals[0]->config.self_core_type = 1;
+        SchedulerAdmissionLocalState rejected{};
+        EXPECT_FALSE(scheduler_initialize_admission(fixture.base(), fixture.locals[0], &rejected));
+        EXPECT_FALSE(rejected.initialized);
+        EXPECT_EQ(rejected.topology_worker_count, 0u);
+        EXPECT_EQ(fixture.control()->commit_tail, 0u);
+        EXPECT_EQ(fixture.record(0)->run_epoch, 0u);
+        EXPECT_EQ(fixture.record(0)->member_count, 0u);
+        EXPECT_EQ(fixture.members(0)[0], 0u);
+        EXPECT_EQ(fixture.admissions[0].topology_worker_count, 0u);
+    }
+}
+
 TEST(HbgAdmissionProtocol, SuccessfulPublicationRecordsActualPublisherOrderAndEpoch) {
     for (uint64_t epoch : {UINT64_C(0), UINT64_MAX}) {
         AdmissionFixture fixture({{2, LaneMask::aic()}, {2, LaneMask::aiv0()}}, 6, epoch, {}, true);
@@ -1460,6 +1525,66 @@ TEST(HbgAdmissionProtocol, SuccessfulPublicationRecordsActualPublisherOrderAndEp
         EXPECT_EQ(tasks[0].admission.worker_index, 3u);
         EXPECT_EQ(tasks[0].completion.before.sequence, 0u);
         EXPECT_EQ(tasks[1].completion.after.sequence, 0u);
+    }
+}
+
+TEST(HbgAdmissionProtocol, ExplicitNoRecordPathPreservesAdmissionAndEntryErrorGate) {
+    for (const bool prepare_first : {false, true}) {
+        AdmissionFixture fixture({{2, LaneMask::aic()}}, 6, 17, {}, true);
+        auto *local = fixture.locals[0];
+        local->admission = &fixture.admissions[0];
+        SchedulerReadyClaim ready{};
+        ASSERT_TRUE(fixture.ready_pop(0, 0, &ready));
+        ASSERT_EQ(fixture.claim(0, ready), SchedulerAdmissionResult::PROGRESS);
+        if (prepare_first) ASSERT_TRUE(fixture.prepare(0));
+        ASSERT_EQ(
+            scheduler_ordered_publish_pending<false>(fixture.graph.graph(), fixture.base(), local, fixture.run()),
+            SchedulerAdmissionResult::PROGRESS
+        );
+        EXPECT_EQ(fixture.control()->commit_tail, 1u);
+        EXPECT_EQ(fixture.record(0)->run_epoch, 17u);
+        EXPECT_EQ(fixture.record(0)->member_count, 2u);
+        EXPECT_EQ(fixture.task_control(0)->admission_state, static_cast<uint64_t>(SchedulerAdmissionState::ADMITTED));
+        ASSERT_TRUE(
+            scheduler_refresh_local_obligation<false>(
+                fixture.graph.graph(), fixture.base(), local, fixture.run(), local->admission
+            )
+        );
+        EXPECT_EQ(local->admission->current_task_ref, 0);
+        ASSERT_EQ(
+            scheduler_claim_ordered_block<false>(fixture.graph.graph(), fixture.base(), local, fixture.run(), 0),
+            SchedulerBlockClaimResult::CLAIMED
+        );
+        local->slots[0].state = SchedulerDispatchSlotState::READY;
+        bool permit = false;
+        ASSERT_TRUE(
+            scheduler_ordered_can_enter_slot<false>(
+                fixture.graph.graph(), fixture.base(), local, fixture.run(), 0, &permit
+            )
+        );
+        ASSERT_TRUE(permit);
+        const auto *task = scheduler_state_at<SchedulerProtocolTaskTrace>(
+            fixture.base(), fixture.storage.layout.protocol.tasks_offset
+        );
+        const auto *member = scheduler_state_at<SchedulerProtocolMemberTrace>(
+            fixture.base(), fixture.storage.layout.protocol.members_offset
+        );
+        const auto *worker = scheduler_state_at<SchedulerProtocolWorkerTrace>(
+            fixture.base(), fixture.storage.layout.protocol.workers_offset
+        );
+        EXPECT_EQ(task->admission.before.sequence, 0u);
+        EXPECT_EQ(task->admission.after.sequence, 0u);
+        EXPECT_EQ(member->observed.sequence, 0u);
+        EXPECT_EQ(worker->next_sequence, 0u);
+        EXPECT_EQ(worker->error_flags, 0u);
+        scheduler_gm_store(fixture.run()->scheduler_error, UINT64_C(1));
+        EXPECT_FALSE(
+            scheduler_ordered_can_enter_slot<false>(
+                fixture.graph.graph(), fixture.base(), local, fixture.run(), 0, &permit
+            )
+        );
+        EXPECT_FALSE(permit);
+        EXPECT_EQ(fixture.task_control(0)->next_block, 1u);
     }
 }
 

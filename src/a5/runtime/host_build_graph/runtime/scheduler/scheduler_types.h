@@ -1039,9 +1039,10 @@ struct alignas(128) SchedulerReadyInbox {
     uint8_t atomic_line_padding[120];
 };
 
-// Graph-level facts the host measures once while building the graph. Every
-// Scheduler reads this at bootstrap and nothing writes it afterwards, so it
-// occupies its own cache line away from the state Schedulers mutate.
+enum class SchedulerTopologyLayout : uint64_t { GENERAL = 0, COMPACT_LAUNCH = 1 };
+
+// Facts frozen by READY: the host supplies graph facts, and AICPU discovery
+// validates the topology. Workers only read this region during the run.
 struct alignas(128) SchedulerGraphSummary {
     uint64_t mix_task_count;
     uint64_t cooperative_task_count;
@@ -1056,7 +1057,8 @@ struct alignas(128) SchedulerGraphSummary {
     uint64_t mix_close_seals_offset;
     uint64_t run_epoch;
     uint64_t protocol_layout_offset;
-    uint8_t cache_line_padding[24];
+    SchedulerTopologyLayout topology_layout;
+    uint8_t cache_line_padding[16];
 };
 
 struct alignas(64) SchedulerReadyDirectoryShard {
@@ -1231,69 +1233,70 @@ struct alignas(128) AicpuThreadLifecycleTrace {
 };
 
 struct alignas(128) SchedulerWorkerContext {
-    volatile int32_t core_type;
+    // Routing and address fields are immutable from READY publication to retirement.
+    int32_t core_type;
     int32_t physical_core_id;
-    volatile int32_t type_rank;
+    int32_t type_rank;
     uint32_t worker_reserved;
-    volatile uint64_t run_control_offset;
-    volatile uint64_t task_controls_offset;
+    uint64_t run_control_offset;
+    uint64_t task_controls_offset;
     // Base of this run's ChipTaskStorage array. One address: a task's descriptor
     // and payload are members of one entry, so AICore strides by the storage.
-    volatile uint64_t graph_storage_address;
+    uint64_t graph_storage_address;
     // Held so the wire layout survived the collapse from two addresses to one.
     // Whoever wires this context up must write 0 here and reject a non-zero read,
     // or a later field can be reintroduced over a value someone else is using.
-    volatile uint64_t graph_reserved_address;
-    volatile uint64_t scheduler_state_base_address;
-    volatile uint64_t dispatch_payload_offset;
-    volatile uint64_t trace_cells_offset;
-    volatile uint64_t task_window_last_index;
-    volatile uint64_t graph_task_count;
-    volatile uint64_t worker_index;
-    volatile uint64_t scheduler_ssbuf_reserved0;
-    volatile uint64_t scheduler_ssbuf_reserved1;
-    volatile uint64_t aicpu_lifecycle_traces_offset;
+    uint64_t graph_reserved_address;
+    uint64_t scheduler_state_base_address;
+    uint64_t dispatch_payload_offset;
+    uint64_t trace_cells_offset;
+    uint64_t task_window_last_index;
+    uint64_t graph_task_count;
+    uint64_t worker_index;
+    uint64_t scheduler_ssbuf_reserved0;
+    uint64_t scheduler_ssbuf_reserved1;
+    uint64_t aicpu_lifecycle_traces_offset;
 
-    alignas(128) volatile uint64_t task_metadata_offset;
-    volatile uint64_t ready_inboxes_offset;
-    volatile uint64_t ready_directory_offset;
-    volatile uint64_t activity_buffers_offset;
-    volatile uint64_t worker_contexts_offset;
-    volatile uint64_t scheduler_ssbuf_reserved2;
+    alignas(128) uint64_t task_metadata_offset;
+    uint64_t ready_inboxes_offset;
+    uint64_t ready_directory_offset;
+    uint64_t activity_buffers_offset;
+    uint64_t worker_contexts_offset;
+    uint64_t scheduler_ssbuf_reserved2;
     // The active callable's registration-owned kernel-entry table: an absolute
     // device address, not a scheduler-state offset, because the table lives in
     // that callable's registration block and outlives every run bound to it.
     // `callable_addresses_count` is the table's own length, and the only
     // bound available here: the scheduler state reserves no callable array.
-    volatile uint64_t callable_addresses_address;
-    volatile uint64_t runtime_worker_count;
+    uint64_t callable_addresses_address;
+    uint64_t runtime_worker_count;
     uint64_t bootstrap_scan_end_cycles;
     uint64_t target_bootstrap_start_cycles;
     uint64_t target_bootstrap_end_cycles;
     uint64_t bootstrap_target_aic_cycles;
     uint64_t bootstrap_target_aiv_cycles;
-    volatile uint64_t callable_addresses_count;
+    uint64_t callable_addresses_count;
     // This run's per-subtask PMU staging array, in the same index space as the
     // trace cells. Taken from this group rather than from `topology_reserved`
     // below: that tail is contract-checked zero by `scheduler_initialize_local_config`
     // and consuming one of its words would make a context carrying this offset
     // read as malformed.
-    volatile uint64_t pmu_cells_offset;
+    uint64_t pmu_cells_offset;
 
-    alignas(128) volatile uint64_t graph_summary_offset;
-    volatile uint64_t scheduler_count;
-    volatile uint64_t cluster_count;
-    volatile uint64_t cluster_index;
-    volatile uint64_t scheduler_index;
-    volatile uint64_t is_scheduler;
-    volatile uint64_t cluster_worker_ids[3];
+    alignas(128) uint64_t graph_summary_offset;
+    uint64_t scheduler_count;
+    uint64_t cluster_count;
+    uint64_t cluster_index;
+    uint64_t scheduler_index;
+    uint64_t is_scheduler;
+    uint64_t cluster_worker_ids[3];
     // Mix slots' payloads and executor traces, both addressed by the holding
     // AIV's rank within its type rather than by worker id. They sit in the
     // configuration prefix because that is the span a core observes before
     // reading any of it; a config offset outside it reads as whatever the line
     // last held.
-    volatile uint64_t mix_payloads_offset;
-    volatile uint64_t mix_traces_offset;
+    uint64_t mix_payloads_offset;
+    uint64_t mix_traces_offset;
     uint64_t topology_reserved[1];
     uint64_t graph_nodes_address;
     uint64_t graph_instances_address;

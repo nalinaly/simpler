@@ -30,7 +30,8 @@ __aicore__ void legacy_aicore_execute(__gm__ Runtime *runtime, int block_idx, Co
 namespace {
 
 constexpr uint32_t kInitialBackoffIterations = 8;
-constexpr uint32_t kMaximumBackoffIterations = 32;
+constexpr uint32_t kMaximumBackoffIterations = 256;
+constexpr uint32_t kMaximumIdleBackoffIterations = 1024;
 constexpr uint32_t kSchedulerErrorPollInterval = 64;
 
 struct SchedulerWorkerStats {
@@ -99,7 +100,9 @@ __aicore__ __attribute__((always_inline)) void execute_task(__gm__ DispatchPaylo
 }
 
 __aicore__ __attribute__((always_inline)) void local_backoff(uint32_t iterations) {
-    for (volatile uint32_t spin = 0; spin < iterations; ++spin) {}
+    for (uint32_t spin = 0; spin < iterations; ++spin) {
+        __asm__ volatile("NOP");
+    }
 }
 
 __aicore__ __attribute__((always_inline)) void
@@ -172,6 +175,7 @@ stage_task_trace_before_completion(SchedulerExecutorTaskTrace *trace, uint64_t k
     trace->kernel_end_cycles = kernel_end;
 }
 
+template <bool WithProfiling = true>
 __aicore__ bool bootstrap_ready_graph(
     const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, SchedulerLocalState *scheduler,
     __gm__ SchedulerRunControl *run_control, uint64_t scheduler_count, SchedulerWorkerStats *stats,
@@ -272,7 +276,7 @@ __aicore__ bool bootstrap_ready_graph(
         (scheduler->config.scheduler_index + 1) % scheduler_count,
     };
     bool fill_failed = false;
-    (void)scheduler_fill_own_slots(
+    (void)scheduler_fill_own_slots<WithProfiling>(
         graph, scheduler_state_base, scheduler, run_control, ready_victim_cursors,
         phase_timing_enabled ? &stats->ready : nullptr, profiling_level, 0, &fill_failed, nullptr,
         phase_timing_enabled ? &stats->wake : nullptr, phase_timing_enabled ? &stats->completion : nullptr
@@ -289,11 +293,13 @@ __aicore__ bool bootstrap_ready_graph(
     return true;
 }
 
-// The local state owns the immutable configuration; all arguments are register-passed.
+// Context and stats are distinct per-core stack objects. Kernels receive only
+// the GM dispatch payload, not either scheduler-local object.
 template <bool WithProfiling>
 __aicore__ bool run_ready_dispatch_loop(
-    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, SchedulerLocalState *context,
-    __gm__ SchedulerRunControl *run_control, SchedulerWorkerStats *stats, uint64_t requested_profiling_level
+    const SchedulerGraphView &graph, __gm__ void *scheduler_state_base, SchedulerLocalState *__restrict__ context,
+    __gm__ SchedulerRunControl *run_control, SchedulerWorkerStats *__restrict__ stats,
+    uint64_t requested_profiling_level
 ) {
     const uint64_t profiling_level = WithProfiling ? requested_profiling_level : 0;
     const uint32_t cluster_lane = context->config.self_lane;
@@ -390,7 +396,7 @@ __aicore__ bool run_ready_dispatch_loop(
                 ready_generation = scheduler_dispatch_generation(local_generation);
                 if (context->admission != nullptr) {
                     bool permit = false;
-                    if (!scheduler_ordered_can_enter_slot(
+                    if (!scheduler_ordered_can_enter_slot<WithProfiling>(
                             graph, scheduler_state_base, context, run_control, local_slot, &permit
                         ))
                         return false;
@@ -490,7 +496,7 @@ __aicore__ bool run_ready_dispatch_loop(
                 idle_active = true;
             }
         }
-        if (backoff_iterations < kMaximumBackoffIterations) backoff_iterations <<= 1;
+        if (backoff_iterations < kMaximumIdleBackoffIterations) backoff_iterations <<= 1;
     }
     return true;
 }
@@ -656,7 +662,7 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
     }
     if (config_valid) {
         descriptor_cache_observed_cycles = phase_timing_enabled ? get_sys_cnt_aicore() : 0;
-        if (context->is_scheduler != 0 && !bootstrap_ready_graph(
+        if (context->is_scheduler != 0 && !bootstrap_ready_graph<WithProfiling>(
                                               graph, scheduler_state_base, &scheduler_local_state, run_control,
                                               scheduler_local_state.config.scheduler_count, &stats, profiling_level
                                           )) {
@@ -746,7 +752,7 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
         const uint64_t drain_start = get_sys_cnt_aicore();
         while (true) {
             bool drained = false;
-            if (!scheduler_drain_ordered_exit(
+            if (!scheduler_drain_ordered_exit<WithProfiling>(
                     graph, scheduler_state_base, &scheduler_local_state, run_control, &drained
                 ) ||
                 drained)

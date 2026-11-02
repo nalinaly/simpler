@@ -177,7 +177,7 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
         return false;
     }
     const bool had_pending = !scheduler_task_ref_is_null(admission->pending_task_ref);
-    auto published = scheduler_ordered_publish_pending(graph, base, local, run);
+    auto published = scheduler_ordered_publish_pending<RecordProtocol>(graph, base, local, run);
     if (published == SchedulerAdmissionResult::ERROR) {
         *failed = true;
         return false;
@@ -237,7 +237,7 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
             return progress;
         }
         candidate = {};
-        published = scheduler_ordered_publish_pending(graph, base, local, run);
+        published = scheduler_ordered_publish_pending<RecordProtocol>(graph, base, local, run);
         if (published == SchedulerAdmissionResult::ERROR) {
             *failed = true;
             return progress;
@@ -247,7 +247,7 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
     // Discovery and completion service regain control after at most two
     // closed obligations; no member waits for a peer inside this pass.
     for (uint32_t step = 0; step < SCHEDULER_PENDING_SLOT_COUNT; ++step) {
-        if (!scheduler_refresh_local_obligation(graph, base, local, run, admission)) {
+        if (!scheduler_refresh_local_obligation<RecordProtocol>(graph, base, local, run, admission)) {
             *failed = true;
             return progress;
         }
@@ -338,7 +338,8 @@ static inline __aicore__ bool scheduler_fill_ordered_slots(
     return progress;
 }
 
-inline __aicore__ bool scheduler_drain_ordered_exit(
+template <bool RecordProtocol = true>
+static inline __aicore__ bool scheduler_drain_ordered_exit(
     const SchedulerGraphView &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
     bool *done
 ) {
@@ -365,7 +366,7 @@ inline __aicore__ bool scheduler_drain_ordered_exit(
             return scheduler_admission_fail(
                 graph, local, run, slot.task_ref, SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
             );
-    if (!scheduler_refresh_local_obligation(graph, base, local, run, admission)) return false;
+    if (!scheduler_refresh_local_obligation<RecordProtocol>(graph, base, local, run, admission)) return false;
     if (!scheduler_task_ref_is_null(admission->current_task_ref)) {
         bool closed = false;
         if (scheduler_task_is_mix(admission->current_flags)) {
@@ -376,8 +377,8 @@ inline __aicore__ bool scheduler_drain_ordered_exit(
                 return scheduler_admission_fail(
                     graph, local, run, admission->current_task_ref, SchedulerErrorSite::ORDERED_EXIT_IN_FLIGHT
                 );
-            if (!scheduler_gm_mix_close(graph, base, local, run, &closed)) return false;
-        } else if (!scheduler_close_ordered_obligation(graph, base, local, run, &closed)) {
+            if (!scheduler_gm_mix_close<RecordProtocol>(graph, base, local, run, &closed)) return false;
+        } else if (!scheduler_close_ordered_obligation<RecordProtocol>(graph, base, local, run, &closed)) {
             return false;
         }
         return true;

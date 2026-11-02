@@ -84,6 +84,14 @@ that ...".
 
 Newest first.
 
+- [2026-11 — A5 SWA host preparation of initial Ready and wake lists](2026-11-a5-swa-host-bootstrap.md): scan removal and native protocol audit passed; frozen alternating comparison won 2/4 pairs with 0.397% median paired improvement, so the extra path was reverted.
+
+- [2026-11 — A5 SWA full propagation of disabled protocol recording](2026-11-a5-swa-full-recording-propagation.md): full propagation reduced static loop instructions but was 8.98% slower in screening; no end-to-end gain established.
+
+- [2026-11 — A5 SWA early admission-topology validation](2026-11-a5-swa-early-topology.md): reverted after a 1.60% slower screening comparison; moving private topology validation before slot fill did not demonstrate an end-to-end gain.
+
+- [2026-11 — A5 SWA admission-record bypass reads](2026-11-a5-swa-admission-bypass.md): reverted after a 5.7% slower same-device screening run; validation passed, but bypass snapshots did not improve full device wall time.
+
 - [2026-10-csa-fair-competition-diagnostics](../zh-cn/investigations/2026-10-csa-fair-competition-diagnostics.md)
 
 - [2026-10 — Graph materialization RMW polling with bounded backoff](../zh-cn/investigations/2026-10-a5-graph-rmw-poll-backoff.md): rejected as a standalone fix; Mix still reached 3.04 s, and L3 located the stall before ready bootstrap. The isolated publication-signal candidate is tracked in the Graph performance report.
@@ -144,3 +152,9 @@ Newest first.
 - [2026-06 — a5 AICPU filter gate: Scenario B fail-fast guard not added](2026-06-a5-aicpu-filter-gate-scenario-b-validation.md)
 - [2026-06 — Sanitizer rollout scope: macOS, TSAN gating, LSan](2026-06-sanitizer-scope.md)
 - [2026-06 — chip swimlane: defer per-task wmb to rotation](2026-06-chip-swimlane-defer-wmb.md)
+
+- [2026-11 — A5 SWA compact topology proof](2026-11-a5-swa-topology-proof.md): reuse AICPU discovery before READY; all four frozen pairs improve, median paired improvement 5.72%. Selected regressions complete with a documented shutdown warning; TMR goal remains open.
+
+- [2026-11 — A5 SWA idle NOP cap](2026-11-a5-swa-idle-nop-cap.md): steady-state cap 256 to 1024, with bootstrap/drain caps unchanged; all four frozen pairs improve, median paired improvement 2.80%, with focused exit/error checks.
+
+- [2026-11 — A5 SWA publisher-local adoption](2026-11-a5-swa-publisher-adoption.md): correctness and L4 passed, but only 2/4 frozen pairs improved (median +0.162%); candidate reverted to idle-nop1024.
