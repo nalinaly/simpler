@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+#include "host_build_graph/graph_execution.h"
+#include "host_build_graph/graph_image_view.h"
 #include "scheduler/scheduler_graph_work.h"
 
 struct SchedulerGraphMaterializeRegion {
@@ -32,6 +34,62 @@ class SchedulerGraphMaterializePlan {
 public:
     std::vector<SchedulerGraphWork> work;
     std::vector<SchedulerGraphWorkRange> ranges;
+
+    // Region addresses are offsets from the 64-byte-aligned execution tail.
+    // Parameter contents remain device-validated; this only plans write ranges.
+    static std::optional<SchedulerGraphMaterializePlan>
+    from_definition(const GraphDefinition &definition, uint32_t instance_index, uint32_t target_bytes) {
+        if (definition.task_count <= 0 || definition.task_count > SUB_TASK_MAX_NUM || definition.tensor_arg_count < 0 ||
+            definition.tensor_arg_count > SUB_TASK_MAX_NUM * MAX_TENSOR_ARGS || definition.scalar_arg_count < 0 ||
+            definition.scalar_arg_count > SUB_TASK_MAX_NUM * MAX_SCALAR_ARGS)
+            return std::nullopt;
+        GraphExecutionStorageLayout layout{};
+        if (!graph_execution_storage_layout(
+                definition.task_count, definition.tensor_arg_count, definition.scalar_arg_count, definition.edge_count,
+                &layout
+            ) ||
+            layout.total_bytes != definition.execution_storage_bytes)
+            return std::nullopt;
+        const auto *tasks =
+            graph_definition_array<SubTaskDefinition>(definition, definition.off_sub_tasks, definition.task_count);
+        if (tasks == nullptr) return std::nullopt;
+        std::vector<SchedulerGraphMaterializeRegion> regions{
+            {SchedulerGraphWorkRegion::TASK_STORAGE,
+             layout.tasks_offset,
+             static_cast<uint32_t>(definition.task_count),
+             sizeof(ChipTaskStorage),
+             {{0, static_cast<uint32_t>(definition.task_count)}}},
+            {SchedulerGraphWorkRegion::TENSOR_POOL,
+             layout.tensors_offset,
+             static_cast<uint32_t>(definition.tensor_arg_count),
+             sizeof(simpler::hbg::Tensor),
+             {}},
+            {SchedulerGraphWorkRegion::SCALAR_POOL,
+             layout.scalars_offset,
+             static_cast<uint32_t>(definition.scalar_arg_count),
+             sizeof(uint64_t),
+             {}},
+        };
+        for (int32_t child = 0; child < definition.task_count; ++child) {
+            const auto &task = tasks[child];
+            if (task.tensor_count < 0 || task.tensor_count > MAX_TENSOR_ARGS || task.tensor_offset < 0 ||
+                task.tensor_offset > definition.tensor_arg_count ||
+                task.tensor_count > definition.tensor_arg_count - task.tensor_offset || task.scalar_count < 0 ||
+                task.scalar_count > MAX_SCALAR_ARGS || task.scalar_offset < 0 ||
+                task.scalar_offset > definition.scalar_arg_count ||
+                task.scalar_count > definition.scalar_arg_count - task.scalar_offset)
+                return std::nullopt;
+            if (task.tensor_count != 0)
+                regions[1].referenced.push_back(
+                    {static_cast<uint32_t>(task.tensor_offset), static_cast<uint32_t>(task.tensor_count)}
+                );
+            if (task.scalar_count != 0)
+                regions[2].referenced.push_back(
+                    {static_cast<uint32_t>(task.scalar_offset), static_cast<uint32_t>(task.scalar_count)}
+                );
+        }
+        return build(std::move(regions), instance_index, target_bytes);
+    }
 
     static std::optional<SchedulerGraphMaterializePlan>
     build(std::vector<SchedulerGraphMaterializeRegion> regions, uint32_t instance_index, uint32_t target_bytes) {

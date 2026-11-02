@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#include "inner_kernel.h"
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -19,6 +21,7 @@
 #include <random>
 #include <vector>
 
+#include "hbg_graph_test_support.h"
 #include "scheduler_graph_materialize_plan.h"
 
 namespace {
@@ -222,6 +225,62 @@ TEST(HbgGraphMaterializePlan, RandomSharedReferencesHaveExactCoverageAndExclusiv
         ASSERT_TRUE(plan);
         check_coverage({region}, *plan);
     }
+}
+
+TEST(HbgGraphMaterializePlan, DefinitionAdapterDeduplicatesOnlyReferencedPoolSlots) {
+    MaterializeFixture f;
+    f.object.body.tasks[1].tensor_offset = 0;
+    f.object.body.tasks[1].scalar_offset = 0;
+    f.object.body.tensors[1].owner_task_id = TaskId::make_param(99);
+    f.object.body.sources[1] = GraphScalarInheritance::from_boundary(99);
+    const auto &definition = f.object.body.definition;
+    auto plan = Plan::from_definition(definition, 7, 64);
+    ASSERT_TRUE(plan);
+    GraphExecutionStorageLayout layout{};
+    ASSERT_TRUE(graph_execution_storage_layout(2, 2, 2, 1, &layout));
+    check_coverage(
+        {{Kind::TASK_STORAGE, layout.tasks_offset, 2, sizeof(ChipTaskStorage), {{0, 2}}},
+         {Kind::TENSOR_POOL, layout.tensors_offset, 2, sizeof(simpler::hbg::Tensor), {{0, 1}}},
+         {Kind::SCALAR_POOL, layout.scalars_offset, 2, sizeof(uint64_t), {{0, 1}}}},
+        *plan
+    );
+}
+
+TEST(HbgGraphMaterializePlan, DefinitionAdapterLeavesScalarBindingErrorsToDeviceValidation) {
+    MaterializeFixture f;
+    f.control.instance_index = 7;
+    f.object.body.sources[0] = GraphScalarInheritance::from_boundary(99);
+    auto plan = Plan::from_definition(f.object.body.definition, 7, 4096);
+    ASSERT_TRUE(plan);
+    const SchedulerGraphView graph{
+        0, 0, f.nodes.size(), f.nodes.size() - 1, reinterpret_cast<uint64_t>(f.nodes.data())
+    };
+    bool checked = false;
+    for (const auto &work : plan->work) {
+        if (work.region != Kind::SCALAR_POOL) continue;
+        int32_t failed_child = -1;
+        EXPECT_EQ(
+            scheduler_graph_materialize_work(
+                f.instance, graph, work, plan->ranges.data(), plan->ranges.size(), &failed_child
+            ),
+            SchedulerGraphResult::INVALID_ARGUMENTS
+        );
+        EXPECT_EQ(failed_child, 0);
+        checked = true;
+    }
+    EXPECT_TRUE(checked);
+}
+
+TEST(HbgGraphMaterializePlan, UnplannableMetadataDoesNotRequireReadingInvalidPoolSlots) {
+    MaterializeFixture f;
+    f.object.body.tasks[0].scalar_offset = -1;
+    EXPECT_FALSE(Plan::from_definition(f.object.body.definition, 7, 4096));
+    f.object.body.tasks[0].scalar_offset = 0;
+    f.object.body.tasks[0].tensor_count = 3;
+    EXPECT_FALSE(Plan::from_definition(f.object.body.definition, 7, 4096));
+    f.object.body.tasks[0].tensor_count = 1;
+    f.object.body.definition.execution_storage_bytes = 0;
+    EXPECT_FALSE(Plan::from_definition(f.object.body.definition, 7, 4096));
 }
 
 }  // namespace
