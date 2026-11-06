@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "pto/comm/async_common/sdma_constants.hpp"
+
 namespace workspace_fixture {
 inline int started[3]{};
 inline int live[3]{};
@@ -36,14 +38,17 @@ public:
     }
     bool create() {
         ++started[engine_];
-        addr_ = std::calloc(1, 16384);
+        const size_t bytes = engine_ == 0 ? pto::comm::sdma::kSdmaWorkspaceBytes : 16384;
+        addr_ = std::calloc(1, bytes);
         if (!addr_) throw std::bad_alloc();
         ++live[engine_];
         if (throw_engine == engine_) throw std::runtime_error("workspace init failure");
         return fail_engine != engine_;
     }
     void *GetWorkspaceAddr() const { return invalid_addr_engine == engine_ ? nullptr : addr_; }
-    uint64_t GetWorkspaceSize() const { return invalid_size_engine == engine_ ? 0 : engine_ == 0 ? 16384 : 8192; }
+    uint64_t GetWorkspaceSize() const {
+        return invalid_size_engine == engine_ ? 0 : engine_ == 0 ? pto::comm::sdma::kSdmaWorkspaceBytes : 8192;
+    }
 
 private:
     int engine_;

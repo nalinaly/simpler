@@ -15,6 +15,8 @@ from pathlib import Path
 import pytest
 from simpler.comm_domain import DomainConfig
 
+from simpler_setup.pto_isa import ensure_pto_isa_root
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -103,6 +105,7 @@ def host_resource_binary(request, tmp_path_factory):
             "-Wl,--gc-sections",
             *defines,
             f"-I{build}",
+            f"-I{ensure_pto_isa_root()}/include",
             f"-I{cann}/include",
             f"-I{cann}/pkg_inc/base",
             f"-I{ROOT}/src/a5/platform/include",

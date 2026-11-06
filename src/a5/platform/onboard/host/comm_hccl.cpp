@@ -53,6 +53,7 @@
 #include "hccl/hccl_types.h"
 #include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
 #include "pto/comm/async/urma/urma_workspace_manager.hpp"
+#include "pto/comm/async_common/sdma_constants.hpp"
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
 #ifndef __gm__
 #define __gm__
@@ -763,7 +764,8 @@ static void ensure_sdma_workspace(CommHandle h) {
     auto manager = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
     if (!manager->Init() || manager->GetWorkspaceAddr() == nullptr) return;
     set_comm_workspace(
-        h->host_ctx, CommWorkspaceKind::SDMA, reinterpret_cast<uint64_t>(manager->GetWorkspaceAddr()), 16 * 1024
+        h->host_ctx, CommWorkspaceKind::SDMA, reinterpret_cast<uint64_t>(manager->GetWorkspaceAddr()),
+        pto::comm::sdma::kSdmaWorkspaceBytes
     );
     h->sdma_workspace = std::move(manager);
 }

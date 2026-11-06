@@ -1052,7 +1052,8 @@ struct alignas(128) SchedulerGraphSummary {
     uint64_t run_epoch;
     uint64_t protocol_layout_offset;
     uint64_t ready_pool_offset;
-    uint8_t cache_line_padding[16];
+    uint64_t async_layout_offset;
+    uint8_t cache_line_padding[8];
 };
 
 struct alignas(64) SchedulerReadyDirectoryShard {
@@ -1135,6 +1136,11 @@ enum class SchedulerErrorSite : uint64_t {
     GRAPH_BIND_TENSOR = 133,
     GRAPH_BIND_SCALAR = 134,
     GRAPH_BIND_PREDICATE = 135,
+    ASYNC_CONTEXT_INVALID = 140,
+    ASYNC_SEAL_FAILED = 141,
+    ASYNC_CHECK_FAILED = 142,
+    ASYNC_FINISH_FAILED = 143,
+    ASYNC_BLOCK_RELEASE_FAILED = 144,
 };
 
 enum SchedulerErrorIdentityField : uint32_t {
@@ -1467,6 +1473,7 @@ static_assert(
 static_assert(sizeof(SchedulerReadyInbox) == 128, "ready inbox layout changed");
 static_assert(alignof(SchedulerReadyInbox) == 128, "ready inbox alignment changed");
 static_assert(sizeof(SchedulerGraphSummary) == 128, "graph summary layout changed");
+static_assert(offsetof(SchedulerGraphSummary, async_layout_offset) == 112);
 static_assert(alignof(SchedulerGraphSummary) == 128, "graph summary alignment changed");
 static_assert(sizeof(SchedulerReadyDirectoryShard) == 64, "ready directory shard must occupy one cache line");
 static_assert(alignof(SchedulerReadyDirectoryShard) == 64, "ready directory shard alignment changed");
@@ -1827,6 +1834,7 @@ scheduler_init_data_from_layout(void *base, const AicoreSchedulerLayout &layout,
     summary->group_mailboxes_offset = layout.group_mailboxes_offset;
     summary->mix_close_seals_offset = layout.mix_close_seals_offset;
     summary->protocol_layout_offset = layout.protocol_layout_offset;
+    summary->async_layout_offset = layout.async_layout_offset;
     if (layout.spmd.cooperative_task_count != 0) {
         for (uint64_t task = 0; task < layout.task_count; ++task) {
             const uint64_t offset = layout.admission_records_offset + task * layout.admission_record_stride;
