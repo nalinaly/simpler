@@ -17,12 +17,13 @@ MAX = (1 << 64) - 1
 
 
 class ProtocolBuilder:
-    def __init__(self, shapes, clusters=2, epoch=0, sync_tasks=()):
+    def __init__(self, shapes, clusters=2, epoch=0, sync_tasks=(), deferred_tasks=()):
         self.raw: dict[str, Any] = capture(epoch)
         self.clock = 0
         self.groups = [0] * clusters
         self.generations = {}
         self.identities: list[dict[str, Any]] = []
+        self.deferred_tasks = set(deferred_tasks)
         raw = self.raw
         raw.update(
             task_count=len(shapes),
@@ -150,6 +151,14 @@ class ProtocolBuilder:
             if spec["flags"] & 4 or (w["core_type"] == 0) == bool(spec["active_mask"] & 1)
         ]
 
+    def complete_task(self, task, worker):
+        if task in self.deferred_tasks:
+            worker = (worker + 1) % len(self.raw["workers"])
+        record = self.actor(task, worker, "completion")
+        if task in self.deferred_tasks:
+            record["flags"] |= 1 << 31
+        return record
+
     def admit(self, task, worker=0, observe_members=True):
         spec = self.raw["tasks"][task]
         self.raw["admission_log"].append(task)
@@ -264,11 +273,11 @@ class ProtocolBuilder:
         if cooperative and not mixed:
             self.complete_block(owner)
         self.stamp(row, "completion_consumed")
-        if not cooperative and not self.raw["cooperative_task_count"]:
-            self.actor(task, worker, "completion")
+        if not cooperative and not self.raw["cooperative_task_count"] and task not in self.deferred_tasks:
+            self.complete_task(task, worker)
         self.stamp(row, "trace_published")
-        if not cooperative and self.raw["cooperative_task_count"]:
-            self.actor(task, worker, "completion")
+        if not cooperative and (self.raw["cooperative_task_count"] or task in self.deferred_tasks):
+            self.complete_task(task, worker)
         self.identities.append(
             dict(
                 run_epoch=self.raw["run_epoch"],
@@ -382,7 +391,7 @@ class ProtocolBuilder:
                             owner=last,
                         )
                 assert last is not None
-                self.actor(task, last["owner"]["worker_index"], "completion")
+                self.complete_task(task, last["owner"]["worker_index"])
                 self.close(task)
             else:
                 slot = spec["active_mask"].bit_length() - 1
