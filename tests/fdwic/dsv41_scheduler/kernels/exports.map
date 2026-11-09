@@ -1,0 +1,4 @@
+{
+  global: dsv41_0_mix_aic; dsv41_0_mix_aiv;
+  local: *;
+};
