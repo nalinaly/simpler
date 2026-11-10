@@ -200,6 +200,12 @@ that production profiling level. Outputs are split by rank and run;
 `result.json` confirms completion and boundary validation, and
 `source-task-map.txt` maps replay task IDs to the original forward.
 
+The launcher uses the production `prepare_native_run` / `launch_native_run`
+lifecycle and synchronizes both ranks after Host preparation. Device timings
+therefore include actual execution and communication, while the peer's Host
+binding/upload time does not become an artificial communication wait. A
+single-level run uses that same profiling level for warmup and measurement.
+
 The local `plan-rank*.bin` records use current production C++ types. They are
 **derived build artifacts**, not portable runtime protocols. Regenerate them
 from the included original C++ after changing the runtime ABI, Host adapters,
