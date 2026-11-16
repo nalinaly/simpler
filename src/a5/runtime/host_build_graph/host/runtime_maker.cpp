@@ -1786,6 +1786,21 @@ bool create_scheduler_state(
     auto *notification_addresses = scheduler_state_at<uint64_t>(host_base, layout.done_notifications_offset);
     std::copy(notifications.addresses.begin(), notifications.addresses.end(), notification_addresses);
 
+    // The total number of MIX blocks bounds every cluster's sequence. Larger
+    // graphs retain the full-width GM protocol; no sequence is truncated.
+    uint64_t mix_blocks = 0;
+    for (const auto &metadata : task_metadata)
+        if (scheduler_task_is_mix(metadata.flags)) mix_blocks += metadata.logical_block_num;
+    SchedulerDoneNotifications mix_notifications;
+    if (spmd.sync_mix_task_count != 0 && mix_blocks < (UINT64_C(1) << 31)) {
+        try {
+            mix_notifications = create_scheduler_done_notifications(static_cast<size_t>(spmd.cluster_count) * 6);
+        } catch (const std::exception &error) {
+            LOG_ERROR("A5 HBG: cannot prepare MIX notifications: %s", error.what());
+            return false;
+        }
+    }
+
     if (layout.async_layout_offset != 0 && !initialize_async_completion(host_base, layout.total_size, async_plan)) {
         LOG_ERROR("A5 HBG: failed to initialize async completion storage");
         return false;
@@ -1945,6 +1960,20 @@ bool create_scheduler_state(
         context.worker_index = static_cast<uint64_t>(i);
     }
 
+    if (!mix_notifications.addresses.empty()) {
+        auto *mailboxes = scheduler_state_at<SchedulerGroupMailbox>(host_base, layout.group_mailboxes_offset);
+        for (uint64_t cluster = 0; cluster < spmd.cluster_count; ++cluster) {
+            const auto *addresses = mix_notifications.addresses.data() + cluster * 6;
+            if (std::all_of(addresses, addresses + 6, [](uint64_t address) {
+                    return address != 0;
+                }))
+                for (size_t lane = 0; lane < 2; ++lane)
+                    std::copy(
+                        addresses + lane * 3, addresses + lane * 3 + 3, mailboxes[cluster].notification_addresses[lane]
+                    );
+        }
+    }
+
     runtime->publish_scheduler_bootstrap(
         SCHEDULER_RUNTIME_MODE_RESIDENT_PENDING, aligned_address + layout.worker_contexts_offset
     );
@@ -1964,6 +1993,7 @@ bool create_scheduler_state(
         HostPhaseKind::Count, {}
     );
     if (notifications.owner != nullptr) runtime->retain_pending_resource(std::move(notifications.owner));
+    if (mix_notifications.owner != nullptr) runtime->retain_pending_resource(std::move(mix_notifications.owner));
     LOG_INFO("A5 HBG: selected AICore Scheduler for %d tasks", total_tasks);
     return true;
 }

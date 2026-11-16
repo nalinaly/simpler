@@ -3943,4 +3943,93 @@ TEST(HbgCompletionPacking, MaximumSupportedShapesIgnoreUnrelatedAsyncActivityUnt
     }
 }
 
+// Addressed words model SDK-owned SRAM values, separate from all GM ACK lines.
+void bind_mix_notifications(SchedulerGroupMailbox *mailbox, std::array<uint32_t, 6> &values) {
+    for (uint32_t lane = 0; lane < 2; ++lane)
+        for (uint32_t kind = 0; kind < 3; ++kind)
+            mailbox->notification_addresses[lane][kind] = reinterpret_cast<uint64_t>(&values[lane * 3 + kind]);
+}
+
+TEST(HbgGmMix, CntNotifyReusesLaneSequencesAcrossChangingMembershipWithoutGmAckOperations) {
+    GmMixFixture fixture({{2, LaneMask::all(), true}, {2, kAicAiv0, true}, {2, LaneMask::all(), true}});
+    std::array<uint32_t, 6> signals{};
+    auto *mailbox = fixture.mailbox(0);
+    bind_mix_notifications(mailbox, signals);
+    uint32_t gm_reads = 0, gm_atomics = 0;
+    auto remote_ack = [&](volatile uint64_t *word) {
+        for (uint32_t lane = 1; lane < 3; ++lane)
+            if (word == &mailbox->lanes[lane].assigned_seq || word == &mailbox->lanes[lane].arrived_seq ||
+                word == &mailbox->lanes[lane].released_seq)
+                return true;
+        return false;
+    };
+    ScopedGmQueryObserver observe_reads([&](volatile uint64_t *word) {
+        gm_reads += remote_ack(word);
+    });
+    ScopedGmAtomicObserver observe_atomics([&](volatile uint64_t *word, uint64_t, GmAtomicOperation) {
+        gm_atomics += remote_ack(word);
+    });
+    ASSERT_TRUE(fixture.prepare_calls());
+    for (uint32_t task = 0; task < 3; ++task) {
+        ASSERT_TRUE(fixture.admit(task));
+        ASSERT_TRUE(fixture.refresh_all());
+        ASSERT_NO_FATAL_FAILURE(finish_sync_cluster(fixture, 0));
+        ASSERT_NO_FATAL_FAILURE(finish_sync_cluster(fixture, 1));
+        EXPECT_TRUE(fixture.task_done(task));
+        bool closed = false;
+        for (uint32_t worker = 0; worker < 6; ++worker) {
+            if (!fixture.participant(worker, task)) continue;
+            ASSERT_TRUE(fixture.close(worker, &closed));
+            ASSERT_TRUE(closed);
+        }
+    }
+    EXPECT_EQ(signals[0], 3u);
+    EXPECT_EQ(signals[3], 3u);
+    EXPECT_EQ(signals[5], 3u);
+    EXPECT_EQ(gm_reads, 0u);
+    EXPECT_EQ(gm_atomics, 0u);
+    EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
+}
+
+TEST(HbgGmMix, CntNotifyFailureReleasePreservesFailureAndPreventsGroupContribution) {
+    GmMixFixture fixture({{2, LaneMask::all(), true}});
+    std::array<uint32_t, 6> signals{};
+    bind_mix_notifications(fixture.mailbox(0), signals);
+    ASSERT_TRUE(fixture.prepare_calls());
+    ASSERT_TRUE(fixture.admit(0));
+    ASSERT_TRUE(fixture.refresh_all());
+    ASSERT_EQ(fixture.claim(0), SchedulerBlockClaimResult::CLAIMED);
+    ASSERT_TRUE(fixture.publish(0));
+    ASSERT_TRUE(fixture.rendezvous(0));
+    for (uint32_t worker = 0; worker < 3; ++worker) {
+        GmExecution execution{};
+        ASSERT_TRUE(fixture.begin(worker, &execution));
+        if (worker == 2) {
+            ASSERT_TRUE((scheduler_complete_own_slot<false, true, false>(
+                fixture.graph.graph(), fixture.base(), fixture.locals[worker], fixture.run(), execution.slot, 0
+            )));
+        } else ASSERT_TRUE(fixture.complete(execution));
+    }
+    EXPECT_EQ(signals[5], (UINT32_C(1) << 31) | 1u);
+    EXPECT_EQ(
+        scheduler_gm_mix_query_signal(fixture.mailbox(0), 2, SchedulerGmMixSignal::RELEASED),
+        SCHEDULER_GROUP_SEQUENCE_LIMIT | 1u
+    );
+    EXPECT_EQ(fixture.retire(0), SchedulerGmMixResult::ERROR);
+    EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 0u);
+}
+
+TEST(HbgGmMix, CntNotifySequenceExhaustionFailsBeforeClaiming) {
+    GmMixFixture fixture({{2, LaneMask::all(), true}});
+    std::array<uint32_t, 6> signals{};
+    bind_mix_notifications(fixture.mailbox(0), signals);
+    ASSERT_TRUE(fixture.prepare_calls());
+    ASSERT_TRUE(fixture.admit(0));
+    ASSERT_TRUE(fixture.refresh_all());
+    fixture.admissions[0].gm_mix.group_seq = SCHEDULER_GROUP_NOTIFY_SEQUENCE_LIMIT - 1;
+    EXPECT_EQ(fixture.claim(0), SchedulerBlockClaimResult::ERROR);
+    EXPECT_EQ(fixture.control(0)->next_block, 0u);
+    EXPECT_EQ(signals[0], 0u);
+}
+
 }  // namespace

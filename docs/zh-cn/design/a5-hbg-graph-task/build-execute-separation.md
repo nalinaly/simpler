@@ -2,11 +2,13 @@
 
 **状态：固定归属、有序发票和 Host Kahn 分层排序已接入。** Host 根据现有数据与 Graph 控制依赖排序；Device 在前项全局发完有效票后开放后项，不要求前项整体执行完成。本卡通知配对和 PyPTO 通知元数据导出暂缓，后续由真实场景驱动评估，见 [#3096](https://github.com/hw-native-sys/simpler/issues/3096)。现有通信协议和延后完成机制保持不变。
 
-本文以 `atomic_probe/pa_scheduler/cross_core_only_scheduler` 的实际执行流程为参考，只保留当前实现与拟修改合同。供给顺序是 **Host 读取现有数据与 Graph 控制依赖 → 拓扑分层并在层内排序 → 投影为两类任务目录 → Device 按序发完前项有效票再推进 → 固定 owner 等待并执行**。不能仅移植四 token 和提前领取，却遗漏有序取票。HBG 的不可变 Call 由 Host 构造，Device 仍有接收、owner 相关准备和动态入口工作；不能将这三者统称为“Build 已全部在 Host 完成”，也不照搬 probe 的任务生成、TensorMap 或 Device Build 队列。调度优化按 12 组 AICore L0 均值总和验收；功能正确且明确减少冗余 atomic／ld_dev 的候选允许不超过1%的总和回退，超过1%则撤回。
+本文以 `atomic_probe/pa_scheduler/cross_core_only_scheduler` 的实际执行流程为参考，只保留当前实现与拟修改合同。供给顺序是 **Host 读取现有数据与 Graph 控制依赖 → 拓扑分层并在层内排序 → 投影为两类任务目录 → Device 按序发完前项有效票再推进 → 固定 owner 等待并执行**。不能仅移植四 token 和提前领取，却遗漏有序取票。HBG 的不可变 Call 由 Host 构造，Device 仍有接收、owner 相关准备和动态入口工作；不能将这三者统称为“Build 已全部在 Host 完成”，也不照搬 probe 的任务生成、TensorMap 或 Device Build 队列。调度优化按 12 组 AICore L0 均值总和验收；功能正确且明确减少冗余 atomic／ld_dev 的候选允许不超过0.5%的总和回退，超过0.5%则撤回。
 
 修改范围为 A5 HBG 调度器、必要的 Host 布局、内部协议与 DFX；不新增 PyPTO 通知接口，不修改用户 kernel、前端语义或参数 ABI。
 
 调度优化必须由通用任务状态、依赖和资源合同驱动，不按模型名、特定 task 编号、shape 或固定图拓扑选择策略。SWA 等单例的泳道图用于提出和验证机制假设，不能替代通用性验收。
+
+**当前保留标准（2026-11-16 更新）：** CntNotify 扩展逐项对比上一保留版本的12组 AICore L0 均值总和；总和回退超过0.5%即撤回，不超过0.5%可以保留，并记录每组变化。MIX 握手的 +0.224% 总和回退在保留范围内。
 
 性能主指标统一为 HBG 与 percounter 的 **AICore L0 wall**：各实际执行核的最晚 kernel end 减最早 kernel begin，包含中间调度和依赖等待，排除首末 kernel 外的 AICPU 启停开销。每组预热一次、正式测量十次；双卡每轮先 Device 会合，各卡按自己的时钟计算，再逐轮取 rank 最大值并求均值。缺失或非法端点直接判无效，不回退到 Device wall 或旧 percounter 调度循环窗口；历史数据保留原口径，不重新贴标。
 
@@ -316,7 +318,7 @@ GM MIX 的 assigned_seq 与未确认 arrived/released ACK 直接消费可靠 ld_
 
 ### 收敛同址原子访问的实施约束
 
-优先减少同一地址上的 atomic 请求，再减少 atomic 总调用次数，并减少重复 ld_dev 观察。保留唯一 canonical 完成字、固定执行 owner、有序供给和已有协作语义；不复制完成通知，也不通过扩散地址替代职责设计。每个候选独立比较12组 AICore L0 均值之和，并展示逐项变化。已证明消除了冗余 atomic／ld_dev 且功能合同保持时，允许总和回退不超过1%仍保留；回退超过1%则撤回。须明确区分操作数量减少和已测得的性能收益，不能隐藏新增的普通访存、DCCI/DSB 或其他地址的竞争。
+优先减少同一地址上的 atomic 请求，再减少 atomic 总调用次数，并减少重复 ld_dev 观察。保留唯一 canonical 完成字、固定执行 owner、有序供给和已有协作语义；不复制完成通知，也不通过扩散地址替代职责设计。每个候选独立比较12组 AICore L0 均值之和，并展示逐项变化。已证明消除了冗余 atomic／ld_dev 且功能合同保持时，允许总和回退不超过0.5%仍保留；回退超过0.5%则撤回。须明确区分操作数量减少和已测得的性能收益，不能隐藏新增的普通访存、DCCI/DSB 或其他地址的竞争。
 
 1. **观察与处理职责**：异步 CHECK 的目录用于发现候选，lease 每次只取一份可靠 `ld_dev` 快照，带 generation 的 CAS 才授予处理责任。非 RUNNABLE 留待后续扫描，非法状态直接报错，不保留交替强复核标志或追加 FAA(0)。旧 generation 不能越过 CAS；CAS 返回更新后的 RUNNABLE 时最多再尝试一次。目录游标仍越过已访问条目，保持扫描预算与公平性；私有状态仍64B，FINISH 不使用目录或 lease。CHECK 每次服务有界，返回业务执行前释放责任，不持 lease 进入可能同步等待的 kernel。 非空组登记 canonical 完成债务时，可靠读取作为 CAS 期望值；不满足有效性、C>0 或债务上界时直接拒绝，不追加 FAA(0)。CAS 冲突后复用返回值，只有 CAS 成功才取得信用，不能用无检查的 FAA(+1)替代溢出校验。
 2. **稳定事实复用**：在同一 run 和同一任务义务中复用已确认的供给关闭、完成及依赖前缀。每个证明必须有明确的来源和失效点；错误、epoch、实际执行许可继续在必要边界检查。先验证 admission 的合法 supply seal 能否直接证明最终有效登记数，再复用已有本核 DONE 缓存。
@@ -336,7 +338,7 @@ GM MIX 的 assigned_seq 与未确认 arrived/released ACK 直接消费可靠 ld_
 
 普通 token 的最后有效票在唯一 Claim 成功、handle 已记录固定 owner 后发布 seal，再接收与校验不可变 Call/Binding。此时本核的 token 仍是 TICKETED，Claim handle 已登记，接收成功才进入 WAIT_FANIN；其他核可以领取并准备后项，执行仍等待前驱 canonical DONE。接收失败须记录错误并撤销未启动的本地执行责任，不能完成前驱或放行依赖消费者。Claim/Receive 分开计时；需要完整接收的 MIX/cohort 入口仍组合调用两步。普通 MIX 与 sync_start 保留各自真实责任登记的发布点。
 
-普通纯核 token 与普通 SSBUF MIX 的 coordinator 共用本核当前发行项的无票证明。两者在首次可靠 `ld_dev` 观察 next_block 已达到 block 数，或首次越界取票完成退款后记录。之后同项不再重复分配或强确认无票，已有 group/pending 仍按原 owner 服务。该事实不代表正式供给关闭、成员登记或 DONE；目录仍等待原有 claim seal/完成证明。continuation、refill 与普通 MIX discovery 共用此事实，发行项切换及新 run 时清空，不改变 sync_start GM MIX 的成员取票协议。此项以已证明减少的重复原子访问作为保留依据，当前 L0 总和回退不超过1%仍可保留，超过1%则撤回；不把操作数量下降等同于实测耗时收益，后续继续分析访问时序与竞争。
+普通纯核 token 与普通 SSBUF MIX 的 coordinator 共用本核当前发行项的无票证明。两者在首次可靠 `ld_dev` 观察 next_block 已达到 block 数，或首次越界取票完成退款后记录。之后同项不再重复分配或强确认无票，已有 group/pending 仍按原 owner 服务。该事实不代表正式供给关闭、成员登记或 DONE；目录仍等待原有 claim seal/完成证明。continuation、refill 与普通 MIX discovery 共用此事实，发行项切换及新 run 时清空，不改变 sync_start GM MIX 的成员取票协议。此项以已证明减少的重复原子访问作为保留依据，当前 L0 总和回退不超过0.5%仍可保留，超过0.5%则撤回；不把操作数量下降等同于实测耗时收益，后续继续分析访问时序与竞争。
 
 部分驻留 `sync_start` 的每个候选位置直接领取一次 `claim_tickets`，由返回票号确定是否拥有 block；`sync_claimed/ticket_exhausted` 防止该位置重复取票。领取前不另外读取有效领取计数和 claim seal。实际有效领取仍单独递增 `next_block`，最后领取者发布 seal；没有获得 block 的位置仍通过原关闭检查确认有效供给完成，不能用原始票号代替该证据。满驻留路径保持一次有效领取原子操作，不使用额外票号。
 
@@ -827,6 +829,15 @@ Build 同时展示准备工作量和它与前驱计算的重叠；领取同时�
 - 验证实际 AIC/AIV 双向读写、重复复位、逻辑完成与异步债务区分，再按下面的12组
   AICore L0 标准比较；启动复位成本和 Host 资源数量单列，不计作消失的工作。
 
+### GM MIX 的 CntNotify 握手
+
+sync_start MIX 的远端 AIV assigned/arrived/released 使用独立 SET/read 通知。
+GM descriptor 和已有 SSBUF 协议保留；每个 cluster 的六个映射地址放在 mailbox
+只读区域，不与 ACK 原子行混用。非 sync_start MIX 不申请这批资源。
+Host 以全部 MIX block 数作为每簇序号上界，上界小于2^31且六个映射齐备才启用；
+其余使用完整64-bit GM协议。SRAM release的bit31映射回原bit63失败位，不能截断序号或吞掉失败。
+每轮 AICPU 在 READY 前清零，发布、接收与资源退休边界的既有DSB保留。
+
 <!-- markdownlint-disable-next-line MD033 -->
 <a id="performance-retention-policy"></a>
 
@@ -834,13 +845,13 @@ Build 同时展示准备工作量和它与前驱计算的重叠；领取同时�
 
 每项修改先对应到实测泳道图中的具体串行链，再查 `atomic_probe/ATOMIC_USAGE_GUIDE.md` 与同构探针的硬件证据。明确可减少的共享访存、等待或重复准备及保留的交权边界；不按函数 inclusive 时间直接估算可省开销，也不凭模型名称试参数。
 
-- 当前优化目标先减少同地址 atomic 请求，再减少 atomic 总调用及重复 ld_dev。每项策略比较同一组输入下12个 AICore L0 均值的总和及逐项变化：功能正确、明确消减冗余 atomic／ld_dev 且总和回退不超过1%时可保留，回退超过1%则撤回。计数减少和耗时收益分别提供证据，不能将新增 DCCI/DSB、普通读写或其他地址竞争隐去。percounter 作为定位参照，比较结论须由可比版本、输入及计时边界的实际对照支持。5 µs 交接用于分析关键路径，不能替代12组指标。
+- 当前优化目标先减少同地址 atomic 请求，再减少 atomic 总调用及重复 ld_dev。每项策略比较同一组输入下12个 AICore L0 均值的总和及逐项变化：功能正确、明确消减冗余 atomic／ld_dev 且总和回退不超过0.5%时可保留，回退超过0.5%则撤回。计数减少和耗时收益分别提供证据，不能将新增 DCCI/DSB、普通读写或其他地址竞争隐去。percounter 作为定位参照，比较结论须由可比版本、输入及计时边界的实际对照支持。5 µs 交接用于分析关键路径，不能替代12组指标。
 - 最终性能以 AICore L0 `chip.run.runner_run.aicore_wall` 为准：在无 L1/L3 插桩的运行中，直接取所有实际 AIC/AIV kernel 的最晚 end 减最早 begin，包含首尾之间的调度空洞、依赖和通信等待，排除头尾 AICPU 开销。每组 1 次预热、10 次计时；无 kernel 的核不参与归并，缺失或无效时间戳不能用 Device wall 代替。HBG、基线及 percounter 必须核实同一首尾边界；percounter 原调度循环窗口不得直接冒充 kernel 首尾窗口。L1/L3 只用于定位。
 - 双卡用例每轮先做跨卡 Device 同步，再开始上述 L0 计时。测试启动门必须位于 AICPU 计时入口之前：两卡完成本轮入队后才允许设备会合，随后执行原有 AICPU/AICore 流程；同步门自身等待不计入 AICore L0；只有首末实际 kernel 之间的计算、调度空洞及通信等待计入，AICPU 启停与首末 kernel 之外的准备、退出不计入主指标。单卡不加门。每轮取两个 rank 的本卡耗时最大值，再对十轮求均值；不得跨卡相减硬件计数器或从旧样本减去估计的启动差。基线、候选与 percounter 均须使用同一门；旧的未同步双卡数据另标口径，不能直接作为新口径基线。
 - 性能验收使用 `dsv41_scheduler` 当前清单的 12 组配对对照，保持各组原 kernel、输入、图、sync_start 配置一致。11组回放须通过数值验证；新版原生 MoE 沿用已约定的72/72性能专用模式，明确标记 `numerical_validation:false`，不能把执行成功当作数值通过；全部 12 组（含 MoE 与 layers_19_21 通信场景）的 AICore L0 均值之和决定是否保留，同时披露逐项回退；Graph、MIX、sync_start、defer_wait 的通用功能另按上述合同验证。单个 SWA 或其他模型的收益不能替代全套结果。
 - 所有硬件任务使用 `task-submit --device auto --device-num N`，在任务内使用并记录实际 `TASK_DEVICE`；attention 单卡，同一分配内做配对对照，记录先后顺序。
 - L1/L3 也区分预热与正式采集；不从单条交接里扣除整次 L1−L0，不累加跨核或嵌套 span 冒充串行耗时。5 µs 判断同时报告低扰动观测、采集开销和未达标原因。
-- 对照完整目标方案前后，并保留各独立改动的归因。常规性能改动以综合收益决定保留，1% 收益也记录；已证明消减冗余 atomic／ld_dev 的结构性修改适用上述不超过1%回退的保留例外，超过1%则撤回；回退如实记录。无 ±5% 忽略区间。有收益的独立修改分别本地 commit，未经允许不 push。
+- 对照完整目标方案前后，并保留各独立改动的归因。常规性能改动以综合收益决定保留，1% 收益也记录；已证明消减冗余 atomic／ld_dev 的结构性修改适用上述不超过0.5%回退的保留例外，超过0.5%则撤回；回退如实记录。无 ±5% 忽略区间。有收益的独立修改分别本地 commit，未经允许不 push。
 - Host 准备、实际 H2D、GM/SSBUF 和峰值内存单列；不能把工作搬出 L0 区间后不报告。历史测量与详细采集留在实验结果中，不回填本设计作为实施完成状态。
 
 验收需要同时证明：具体 pending 确实提前持有、已有工作能直接接续、SPMD 分布没有以尾波换局部收益、协作与异步语义完整，以及同口径 AICore L0 有实际收益。四个 token、一次 CAS 或某个局部 span 变短，都不能单独替代这些结果。

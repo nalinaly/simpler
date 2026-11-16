@@ -438,6 +438,7 @@ struct alignas(64) SchedulerGroupLaneAck {
 
 struct alignas(SCHEDULER_GM_ATOMIC_SECTOR_BYTES) SchedulerGroupMailbox {
     SchedulerGroupDescriptor descriptor;
+    uint64_t notification_addresses[2][3];
     alignas(SCHEDULER_GM_ATOMIC_SECTOR_BYTES) SchedulerGroupLaneAck lanes[3];
 };
 

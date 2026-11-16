@@ -209,6 +209,18 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
         }
         wmb();
     }
+    const auto *notification_summary =
+        scheduler_state_at<SchedulerGraphSummary>(scheduler_state_base, bootstrap_context->graph_summary_offset);
+    if (notification_summary->group_mailboxes_offset != 0) {
+        const auto *mailboxes = scheduler_state_at<SchedulerGroupMailbox>(
+            scheduler_state_base, notification_summary->group_mailboxes_offset
+        );
+        for (uint64_t cluster = 0; cluster < notification_summary->cluster_count; ++cluster)
+            for (const auto &lane : mailboxes[cluster].notification_addresses)
+                for (uint64_t address : lane)
+                    if (address != 0) *reinterpret_cast<volatile uint32_t *>(address) = 0;
+        wmb();
+    }
     if (!initialize_resident_args_dump_outputs(
             reinterpret_cast<void *>(bootstrap_context->args_dump_address), runtime->dev.callable_table_addr_,
             runtime->dev.callable_table_len_
