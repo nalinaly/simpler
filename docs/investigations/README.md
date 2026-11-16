@@ -189,3 +189,5 @@ Newest first.
 - [2026-06 — chip swimlane: defer per-task wmb to rotation](2026-06-chip-swimlane-defer-wmb.md)
 
 - [A5 HBG control-node fanin progress](2026-11-a5-hbg-control-fanin-progress.md) — single-entry trial superseded; task-keyed private cache reduces repeated control FAA with a recorded 0.306% L0 regression.
+
+- [2026-11 — CntNotify task flags and admission tail](2026-11-a5-hbg-cnt-notify-task-flags.md) — rejected: twelve-case AICore L0 sum regresses 1.756%; paired L3 shows increased scheduling visits and primitive traffic despite moving control fields to SRAM.
