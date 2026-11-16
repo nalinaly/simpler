@@ -34,6 +34,8 @@
  *     outlives the run and is freed once at Worker finalization.
  */
 
+#include "host/scheduler_done_notifications.h"
+
 #include <dlfcn.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -457,10 +459,8 @@ static void release_run_tensor_leases(Runtime *runtime, const HostApi *api) {
 // Declined unless a runtime that schedules AICore differently links its own.
 // Outside the anonymous namespace below: an internal-linkage symbol cannot be
 // the weak half of an override.
-__attribute__((weak)) SchedulerExtensionResult scheduler_extension_select(
-    Runtime *, const HostApi *, SharedMemoryHandle &, int32_t, const std::vector<SchedulerTaskMetadata> &,
-    const std::vector<int64_t> &, const sm_layout::SegmentOffsets &, const void *
-) {
+__attribute__((weak)) SchedulerExtensionResult
+scheduler_extension_select(Runtime *, const HostApi *, SharedMemoryHandle &, int32_t, const std::vector<SchedulerTaskMetadata> &, const std::vector<int64_t> &, const sm_layout::SegmentOffsets &, const void *) {
     return SchedulerExtensionResult::DECLINED;
 }
 
@@ -1712,9 +1712,8 @@ bool create_scheduler_state(
          (!scheduler_layout_reserve(
               &layout.total_size, dump_layout.total_size, alignof(SchedulerArgsDumpHeader), &dump_offset
           ) ||
-          !scheduler_layout_checked_align(
-              layout.total_size, pto2::resident::ASYNC_RECORD_ALIGNMENT, &layout.total_size
-          )))) {
+          !scheduler_layout_checked_align(layout.total_size, pto2::resident::ASYNC_RECORD_ALIGNMENT, &layout.total_size)
+         ))) {
         LOG_ERROR("A5 HBG: task argument diagnostic image overflow");
         return false;
     }
@@ -1776,6 +1775,16 @@ bool create_scheduler_state(
         LOG_ERROR("A5 HBG AICore scheduler: failed to initialize scheduler state");
         return false;
     }
+
+    SchedulerDoneNotifications notifications;
+    try {
+        notifications = create_scheduler_done_notifications(static_cast<size_t>(node_count));
+    } catch (const std::exception &error) {
+        LOG_ERROR("A5 HBG: cannot prepare DONE notifications: %s", error.what());
+        return false;
+    }
+    auto *notification_addresses = scheduler_state_at<uint64_t>(host_base, layout.done_notifications_offset);
+    std::copy(notifications.addresses.begin(), notifications.addresses.end(), notification_addresses);
 
     if (layout.async_layout_offset != 0 && !initialize_async_completion(host_base, layout.total_size, async_plan)) {
         LOG_ERROR("A5 HBG: failed to initialize async completion storage");
@@ -1917,6 +1926,7 @@ bool create_scheduler_state(
         context.run_control_offset = layout.run_control_offset;
         context.task_controls_offset = layout.task_controls_offset;
         context.task_metadata_offset = layout.task_metadata_offset;
+        context.done_notifications_offset = layout.done_notifications_offset;
         context.aicpu_lifecycle_traces_offset = layout.aicpu_lifecycle_traces_offset;
         context.worker_contexts_offset = layout.worker_contexts_offset;
         context.runtime_worker_count = static_cast<uint64_t>(runtime->get_worker_count());
@@ -1942,16 +1952,18 @@ bool create_scheduler_state(
     {
         std::scoped_lock lock(scheduler_state_owners_mutex);
         scheduler_state_owners.emplace(
-            runtime, SchedulerStateOwner{
-                         reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks),
-                         std::move(protocol_source)
-                     }
+            runtime,
+            SchedulerStateOwner{
+                reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks),
+                std::move(protocol_source)
+            }
         );
     }
     runtime->add_pending_metadata(
         reinterpret_cast<void *>(aligned_address), host_base, static_cast<size_t>(initialized_bytes),
         HostPhaseKind::Count, {}
     );
+    if (notifications.owner != nullptr) runtime->retain_pending_resource(std::move(notifications.owner));
     LOG_INFO("A5 HBG: selected AICore Scheduler for %d tasks", total_tasks);
     return true;
 }
