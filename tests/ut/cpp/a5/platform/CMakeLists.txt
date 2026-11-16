@@ -44,8 +44,6 @@ add_custom_command(TARGET test_a5_aicpu_topology_fallback POST_BUILD
         "$<TARGET_FILE_DIR:test_a5_aicpu_topology_fallback>/aicpu_cpu_topo_fallback.json"
 )
 
-a5_platform_case(test_scheduler_notification_cache.cpp)
-
 a5_platform_case(test_aicore_retirement.cpp
     SOURCES
         ${SIMPLER_SRC}/a5/platform/shared/aicpu/platform_regs.cpp

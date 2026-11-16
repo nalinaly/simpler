@@ -45,7 +45,7 @@ public:
             notifications_.emplace_back();
             auto &notification = notifications_.back();
             const auto rc = aclrtCntNotifyCreate(&notification.handle, 0);
-            if (rc == ACL_ERROR_RT_NO_NOTIFY_RESOURCE) {
+            if (rc == ACL_ERROR_RT_NO_NOTIFY_RESOURCE || rc == ACL_ERROR_RT_RESOURCE_ALLOC_FAIL) {
                 notifications_.pop_back();
                 LOG_WARN(
                     "A5 HBG: CntNotify capacity exhausted at %zu/%zu; remaining nodes use GM", notifications_.size(),
