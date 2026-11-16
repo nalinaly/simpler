@@ -82,6 +82,7 @@ that ...".
 
 ## Index
 
+- [2026-11 — CntNotify completion bitmaps with DAG bank reuse](2026-11-a5-hbg-cnt-notify-completion-reuse.md) — rejected: strict-ancestor bank reuse resolves the observed notification-capacity failure, but the twelve-case AICore L0 sum regresses 5.959%; MIX handshakes and the Host mapping pool remain.
 - [2026-11 — A5 HBG early MIX Binding publication](2026-11-a5-hbg-mix-binding-preparation.md): withdrawn at the user's request after a 0.560% aggregate regression; single-writer signal changes remain.
 - [2026-11 — A5 HBG replicated completion notices](2026-11-a5-hbg-replicated-completion-notices.md): withdrawn despite measured gain; reduce same-address atomic requests through ownership and observation design.
 
