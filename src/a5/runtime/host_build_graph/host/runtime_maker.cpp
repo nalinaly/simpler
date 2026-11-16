@@ -34,7 +34,7 @@
  *     outlives the run and is freed once at Worker finalization.
  */
 
-#include "host/scheduler_done_notifications.h"
+#include "host/scheduler_notifications.h"
 
 #include <dlfcn.h>
 #include <stddef.h>
@@ -1778,7 +1778,10 @@ bool create_scheduler_state(
 
     SchedulerDoneNotifications notifications;
     try {
-        notifications = create_scheduler_done_notifications(static_cast<size_t>(node_count));
+        if (api->acquire_scheduler_notifications(
+                SchedulerNotificationPurpose::TASK_STATE, static_cast<size_t>(node_count), 0, &notifications
+            ) != 0)
+            throw std::runtime_error("cannot acquire retained task notifications");
     } catch (const std::exception &error) {
         LOG_ERROR("A5 HBG: cannot prepare DONE notifications: %s", error.what());
         return false;
@@ -1794,7 +1797,11 @@ bool create_scheduler_state(
     SchedulerDoneNotifications mix_notifications;
     if (spmd.sync_mix_task_count != 0 && mix_blocks < (UINT64_C(1) << 31)) {
         try {
-            mix_notifications = create_scheduler_done_notifications(static_cast<size_t>(spmd.cluster_count) * 6);
+            if (api->acquire_scheduler_notifications(
+                    SchedulerNotificationPurpose::MIX_ACK, static_cast<size_t>(spmd.cluster_count) * 6, 0,
+                    &mix_notifications
+                ) != 0)
+                throw std::runtime_error("cannot acquire retained MIX notifications");
         } catch (const std::exception &error) {
             LOG_ERROR("A5 HBG: cannot prepare MIX notifications: %s", error.what());
             return false;

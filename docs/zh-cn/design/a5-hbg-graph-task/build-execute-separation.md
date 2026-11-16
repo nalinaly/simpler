@@ -838,6 +838,25 @@ Host 以全部 MIX block 数作为每簇序号上界，上界小于2^31且六个
 其余使用完整64-bit GM协议。SRAM release的bit31映射回原bit63失败位，不能截断序号或吞掉失败。
 每轮 AICPU 在 READY 前清零，发布、接收与资源退休边界的既有DSB保留。
 
+### CntNotify 资源复用与控制状态选型
+
+DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publication/capture lease
+持有的池才可复用；live/captured 使用者占用的池独立保留，不能在其退出前复位给新运行。
+每轮 Device 的 READY 前复位保持不变。普通关闭在 context 有效时显式释放映射与handle，
+失败保留供重试；确认设备 reset 后只 abandon，析构不调用失效context上的SDK。
+
+控制信号优先迁移到 CntNotify，并按完整状态字的读、写、初始化及复用合同选型：
+单写者值/序号用SET；exactly-once贡献的数量汇合可用ADD，不同条件也可用不进位的权重ADD；
+需要条件身份和幂等重复时可用BIT_WR掩码置位。当前实机已验证SET及BIT_WR，
+ADD和BIT_CLR的直接映射仍被当前SDK/驱动拒绝，不能假设其AICore访问已可用。
+只有依赖返回值裁定唯一责任的CAS/FAA等继续使用GM atomic；同一锁若仍用GM CAS，
+不能单独把它的解锁写搬到SRAM。普通payload、Tensor数据、GM descriptor不属于控制通知替换。
+原64-bit状态的范围、失败位和代际语义必须保留，不能截断成32-bit。
+
+AICore以32-bit ld_dev/st_dev访问通知，资源地址决定SET或BIT_WR操作；
+AICPU在启动阶段通过映射地址写值并在READY之前DSB。通知地址不做DCCI，
+同核存在数据发布顺序依赖时保留相应DSB，跨核通知本身不机械新增屏障。
+
 <!-- markdownlint-disable-next-line MD033 -->
 <a id="performance-retention-policy"></a>
 

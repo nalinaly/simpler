@@ -8,9 +8,17 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  * -----------------------------------------------------------------------------------------------------------
  */
-#include "host/scheduler_done_notifications.h"
+#pragma once
 
-// Sim uses the canonical GM completion protocol; it has no STARS registers.
-SchedulerDoneNotifications create_scheduler_done_notifications(size_t count) {
-    return {std::vector<uint64_t>(count, 0), {}};
-}
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+enum class SchedulerNotificationPurpose : uint32_t { TASK_STATE, MIX_ACK, COMPLETION_BITMAP };
+
+struct SchedulerDoneNotifications {
+    std::vector<uint64_t> addresses;
+    std::vector<uint64_t> bit_write_addresses;
+    std::shared_ptr<const void> owner;
+};

@@ -10,16 +10,6 @@
  */
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <vector>
+#include "host/scheduler_notification_cache.h"
 
-// Nonzero entries name owned, non-consuming 32-bit SET/read registers.
-// Zero entries use the task's canonical GM completion state.
-struct SchedulerDoneNotifications {
-    std::vector<uint64_t> addresses;
-    std::shared_ptr<const void> owner;
-};
-
-SchedulerDoneNotifications create_scheduler_done_notifications(size_t count);
+std::shared_ptr<SchedulerNotificationStorage> make_scheduler_notification_storage(void *context);

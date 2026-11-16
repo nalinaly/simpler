@@ -17,6 +17,7 @@
 #include <utility>
 
 #include "common/chip_swimlane_extension.h"
+#include "host/scheduler_notifications.h"
 
 // Borrowed source views, valid through stage_launch_metadata; the platform
 // captures values and never takes ownership of the source containers.
@@ -292,6 +293,10 @@ struct HostApiOps {
     int (*stage_launch_metadata)(
         void *runner_ctx, uint32_t pipeline_slot, const HostMetadataRegion *regions, size_t count
     );
+    int (*acquire_scheduler_notifications)(
+        void *runner_ctx, uint32_t pipeline_slot, SchedulerNotificationPurpose purpose, size_t count,
+        size_t bit_write_count, SchedulerDoneNotifications *out
+    ) = nullptr;
 };
 
 /**
@@ -336,6 +341,19 @@ public:
     // record streams stamp it into each row: per-task tokens restart every run,
     // so a row without it cannot be attributed once one file holds several runs.
     uint64_t run_epoch() const { return run_epoch_; }
+
+    int acquire_scheduler_notifications(
+        SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count, SchedulerDoneNotifications *out
+    ) const {
+        if (out == nullptr || bit_write_count > count) return -1;
+        if (ops_->acquire_scheduler_notifications != nullptr)
+            return ops_->acquire_scheduler_notifications(
+                runner_ctx_, pipeline_slot_, purpose, count, bit_write_count, out
+            );
+        // CPU and simulator backends use the canonical GM protocol.
+        *out = {std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}};
+        return 0;
+    }
 
     void *device_malloc(size_t size) const { return ops_->device_malloc(runner_ctx_, size); }
     void device_free(void *dev_ptr) const { ops_->device_free(runner_ctx_, dev_ptr); }
@@ -504,9 +522,8 @@ public:
      * publishes while its successor is already admitted, so only the caller's
      * own identity says whose section this is.
      */
-    bool publish_chip_swimlane_extension(
-        ChipSwimlaneExtensionSection section, const char *json_value, size_t json_size
-    ) const noexcept {
+    bool publish_chip_swimlane_extension(ChipSwimlaneExtensionSection section, const char *json_value, size_t json_size)
+        const noexcept {
         if (ops_->publish_chip_swimlane_extension == nullptr || !chip_swimlane_extension_section_is_valid(section) ||
             json_value == nullptr)
             return false;

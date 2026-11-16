@@ -74,8 +74,8 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_replay_emit_d
 }
 
 extern "C" __attribute__((weak, visibility("hidden"))) bool dep_gen_host_graph_active() { return false; }
-extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_take(
-    simpler::dfx::host_graph::HostGraphExport * /*out*/
+extern "C" __attribute__((weak, visibility("hidden"))) int
+dep_gen_host_graph_take(simpler::dfx::host_graph::HostGraphExport * /*out*/
 ) {
     // `NotCaptured`: this runtime builds no host graph, so there is nothing
     // on any thread to hand over.
@@ -88,8 +88,8 @@ extern "C" __attribute__((weak, visibility("hidden"))) int dep_gen_host_graph_em
 
 // Each host_runtime.so links one runtime source set. A5 HBG replaces this
 // no-op with the publisher for its resident scheduler state.
-extern "C" __attribute__((weak, visibility("hidden"))) bool publish_runtime_chip_swimlane_extensions(
-    Runtime * /*runtime*/
+extern "C" __attribute__((weak, visibility("hidden"))) bool
+publish_runtime_chip_swimlane_extensions(Runtime * /*runtime*/
 ) noexcept {
     return true;
 }
@@ -249,7 +249,30 @@ int DeviceRunner::prepare_kernel_arch_context(rtStream_t control_stream) {
     return query_aicpu_topology(topology, control_stream);
 }
 
+int DeviceRunner::acquire_scheduler_notifications(
+    uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count,
+    SchedulerDoneNotifications *out
+) {
+    if (!can_accept_run()) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const int context_rc = validate_current_context();
+    if (context_rc != 0) return context_rc;
+    aclrtContext context = nullptr;
+    const auto rc = aclrtGetCurrentContext(&context);
+    if (rc != ACL_SUCCESS) return rc;
+    return scheduler_notifications_.acquire(
+        slot, purpose, context, count, bit_write_count, make_scheduler_notification_storage, out
+    );
+}
+
 int DeviceRunner::release_arch_context_resources(bool abandon_device_resources) {
+    if (abandon_device_resources) scheduler_notifications_.abandon();
+    else {
+        const int notify_rc = scheduler_notifications_.release();
+        if (notify_rc != 0) {
+            LOG_ERROR("A5 CntNotify resource release failed: %d", notify_rc);
+            return notify_rc;
+        }
+    }
     if (abandon_device_resources) {
         aicpu_topology_query_result_ = nullptr;
         aicpu_topology_query_pending_ = false;
@@ -413,11 +436,9 @@ int DeviceRunner::prepare_execution(
     // failure cascade into a single fast, self-explanatory error; the runner is
     // then recovered at finalize.
     if (device_unusable_.load(std::memory_order_acquire)) {
-        LOG_ERROR(
-            "DeviceRunner marked unusable by a prior AICore failure; refusing to enqueue. "
-            "A soft reset does not clear the poison on a5; finalize() will force-reset "
-            "the card so the next Worker on it inits clean."
-        );
+        LOG_ERROR("DeviceRunner marked unusable by a prior AICore failure; refusing to enqueue. "
+                  "A soft reset does not clear the poison on a5; finalize() will force-reset "
+                  "the card so the next Worker on it inits clean.");
         return PTO_RUNTIME_ERR_INTERNAL;
     }
     if (validate_launch_aicpu_num(requested_aicpu_num) != 0) return PTO_RUNTIME_ERR_INTERNAL;
@@ -753,9 +774,8 @@ LaunchTransactionResult DeviceRunner::launch_execution_impl(PreparedExecution &p
                 // end rather than an AICPU-kernel end. Recorded only on this path, because only
                 // here does the stream position carry that meaning.
                 if (!prepared.recording)
-                    (void)mark_run_boundary(
-                        RunBoundaryMarks::Position::WholeOperatorEnd, prepared.identity, streams.aicpu
-                    );
+                    (void
+                    )mark_run_boundary(RunBoundaryMarks::Position::WholeOperatorEnd, prepared.identity, streams.aicpu);
             }
             const int boundary_rc = record_run_boundary(prepared, RunCompletionFence::StreamRole::Aicpu);
             if (!prepared.recording && boundary_rc == 0 && whole_operator) note_whole_operator_boundary(prepared);

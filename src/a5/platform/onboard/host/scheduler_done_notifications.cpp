@@ -17,71 +17,113 @@
 #include <string>
 
 namespace {
-struct Notification {
-    aclrtCntNotify handle{nullptr};
-    rtDevResInfo mapping{0, RT_PROCESS_CP1, RT_RES_TYPE_STARS_CNT_NOTIFY_RECORD, 0, 0};
-    bool mapped{false};
-};
-
-struct NotificationPool {
-    aclrtContext context{nullptr};
-    std::vector<Notification> notifications;
-
-    ~NotificationPool() {
-        aclrtContext previous = nullptr;
-        const auto previous_rc = aclrtGetCurrentContext(&previous);
-        if (context != nullptr && (previous_rc != ACL_SUCCESS || previous != context) &&
-            aclrtSetCurrentContext(context) != ACL_SUCCESS) {
-            LOG_ERROR("A5 HBG: cannot select context to release CntNotify resources");
-            return;
-        }
-        for (auto &notification : notifications) {
-            if (notification.mapped) {
-                const auto rc = rtReleaseDevResAddress(&notification.mapping);
-                if (rc != 0) LOG_ERROR("A5 HBG: CntNotify unmap failed: %d", rc);
-            }
-            if (notification.handle != nullptr) {
-                const auto rc = aclrtCntNotifyDestroy(notification.handle);
-                if (rc != ACL_SUCCESS) LOG_ERROR("A5 HBG: CntNotify destroy failed: %d", rc);
-            }
-        }
-        if (previous_rc == ACL_SUCCESS && previous != nullptr && previous != context &&
-            aclrtSetCurrentContext(previous) != ACL_SUCCESS)
-            LOG_ERROR("A5 HBG: cannot restore context after CntNotify release");
-    }
-};
-
 void check(int rc, const char *operation) {
     if (rc != 0) throw std::runtime_error(std::string("CntNotify ") + operation + ": " + std::to_string(rc));
 }
-}  // namespace
 
-SchedulerDoneNotifications create_scheduler_done_notifications(size_t count) {
-    SchedulerDoneNotifications result{std::vector<uint64_t>(count, 0), {}};
-    if (count == 0) return result;
-    auto pool = std::make_shared<NotificationPool>();
-    check(aclrtGetCurrentContext(&pool->context), "get context");
-    pool->notifications.reserve(count);
-    for (size_t index = 0; index < count; ++index) {
-        pool->notifications.emplace_back();
-        auto &notification = pool->notifications.back();
-        const auto rc = aclrtCntNotifyCreate(&notification.handle, 0);
-        if (rc == ACL_ERROR_RT_NO_NOTIFY_RESOURCE) {
-            pool->notifications.pop_back();
-            LOG_WARN("A5 HBG: CntNotify capacity exhausted at %zu/%zu nodes; remaining nodes use GM", index, count);
-            break;
+struct Notification {
+    aclrtCntNotify handle{nullptr};
+    rtDevResInfo mapping{0, RT_PROCESS_CP1, RT_RES_TYPE_STARS_CNT_NOTIFY_RECORD, 0, 0};
+    rtDevResInfo bit_write_mapping{0, RT_PROCESS_CP1, RT_RES_TYPE_STARS_CNT_NOTIFY_BIT_WR, 0, 0};
+    uint64_t address{0};
+    uint64_t bit_write_address{0};
+    bool mapped{false};
+    bool bit_write_mapped{false};
+};
+
+class NotificationPool final : public SchedulerNotificationStorage {
+public:
+    explicit NotificationPool(void *context) :
+        SchedulerNotificationStorage(context) {}
+    size_t capacity() const override { return notifications_.size(); }
+
+    SchedulerDoneNotifications prepare(size_t count, size_t bit_write_count) override {
+        if (retiring || bit_write_count > count) throw std::invalid_argument("invalid CntNotify pool acquire");
+        SchedulerDoneNotifications result{std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}};
+        notifications_.reserve(count);
+        while (notifications_.size() < count) {
+            notifications_.emplace_back();
+            auto &notification = notifications_.back();
+            const auto rc = aclrtCntNotifyCreate(&notification.handle, 0);
+            if (rc == ACL_ERROR_RT_NO_NOTIFY_RESOURCE) {
+                notifications_.pop_back();
+                LOG_WARN(
+                    "A5 HBG: CntNotify capacity exhausted at %zu/%zu; remaining nodes use GM", notifications_.size(),
+                    count
+                );
+                break;
+            }
+            check(rc, "create");
+            check(aclrtCntNotifyGetId(notification.handle, &notification.mapping.resId), "get id");
+            notification.bit_write_mapping.resId = notification.mapping.resId;
+            map(notification.mapping, notification.address, notification.mapped);
         }
-        check(rc, "create");
-        check(aclrtCntNotifyGetId(notification.handle, &notification.mapping.resId), "get id");
+        for (size_t index = 0; index < count && index < notifications_.size(); ++index) {
+            auto &notification = notifications_[index];
+            if (!notification.mapped) throw std::runtime_error("CntNotify pool has an incomplete mapping");
+            if (index < bit_write_count && !notification.bit_write_mapped)
+                map(notification.bit_write_mapping, notification.bit_write_address, notification.bit_write_mapped);
+            result.addresses[index] = notification.address;
+            if (index < bit_write_count) result.bit_write_addresses[index] = notification.bit_write_address;
+        }
+        return result;
+    }
+
+    int release() override {
+        retiring = true;
+        aclrtContext previous = nullptr;
+        const auto previous_rc = aclrtGetCurrentContext(&previous);
+        if (previous_rc != ACL_SUCCESS || previous != context) {
+            const auto rc = aclrtSetCurrentContext(context);
+            if (rc != ACL_SUCCESS) return rc;
+        }
+        int error = 0;
+        auto note = [&error](int rc) {
+            if (error == 0 && rc != 0) error = rc;
+        };
+        for (auto &notification : notifications_) {
+            if (notification.bit_write_mapped) {
+                const auto rc = rtReleaseDevResAddress(&notification.bit_write_mapping);
+                note(rc);
+                if (rc == 0) notification.bit_write_mapped = false;
+            }
+            if (notification.mapped) {
+                const auto rc = rtReleaseDevResAddress(&notification.mapping);
+                note(rc);
+                if (rc == 0) notification.mapped = false;
+            }
+            if (!notification.mapped && !notification.bit_write_mapped && notification.handle != nullptr) {
+                const auto rc = aclrtCntNotifyDestroy(notification.handle);
+                note(rc);
+                if (rc == ACL_SUCCESS) notification.handle = nullptr;
+            }
+        }
+        if (previous_rc == ACL_SUCCESS && previous != nullptr && previous != context)
+            note(aclrtSetCurrentContext(previous));
+        if (error == 0) notifications_.clear();
+        return error;
+    }
+
+    void abandon() noexcept override {
+        retiring = true;
+        notifications_.clear();
+    }
+
+private:
+    static void map(rtDevResInfo &mapping, uint64_t &address, bool &mapped) {
         uint32_t bytes = 0;
-        rtDevResAddrInfo address{&result.addresses[index], &bytes};
-        check(rtGetDevResAddress(&notification.mapping, &address), "map");
-        notification.mapped = true;
-        if (result.addresses[index] == 0 || result.addresses[index] % alignof(uint32_t) != 0 ||
-            bytes < sizeof(uint32_t))
+        rtDevResAddrInfo out{&address, &bytes};
+        check(rtGetDevResAddress(&mapping, &out), "map");
+        mapped = true;
+        if (address == 0 || address % alignof(uint32_t) != 0 || bytes < sizeof(uint32_t))
             throw std::runtime_error("CntNotify invalid 32-bit register mapping");
     }
-    LOG_INFO("A5 HBG: CntNotify DONE coverage %zu/%zu nodes", pool->notifications.size(), count);
-    result.owner = std::move(pool);
-    return result;
+    // Explicit close owns SDK calls. A reset or a rejected close cannot cause
+    // a member destructor to operate on a dead or still-borrowed context.
+    std::vector<Notification> notifications_;
+};
+}  // namespace
+
+std::shared_ptr<SchedulerNotificationStorage> make_scheduler_notification_storage(void *context) {
+    return std::make_shared<NotificationPool>(context);
 }

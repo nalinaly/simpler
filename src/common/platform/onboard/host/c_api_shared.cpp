@@ -375,6 +375,19 @@ static int acquire_scheduler_state_storage(
     }
 }
 
+static int acquire_scheduler_notifications(
+    void *runner_ctx, uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count,
+    SchedulerDoneNotifications *out
+) {
+    if (runner_ctx == nullptr) return -1;
+    try {
+        return static_cast<DeviceRunnerBase *>(runner_ctx)
+            ->acquire_scheduler_notifications(slot, purpose, count, bit_write_count, out);
+    } catch (...) {
+        return -1;
+    }
+}
+
 static void record_scheduler_runtime_mode(void *runner_ctx, uint32_t pipeline_slot, uint32_t mode) {
     (void)pipeline_slot;
     if (runner_ctx == nullptr) return;
@@ -676,6 +689,7 @@ static const HostApiOps g_host_api_ops = {
     .get_prepare_plan = get_prepare_plan,
     .set_prepare_plan = set_prepare_plan,
     .stage_launch_metadata = stage_launch_metadata,
+    .acquire_scheduler_notifications = acquire_scheduler_notifications,
 };
 
 /* ===========================================================================
@@ -2810,9 +2824,8 @@ static int finalize_native_run(
             // Error detail comes from the original call-owned record. A
             // successful qualified observer performs no private-result copy.
             if (launched && execution_rc != 0) {
-                (void)state->runner->read_device_run_result(
-                    state->descriptor.pipeline_slot, state->descriptor.run_epoch
-                );
+                (void
+                )state->runner->read_device_run_result(state->descriptor.pipeline_slot, state->descriptor.run_epoch);
                 report_terminal_disagreement(state, execution_rc);
             }
             if (launched) {
@@ -3051,8 +3064,7 @@ int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
         std::lock_guard<std::mutex> lock(runner->callable_registration_mutex());
         if (runner->native_runs_outstanding()) {
-            LOG_ERROR(
-                "simpler_unregister_callable: native run must be finalized before mutating the callable registry"
+            LOG_ERROR("simpler_unregister_callable: native run must be finalized before mutating the callable registry"
             );
             return PTO_RUNTIME_ERR_INTERNAL;
         }
