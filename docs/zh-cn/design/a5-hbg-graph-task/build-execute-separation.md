@@ -43,7 +43,7 @@ DSB 只针对同核前后操作的实际顺序依赖；跨核通知本身不要�
 
 ### STARS 与 SPR 的演进边界
 
-当前逻辑 DONE 使用每节点独占的 CntNotify SRAM，资源不足的节点及其他 GM 条件保留原观察路径；MIX 协作仍使用既有 SSBUF 信号。CntNotify 随运行镜像持有并在每次 READY 之前复位；其他 STARS 接入仍需绑定已有 task/epoch/sequence，明确 event 申请、初始化、先通知后等待的处理、完成后清理、复用及异常清退；不能漏通知、把上一轮通知认作本轮完成，或在旧观察者仍访问时复用资源。通知与 payload 可见性仍按各后端合同排序，SRAM 低排队代价不免除这些责任。
+当前已验证的逻辑 DONE 使用每节点独占的 CntNotify SRAM，资源不足的节点保留 GM 观察路径；GM sync_start MIX 的远端握手也使用 SET/read，非 sync_start MIX 保留 SSBUF 协议。CntNotify 随运行镜像持有并在每次 READY 之前复位；其他 STARS 接入仍需绑定已有 task/epoch/sequence，明确 event 申请、初始化、先通知后等待的处理、完成后清理、复用及异常清退；不能漏通知、把上一轮通知认作本轮完成，或在旧观察者仍访问时复用资源。通知与 payload 可见性仍按各后端合同排序，SRAM 低排队代价不免除这些责任。
 
 STARS 的 `nop` 是入口限流，不是让有工作可做的 Scalar 无条件停顿：空轮询受控，已有可执行任务、合法 Build、defer_wait 服务和 EXIT 检查继续获得进展。具体间隔由入口请求率与发现延迟决定，不预置模型专用常数。SPR 在具备上述资源管理机制以前不作为该方案的替代品；A3 上的寄存器可达性实验也不能直接作为 A5 映射可用性的证明。
 
@@ -805,9 +805,9 @@ Build 同时展示准备工作量和它与前驱计算的重叠；领取同时�
 
 ### CntNotify：逻辑完成通知与后继等待 {#cntnotify-done}
 
-本轮仅把逻辑 DONE 的发布与后继观察迁到 STARS CntNotify SRAM。CntNotify
-的 store 可选择 SET 或硬件 ADD，但 ADD 不返回旧值，不能据此领取唯一执行票。
-本轮使用 SET 区域，保留 GM 上的 block 领取、完成贡献、异步债务及唯一完成者裁定。
+已实测保留的 SET 路径把逻辑 DONE 的发布与后继观察迁到 STARS CntNotify SRAM。
+ADD 不返回旧值，不能据此领取唯一执行票。ADD 未启用或链资源不足时，保留 GM
+上的 block 领取、完成贡献、异步债务及唯一完成者裁定；ADD 目标路径见下方单调累计完成链。
 
 - Host 为运行镜像中的节点申请独占 CntNotify，通过 SDK 获取映射地址，不猜测寄存器地址。
   地址表不可变，独立于 GM atomic-only 控制行。资源跟随 prepared publication 保留，
@@ -853,9 +853,60 @@ ADD和BIT_CLR的直接映射仍被当前SDK/驱动拒绝，不能假设其AICore
 不能单独把它的解锁写搬到SRAM。普通payload、Tensor数据、GM descriptor不属于控制通知替换。
 原64-bit状态的范围、失败位和代际语义必须保留，不能截断成32-bit。
 
-AICore以32-bit ld_dev/st_dev访问通知，资源地址决定SET或BIT_WR操作；
+AICore以32-bit ld_dev/st_dev访问通知，资源地址决定SET或ADD操作；BIT_WR只保留既有硬件探针证据，不作为完成计数实现。
 AICPU在启动阶段通过映射地址写值并在READY之前DSB。通知地址不做DCCI，
 同核存在数据发布顺序依赖时保留相应DSB，跨核通知本身不机械新增屏障。
+
+### 无返回值 ADD：单调累计完成链（2026-11-17）
+
+本次以 CntNotify 的无返回值硬件 ADD 可用为目标接口，先准备实现与验证入口。当前设备的 SET/read、BIT_WR 已实测可用，ADD 的 AICore 地址映射仍返回 507899；不能把流上的 ADD 功能、普通 SET 写性能或 GM 回退结果当成 AICore ADD 的整网实测。参考 `fwic-dsl` 的独立探针：96 核同址各访问一次，CntNotify 读整波均值 1.203 µs、写加 DSB 为 1.463 µs；对应 GM ld/st 为 1.530/9.231 µs，GM atomic 为 16.946/16.956 µs。计时不含同步门和 Host 资源申请；这是控制访问的设计依据，不是未来调度收益承诺。原始条件及记录保存在 `artifacts/cnt96-rw-20261116/`。
+
+**目标是缩减协议，不用 BIT_WR 模拟 ADD。** 删除无生产消费者的 bitmap/bit-write 资源接口；数量汇合直接使用同一 CntNotify ID 的 SET/read 和 ADD 两个 SDK 别名。ADD 写入只提交贡献，不需要返回值，不再通过每个 block 的 GM FAA 返回值选出最后完成者。必须返回唯一票号的 build/execute claim、条件 claim 和其他真正的竞争裁决仍使用 GM atomic；不能把同一状态的读取放到 SRAM，而仍在 GM 上对另一份值 CAS。
+
+#### 静态阈值与资源复用
+
+Host 只根据现有 DAG 元数据，把具有真实先后依赖的计算任务放到同一条完成链。后一任务必须以已有依赖关系保证：它的任何有效完成贡献不可能早于前一任务逻辑完成。拓扑排列位置本身不构成证明；独立任务使用不同链，不增加人为依赖。非计算控制节点仍参与祖先关系推导，HostDone/folded 节点按真实执行语义处理，不能从被折叠的依赖虚构顺序。
+
+每条链一个 32-bit 物理计数器，每个任务保存自己的累计阈值。设 A 有 96 个实际计算执行单元、B 有 64 个，并且 A 是 B 的严格前驱：
+
+```text
+本轮启动：counter = 0
+A 的完成目标：counter >= 2 × 96 = 192
+B 的完成目标：counter >= 192 + 2 × 64 = 320
+```
+
+B 的贡献只能在 A 完成之后出现；因此 `counter >= target(A)` 是本轮永久成立的正向证明。慢观察者即使在 B 完成之后再检查 A，也能直接得到正确结果，不需要旧快照。Host 用 64-bit 计算累计值，超过 32-bit 可表示范围前拆链，禁止溢出、截断或环绕比较。
+
+每次 READY 之前由 AICPU 对每条链清零一次，随后整轮只累加。没有 run 内 reset、owner 代际转交、bank lease CAS、BUSY/ACTIVE 发布或快照写回。两个别名属于同一 handle，不增加硬件资源数。不同 pipeline slot、活跃 publication 与 capture 的资源所有权仍由现有池隔离；确认所有旧执行者退出之前不得开始下一轮复位。
+
+#### P/Q 两份完成贡献
+
+对每个实际执行单元定义固定两份贡献，总目标为 `2 × logical_block_num × active_lane_count`；MIX 不计算未执行 kernel 的资源 lane。
+
+| 贡献 | 发布条件 | 不允许替代的条件 |
+| ---- | -------- | ---------------- |
+| P：物理完成 | 普通 kernel 已返回并完成既有结果发布；MIX 由 coordinator 在全部资源 lane 退休后批量发布 active lanes 的 P | kernel 开始、任务票已发完、仅部分 MIX lane 返回 |
+| Q：逻辑条件 | 已封口且本执行单元所有 defer_wait 条件满足；没有条件时可与普通物理返回合并为一次 `ADD(2)` | Build 完成、条件仅登记、仅物理返回或 CHECK 负向结果 |
+
+有 deferred 条件时，原有唯一 CHECK owner 在确定条件全部满足后发布一次 Q；封口与 CHECK 之间必须保留 exactly-once 状态转换，禁止重复加数。同步 MIX 的 Q 可由实际计算 lane 封口发布，P 仍遵守原组资源全部退出的边界。没有结果返回值的 ADD 不代表可以取消条件领取、错误或 MIX/sync_start 的实际资源许可检查。
+
+Build、预取、绑定和提前领取不得发布 P/Q。失败、取消及没有成功执行的 lane 不补假贡献，沿既有错误退出路径收敛。任务逻辑完成直接由其累计阈值证明；defer_wait 未满足时阈值不可到达，后继保持等待。
+
+#### 热路径与归档分离
+
+发布者执行必要的数据发布，然后向 ADD 别名写入贡献，立即返回已有调度流程；不为了识别“我是最后一个”再读取计数、FAA(0) 或竞争共享 last-owner。消费者复用已绑定的计数器地址和任务阈值，一次非消费式读取满足阈值即获得逻辑 DONE 证明；不就绪返回现有有界服务循环，不新增无限紧轮询。
+
+canonical GM 完成字段、退出统计和 DFX 归档由每任务固定的归档责任在有界维护路径中完成一次。归档不是 ready、slot 退休、下一任务领取或链资源继续累加的前置条件；归档者暂时忙碌不得阻断已达阈值的后继。退出仍须证明实际执行和归档都收敛，不能把少做的统计或清理当作性能收益。
+
+同核确有数据→通知或状态→数据依赖时保留 DSB；独立贡献不为跨核通知本身额外加尾 DSB。SRAM 通知不做 DCCI，业务 Tensor 和 GM payload 的可见性协议保持原状。实际发行、条件 CHECK 与 kernel 入口仍执行已有 EXIT/错误检查。
+
+#### 接入、DFX 与正式验收
+
+资源层仅通过 SDK 获取 ADD 地址，不猜测偏移。ADD 映射未支持时明确记录不可用，并整条链使用原 GM 完成路径；SET/MIX 映射错误及其他真实错误不伪装成容量不足。可选 ADD 映射失败在当前资源池/context 内记忆，不每次准备重复调用。正式 ADD 测试必须检查实际启用链数与覆盖任务数，零覆盖属于不可测试，不是通过。
+
+DFX 明确记录完成后端、链身份、任务阈值及真实计数快照。ADD 没有旧值返回，不生成虚假的 completion ticket；实际 P/Q 发布区间与延后的归档 actor 分开记录，不能用归档时刻替代 ready 时刻。当前 CPU 协议验证、A5 编译与 GM 回退验证均不能替代未来 ADD 实机验证。
+
+ADD 映射可用后，先验证满核累计、分支独立、同链晚观察、MIX 资源退休、defer_wait 晚到与 capture/replay 复位，再执行相同 kernel/输入下的12组 AICore L0 对照。仍按下述总和回退不超过0.5%的规则决定正式保留，不因理论上少了 atomic 就预先宣布性能通过。其他通知字段后续按 SET、ADD 和必须返回值的 claim 三类迁移，不把本次完成链扩展冒充为所有 GM 控制状态已迁移。
 
 <!-- markdownlint-disable-next-line MD033 -->
 <a id="performance-retention-policy"></a>

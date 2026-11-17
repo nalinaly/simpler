@@ -209,6 +209,23 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
         }
         wmb();
     }
+    if (bootstrap_context->completion_counters_offset != 0) {
+        const auto *counters = scheduler_state_at<SchedulerTaskCompletionCounter>(
+            scheduler_state_base, bootstrap_context->completion_counters_offset
+        );
+        const auto *metadata =
+            scheduler_state_at<SchedulerTaskMetadata>(scheduler_state_base, bootstrap_context->task_metadata_offset);
+        for (uint64_t task = 0; task < bootstrap_context->graph_task_count; ++task) {
+            const auto &counter = counters[task];
+            if (counter.add_address == 0) continue;
+            const uint32_t credits =
+                2U * metadata[task].logical_block_num * scheduler_task_lanes(metadata[task]).count();
+            // Only a chain head has no credit prefix. The run has not started;
+            // there is no reset or transfer after READY.
+            if (counter.threshold == credits) *reinterpret_cast<volatile uint32_t *>(counter.read_address) = 0;
+        }
+        wmb();
+    }
     const auto *notification_summary =
         scheduler_state_at<SchedulerGraphSummary>(scheduler_state_base, bootstrap_context->graph_summary_offset);
     if (notification_summary->group_mailboxes_offset != 0) {
@@ -686,6 +703,24 @@ bool AicoreLifecycle::settle_run_diagnostics(Runtime *runtime, bool graph_comple
             retired, core_count_
         );
         return false;
+    }
+    auto *counter_context = aicore_scheduler_bootstrap_context(runtime);
+    if (counter_context != nullptr && counter_context->completion_counters_offset != 0) {
+        auto *base = aicore_scheduler_state_base(counter_context);
+        const auto *summary = scheduler_state_at<SchedulerGraphSummary>(base, counter_context->graph_summary_offset);
+        if (summary->protocol_layout_offset != 0) {
+            auto *protocol = scheduler_state_at<SchedulerProtocolLayout>(base, summary->protocol_layout_offset);
+            auto *observations =
+                scheduler_state_at<SchedulerProtocolCounterObservation>(base, protocol->counter_observations_offset);
+            const auto *counters =
+                scheduler_state_at<SchedulerTaskCompletionCounter>(base, counter_context->completion_counters_offset);
+            for (uint64_t task = 0; task < counter_context->graph_task_count; ++task) {
+                if (counters[task].add_address == 0) continue;
+                observations[task].value = *reinterpret_cast<volatile uint32_t *>(counters[task].read_address);
+                observations[task].valid = 1;
+            }
+            wmb();
+        }
     }
     if (is_dump_args_enabled()) {
         for (int32_t thread = 0; thread < aicpu_thread_num_; ++thread) {

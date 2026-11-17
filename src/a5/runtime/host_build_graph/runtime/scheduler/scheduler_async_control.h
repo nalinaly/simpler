@@ -15,12 +15,17 @@
 #include "scheduler_async_directory.h"
 #include "scheduler_async_layout.h"
 #include "scheduler_graph.h"
+#include "scheduler_completion_counter.h"
 
 struct SchedulerAsyncLocalState {
     __gm__ uint8_t *base{nullptr};
     __gm__ const SchedulerAsyncLayout *layout{nullptr};
     __gm__ SchedulerTaskControl *controls{nullptr};
     uint64_t bytes{0};
+    uint64_t completion_counters_offset{0};
+    uint64_t task_metadata_offset{0};
+    uint64_t protocol_layout_offset{0};
+    uint32_t worker_index{0};
     uint32_t check_cursor{0};
     int64_t failed_task_ref{-1};
     int32_t error_code{0};
@@ -30,7 +35,7 @@ struct SchedulerAsyncLocalState {
     uint8_t idle_probe_countdown{0};
 };
 
-static_assert(sizeof(SchedulerAsyncLocalState) == 64);
+static_assert(sizeof(SchedulerAsyncLocalState) == 88);
 
 enum class SchedulerAsyncCompletionResult : uint8_t { NONE, WAITING, FINISH_OWNER, ERROR };
 
@@ -335,8 +340,9 @@ scheduler_async_register_completion_credit(SchedulerAsyncLocalState &local, int6
 template <bool BoundExecution = false>
 static inline __aicore__ bool scheduler_async_seal_execution(
     SchedulerAsyncLocalState *local, int64_t task_ref, uint32_t block, uint32_t lane,
-    const pto2::resident::AsyncWriter &writer
+    const pto2::resident::AsyncWriter &writer, bool *has_deferred = nullptr
 ) {
+    if (has_deferred != nullptr) *has_deferred = false;
     using namespace scheduler_async_detail;
     if (local == nullptr) return true;
     if (writer.image == nullptr) return true;
@@ -382,10 +388,13 @@ static inline __aicore__ bool scheduler_async_seal_execution(
     uint32_t task_index_value = ASYNC_INVALID_INDEX;
     if (!task_index(*local, task_ref, task_index_value) || task_index_value == ASYNC_INVALID_INDEX)
         return fail(*local, task_ref);
-    if (!scheduler_async_register_completion_credit(*local, task_ref)) return false;
-    auto *joins = scheduler_state_at<SchedulerAsyncTaskJoin>(local->base, local->layout->joins_offset);
-    if (scheduler_async_pending::register_group(joins[task_index_value]) != scheduler_async_pending::Result::PENDING)
-        return fail(*local, task_ref);
+    if (scheduler_completion_counter_at(local->base, local->completion_counters_offset, task_ref) == nullptr) {
+        if (!scheduler_async_register_completion_credit(*local, task_ref)) return false;
+        auto *joins = scheduler_state_at<SchedulerAsyncTaskJoin>(local->base, local->layout->joins_offset);
+        if (scheduler_async_pending::register_group(joins[task_index_value]) !=
+            scheduler_async_pending::Result::PENDING)
+            return fail(*local, task_ref);
+    }
     auto *progress = scheduler_state_at<SchedulerAsyncGroupProgress>(local->base, local->layout->group_progress_offset);
     progress[writer.group_index].pending_mask = scheduler_async_condition_mask(count);
     progress[writer.group_index].condition_cursor = 0;
@@ -398,6 +407,7 @@ static inline __aicore__ bool scheduler_async_seal_execution(
     if (scheduler_async_directory_publish(directory[writer.group_index / 64].bits, writer.group_index % 64) !=
         SchedulerAsyncDirectoryResult::SUCCESS)
         return fail(*local, task_ref);
+    if (has_deferred != nullptr) *has_deferred = true;
     return true;
 }
 
@@ -570,6 +580,16 @@ static inline __aicore__ bool scheduler_async_check_step(
         scheduler_async_directory_clear(directory[index / 64].bits, index % 64) !=
             SchedulerAsyncDirectoryResult::SUCCESS)
         return fail(local, task_ref);
+    const auto *counter = scheduler_completion_counter_at(local.base, local.completion_counters_offset, task_ref);
+    if (counter != nullptr) {
+        if (!scheduler_counter_publish_condition(
+                local.base, *counter, task_ref, data->block_index, data->subtask_slot, local.task_metadata_offset,
+                local.protocol_layout_offset, local.worker_index, true
+            ))
+            return fail(local, task_ref);
+        completion = {SchedulerAsyncCompletionResult::WAITING, task_ref};
+        return true;
+    }
     completion = settle_group(local, task_ref);
     return completion.result != SchedulerAsyncCompletionResult::ERROR;
 }

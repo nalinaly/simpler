@@ -116,15 +116,23 @@ static inline __aicore__ SchedulerSubtaskFinishResult scheduler_contribute_subta
     if (scheduler_read_worker_error(run, local->worker_id()) != 0) return SchedulerSubtaskFinishResult::ERROR;
     auto *control = scheduler_task_control_at(base, local, completed.task_ref);
     const bool block_owner = scheduler_slot_uses_admission(local, completed) && !completed.gm_mix;
+    const auto *counter =
+        scheduler_completion_counter_at(base, local->config.completion_counters_offset, completed.task_ref);
+    const uint32_t credits = counter == nullptr ? 0 : completed.completion_credits;
+    if (counter != nullptr && (credits < 1 || credits > 2)) return SchedulerSubtaskFinishResult::ERROR;
     if constexpr (RecordProtocol) {
-        scheduler_protocol_subtask_complete(base, local, completed, pending_slot, true, UINT64_MAX);
-        if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, true, UINT64_MAX);
+        scheduler_protocol_subtask_complete(base, local, completed, pending_slot, true, UINT64_MAX, credits);
+        if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, true, UINT64_MAX, credits);
     }
-    uint64_t previous = 0;
-    const auto result = scheduler_contribute_returns(control, 1, &previous);
+    uint64_t previous = UINT64_MAX;
+    auto result = SchedulerSubtaskFinishResult::PARTIAL;
+    if (counter != nullptr) {
+        scheduler_cache_barrier();
+        scheduler_completion_counter_add(*counter, credits);
+    } else result = scheduler_contribute_returns(control, 1, &previous);
     if constexpr (RecordProtocol) {
-        scheduler_protocol_subtask_complete(base, local, completed, pending_slot, false, previous);
-        if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, false, previous);
+        scheduler_protocol_subtask_complete(base, local, completed, pending_slot, false, previous, credits);
+        if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, false, previous, credits);
     }
     if (result == SchedulerSubtaskFinishResult::ERROR) {
         scheduler_record_error(
@@ -208,8 +216,11 @@ static inline __aicore__ bool scheduler_complete_own_slot(
         }
     }
     const SchedulerLocalSlotState completed_slot = *local_slot;
-    const bool contribution_retires = FromExecutor && PublishCompletion && completed_slot.execution_token &&
-                                      !completed_slot.cluster_mix && !completed_slot.gm_mix;
+    const bool contribution_retires =
+        FromExecutor && PublishCompletion && completed_slot.execution_token && !completed_slot.cluster_mix &&
+        !completed_slot.gm_mix &&
+        scheduler_completion_counter_at(scheduler_state_base, scheduler->config.completion_counters_offset, task_ref) ==
+            nullptr;
     auto contribution = SchedulerSubtaskFinishResult::PARTIAL;
     bool retirement_inferred = false;
     if (contribution_retires) {
