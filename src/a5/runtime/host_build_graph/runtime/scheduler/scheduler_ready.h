@@ -14,7 +14,6 @@
 #include "scheduler_protocol.h"
 #include "scheduler_scalar_trace.h"
 #include "scheduler_memory.h"
-#include "scheduler_completion_counter.h"
 #include "scheduler_graph.h"
 #include "scheduler_graph_binding.h"
 #include "scheduler_prepared_execution.h"
@@ -27,7 +26,6 @@ enum class SchedulerCompletionObservation : uint8_t { PENDING, DONE, INVALID };
 struct SchedulerCompletionSource {
     __gm__ SchedulerTaskControl *control{nullptr};
     __gm__ volatile uint32_t *notification{nullptr};
-    const __gm__ SchedulerTaskCompletionCounter *counter{nullptr};
 };
 
 // Static edge identity survives repeated polls; completion never does.
@@ -42,12 +40,6 @@ struct SchedulerFaninWait {
 // A reliable bypass snapshot establishes completion without changing ownership.
 static inline __aicore__ SchedulerCompletionObservation
 scheduler_observe_task_completion(const SchedulerCompletionSource &source) {
-    if (source.counter != nullptr) {
-        const int state = scheduler_completion_counter_observe(*source.counter);
-        return state < 0  ? SchedulerCompletionObservation::INVALID :
-               state == 0 ? SchedulerCompletionObservation::PENDING :
-                            SchedulerCompletionObservation::DONE;
-    }
     if (source.notification != nullptr) {
         const uint32_t state = scheduler_notify_query(*source.notification);
         return state == 1 ? SchedulerCompletionObservation::DONE :
@@ -162,7 +154,6 @@ struct SchedulerLocalSlotState {
     bool gm_mix{false};
     bool cluster_mix{false};
     bool execution_token{false};
-    uint8_t completion_credits{2};
     uint64_t preclaim_order{UINT64_MAX};
 };
 
@@ -175,7 +166,6 @@ struct SchedulerLocalConfig {
     const SchedulerGraphView *graph{nullptr};
     uint64_t task_controls_offset{0};
     uint64_t done_notifications_offset{0};
-    uint64_t completion_counters_offset{0};
     uint64_t task_catalog_offset{0};
     uint64_t graph_summary_offset{0};
     // This run's per-subtask PMU staging array. Here rather than in the
@@ -262,7 +252,6 @@ struct SchedulerLocalState {
     SCHEDULER_CLUSTER_SSBUF SchedulerClusterSignal *cluster_signal{nullptr};
     uint32_t *direct_slot{nullptr};
     uint64_t pending_completed{0};
-    uint32_t completion_accounting_ref{UINT32_MAX};
     uint64_t last_completion_flush_cycles{0};
     uint32_t control_peer_cursor{0};
     uint32_t cluster_prepare_seen{0};
@@ -324,7 +313,7 @@ static_assert(PLATFORM_CORES_PER_BLOCKDIM <= 8, "worker trace mask must fit one 
 static_assert(SCHEDULER_PENDING_SLOT_COUNT == 2, "local ready head requires two slots");
 static_assert(alignof(SchedulerLocalSlotState) == alignof(uint64_t));
 static_assert(alignof(SchedulerLocalState) == alignof(uint64_t));
-static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalConfig) == 96, "64-bit local config size changed");
+static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalConfig) == 88, "64-bit local config size changed");
 static_assert(sizeof(void *) != 8 || sizeof(SchedulerLocalSlotState) == 48, "64-bit local slot size changed");
 static_assert(
     sizeof(void *) != 8 || sizeof(SchedulerLocalProfilingState) == 88 + sizeof(SchedulerScalarTrace),
@@ -373,7 +362,6 @@ static inline __aicore__ bool scheduler_initialize_local_config(
     config.graph = graph;
     config.task_controls_offset = context->task_controls_offset;
     config.done_notifications_offset = context->done_notifications_offset;
-    config.completion_counters_offset = context->completion_counters_offset;
     config.task_metadata_offset = static_cast<uint32_t>(context->task_metadata_offset);
     config.pmu_cells_offset = context->pmu_cells_offset;
     if (local->profiling != nullptr) {
@@ -581,10 +569,7 @@ scheduler_done_notification_at(__gm__ void *base, const SchedulerLocalState *loc
 
 static inline __aicore__ SchedulerCompletionSource
 scheduler_completion_source(__gm__ void *base, const SchedulerLocalState *local, int64_t task_ref) {
-    return {
-        scheduler_task_control_at(base, local, task_ref), scheduler_done_notification_at(base, local, task_ref),
-        scheduler_completion_counter_at(base, local->config.completion_counters_offset, task_ref)
-    };
+    return {scheduler_task_control_at(base, local, task_ref), scheduler_done_notification_at(base, local, task_ref)};
 }
 
 // Only a canonical logical-DONE owner publishes. The notification has no
@@ -887,7 +872,6 @@ inline __aicore__ void scheduler_initialize_free_slot(SchedulerLocalSlotState *l
     local_slot->gm_mix = false;
     local_slot->cluster_mix = false;
     local_slot->execution_token = false;
-    local_slot->completion_credits = 2;
     local_slot->preclaim_order = UINT64_MAX;
     local_slot->block_idx = 0;
     local_slot->predicate = SchedulerPredicateState::UNEVALUATED;

@@ -187,5 +187,4 @@ a5_hbg_case(test_hbg_resident_entry_result.cpp TIMEOUT 30
     COMPILE_OPTIONS -ffunction-sections -fdata-sections
     LINK_OPTIONS ${_gc_link_option})
 
-a5_hbg_case(test_hbg_completion_counter_plan.cpp NO_OBJS INCLUDES ${SIMPLER_SRC}/a5/runtime/host_build_graph/host)
 simpler_ut_glob_cases(a5_hbg_case)

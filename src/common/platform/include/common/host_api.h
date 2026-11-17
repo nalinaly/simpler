@@ -295,7 +295,7 @@ struct HostApiOps {
     );
     int (*acquire_scheduler_notifications)(
         void *runner_ctx, uint32_t pipeline_slot, SchedulerNotificationPurpose purpose, size_t count,
-        SchedulerDoneNotifications *out
+        size_t bit_write_count, SchedulerDoneNotifications *out
     ) = nullptr;
 };
 
@@ -343,11 +343,13 @@ public:
     uint64_t run_epoch() const { return run_epoch_; }
 
     int acquire_scheduler_notifications(
-        SchedulerNotificationPurpose purpose, size_t count, SchedulerDoneNotifications *out
+        SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count, SchedulerDoneNotifications *out
     ) const {
-        if (out == nullptr) return -1;
+        if (out == nullptr || bit_write_count > count) return -1;
         if (ops_->acquire_scheduler_notifications != nullptr)
-            return ops_->acquire_scheduler_notifications(runner_ctx_, pipeline_slot_, purpose, count, out);
+            return ops_->acquire_scheduler_notifications(
+                runner_ctx_, pipeline_slot_, purpose, count, bit_write_count, out
+            );
         // CPU and simulator backends use the canonical GM protocol.
         *out = {std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}};
         return 0;

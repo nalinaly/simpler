@@ -376,14 +376,13 @@ static int acquire_scheduler_state_storage(
 }
 
 static int acquire_scheduler_notifications(
-    void *runner_ctx, uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, SchedulerDoneNotifications *out
+    void *runner_ctx, uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count,
+    SchedulerDoneNotifications *out
 ) {
     if (runner_ctx == nullptr) return -1;
     try {
-        return static_cast<DeviceRunnerBase *>(runner_ctx)->acquire_scheduler_notifications(slot, purpose, count, out);
-    } catch (const std::exception &error) {
-        LOG_ERROR("scheduler notification acquire failed: %s", error.what());
-        return -1;
+        return static_cast<DeviceRunnerBase *>(runner_ctx)
+            ->acquire_scheduler_notifications(slot, purpose, count, bit_write_count, out);
     } catch (...) {
         return -1;
     }

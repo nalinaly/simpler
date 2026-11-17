@@ -192,17 +192,6 @@ inline uint8_t scheduler_task_metadata_flags_from_submit_state(
 
 constexpr int32_t SCHEDULER_TASK_TIMING_SLOT_COUNT = 16;
 
-// Immutable task view of a shared monotonic CntNotify ADD chain. Strict DAG
-// ancestors precede descendants; count >= threshold stays true for this run.
-// Zero ADD address selects the established GM completion protocol.
-struct SchedulerTaskCompletionCounter {
-    uint64_t read_address;
-    uint64_t add_address;
-    uint32_t threshold;
-    uint32_t limit;
-};
-static_assert(sizeof(SchedulerTaskCompletionCounter) == 24);
-
 // GM records have a 16-byte stride. Stack copies use scalar alignment: their
 // callers pass local objects across outlined boundaries without realigning SP.
 struct alignas(8) SchedulerTaskMetadata {
@@ -654,7 +643,6 @@ struct alignas(64) SchedulerWorkerContext {
     uint64_t pmu_cells_offset;
     uint64_t args_dump_address;
     uint64_t done_notifications_offset;
-    uint64_t completion_counters_offset;
 
     // Only this worker writes its bootstrap diagnostic line.
     alignas(64) uint64_t bootstrap_task_count;
@@ -926,12 +914,6 @@ inline bool scheduler_plan_protocol_storage(uint64_t *cursor, AicoreSchedulerLay
         SCHEDULER_PROTOCOL_RESERVE(protocol.member_count, SchedulerProtocolMemberTrace, protocol.members_offset) &&
         SCHEDULER_PROTOCOL_RESERVE(protocol.trace_count, SchedulerProtocolBlockTrace, protocol.blocks_offset) &&
         SCHEDULER_PROTOCOL_RESERVE(protocol.trace_count, SchedulerProtocolExecutionTrace, protocol.executions_offset) &&
-        SCHEDULER_PROTOCOL_RESERVE(
-            protocol.trace_count, SchedulerProtocolConditionContribution, protocol.condition_contributions_offset
-        ) &&
-        SCHEDULER_PROTOCOL_RESERVE(
-            protocol.task_count, SchedulerProtocolCounterObservation, protocol.counter_observations_offset
-        ) &&
         SCHEDULER_PROTOCOL_RESERVE(protocol.worker_count, SchedulerProtocolWorkerTrace, protocol.workers_offset);
 #undef SCHEDULER_PROTOCOL_RESERVE
     if (valid) protocol.storage_end_offset = *cursor;
@@ -994,7 +976,6 @@ inline bool scheduler_plan_layout(
         !SCHEDULER_RESERVE_ARRAY(SCHEDULER_WORKER_CAPACITY, SchedulerWorkerContext, worker_contexts_offset) ||
         !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskMetadata, task_metadata_offset) ||
         !SCHEDULER_RESERVE_ARRAY(task_count, uint64_t, done_notifications_offset) ||
-        !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskCompletionCounter, completion_counters_offset) ||
         !SCHEDULER_RESERVE_ARRAY(task_count, SchedulerTaskControl, task_controls_offset) ||
         !scheduler_layout_reserve(
             &cursor, sizeof(SchedulerGraphSummary), alignof(SchedulerGraphSummary), &next.graph_summary_offset

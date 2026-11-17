@@ -155,18 +155,6 @@ static inline __aicore__ void scheduler_notify_done(__gm__ volatile uint32_t &va
     scheduler_notify_store(value, UINT32_C(1));
 }
 
-// This address is the driver's ADD alias of a CntNotify register. The hardware
-// accumulates the written positive delta; no old value or ownership is returned.
-static inline __aicore__ void scheduler_notify_add(__gm__ volatile uint32_t &value, uint32_t credits) {
-    scheduler_scalar_memory_issue(SchedPhaseKind::ScalarBypassStore, 1, [&value, credits]() __aicore__ {
-#if defined(__CCE_AICORE__)
-        __builtin_cce_st_dev(credits, const_cast<__gm__ uint32_t *>(&value), 0);
-#else
-        (void)__atomic_fetch_add(&value, credits, __ATOMIC_RELEASE);
-#endif
-    });
-}
-
 static inline __aicore__ uint64_t
 scheduler_gm_query_u32_pair(__gm__ volatile uint32_t *values, int order = __ATOMIC_ACQUIRE) {
     return scheduler_scalar_memory_result(SchedPhaseKind::ScalarBypassLoad, [values, order]() __aicore__ {

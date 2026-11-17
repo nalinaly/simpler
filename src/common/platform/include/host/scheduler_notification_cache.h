@@ -23,7 +23,7 @@ public:
         context(context) {}
     virtual ~SchedulerNotificationStorage() = default;
     virtual size_t capacity() const = 0;
-    virtual SchedulerDoneNotifications prepare(size_t count) = 0;
+    virtual SchedulerDoneNotifications prepare(size_t count, size_t bit_write_count) = 0;
     virtual int release() = 0;
     virtual void abandon() noexcept = 0;
     void *const context;
@@ -36,18 +36,13 @@ class SchedulerNotificationCache {
 public:
     template <class Create>
     int acquire(
-        uint32_t slot, SchedulerNotificationPurpose purpose, void *context, size_t count, Create create,
-        SchedulerDoneNotifications *out
+        uint32_t slot, SchedulerNotificationPurpose purpose, void *context, size_t count, size_t bit_write_count,
+        Create create, SchedulerDoneNotifications *out
     ) {
-        if (out == nullptr || context == nullptr) return -1;
+        if (out == nullptr || context == nullptr || bit_write_count > count) return -1;
         *out = {};
         if (count == 0) return 0;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (add_unavailable_context_ != nullptr && add_unavailable_context_ != context) return -1;
-        if (purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER && add_unavailable_context_ == context) {
-            *out = {std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}, true};
-            return 0;
-        }
         auto &bank = pools_[{slot, purpose}];
         std::shared_ptr<SchedulerNotificationStorage> selected;
         for (const auto &pool : bank) {
@@ -68,21 +63,12 @@ public:
             it = bank.erase(it);
         }
         if (!selected) {
-            selected = create(context, purpose);
+            selected = create(context);
             if (!selected || selected->context != context) return -1;
             bank.push_back(selected);
         }
         try {
-            auto result = selected->prepare(count);
-            if (result.add_unavailable) {
-                add_unavailable_context_ = context;
-                selected->retiring = true;
-                const int rc = selected->release();
-                if (rc != 0) return rc;
-                bank.erase(std::find(bank.begin(), bank.end(), selected));
-                *out = std::move(result);
-                return 0;
-            }
+            auto result = selected->prepare(count, bit_write_count);
             result.owner = selected;
             *out = std::move(result);
             return 0;
@@ -110,10 +96,7 @@ public:
                 }
             }
         }
-        if (first_error == 0) {
-            pools_.clear();
-            add_unavailable_context_ = nullptr;
-        }
+        if (first_error == 0) pools_.clear();
         return first_error;
     }
 
@@ -125,12 +108,10 @@ public:
             for (auto &pool : entry.second)
                 pool->abandon();
         pools_.clear();
-        add_unavailable_context_ = nullptr;
     }
 
 private:
     std::mutex mutex_;
-    void *add_unavailable_context_{nullptr};
     std::map<
         std::pair<uint32_t, SchedulerNotificationPurpose>, std::vector<std::shared_ptr<SchedulerNotificationStorage>>>
         pools_;

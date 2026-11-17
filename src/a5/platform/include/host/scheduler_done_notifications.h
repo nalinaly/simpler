@@ -12,5 +12,4 @@
 
 #include "host/scheduler_notification_cache.h"
 
-std::shared_ptr<SchedulerNotificationStorage>
-make_scheduler_notification_storage(void *context, SchedulerNotificationPurpose purpose);
+std::shared_ptr<SchedulerNotificationStorage> make_scheduler_notification_storage(void *context);

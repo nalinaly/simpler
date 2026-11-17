@@ -88,7 +88,8 @@ public:
 
     DeviceRunner() = default;
     int acquire_scheduler_notifications(
-        uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, SchedulerDoneNotifications *out
+        uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count,
+        SchedulerDoneNotifications *out
     ) override;
     ~DeviceRunner();
     std::thread create_thread(std::function<void()> fn) override;

@@ -16,7 +16,6 @@
 #include <type_traits>
 
 inline constexpr uint64_t SCHEDULER_PROTOCOL_MAGIC = UINT64_C(0x53504d4454520002);
-inline constexpr uint32_t SCHEDULER_PROTOCOL_COUNTER_ACCOUNTING = UINT32_C(1) << 27;
 inline constexpr uint32_t SCHEDULER_PROTOCOL_MEMBER_FROM_CLAIM = UINT32_C(1) << 28;
 // A physical synchronous completion aliases the actual last contribution stamps.
 inline constexpr uint32_t SCHEDULER_PROTOCOL_COMPLETION_FROM_GROUP = UINT32_C(1) << 29;
@@ -48,8 +47,6 @@ struct alignas(64) SchedulerProtocolLayout {
     uint64_t members_offset;
     uint64_t blocks_offset;
     uint64_t executions_offset;
-    uint64_t condition_contributions_offset;
-    uint64_t counter_observations_offset;
     uint64_t workers_offset;
 };
 
@@ -67,23 +64,6 @@ struct alignas(64) SchedulerProtocolTaskActor {
 struct alignas(64) SchedulerProtocolTaskTrace {
     SchedulerProtocolTaskActor admission;
     SchedulerProtocolTaskActor completion;
-};
-
-struct alignas(64) SchedulerProtocolConditionContribution {
-    SchedulerProtocolStamp before;
-    SchedulerProtocolStamp after;
-    uint64_t run_epoch;
-    int64_t task_ref;
-    uint32_t worker_index;
-    uint16_t block_idx;
-    uint8_t lane;
-    uint8_t source;
-    uint32_t credits;
-};
-
-struct SchedulerProtocolCounterObservation {
-    uint32_t value;
-    uint32_t valid;
 };
 
 struct alignas(64) SchedulerProtocolMemberTrace {
@@ -128,7 +108,6 @@ struct alignas(64) SchedulerProtocolBlockOwner {
     uint64_t sync_tail;
     uint32_t sync_frontier[3];
     uint32_t sync_hold[3];
-    uint32_t completion_credits;
 };
 
 struct alignas(64) SchedulerProtocolLaneTrace {
@@ -201,7 +180,6 @@ struct alignas(64) SchedulerProtocolExecutionTrace {
     SchedulerProtocolStamp contribution_after;
     uint64_t contribution_ticket;
     uint32_t contribution_worker;
-    uint32_t contribution_credits;
 };
 
 enum SchedulerProtocolExecutionFlags : uint32_t {
@@ -229,8 +207,6 @@ static_assert(sizeof(SchedulerProtocolStamp) == 16);
 static_assert(sizeof(SchedulerProtocolLayout) == 128);
 static_assert(sizeof(SchedulerProtocolTaskActor) == 64);
 static_assert(sizeof(SchedulerProtocolTaskTrace) == 128);
-static_assert(sizeof(SchedulerProtocolConditionContribution) == 64);
-static_assert(sizeof(SchedulerProtocolCounterObservation) == 8);
 static_assert(offsetof(SchedulerProtocolTaskTrace, completion) == 64);
 static_assert(sizeof(SchedulerProtocolMemberTrace) == 128);
 static_assert(sizeof(SchedulerProtocolBlockOwner) == 256);
@@ -243,8 +219,6 @@ static_assert(sizeof(SchedulerProtocolExecutionTrace) == 256);
 static_assert(sizeof(SchedulerProtocolWorkerTrace) == 64);
 static_assert(std::is_standard_layout_v<SchedulerProtocolLayout> && std::is_trivially_copyable_v<SchedulerProtocolLayout>);
 static_assert(std::is_standard_layout_v<SchedulerProtocolTaskTrace> && std::is_trivially_copyable_v<SchedulerProtocolTaskTrace>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolConditionContribution> && std::is_trivially_copyable_v<SchedulerProtocolConditionContribution>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolCounterObservation> && std::is_trivially_copyable_v<SchedulerProtocolCounterObservation>);
 static_assert(std::is_standard_layout_v<SchedulerProtocolMemberTrace> && std::is_trivially_copyable_v<SchedulerProtocolMemberTrace>);
 static_assert(std::is_standard_layout_v<SchedulerProtocolBlockTrace> && std::is_trivially_copyable_v<SchedulerProtocolBlockTrace>);
 static_assert(std::is_standard_layout_v<SchedulerProtocolExecutionTrace> && std::is_trivially_copyable_v<SchedulerProtocolExecutionTrace>);

@@ -250,7 +250,8 @@ int DeviceRunner::prepare_kernel_arch_context(rtStream_t control_stream) {
 }
 
 int DeviceRunner::acquire_scheduler_notifications(
-    uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, SchedulerDoneNotifications *out
+    uint32_t slot, SchedulerNotificationPurpose purpose, size_t count, size_t bit_write_count,
+    SchedulerDoneNotifications *out
 ) {
     if (!can_accept_run()) return PTO_RUNTIME_ERR_INVALID_STATE;
     const int context_rc = validate_current_context();
@@ -258,7 +259,9 @@ int DeviceRunner::acquire_scheduler_notifications(
     aclrtContext context = nullptr;
     const auto rc = aclrtGetCurrentContext(&context);
     if (rc != ACL_SUCCESS) return rc;
-    return scheduler_notifications_.acquire(slot, purpose, context, count, make_scheduler_notification_storage, out);
+    return scheduler_notifications_.acquire(
+        slot, purpose, context, count, bit_write_count, make_scheduler_notification_storage, out
+    );
 }
 
 int DeviceRunner::release_arch_context_resources(bool abandon_device_resources) {

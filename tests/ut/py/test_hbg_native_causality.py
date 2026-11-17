@@ -16,7 +16,6 @@ from _native_protocol_builder import ProtocolBuilder
 
 from simpler_setup.tools.hbg.native_causality import MIX, PRECLAIM, audit_native_protocol
 from simpler_setup.tools.hbg.native_protocol import (
-    COUNTER_ACCOUNTING,
     MEMBER_FROM_CLAIM,
     STAMPS,
     _event_records,
@@ -1109,119 +1108,5 @@ def test_mix_group_completion_preserves_unique_credit_and_physical_retirement(fa
     else:
         last["completion_before"], last["releases_observed"] = (last["releases_observed"], last["completion_before"])
         done["before"] = last["completion_before"].copy()
-    with pytest.raises(ValueError):
-        audit_native_protocol(raw, identities)
-
-
-def _counter_capture(*, mask=1, separate=False, successor=False, sync=False):
-    shapes: list[tuple[int, int, tuple[int, ...]]] = [(mask, 2, ())]
-    if successor:
-        shapes.append((1, 1, (0,)))
-    builder = ProtocolBuilder(shapes, sync_tasks=(0,) if sync else ())
-    raw, identities = builder.run()
-    threshold = 0
-    for task, control, actors in zip(raw["tasks"], raw["task_controls"], raw["task_events"], strict=True):
-        threshold += 2 * task["block_num"] * task["active_mask"].bit_count()
-        control.update(completion_backend=1, counter_index=0, counter_threshold=threshold)
-        done = actors["completion"]
-        done["flags"] = task["flags"] | COUNTER_ACCOUNTING | ((1 << 31) if separate else 0)
-        when = builder.clock + 100 + 4 * task["task_ref"]
-        done.update(before=[when, 1], after=[when + 1, 1])
-    for control in raw["task_controls"]:
-        control["counter_limit"] = threshold
-    raw["completion_counters"] = [dict(index=0, value=threshold, valid=1, limit=threshold)]
-    for block in raw["blocks"]:
-        owner = block["owner"]
-        mixed = bool(raw["tasks"][owner["task_ref"]]["flags"] & MIX)
-        owner.update(
-            completion_ticket=(1 << 64) - 1,
-            completion_credits=owner["active_mask"].bit_count() if mixed else (1 if separate else 2),
-        )
-    for execution in raw["executions"]:
-        task = raw["tasks"][execution["task_ref"]]
-        mixed = bool(task["flags"] & MIX)
-        if not mixed:
-            execution.update(contribution_ticket=(1 << 64) - 1, contribution_credits=1 if separate else 2)
-        if mixed or separate:
-            when = execution["completion_consumed"][0] + 1
-            raw["condition_contributions"].append(
-                dict(
-                    index=execution["index"],
-                    run_epoch=raw["run_epoch"],
-                    task_ref=execution["task_ref"],
-                    worker_index=execution["worker_index"],
-                    block_idx=execution["block_idx"],
-                    subtask_slot=execution["subtask_slot"],
-                    source=1 if separate else 0,
-                    credits=1,
-                    before=[when, 1],
-                    after=[when + 1, 1],
-                )
-            )
-    resequence(raw)
-    return raw, identities
-
-
-@pytest.mark.parametrize(
-    ("mask", "separate", "sync"),
-    [(1, False, False), (1, True, False), (1, False, True), (3, False, False), (6, True, True)],
-)
-def test_counter_credits_preserve_physical_and_condition_causality_without_return_tickets(mask, separate, sync):
-    raw, identities = _counter_capture(mask=mask, separate=separate, sync=sync)
-    assert audit_native_protocol(raw, identities)["protocol_verified"]
-
-
-def test_counter_successor_does_not_wait_for_deferred_gm_accounting():
-    raw, identities = _counter_capture(successor=True)
-    assert raw["executions"][-1]["entry"][0] < raw["task_events"][0]["completion"]["before"][0]
-    assert audit_native_protocol(raw, identities)["protocol_verified"]
-
-
-def test_counter_publication_can_be_observed_before_the_publishers_after_sample():
-    raw, identities = _counter_capture(successor=True)
-    publisher, successor = raw["executions"][1:]
-    assert publisher["worker_index"] != successor["worker_index"]
-    publisher["contribution_after"][0] = successor["entry"][0] + 1
-    publisher["trace_published"][0] = successor["entry"][0] + 2
-    resequence(raw)
-    assert audit_native_protocol(raw, identities)["protocol_verified"]
-
-
-@pytest.mark.parametrize(
-    "fault",
-    [
-        "credits",
-        "ticket",
-        "missing_condition",
-        "late_condition",
-        "incomplete",
-        "ancestor",
-        "threshold",
-        "accounting_alias",
-    ],
-)
-def test_counter_capture_rejects_missing_or_fabricated_completion_proof(fault):
-    raw, identities = _counter_capture(separate=True, successor=True)
-    if fault == "credits":
-        raw["executions"][0]["contribution_credits"] = 2
-    elif fault == "ticket":
-        raw["executions"][0]["contribution_ticket"] = 0
-    elif fault == "missing_condition":
-        raw["condition_contributions"].pop(0)
-    elif fault == "late_condition":
-        condition = raw["condition_contributions"][0]
-        execution = raw["executions"][-1]
-        condition["worker_index"] = execution["worker_index"]
-        condition["before"][0] = execution["trace_published"][0] + 1
-        condition["after"][0] = execution["trace_published"][0] + 2
-    elif fault == "incomplete":
-        raw["completion_counters"][0]["value"] -= 1
-    elif fault == "ancestor":
-        raw["tasks"][1]["dependencies"] = []
-    elif fault == "threshold":
-        raw["task_controls"][0]["counter_threshold"] += 2
-    else:
-        raw["task_events"][0]["completion"]["flags"] |= 1 << 30
-    resequence(raw)
     with pytest.raises(ValueError):
         audit_native_protocol(raw, identities)

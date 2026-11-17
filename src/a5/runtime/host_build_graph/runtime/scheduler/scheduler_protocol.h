@@ -71,14 +71,6 @@ static inline __aicore__ bool scheduler_protocol_bind(__gm__ void *base, const L
             layout->executions_offset, layout->trace_count, sizeof(SchedulerProtocolExecutionTrace), limit, &end
         ) ||
         !scheduler_protocol_check_region(
-            layout->condition_contributions_offset, layout->trace_count, sizeof(SchedulerProtocolConditionContribution),
-            limit, &end
-        ) ||
-        !scheduler_protocol_check_region(
-            layout->counter_observations_offset, layout->task_count, sizeof(SchedulerProtocolCounterObservation), limit,
-            &end
-        ) ||
-        !scheduler_protocol_check_region(
             layout->workers_offset, layout->worker_count, sizeof(SchedulerProtocolWorkerTrace), limit, &end
         ) ||
         end != limit)
