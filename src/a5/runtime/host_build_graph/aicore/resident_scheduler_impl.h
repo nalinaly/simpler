@@ -499,14 +499,6 @@ __aicore__ bool run_ready_dispatch_loop(
         if (!scheduler_service_counter_accounting(graph, scheduler_state_base, context, run_control, &counter_advanced))
             return false;
         progress = progress || counter_advanced;
-        if (context->pending_completed != 0) {
-            const uint64_t now = scheduler_cycles();
-            if (context->pending_completed >= 32 ||
-                now - context->last_completion_flush_cycles >= PLATFORM_PROF_SYS_CNT_FREQ / 1000) {
-                scheduler_flush_completions(run_control, context);
-                context->last_completion_flush_cycles = now;
-            }
-        }
         return true;
     };
     enum class Boundary { Proceed, Exit, Error };
@@ -808,10 +800,6 @@ __aicore__ bool run_ready_dispatch_loop(
             boundary = check_boundary();
             continue;
         }
-        {
-            SchedulerScalarScope scalar_flush(context, SchedPhaseKind::ScalarFlushCompletions);
-            scheduler_flush_completions(run_control, context);
-        }
         if (phase_timing_enabled) {
             if (!idle_active) {
                 idle_start_cycles = idle_candidate_start;
@@ -969,7 +957,6 @@ __aicore__ __attribute__((noinline)) void run_resident_scheduler(
 
     SchedulerScalarScope scalar_exit(&scheduler_local_state, SchedPhaseKind::ScalarExitDrain);
     if (phase_timing_enabled) publish_deferred_idle_activity(scheduler_state_base, &scheduler_local_state, &stats);
-    scheduler_flush_completions(run_control, &scheduler_local_state);
 
     const uint64_t exit_wait_start = get_sys_cnt_aicore();
     while (stats.exit_observed_cycles == 0 &&

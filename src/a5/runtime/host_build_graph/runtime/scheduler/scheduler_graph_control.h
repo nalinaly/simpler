@@ -97,7 +97,7 @@ static inline __aicore__ bool scheduler_service_controls(
             scheduler_protocol_task_actor(base, local, ref, UINT64_MAX, flags, true, false, after);
         }
         scheduler_remember_task_proof(local, ref, SchedulerTaskProof::DONE);
-        ++local->pending_completed;
+        scheduler_report_task_completed(run);
         *progress = true;
     }
     return true;

@@ -302,7 +302,7 @@ GM MIX 的 assigned_seq 与未确认 arrived/released ACK 直接消费可靠 ld_
 
 第一项的正确性依赖于闭合前缀的归纳：核领取目录第 i 项前，已经分别确认所有更早项关闭；各核游标无需相等。目录用于有序发票，kernel 入口仍独立等待 DONE 与资源许可。依赖确认的复用只能继承已经成立的事实，不能通过供给关闭或提前领取制造就绪。
 
-实际发布 canonical DONE 的核，将该次返回式原子已经确认的结论写入现有16项 task 私有证明缓存，后续供给/依赖检查直接复用。普通返回与 MIX 组贡献只在 `TASK_LAST` 时记 DONE；控制节点完成 CAS、异步 FINISH CAS 只在成功后记 DONE。`PARTIAL`、`TASK_LAST_DEFERRED`、失败的 CAS、单独的 slot/资源退休都不授予该证明。缓存仍按本轮完整 task 身份区分，碰撞只遗忘结论，不增加容量或共享通知；既有 pending_completed、组资源关闭、错误检查与 DFX 记录独立保留。
+实际发布 canonical DONE 的核，将该次返回式原子已经确认的结论写入现有16项 task 私有证明缓存，后续供给/依赖检查直接复用。普通返回与 MIX 组贡献只在 `TASK_LAST` 时记 DONE；控制节点完成 CAS、异步 FINISH CAS 只在成功后记 DONE。`PARTIAL`、`TASK_LAST_DEFERRED`、失败的 CAS、单独的 slot/资源退休都不授予该证明。缓存仍按本轮完整 task 身份区分，碰撞只遗忘结论，不增加容量或共享通知；全局逻辑完成计数、组资源关闭、错误检查与 DFX 记录独立更新。
 
 ### 控制节点的本核前驱检查进度
 
@@ -684,7 +684,7 @@ defer_wait 登记条件并物理返回，释放执行位置
 
 `scheduler_service_async_slice()` 每两个活跃服务机会允许一次 CHECK，首个机会可检查；保留既有 CHECK 频率，删除 FINISH 后不加倍争抢。CHECK 最多观察8个条件，未满足时保存进度、归还 lease 并轮转。任何核不得带 CHECK lease 进入业务 kernel；持续命中快入口时也按第3节预算服务控制路径。
 
-最后计算返回或最后条件组完成的 join FAA 返回 `NONE / WAITING / FINISH_OWNER / ERROR`。唯一 owner 携带本次原子返回值推导的 join 终态及 task/run 身份，在同一调用链中直接检查 canonical completion 并 CAS 到 DONE；不再发布 FINISH lease/目录，不重新竞争责任，也不将 outcome 留到下一次 kernel。CHECK 侧先终结自身 lease、清除 CHECK 目录，再处理 join。owner 产生后的错误必须使 run 失败，不能重试或丢弃责任；最终 CAS 成功者恰好增加一次 pending_completed 并记录真实 DFX 完成因果。计算返回和 MIX 信用外层不能重复计数。
+最后计算返回或最后条件组完成的 join FAA 返回 `NONE / WAITING / FINISH_OWNER / ERROR`。唯一 owner 携带本次原子返回值推导的 join 终态及 task/run 身份，在同一调用链中直接检查 canonical completion 并 CAS 到 DONE；不再发布 FINISH lease/目录，不重新竞争责任，也不将 outcome 留到下一次 kernel。CHECK 侧先终结自身 lease、清除 CHECK 目录，再处理 join。owner 产生后的错误必须使 run 失败，不能重试或丢弃责任；最终 CAS 成功者立即贡献一次全局逻辑完成计数并记录真实 DFX 完成因果。计算返回和 MIX 信用外层不能重复计数。
 
 FINISH owner 从本轮不可变 task metadata 的 block 数与活跃 lane 数得到总贡献数 N，从已确认的 join 结果得到登记债务 D；预期 canonical completion 为 `(N, C=0, D)`。校验 N/D 范围后，直接 CAS 该预期值到 `(N, 0, 0)`，不先 FAA(0) 再读取同一个完成字。CAS 返回值是唯一成功依据；剩余计算未归零、债务不符、总数不符或重复 FINISH 均失败且不修改原状态。保持原有发布屏障、run/实例身份校验及 DFX 因果，不把静态 N 或 join 本身当作任务 DONE。
 
@@ -850,6 +850,10 @@ async 登记的 canonical gate 只保存一个 task 级 `has_async` 门闩，真
 CHECK lease 在目录发布之前只有唯一 sealer，可用单写者 st_dev 初始化 RUNNABLE；保留初始化后的 DSB，随后才发布目录位。发布后的 claim、release、finish 仍使用原子交权，不能将初始化证明扩展到多写者更新。
 
 CHECK目录仍按64组扫描，两个32位半区可各自映射到CntNotify；实际不足32组的尾部只申请一个通知。唯一成功sealer通过BIT_WR置位，只有成功完成lease终态CAS的CHECK owner才能通过BIT_CLR清位并提交Q。通知不返回旧bit，因此重复登记或重复完成必须在原有seal/lease协议中拒绝，不能依赖OR/CLR辨认唯一owner。目录扫描仅读取剩余有效半区；映射不足的半区保留GM CAS路径，可与已映射半区共存。目录地址由Host写入后不可变，运行中不对包含GM bits的目录行做cached store或DCCI写回；每轮READY前清零SRAM，通知池仍按prepared slot、用途和capture租约复用。纯同步图不创建这类通知。
+
+全局`resolved_task_count`以每轮一个CntNotify记录已完成的逻辑task数。普通/MIX最终贡献者、异步FINISH owner、计数链的唯一accountant及控制节点CAS胜者各自恰好报告一次INC(1)；物理返回而异步条件尚未完成不报告。删除本核`pending_completed`、批量阈值、时间阈值及idle/exit flush。Host已完成节点仍单独记入`inline_completed_count`，不产生device信用。AICPU从同一个SRAM值判断进度、超时及结束，目标为`expected_task_count-inline_completed_count`；超过目标立即失败。
+
+RUN_PROGRESS资源沿prepared-slot/capture租约保留，每轮READY前清零；目标超过32位范围或资源不足时整轮使用每task一次64位GM FAA，不恢复批量机制。INC封装不追加DSB，沿用各完成路径已有的数据发布和无条件退休屏障。达到全局目标只允许请求EXIT，不代表资源可立即复用；所有核退休后，AICPU才将真实SRAM计数写入GM诊断镜像并导出。后继许可仍基于各task的逻辑完成通知，不等待全局统计或canonical记账镜像。
 
 成功领取 CHECK 后，只重新接收 AsyncGroupData 的首64B可写行和 progress 行，两条 DCCI 之后统一 DSB，再读取两者字段；header 后64B由 Host 初始化且整轮不可变，复用启动观察。目录与 lease、条件读取、CCU 事件消费及消费者 tensor 获取边界均保留。
 

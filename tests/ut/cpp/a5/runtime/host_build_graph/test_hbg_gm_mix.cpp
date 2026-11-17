@@ -843,7 +843,7 @@ TEST(HbgClusterMixArgsDump, LastSnapshotHoldsExistingCompletionAcrossThreeWaves)
         EXPECT_EQ(scheduler_cluster_mix_armed(fixture.signal(0)->armed_generation), block == 2);
         EXPECT_FALSE(fixture.task_done(0));
         EXPECT_EQ(fixture.control(1)->next_block, 0u);
-        EXPECT_EQ(local->pending_completed, 0u);
+        EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     }
     EXPECT_EQ(visible, (std::array<uint32_t, 9>{1, 2, 3, 4, 5, 6, 7, 8, 9}));
     EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 6u);
@@ -857,7 +857,7 @@ TEST(HbgClusterMixArgsDump, LastSnapshotHoldsExistingCompletionAcrossThreeWaves)
     EXPECT_EQ(fixture.signal(0)->staged_mask, 0u);
     ASSERT_TRUE(fixture.task_done(0));
     EXPECT_TRUE(fixture.task_done(0));
-    EXPECT_EQ(fixture.locals[0]->pending_completed, 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 1u);
     EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 9u);
     uint32_t successor_entries = 0;
     for (uint32_t step = 0; step < 8; ++step) {
@@ -1224,9 +1224,8 @@ TEST_P(HbgClusterMixMultiWave, EveryReturnPrecedesExactlyOneSuccessor) {
         for (uint32_t pass = 0; pass < 4 && !done; ++pass)
             ASSERT_TRUE(fixture.drain(worker, &done));
         EXPECT_TRUE(done);
-        scheduler_flush_completions(fixture.run(), fixture.locals[worker]);
     }
-    EXPECT_EQ(fixture.run()->resolved_task_count, 2u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 2u);
     EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
 }
 
@@ -1293,9 +1292,7 @@ TEST_P(HbgClusterMixShapes, RealOwnDispatchAndCompletionKeepEveryLogicalBlockAnd
     EXPECT_TRUE(std::all_of(done.begin(), done.end(), [](bool value) {
         return value;
     }));
-    for (uint32_t worker = 0; worker < 6; ++worker)
-        scheduler_flush_completions(fixture.run(), fixture.locals[worker]);
-    EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->resolved_task_count, UINT64_C(0)), 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 1u);
     EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->scheduler_error, UINT64_C(0)), 0u);
 }
 
@@ -1979,7 +1976,7 @@ TEST(HbgGmMix, PublishedRunErrorRejectsAlreadyPreparedKernelEntryOnEveryActiveLa
             EXPECT_EQ(local->slots[slot].state, SchedulerDispatchSlotState::READY);
         }
         EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 0u);
-        EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+        EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     }
 }
 
@@ -2064,7 +2061,7 @@ TEST(HbgGmMix, InvalidDiscoveredFaninRejectsNewAdmissionAndPreviouslyPermittedKe
         EXPECT_EQ(fixture.locals[lane]->slots[slot].state, SchedulerDispatchSlotState::READY);
     }
     EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 0u);
-    EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     EXPECT_EQ(scheduler_read_error(fixture.run()), first_error);
     EXPECT_EQ(fixture.run()->error_site, first_site);
     EXPECT_EQ(fixture.run()->error_task_ref, first_task);
@@ -2087,7 +2084,7 @@ TEST(HbgGmMix, PublishedRunErrorDoesNotTurnReleasedLanesIntoSuccessfulBlockCompl
         );
         EXPECT_EQ(fixture.retire(0), SchedulerGmMixResult::ERROR);
         EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 0u);
-        EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+        EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
         EXPECT_EQ(fixture.frontier(0), 0u);
     }
 }
@@ -2155,10 +2152,10 @@ TEST(HbgGmMix, FatalRunStillRetiresRealReturnsWithoutCompletingTheTask) {
                             lane == 0 ? 0u : SCHEDULER_GROUP_SEQUENCE_LIMIT | 1u
                         );
                     else EXPECT_EQ(fixture.signal(0)->finished[lane], fixture.signal(0)->armed_generation + 1);
-                    EXPECT_EQ(local->pending_completed, 0u);
+                    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
                 }
                 EXPECT_EQ(fixture.control(0)->completion_state, completion_before);
-                EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+                EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
                 EXPECT_FALSE(fixture.task_done(0));
                 EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::ASYNC_SEAL_FAILED));
             }
@@ -2207,7 +2204,7 @@ TEST(HbgGmMix, CancelUnstartedTicketsAndOwnedCallsNeverContributesOrReturnsThem)
         );
         EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 0u);
         EXPECT_EQ(fixture.control(0)->next_block, 1u);
-        EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+        EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     }
 }
 
@@ -2242,7 +2239,7 @@ TEST(HbgClusterMix, CancelFutureReservationDoesNotAcknowledgeAnArmedGroup) {
     EXPECT_EQ(fixture.signal(0)->anchor_state, armed_anchor);
     for (uint32_t lane = 0; lane < 3; ++lane)
         EXPECT_EQ(fixture.signal(0)->finished[lane], 0u);
-    EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
 }
 
 TEST(HbgGmMix, PublishedRunErrorDoesNotSealALocallyCompletedSyncTask) {
@@ -2474,7 +2471,7 @@ TEST(HbgGmMix, KernelReturnWithoutCompletionReleaseDoesNotRetireTheGroup) {
         scheduler_completion_task_state(scheduler_gm_query(fixture.control(0)->completion_state)),
         static_cast<int64_t>(SchedulerTaskState::DONE)
     );
-    EXPECT_EQ(fixture.locals[3]->pending_completed, 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 1u);
     EXPECT_EQ(scheduler_cached_task_proof(fixture.locals[3], 0), SchedulerTaskProof::DONE);
 }
 
@@ -3101,13 +3098,10 @@ TEST(HbgGmMix, ExitDrainPublishesOutstandingGroupBeforeLogicalCompletion) {
             GmExecution execution{};
             ASSERT_TRUE(fixture.begin(worker, &execution));
             ASSERT_TRUE(fixture.complete(execution));
-            scheduler_flush_completions(fixture.run(), fixture.locals[worker]);
         }
         ASSERT_NO_FATAL_FAILURE(finish_sync_cluster(fixture, 1));
-        for (uint32_t worker : {3u, 4u, 5u})
-            scheduler_flush_completions(fixture.run(), fixture.locals[worker]);
         ASSERT_FALSE(fixture.task_done(0));
-        ASSERT_EQ(fixture.run()->resolved_task_count, 0u);
+        ASSERT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
         ASSERT_EQ(fixture.mailbox(0)->lanes[0].released_seq, 0u);
 
         bool done = true;
@@ -3121,8 +3115,7 @@ TEST(HbgGmMix, ExitDrainPublishesOutstandingGroupBeforeLogicalCompletion) {
             EXPECT_TRUE(done);
         }
         ASSERT_TRUE(fixture.task_done(0));
-        scheduler_flush_completions(fixture.run(), fixture.locals[0]);
-        EXPECT_EQ(fixture.run()->resolved_task_count, 1u);
+        EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 1u);
         EXPECT_EQ(scheduler_cluster_load_field(&fixture.frontier(0)), 1u);
         EXPECT_EQ(fixture.locals[0]->local_ready_mask, 0u);
         EXPECT_EQ(scheduler_completion_count(fixture.control(0)->completion_state), 4u);
@@ -3217,7 +3210,7 @@ TEST(HbgGmMix, MixFaninWaitsForLastSubtaskAndCoordinatorDiscoversSuccessorOnce) 
         scheduler_gm_query(fixture.control(1)->admission_state),
         static_cast<uint64_t>(SchedulerAdmissionState::INITIALIZED)
     );
-    EXPECT_EQ(fixture.locals[0]->pending_completed, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     ASSERT_EQ(fixture.claim(1), SchedulerBlockClaimResult::CLAIMED);
     ASSERT_TRUE(fixture.publish(1));
     ASSERT_TRUE(fixture.rendezvous(1));
@@ -3225,7 +3218,7 @@ TEST(HbgGmMix, MixFaninWaitsForLastSubtaskAndCoordinatorDiscoversSuccessorOnce) 
     ASSERT_EQ(fixture.retire(1), SchedulerGmMixResult::PROGRESS);
     ASSERT_TRUE(fixture.task_done(0));
     EXPECT_TRUE(fixture.task_done(0));
-    EXPECT_EQ(fixture.locals[3]->pending_completed, 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 1u);
     EXPECT_EQ(
         scheduler_gm_query(fixture.control(1)->admission_state),
         static_cast<uint64_t>(SchedulerAdmissionState::INITIALIZED)
@@ -3252,9 +3245,7 @@ TEST(HbgGmMix, MixFaninWaitsForLastSubtaskAndCoordinatorDiscoversSuccessorOnce) 
     EXPECT_EQ(
         scheduler_completion_count(scheduler_gm_fetch_add(fixture.control(1)->completion_state, UINT64_C(0))), 4u
     );
-    for (auto *local : fixture.locals)
-        scheduler_flush_completions(fixture.run(), local);
-    EXPECT_EQ(scheduler_gm_fetch_add(fixture.run()->resolved_task_count, UINT64_C(0)), 2u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 2u);
 }
 
 class HbgGmMixExitInFlight : public ::testing::TestWithParam<SchedulerGmMixPhase> {};

@@ -33,7 +33,10 @@ class NotificationPool final : public SchedulerNotificationStorage {
 public:
     NotificationPool(void *context, SchedulerNotificationPurpose purpose) :
         SchedulerNotificationStorage(context),
-        counter_(purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER),
+        counter_(
+            purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER ||
+            purpose == SchedulerNotificationPurpose::RUN_PROGRESS
+        ),
         bit_directory_(purpose == SchedulerNotificationPurpose::CHECK_DIRECTORY) {}
     size_t capacity() const override { return notifications_.size(); }
 

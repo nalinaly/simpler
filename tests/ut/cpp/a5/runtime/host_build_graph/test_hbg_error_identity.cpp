@@ -351,7 +351,7 @@ TEST(HbgErrorIdentity, ActualMixPreparationFailureRetainsTheClaimedBlock) {
     ));
     EXPECT_EQ(fixture.run()->error_site, static_cast<uint64_t>(SchedulerErrorSite::DISPATCH_MATERIALIZE_FAILED));
     EXPECT_EQ(read_identity(*fixture.run()), (Identity{61, 0, 2, 7, 1, 1}));
-    EXPECT_EQ(fixture.locals[1]->pending_completed, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
 }
 
 TEST(HbgErrorIdentity, AicoreFirstWriterSurvivesALaterAicpuTimeoutAndAnotherWorker) {
@@ -435,7 +435,7 @@ TEST(HbgErrorIdentity, NonExecutingCompletionNamesTheSlotWithoutGuessingFromTheO
     EXPECT_FALSE(scheduler_complete_own_slot(fixture.graph.graph(), fixture.base(), local, fixture.run(), 1, 0));
     EXPECT_EQ(read_identity(*fixture.run()), (Identity{61, 0, 2, UINT64_MAX, 1, 1}));
     EXPECT_EQ(read_valid_fields(*fixture.run()), 55u);
-    EXPECT_EQ(local->pending_completed, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
 }
 
 TEST(HbgErrorIdentity, ExtraCompletionRetainsItsBlockAndDoesNotCountSuccess) {
@@ -456,9 +456,9 @@ TEST(HbgErrorIdentity, ExtraCompletionRetainsItsBlockAndDoesNotCountSuccess) {
         SchedulerSubtaskFinishResult::ERROR
     );
     EXPECT_EQ(read_identity(*fixture.run()), (Identity{61, 0, 3, UINT64_MAX, 1, 1}));
-    EXPECT_EQ(local->pending_completed, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
     EXPECT_FALSE(scheduler_completion_valid(scheduler_gm_fetch_add(controls[0].completion_state, UINT64_C(0))));
-    EXPECT_EQ(fixture.run()->resolved_task_count, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.run()), 0u);
 }
 
 TEST(HbgErrorIdentity, RetiredGroupKeepsItsLastIdentityOnlyWhileItBelongsToTheCurrentTask) {

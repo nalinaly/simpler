@@ -576,6 +576,10 @@ struct alignas(64) SchedulerRunControl {
     volatile uint64_t scheduler_timeout_cycles;
     volatile uint64_t chip_swimlane_level;
     volatile uint64_t sampled_task_timing_enabled;
+    // One owned 32-bit CntNotify for this invocation. Zero addresses select
+    // immediate per-task GM reporting; neither address changes after READY.
+    uint64_t run_completed_read_address;
+    uint64_t run_completed_add_address;
 
     alignas(64) volatile uint64_t resolved_task_count;
     volatile uint64_t bootstrap_arrived_count;

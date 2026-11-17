@@ -262,9 +262,7 @@ struct SchedulerLocalState {
     SchedulerAsyncLocalState *async{nullptr};
     SCHEDULER_CLUSTER_SSBUF SchedulerClusterSignal *cluster_signal{nullptr};
     uint32_t *direct_slot{nullptr};
-    uint64_t pending_completed{0};
     uint32_t completion_accounting_ref{UINT32_MAX};
-    uint64_t last_completion_flush_cycles{0};
     uint32_t control_peer_cursor{0};
     uint32_t cluster_prepare_seen{0};
     SchedulerClusterMixLocalState cluster_mix{};
@@ -594,6 +592,15 @@ static inline __aicore__ void
 scheduler_publish_task_done(__gm__ void *base, const SchedulerLocalState *local, int64_t task_ref) {
     auto *notification = scheduler_done_notification_at(base, local, task_ref);
     if (notification != nullptr) scheduler_notify_done(*notification);
+}
+
+// Call exactly once from the logical-DONE owner. Data publication and any
+// required ordering of canonical DONE belong to that completion path. EXIT
+// requests still wait for every worker's unconditional retirement barrier.
+static inline __aicore__ void scheduler_report_task_completed(__gm__ SchedulerRunControl *run) {
+    if (run->run_completed_add_address != 0)
+        scheduler_notify_add(*reinterpret_cast<__gm__ volatile uint32_t *>(run->run_completed_add_address), 1);
+    else scheduler_gm_fetch_add_discard(run->resolved_task_count, UINT64_C(1));
 }
 
 static inline __aicore__ SchedulerCompletionObservation scheduler_observe_cached_completion(

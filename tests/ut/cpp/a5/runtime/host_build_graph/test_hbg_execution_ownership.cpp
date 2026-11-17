@@ -380,7 +380,7 @@ TEST(HbgExecutionRefill, CounterAccountingReusesOnlyAnObservedDoneProof) {
     ));
     EXPECT_FALSE(progress);
     EXPECT_EQ(notify_count, 1u);
-    EXPECT_EQ(fixture.local->pending_completed, 0u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.storage.run_control), 0u);
     value = 1;
     EXPECT_EQ(
         scheduler_observe_cached_completion(fixture.base(), fixture.local, 0), SchedulerCompletionObservation::DONE
@@ -391,13 +391,13 @@ TEST(HbgExecutionRefill, CounterAccountingReusesOnlyAnObservedDoneProof) {
     ));
     EXPECT_TRUE(progress);
     EXPECT_EQ(notify_count, 2u);
-    EXPECT_EQ(fixture.local->pending_completed, 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.storage.run_control), 1u);
     EXPECT_TRUE(scheduler_completion_done(fixture.control(0)->completion_state));
     ASSERT_TRUE(scheduler_service_counter_accounting(
         fixture.graph.graph(), fixture.base(), fixture.local, fixture.storage.run_control, &progress
     ));
     EXPECT_FALSE(progress);
-    EXPECT_EQ(fixture.local->pending_completed, 1u);
+    EXPECT_EQ(scheduler_test::resolved_count(fixture.storage.run_control), 1u);
 }
 
 TEST(HbgExecutionRefill, TicketOwnerKeepsLifecycleWithoutASecondOwnershipAtomic) {

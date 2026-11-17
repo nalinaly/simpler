@@ -1913,6 +1913,21 @@ bool create_scheduler_state(
         LOG_ERROR("A5 HBG: completion counter plan failed: %s", task_order_error.c_str());
         return false;
     }
+    // Progress has one resource per prepared slot, independently of graph
+    // width. Host-completed nodes remain outside the device-reported count.
+    SchedulerDoneNotifications run_progress_notification;
+    const uint64_t device_tasks = node_count - inline_completed_task_refs.size();
+    if (device_tasks != 0 && device_tasks <= UINT32_MAX) {
+        try {
+            if (api->acquire_scheduler_notifications(
+                    SchedulerNotificationPurpose::RUN_PROGRESS, 1, &run_progress_notification
+                ) != 0)
+                throw std::runtime_error("cannot acquire retained run progress notification");
+        } catch (const std::exception &error) {
+            LOG_ERROR("A5 HBG: cannot prepare run progress notification: %s", error.what());
+            return false;
+        }
+    }
     SchedulerDoneNotifications counter_notifications;
     try {
         if (api->acquire_scheduler_notifications(
@@ -2069,6 +2084,16 @@ bool create_scheduler_state(
     auto *run_control = scheduler_state_at<SchedulerRunControl>(host_base, layout.run_control_offset);
     run_control->expected_task_count = node_count;
     run_control->inline_completed_count = inline_completed_task_refs.size();
+    if (!run_progress_notification.addresses.empty() && run_progress_notification.addresses[0] != 0 &&
+        run_progress_notification.add_addresses[0] != 0) {
+        run_control->run_completed_read_address = run_progress_notification.addresses[0];
+        run_control->run_completed_add_address = run_progress_notification.add_addresses[0];
+    }
+    LOG_TIMING(
+        "A5 HBG: run progress backend=%s device_tasks=%" PRIu64 " inline_tasks=%zu",
+        run_control->run_completed_add_address != 0 ? "CntNotify-INC" : "GM-FAA", device_tasks,
+        inline_completed_task_refs.size()
+    );
     run_control->aic_worker_demand = aic_worker_demand;
     run_control->aiv_worker_demand = aiv_worker_demand;
     run_control->chip_swimlane_level = runtime->dev.chip_swimlane_level;
@@ -2140,6 +2165,8 @@ bool create_scheduler_state(
         reinterpret_cast<void *>(aligned_address), host_base, static_cast<size_t>(initialized_bytes),
         HostPhaseKind::Count, {}
     );
+    if (run_progress_notification.owner != nullptr)
+        runtime->retain_pending_resource(std::move(run_progress_notification.owner));
     if (counter_notifications.owner != nullptr)
         runtime->retain_pending_resource(std::move(counter_notifications.owner));
     if (notifications.owner != nullptr) runtime->retain_pending_resource(std::move(notifications.owner));

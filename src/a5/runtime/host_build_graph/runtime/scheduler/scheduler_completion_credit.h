@@ -87,7 +87,7 @@ static inline __aicore__ bool scheduler_contribute_mix_group(
     if (result == SchedulerSubtaskFinishResult::TASK_LAST) {
         scheduler_publish_task_done(base, local, task_ref);
         scheduler_remember_task_proof(local, task_ref, SchedulerTaskProof::DONE);
-        ++local->pending_completed;
+        scheduler_report_task_completed(run);
         if (owner != nullptr) {
             auto *actor =
                 &scheduler_state_at<SchedulerProtocolTaskTrace>(base, layout->tasks_offset)[task_ref].completion;
@@ -182,7 +182,10 @@ static inline __aicore__ bool scheduler_service_counter_accounting(
     );
     scheduler_protocol_task_actor(base, local, task, order, flags, true, false);
     scheduler_remember_task_proof(local, task, SchedulerTaskProof::DONE);
-    ++local->pending_completed;
+    // Successors consume the counter threshold, not this canonical mirror.
+    // EXIT cannot interrupt this call; the retirement barrier drains the mirror
+    // before AICPU reads final diagnostics, so reporting needs no extra DSB.
+    scheduler_report_task_completed(run);
     advance();
     return true;
 }
