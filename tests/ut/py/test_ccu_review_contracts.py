@@ -16,7 +16,17 @@ from simpler.task_interface import ChipCallable, CoreCallable
 
 @pytest.mark.parametrize("index", [0, 1])
 def test_extracted_child_repackages_without_padding_or_ccu_package(index):
-    children = [(i, CoreCallable.build(signature=[], binary=bytes([i + 1]))) for i in range(2)]
+    children = [
+        (
+            i,
+            CoreCallable.build(
+                signature=[],
+                binary=bytes([i + 1]),
+                async_capability={"version": 1, "mode": "SYNCHRONOUS", "max_conditions": 0, "condition_types": 0},
+            ),
+        )
+        for i in range(2)
+    ]
     parent = ChipCallable.build(
         signature=[], func_name="parent", binary=b"orchestration", children=children, ccu_modules=[b"module"]
     )

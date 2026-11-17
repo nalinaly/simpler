@@ -45,7 +45,7 @@ NUMBERS = {
     "admission": ("index run_epoch task_ref order_key block_num member_count active_mask flags record_offset"),
     "control": (
         "task_ref state next_block completed_subtasks admission_state canonical_total pending_compute completion_debt "
-        "completion_backend counter_index counter_threshold counter_limit"
+        "completion_backend counter_index counter_threshold counter_limit async_mask"
     ),
     "counter": "index value valid limit",
     "condition": "index run_epoch task_ref worker_index block_idx subtask_slot source credits",
@@ -229,11 +229,13 @@ def counter_chains(section):
     for control in section["task_controls"]:
         backend, index = control["completion_backend"], control["counter_index"]
         threshold, limit = control["counter_threshold"], control["counter_limit"]
+        task = tasks[control["task_ref"]]
+        if control["async_mask"] & ~task["active_mask"]:
+            _error("async completion mask contains an inactive lane")
         if backend == 0:
             if index != (1 << 64) - 1 or threshold != 0 or limit != 0:
                 _error("GM completion carries counter metadata")
             continue
-        task = tasks[control["task_ref"]]
         if (
             backend != 1
             or index not in counters
@@ -259,7 +261,7 @@ def counter_chains(section):
         for control in chain:
             ref = control["task_ref"]
             task = tasks[ref]
-            threshold += 2 * task["block_num"] * task["active_mask"].bit_count()
+            threshold += task["block_num"] * (task["active_mask"].bit_count() + control["async_mask"].bit_count())
             if control["counter_threshold"] != threshold or (
                 previous is not None and not _counter_ancestor(tasks, ref, previous)
             ):

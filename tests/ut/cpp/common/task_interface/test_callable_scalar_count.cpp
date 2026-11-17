@@ -28,7 +28,9 @@ std::vector<uint8_t> build_chip_callable(int32_t scalar_entries) {
 
     ArgDirection core_sig[1] = {ArgDirection::IN};
     const uint8_t kernel[] = {0x01, 0x02, 0x03, 0x04};
-    auto core = make_callable<CORE_MAX_TENSOR_ARGS>(core_sig, 1, kernel, sizeof(kernel));
+    auto core = make_callable<CORE_MAX_TENSOR_ARGS>(
+        core_sig, 1, kernel, sizeof(kernel), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
 
     const uint8_t fake_orch_so[] = {0x7f, 'E', 'L', 'F'};
     int32_t child_ids[1] = {3};

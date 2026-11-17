@@ -1123,12 +1123,14 @@ TEST_F(HbgBindLedgerTest, TaskImagePublicationMatchesTheDeviceArenaContract) {
         Runtime runtime;
         init_runtime(runtime);
         auto cleanup = cleanup_runtime(runtime);
-        auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+        auto callable =
+            make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
         reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
         const uint64_t objects[] = {reinterpret_cast<uint64_t>(callable.data())};
         const uint64_t entries[] = {0x1000};
         runtime.set_callable_tables(
-            objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1
+            objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1,
+            &reinterpret_cast<const CoreCallable *>(objects[0])->async_capability_
         );
         ChipStorageTaskArgs args;
         ASSERT_EQ(bind(runtime, args, nullptr, 0), 0);
@@ -1336,11 +1338,15 @@ TEST_F(HbgBindLedgerTest, AllMetadataSourcesSurviveBindAndPublishInOrder) {
 TEST_F(HbgBindLedgerTest, DelayedGraphRecordingKeepsItsOwningSubmitIndex) {
     Runtime runtime;
     init_runtime(runtime);
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     const uint64_t objects[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entries[] = {0x1000};
-    runtime.set_callable_tables(objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1);
+    runtime.set_callable_tables(
+        objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1,
+        &reinterpret_cast<const CoreCallable *>(objects[0])->async_capability_
+    );
     eps_ = {delayed_graph_recording_orch_entry, capture_orch_bind};
     ChipStorageTaskArgs args;
     ASSERT_EQ(bind(runtime, args, nullptr, 0), 0);
@@ -1368,11 +1374,15 @@ TEST_F(HbgBindLedgerTest, DelayedGraphRecordingKeepsItsOwningSubmitIndex) {
 TEST_F(HbgBindLedgerTest, ConcurrentGraphRecordingsKeepTheirOwnSubmitIndices) {
     Runtime runtime;
     init_runtime(runtime);
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     const uint64_t objects[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entries[] = {0x1000};
-    runtime.set_callable_tables(objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1);
+    runtime.set_callable_tables(
+        objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1,
+        &reinterpret_cast<const CoreCallable *>(objects[0])->async_capability_
+    );
     eps_ = {concurrent_graph_recording_orch_entry, capture_orch_bind};
     ChipStorageTaskArgs args;
     const uint64_t task_window[4] = {32, 0, 0, 0};
@@ -1419,7 +1429,8 @@ TEST_F(HbgBindLedgerTest, SchedulerModeChangesPublishOnlyThisRunsSources) {
     Runtime runtime;
     init_runtime(runtime);
     auto cleanup = cleanup_runtime(runtime);
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     // The one-entry function tables a registration would own for this callable:
     // the object view addresses the CoreCallable, the entry view carries the
@@ -1427,7 +1438,8 @@ TEST_F(HbgBindLedgerTest, SchedulerModeChangesPublishOnlyThisRunsSources) {
     const uint64_t object_table[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entry_table[] = {0x1000};
     runtime.set_callable_tables(
-        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1
+        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1,
+        &reinterpret_cast<const CoreCallable *>(object_table[0])->async_capability_
     );
     const bool a5 = std::strcmp(get_platform(), "a5sim") == 0;
     uint32_t resident_mode = 0;
@@ -1496,7 +1508,8 @@ TEST_F(HbgBindLedgerTest, SchedulerPublicationFailureAllowsFreshModeSelection) {
     Runtime runtime;
     init_runtime(runtime);
     auto cleanup = cleanup_runtime(runtime);
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     // The one-entry function tables a registration would own for this callable:
     // the object view addresses the CoreCallable, the entry view carries the
@@ -1504,7 +1517,8 @@ TEST_F(HbgBindLedgerTest, SchedulerPublicationFailureAllowsFreshModeSelection) {
     const uint64_t object_table[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entry_table[] = {0x1000};
     runtime.set_callable_tables(
-        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1
+        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1,
+        &reinterpret_cast<const CoreCallable *>(object_table[0])->async_capability_
     );
     const bool a5 = std::strcmp(get_platform(), "a5sim") == 0;
     for (TestOrchEntryFunc entry : {ordinary_orch_entry, recording_orch_entry, mixed_orch_entry}) {
@@ -1916,12 +1930,14 @@ TEST_F(HbgHostAccessContractTest, DisjointDeviceWriterDoesNotGrantHostAccess) {
         auto runtime_cleanup = cleanup_runtime(runtime);
         // a5sim resolves the callable metadata while constructing its scheduler
         // image, even though this memory backend never launches the kernel.
-        auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+        auto callable =
+            make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
         reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
         const uint64_t object_table[] = {reinterpret_cast<uint64_t>(callable.data())};
         const uint64_t entry_table[] = {0x1000};
         runtime.set_callable_tables(
-            object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1
+            object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1,
+            &reinterpret_cast<const CoreCallable *>(object_table[0])->async_capability_
         );
         std::vector<uint8_t> input(4, 0x17);
         ChipStorageTaskArgs args;
@@ -1951,12 +1967,14 @@ protected:
     // The one-entry function tables a registration would own: create_scheduler_state
     // refuses a task whose kernel id has no registered address.
     void install_callable_tables(Runtime &rt) {
-        callable_ = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+        callable_ =
+            make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
         reinterpret_cast<CoreCallable *>(callable_.data())->set_resolved_addr(0x1000);
         object_table_[0] = reinterpret_cast<uint64_t>(callable_.data());
         entry_table_[0] = 0x1000;
         rt.set_callable_tables(
-            object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1
+            object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1,
+            &reinterpret_cast<const CoreCallable *>(object_table_[0])->async_capability_
         );
     }
 
@@ -2013,7 +2031,8 @@ protected:
         second.runtime->dev.chip_swimlane_level = static_cast<uint32_t>(after.enable_chip_swimlane);
         install_callable_tables(*first.runtime);
         second.runtime->set_callable_tables(
-            object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1
+            object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1,
+            &reinterpret_cast<const CoreCallable *>(object_table_[0])->async_capability_
         );
         eps_ = {ordinary_orch_entry, capture_orch_bind};
         ChipStorageTaskArgs args;
@@ -2194,7 +2213,8 @@ TEST_F(HbgResidentSchedulerStorageTest, TwoPipelineSlotsHoldDistinctStorage) {
     auto cleanup_first = cleanup_runtime(first);
     install_callable_tables(first);
     second.set_callable_tables(
-        object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1
+        object_table_, reinterpret_cast<uint64_t>(object_table_), reinterpret_cast<uint64_t>(entry_table_), 1,
+        &reinterpret_cast<const CoreCallable *>(object_table_[0])->async_capability_
     );
     eps_ = {ordinary_orch_entry, capture_orch_bind};
     ChipStorageTaskArgs args;
@@ -2438,12 +2458,14 @@ TEST_F(HbgBindLedgerTest, AnOrdinaryRunAfterAGraphRunNamesNoSection) {
     // The ordinary run below selects a5's AICore scheduler, which resolves every
     // task's callable at bind, so this run needs the tables a registration would
     // have installed.
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     const uint64_t object_table[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entry_table[] = {0x1000};
     runtime.set_callable_tables(
-        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1
+        object_table, reinterpret_cast<uint64_t>(object_table), reinterpret_cast<uint64_t>(entry_table), 1,
+        &reinterpret_cast<const CoreCallable *>(object_table[0])->async_capability_
     );
     ChipStorageTaskArgs args;
 
@@ -2863,11 +2885,15 @@ TEST_F(HbgBindLedgerTest, LaunchStagingOwnsPrerequisitesAndImageWithoutPrepareDe
     Runtime runtime;
     init_runtime(runtime);
     auto cleanup = cleanup_runtime(runtime);
-    auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     reinterpret_cast<CoreCallable *>(callable.data())->set_resolved_addr(0x1000);
     const uint64_t objects[] = {reinterpret_cast<uint64_t>(callable.data())};
     const uint64_t entries[] = {0x1000};
-    runtime.set_callable_tables(objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1);
+    runtime.set_callable_tables(
+        objects, reinterpret_cast<uint64_t>(objects), reinterpret_cast<uint64_t>(entries), 1,
+        &reinterpret_cast<const CoreCallable *>(objects[0])->async_capability_
+    );
     struct Captured {
         void *target;
         std::vector<uint8_t> bytes;
@@ -2997,6 +3023,8 @@ TEST_F(HbgResidentSchedulerStorageTest, ArgsDumpUsesCurrentAicoreNodesAndCharged
         init_runtime(runtime);
         auto cleanup = cleanup_runtime(runtime);
         install_callable_tables(runtime);
+        // This publication-order case explicitly includes deferred storage.
+        reinterpret_cast<CoreCallable *>(callable_.data())->async_capability_ = {1, CoreAsyncMode::DEFERRED, 4, 3, 0};
         eps_ = {entry, capture_orch_bind};
         runtime.dev.dump_args_level = static_cast<uint32_t>(DumpArgsLevel::FULL);
         ChipStorageTaskArgs args;
@@ -3137,3 +3165,24 @@ TEST_F(HbgResidentSchedulerStorageTest, ArgsDumpExcludesPendingInlineControlOper
 }
 
 #endif
+
+TEST(HbgAsyncCapabilityBinding, UsesOnlyTheActiveCallableAndClearsOnRebind) {
+    Runtime runtime;
+    const uint64_t first_objects[] = {0x1000, 0, 0x3000};
+    const CoreAsyncCapability first_capabilities[] = {
+        {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}, {}, {1, CoreAsyncMode::DEFERRED, 4, 3, 0}
+    };
+    EXPECT_THROW(runtime.get_function_async_capability(0), std::invalid_argument);
+    runtime.set_callable_tables(first_objects, 0x4000, 0, 3, first_capabilities);
+    EXPECT_EQ(runtime.get_function_async_capability(0).mode, CoreAsyncMode::SYNCHRONOUS);
+    EXPECT_EQ(runtime.get_function_async_capability(2).max_conditions, 4);
+    EXPECT_THROW(runtime.get_function_async_capability(1), std::invalid_argument);
+    EXPECT_THROW(runtime.get_function_async_capability(-1), std::invalid_argument);
+    EXPECT_THROW(runtime.get_function_async_capability(3), std::invalid_argument);
+    const uint64_t second_objects[] = {0x5000};
+    runtime.set_callable_tables(second_objects, 0x6000, 0, 1);
+    EXPECT_THROW(runtime.get_function_async_capability(0), std::invalid_argument);
+    EXPECT_THROW(runtime.get_function_async_capability(2), std::invalid_argument);
+    runtime.clear_callable_tables();
+    EXPECT_THROW(runtime.get_function_async_capability(0), std::invalid_argument);
+}

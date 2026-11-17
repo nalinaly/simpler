@@ -629,7 +629,16 @@ def _compile_resident_fixture(output):
             extra_include_dirs=includes,
         )
         (output / f"core-{func_id}.elf").write_bytes(binary)
-        children.append((func_id, CoreCallable.build(signature=signature, binary=extract_text_section(binary))))
+        children.append(
+            (
+                func_id,
+                CoreCallable.build(
+                    signature=signature,
+                    binary=extract_text_section(binary),
+                    async_capability={"version": 1, "mode": "SYNCHRONOUS", "max_conditions": 0, "condition_types": 0},
+                ),
+            )
+        )
         source_hashes[str(source.relative_to(_ROOT))] = hashlib.sha256(source.read_bytes()).hexdigest()
     source = sources / "runtime_failure_orchestration.cpp"
     binary = compiler.compile_orchestration(
@@ -1101,7 +1110,16 @@ def _callable(arch, runtime, error_origin, failure, output):
         )
         signature = [ArgDirection.INOUT]
         kernel_binary = extract_text_section(kernel)
-        children = [(0, CoreCallable.build(signature=signature, binary=kernel_binary))]
+        children = [
+            (
+                0,
+                CoreCallable.build(
+                    signature=signature,
+                    binary=kernel_binary,
+                    async_capability={"version": 1, "mode": "SYNCHRONOUS", "max_conditions": 0, "condition_types": 0},
+                ),
+            )
+        ]
     else:
         source = (
             _ROOT / "tests/st/automatic_reported_fatal.cpp"

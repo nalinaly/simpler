@@ -164,6 +164,8 @@ enum class SchedulerDispatchSlotState : uint8_t {
 
 enum SchedulerTaskMetadataFlags : uint8_t {
     SCHEDULER_TASK_EXECUTABLE = 1U << 0,
+    // Host proved an actual fanin ancestor may publish deferred data.
+    SCHEDULER_TASK_ASYNC_INPUT = 1U << 1,
     SCHEDULER_TASK_MIX = 1U << 2,
     SCHEDULER_TASK_SPMD = 1U << 3,
     SCHEDULER_TASK_SYNC_START = 1U << 4,

@@ -562,7 +562,7 @@ flowchart LR
 
 供给游标检查分别读取一次 seal 与 next_block，不追加 `FAA(0)`。正向 seal 之后保留读侧 DSB，再检查 next_block，保证跨字观察顺序；seal 非法、游标越界或 seal 与游标不一致仍报错。实际取票和退款原子不变。
 
-异步计算关闭入口由最后计算返回授权，所有注册已经 seal；此时完成字的 C=0、债务以及 join.registered 均稳定。先用显式 DSB 排序本核的最后计算贡献，再以可靠 ld_dev 读取两个字校验，不追加 FAA(0)。并发 CHECK 只改变 join.pending，最终关闭和结算仍由原 RMW 返回值决定唯一 FINISH owner。该事实不授予一般跨字内存顺序，现有 payload 及 close 屏障继续保留。
+异步计算关闭入口由最后计算返回授权，所有注册已经 seal；调用方直接传入最后 physical FAA 的完成字结果，不重复读取 completion。deferred 路径在 close RMW 前执行 DSB，利用该 RMW 返回的 join 字校验并裁定唯一 FINISH owner，不追加 join 的 ld_dev。同步 checked 入口没有 close RMW，在读取 join 校验零登记之前保留 DSB。屏障排序本核最后贡献与后续共享操作，不能由贡献之前的屏障替代；并发 CHECK、payload 发布及其他数据可见性合同继续保留。
 
 ### 本轮不可变 Call 的缓存观察
 
@@ -844,6 +844,21 @@ GM MIX coordinator 的自身 ARRIVED/RELEASED 只更新本地 confirmed 与 fail
 
 async 登记的 canonical gate 只保存一个 task 级 `has_async` 门闩，真实 registered/pending 数量保留在现有 join。每个非空组照常执行一次 join.register FAA，并复用其返回值识别首注册者；只有首注册者执行 canonical 校验 CAS。它设置门闩之前不能提交自己的 physical return，所以其他组先返回或完成 CHECK 也不能误关 task。正常 gate 的 debt 为 remaining + has_async，close 校验门闩与合法非零 registered，FINISH CAS 从 `encode(total,0,1)` 转为 DONE；不新增等待 owner 或资源，零登记任务保持原同步路径。DFX 的 completion_debt 表示物理余量加门闩，不能当作剩余异步 group 数。
 
+### 按 lane 分类完成能力
+
+`async_capability` 是 kernel 注册时必须提供的静态合同，随 CoreCallable 保存并进入缓存身份。只接受 `SYNCHRONOUS` 和 `DEFERRED` 两种明确声明；缺失、非法类型或版本直接报错，不生成保守执行计划，也不能由某次运行没有登记条件推断为同步。注册入口验证每个 kernel 的声明，包括本次未使用的入口；缺失声明不能因未被执行而绕过检查。Host 在 Graph 展开后只按本次实际可执行的 leaf kernel、每个活动 lane 选择容量；未使用的合法 DEFERRED 声明不会给纯同步图增加异步布局。
+
+- `SYNCHRONOUS`：Host 容量为零，无 group、lease 和条件数组；Device 跳过 begin、条件数量检查和 seal，只提交物理完成 P。
+- `DEFERRED`：Host 按已验证的条件上界和类型声明分配；Device 返回时提交 P，空登记或最终 CHECK 提交 Q。
+
+纯同步图的 async layout 大小为零，不准备异步上下文，不探测 activity，也不运行 CHECK 服务。混合图只为可能异步的 lane 保留资源；同步 lane 不因同 task 或同图中其他 lane 的能力而分配异步组。预备 context 明确写入零 async 字段和无效 group 索引，重放不能沿用先前执行的登记状态。
+
+CntNotify 每任务目标贡献为 `block_num × (active_lane_count + possible_async_lane_count)`。同步普通执行返回仅写一次 INC；可能异步的普通执行零登记时可合并提交 P/Q 两个信用。有异步登记时，P/Q 分开提交。MIX 的 Q 只由具有异步组的 lane 提交，P 仍由 coordinator 在所有资源真实退休后按活动 lane 数提交。例：AIC 同步、两个 AIV 可能异步，每 block 为 P3+Q2，共5，不是6。
+
+SYNCHRONOUS 只描述自身完成语义，不表示前驱数据已经可见。前驱逻辑 DONE、正常依赖获取和必要的缓存/顺序操作仍然成立。Host 沿真实依赖传播 DEFERRED 祖先信息，只对确有此类祖先的任务设置输入获取标记；其他任务不查询全图 activity。所有执行计划都必须完成这个计算，缺少声明直接拒绝准备，不设置额外的保守兜底。带标记的消费者保留实际执行核上的获取。不能因为消费者自身同步就删除异步前驱的数据可见性保证。
+
+验证关注纯同步图零布局、混 lane 信用总数、DEFERRED 的零登记/实际 CHECK、无效声明被拒绝和重放。性能仍使用同一份业务二进制与注册元数据，对照12组 AICore L0 wall；声明来源和实际生效覆盖需要一并记录，不把未传入 runtime 的源码分类当成优化已生效。
+
 ### CntNotify 资源复用与控制状态选型
 
 DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publication/capture lease
@@ -882,8 +897,8 @@ SET映射与handle覆盖整个运行生命周期；派生ADD地址不独立map/u
 
 ### 当前 ADD 完成链实现
 
-- Host 将严格真实DAG祖先链映射到同一单调计数器，每任务保存固定累计阈值；每execution的目标贡献为P物理完成与Q条件完成两份。Host用64-bit累计，超过UINT32_MAX前拆链。独立任务不共享链，也不添加执行依赖。
-- 同步普通返回逻辑贡献2，实际发送两次32-bit写1；有defer时P、Q各发送一次写1。MIX计算lane在无条件封口或最终CHECK时贡献Q，coordinator在完整资源release后按active lane数贡献P。不能把提前准备、发票结束或仅物理返回当作逻辑完成。
+- Host 将严格真实DAG祖先链映射到同一单调计数器，每任务保存固定累计阈值；每execution具有P物理贡献，只有可能异步的lane再具有Q条件贡献。Host用64-bit累计，超过UINT32_MAX前拆链。独立任务不共享链，也不添加执行依赖。
+- 已知同步普通返回贡献1；可能异步的普通执行在本次零登记时贡献2，实际发送两次32-bit写1；有defer时P、Q各发送一次写1。MIX可能异步lane在无条件封口或最终CHECK时贡献Q，coordinator在完整资源release后按active lane数贡献P。不能把提前准备、发票结束或仅物理返回当作仍有条件的任务逻辑完成。
 - `scheduler_notify_add(credits)` 是逻辑批量贡献接口，实际只写已验证的命令1。数据发布前的DSB、消费者数据观察、kernel入口与退出的既有屏障保留；通知自身不机械增加逐次或尾DSB。读到完整阈值证明贡献已到达；探针批尾DSB的结果与此协议论证分开，实际无额外通知尾DSB的整网路径另行实测。
 - 后继直接读计数器并比较自己的阈值；计数器在一轮中只增不减，旧阈值永久有效，无bitmap、旧快照、run内reset或bank转交。每轮READY前仅由AICPU清零链头一次，publication/capture lease继续保护生命周期。
 - canonical GM账本按task一次有界归档，不阻塞fanin ready、固定owner或资源退休。DFX记录真实P/Q贡献区间、累计阈值和退出计数；不伪造FAA返回ticket，也不以归档时刻代替逻辑ready。

@@ -162,7 +162,8 @@ struct SchedulerLocalSlotState {
     bool gm_mix{false};
     bool cluster_mix{false};
     bool execution_token{false};
-    uint8_t completion_credits{2};
+    uint8_t completion_credits{1};
+    bool may_observe_async_inputs{false};
     uint64_t preclaim_order{UINT64_MAX};
 };
 
@@ -887,7 +888,8 @@ inline __aicore__ void scheduler_initialize_free_slot(SchedulerLocalSlotState *l
     local_slot->gm_mix = false;
     local_slot->cluster_mix = false;
     local_slot->execution_token = false;
-    local_slot->completion_credits = 2;
+    local_slot->completion_credits = 1;
+    local_slot->may_observe_async_inputs = false;
     local_slot->preclaim_order = UINT64_MAX;
     local_slot->block_idx = 0;
     local_slot->predicate = SchedulerPredicateState::UNEVALUATED;
@@ -1022,6 +1024,7 @@ static inline __aicore__ void scheduler_stage_dispatch_slot(
 ) {
     SchedulerLocalSlotState *local_slot = &scheduler->slots[slot_index];
     local_slot->task_ref = ready_claim.task_ref;
+    local_slot->may_observe_async_inputs = (metadata.flags & SCHEDULER_TASK_ASYNC_INPUT) != 0;
     scheduler->set_timing_slot(slot_index, metadata.timing_slot);
     local_slot->state = SchedulerDispatchSlotState::READY;
     local_slot->subtask_slot = subtask_slot;

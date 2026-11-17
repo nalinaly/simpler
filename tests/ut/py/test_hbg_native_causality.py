@@ -895,7 +895,7 @@ def test_compact_admission_accepts_64_only_alignment_and_rejects_bad_regions(mut
         audit_native_protocol(raw, identities)
 
 
-@pytest.mark.parametrize("flag", (2, 128))
+@pytest.mark.parametrize("flag", (128,))
 def test_current_cooperative_capture_rejects_independent_flag(flag):
     raw, identities = ProtocolBuilder([(1, 2, ())]).run()
     _set_claim_seal_observation(raw, identities)
@@ -1113,7 +1113,7 @@ def test_mix_group_completion_preserves_unique_credit_and_physical_retirement(fa
         audit_native_protocol(raw, identities)
 
 
-def _counter_capture(*, mask=1, separate=False, successor=False, sync=False):
+def _counter_capture(*, mask=1, separate=False, successor=False, sync=False, async_mask=None):
     shapes: list[tuple[int, int, tuple[int, ...]]] = [(mask, 2, ())]
     if successor:
         shapes.append((1, 1, (0,)))
@@ -1121,8 +1121,9 @@ def _counter_capture(*, mask=1, separate=False, successor=False, sync=False):
     raw, identities = builder.run()
     threshold = 0
     for task, control, actors in zip(raw["tasks"], raw["task_controls"], raw["task_events"], strict=True):
-        threshold += 2 * task["block_num"] * task["active_mask"].bit_count()
-        control.update(completion_backend=1, counter_index=0, counter_threshold=threshold)
+        task_async_mask = task["active_mask"] if async_mask is None else task["active_mask"] & async_mask
+        threshold += task["block_num"] * (task["active_mask"].bit_count() + task_async_mask.bit_count())
+        control.update(completion_backend=1, counter_index=0, counter_threshold=threshold, async_mask=task_async_mask)
         done = actors["completion"]
         done["flags"] = task["flags"] | COUNTER_ACCOUNTING | ((1 << 31) if separate else 0)
         when = builder.clock + 100 + 4 * task["task_ref"]
@@ -1133,16 +1134,20 @@ def _counter_capture(*, mask=1, separate=False, successor=False, sync=False):
     for block in raw["blocks"]:
         owner = block["owner"]
         mixed = bool(raw["tasks"][owner["task_ref"]]["flags"] & MIX)
+        may_defer = bool(raw["task_controls"][owner["task_ref"]]["async_mask"])
         owner.update(
             completion_ticket=(1 << 64) - 1,
-            completion_credits=owner["active_mask"].bit_count() if mixed else (1 if separate else 2),
+            completion_credits=owner["active_mask"].bit_count() if mixed else (1 if separate or not may_defer else 2),
         )
     for execution in raw["executions"]:
         task = raw["tasks"][execution["task_ref"]]
         mixed = bool(task["flags"] & MIX)
+        may_defer = bool(raw["task_controls"][execution["task_ref"]]["async_mask"] & (1 << execution["subtask_slot"]))
         if not mixed:
-            execution.update(contribution_ticket=(1 << 64) - 1, contribution_credits=1 if separate else 2)
-        if mixed or separate:
+            execution.update(
+                contribution_ticket=(1 << 64) - 1, contribution_credits=1 if separate or not may_defer else 2
+            )
+        if may_defer and (mixed or separate):
             when = execution["completion_consumed"][0] + 1
             raw["condition_contributions"].append(
                 dict(
@@ -1175,6 +1180,16 @@ def test_counter_successor_does_not_wait_for_deferred_gm_accounting():
     raw, identities = _counter_capture(successor=True)
     assert raw["executions"][-1]["entry"][0] < raw["task_events"][0]["completion"]["before"][0]
     assert audit_native_protocol(raw, identities)["protocol_verified"]
+
+
+@pytest.mark.parametrize(("mask", "async_mask"), [(1, 0), (3, 0), (7, 6)])
+def test_counter_sync_lanes_need_only_physical_credits(mask, async_mask):
+    raw, identities = _counter_capture(mask=mask, async_mask=async_mask)
+    assert raw["completion_counters"][0]["limit"] == 2 * (mask.bit_count() + async_mask.bit_count())
+    assert audit_native_protocol(raw, identities)["protocol_verified"]
+    raw["task_controls"][0]["async_mask"] ^= 1
+    with pytest.raises(ValueError, match="counter thresholds"):
+        audit_native_protocol(raw, identities)
 
 
 def test_counter_publication_can_be_observed_before_the_publishers_after_sample():

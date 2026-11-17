@@ -14,6 +14,7 @@ import errno
 import hashlib
 import json
 import os
+import runpy
 import shutil
 import struct
 import subprocess
@@ -28,6 +29,7 @@ from simpler_setup.scene_test_cache import compile_incore_artifact_key, get_or_c
 ROOT = Path(__file__).resolve().parents[1]
 MASK = (1 << 64) - 1
 MAGIC = 0x44535634544D5231
+CAPABILITY_WORDS = runpy.run_path(str(Path(__file__).with_name("async_capability.py")))["capability_words"]
 
 
 def publish(path, data):
@@ -257,7 +259,8 @@ def prepare(args):
     rows = [sig(signature), str(len(used))]
     for k in info["kernels"]:
         if k["id"] in used:
-            rows.append(f"{k['id']} {sig(k['signature'])} {json.dumps(str(binaries[k['id']]))}")
+            capability = " ".join(map(str, CAPABILITY_WORDS(kernels[k["id"]])))
+            rows.append(f"{k['id']} {sig(k['signature'])} {json.dumps(str(binaries[k['id']]))} {capability}")
     pack = output / "assembly.txt"
     pack.write_text("\n".join(rows) + "\n")
     subprocess.run(

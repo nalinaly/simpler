@@ -130,7 +130,8 @@ protected:
     std::unique_ptr<SchedulerContext> context = std::make_unique<SchedulerContext>();
     DeviceArena shared_arena;
     DeviceArena scheduler_arena;
-    std::vector<uint8_t> callable_storage = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    std::vector<uint8_t> callable_storage =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     uint64_t callables[1]{};
     std::array<TaskDescriptor, 4> tasks{};
     std::array<TaskPayload, 4> payloads{};

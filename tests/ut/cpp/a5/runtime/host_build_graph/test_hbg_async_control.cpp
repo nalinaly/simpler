@@ -380,6 +380,35 @@ TEST(HbgAsyncControl, BoundExecutionStillChecksTaskBlockAndLaneOnReturn) {
     }
 }
 
+TEST(HbgAsyncControl, CapableZeroConditionGroupStillPublishesItsReservedQAtPhysicalReturn) {
+    AsyncFixture f(1);
+    uint32_t count = 0;
+    auto *counter =
+        scheduler_state_at<SchedulerTaskCompletionCounter>(f.base(), f.storage.layout.completion_counters_offset);
+    counter[0] = {reinterpret_cast<uint64_t>(&count), reinterpret_cast<uint64_t>(&count), 2, 2};
+    f.storage.contexts[0].completion_counters_offset = f.storage.layout.completion_counters_offset;
+    f.workers[0].completion_counters_offset = f.storage.layout.completion_counters_offset;
+    const auto writer = f.start();
+    bool deferred = true;
+    ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, writer, &deferred));
+    EXPECT_FALSE(deferred);
+    auto &slot = f.local()->slots[0];
+    slot.task_ref = 0;
+    slot.block_idx = 0;
+    slot.subtask_slot = 0;
+    slot.state = SchedulerDispatchSlotState::EXECUTING;
+    slot.completion_credits = 2;  // Has a reserved group, but it sealed empty.
+    f.bind_package();
+    slot.execution_token = true;
+    ASSERT_TRUE(
+        (scheduler_complete_own_slot<false, true>(f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, 0))
+    );
+    EXPECT_EQ(count, 2u);
+    EXPECT_EQ(scheduler_completion_counter_observe(counter[0]), 1);
+    EXPECT_FALSE(f.check());
+    EXPECT_EQ(f.join().word, 0u);
+}
+
 TEST(HbgAsyncControl, AddConditionsBeforeOrAfterPhysicalReturnNeedNoGlobalJoinOrAccountingToReleaseFanin) {
     for (bool condition_first : {false, true}) {
         SCOPED_TRACE(condition_first);

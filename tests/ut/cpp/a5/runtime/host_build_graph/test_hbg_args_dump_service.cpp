@@ -60,7 +60,8 @@ protected:
         output.resize(input.size(), 7);
         const ArgDirection signature[] = {ArgDirection::IN, ArgDirection::OUT};
         const uint8_t binary = 0;
-        callable_storage = make_callable<CORE_MAX_TENSOR_ARGS>(signature, 2, &binary, 1);
+        callable_storage =
+            make_callable<CORE_MAX_TENSOR_ARGS>(signature, 2, &binary, 1, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
         callables[0] = reinterpret_cast<uint64_t>(callable_storage.data());
         for (uint32_t id = 0; id < storage.size(); ++id) {
             auto &entry = storage[id];

@@ -40,7 +40,10 @@ assert ctx
 results = []
 try:
     for index, kernel in enumerate(kernels):
-        child = CoreCallable.build(signature=[], binary=kernel.read_bytes())
+        child = CoreCallable.build(
+            signature=[], binary=kernel.read_bytes(),
+            async_capability={"version": 1, "mode": "SYNCHRONOUS", "max_conditions": 0, "condition_types": 0},
+        )
         chip = ChipCallable.build(signature=[], func_name="admission_orchestration",
                                   binary=orch.read_bytes(), children=[(0, child)])
         status = lib.simpler_register_callable(ctx, index, chip.buffer_ptr())

@@ -45,6 +45,7 @@
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "dispatch_payload.h"
 #include "callable_limits.h"
+#include "core_async_capability.h"
 #include "task_args.h"
 #include "aicore_teardown.h"
 #include "common/launch_entry_args.h"             // EntryArgsSource, LaunchEntryArgsPlan
@@ -401,8 +402,10 @@ public:
      * resolved-entry sibling — zero on a runtime whose device scheduler reads
      * no such view.
      */
-    void
-    set_callable_tables(const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len);
+    void set_callable_tables(
+        const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len,
+        const CoreAsyncCapability *async_capabilities = nullptr
+    );
 
     /**
      * Drop the function-table reference.

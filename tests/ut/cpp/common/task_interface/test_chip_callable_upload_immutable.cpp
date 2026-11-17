@@ -52,8 +52,12 @@ std::vector<uint8_t> build_test_chip_callable() {
     const uint8_t kernel1[] = {0xca, 0xfe, 0xba, 0xbe, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a};
 
     // This test exercises chip-callable upload/dedup, not the dump.
-    auto core0 = make_callable<CORE_MAX_TENSOR_ARGS>(core_sig, kCoreSig, kernel0, sizeof(kernel0));
-    auto core1 = make_callable<CORE_MAX_TENSOR_ARGS>(core_sig, kCoreSig, kernel1, sizeof(kernel1));
+    auto core0 = make_callable<CORE_MAX_TENSOR_ARGS>(
+        core_sig, kCoreSig, kernel0, sizeof(kernel0), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
+    auto core1 = make_callable<CORE_MAX_TENSOR_ARGS>(
+        core_sig, kCoreSig, kernel1, sizeof(kernel1), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
 
     const uint8_t fake_orch_so[] = {0x7f, 'E', 'L', 'F', 0xaa, 0xbb};
     int32_t child_ids[2] = {5, 7};

@@ -148,7 +148,9 @@ TEST(KernelEntryValidation, PrepareCallableChecksIdRangeAndImageSize) {
 }
 
 TEST(KernelEntryValidation, CallableImageAcceptsExpandedChildCapacity) {
-    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, kBinary, sizeof(kBinary));
+    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(
+        nullptr, 0, kBinary, sizeof(kBinary), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
     for (int32_t count : {1024, 1025, 1427, ChipCallable::MAX_CHILDREN - 1, ChipCallable::MAX_CHILDREN}) {
         SCOPED_TRACE(count);
         std::vector<int32_t> ids(count);
@@ -176,7 +178,9 @@ TEST(KernelEntryValidation, CallableImageRejectsChildCountOverflow) {
 }
 
 TEST(KernelEntryValidation, CallableImageRejectsTruncatedVariableTail) {
-    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, kBinary, sizeof(kBinary));
+    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(
+        nullptr, 0, kBinary, sizeof(kBinary), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
     const int32_t child_id = 7;
     const std::vector<uint8_t> children[] = {child};
     const auto image = make_chip_callable(nullptr, 0, "orch", kBinary, sizeof(kBinary), &child_id, children, 1, "");
@@ -186,7 +190,9 @@ TEST(KernelEntryValidation, CallableImageRejectsTruncatedVariableTail) {
 }
 
 TEST(KernelEntryValidation, CallableImageRejectsOutOfRangeChildMetadata) {
-    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, kBinary, sizeof(kBinary));
+    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(
+        nullptr, 0, kBinary, sizeof(kBinary), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
     const int32_t child_id = 7;
     const std::vector<uint8_t> children[] = {child};
     auto image = make_chip_callable(nullptr, 0, "orch", nullptr, 0, &child_id, children, 1, "");

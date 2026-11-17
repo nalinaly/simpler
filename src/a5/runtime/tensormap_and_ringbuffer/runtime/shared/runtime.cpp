@@ -104,8 +104,10 @@ uint64_t Runtime::get_function_bin_addr(int func_id) const {
 }
 
 void Runtime::set_callable_tables(
-    const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len
+    const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len,
+    const CoreAsyncCapability *async_capabilities
 ) {
+    (void)async_capabilities;
     if (host_view == nullptr || object_table_addr == 0 || len == 0) {
         clear_callable_tables();
         return;

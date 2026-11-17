@@ -42,7 +42,9 @@ constexpr uint64_t kDeviceBase = 0x7000'0000'0000ull;
 
 std::vector<uint8_t> make_core_child(uint8_t fill, uint32_t binary_size) {
     std::vector<uint8_t> binary(binary_size, fill);
-    return make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, binary.data(), binary_size);
+    return make_callable<CORE_MAX_TENSOR_ARGS>(
+        nullptr, 0, binary.data(), binary_size, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
 }
 
 // A ChipCallable whose children claim `func_ids`, with one distinctly filled
@@ -226,3 +228,35 @@ TEST(CallableFunctionTables, IdenticalBytesYieldIdenticalTables) {
 }
 
 }  // namespace
+
+TEST(CoreAsyncCapability, UsesExistingPaddingAndPreservesCodeIdentity) {
+    auto original = make_chip_with_children({0});
+    auto changed = original;
+    auto *chip = reinterpret_cast<ChipCallable *>(changed.data());
+    auto &child = const_cast<CoreCallable &>(chip->child(0));
+    EXPECT_EQ(child.async_capability().mode, CoreAsyncMode::SYNCHRONOUS);
+    EXPECT_EQ(child.async_capability().version, 1u);
+    child.async_capability_ = {1, CoreAsyncMode::DEFERRED, 4, 3, 0};
+    EXPECT_NO_THROW(validate_chip_callable_buffer(changed.data(), changed.size()));
+    EXPECT_EQ(CoreCallable::binary_data_offset(), 192u);
+    EXPECT_EQ(changed.size(), original.size());
+    const auto before = compute_chip_callable_layout(as_chip(original));
+    const auto after = compute_chip_callable_layout(chip);
+    EXPECT_NE(before.content_hash, after.content_hash);
+    EXPECT_EQ(before.aicore_image_hash, after.aicore_image_hash);
+    EXPECT_EQ(std::memcmp(as_chip(original)->child(0).binary_data(), child.binary_data(), child.binary_size()), 0);
+}
+
+TEST(CoreAsyncCapability, RejectsMissingAndInvalidDeclaration) {
+    EXPECT_FALSE(core_async_capability_valid({}));
+    EXPECT_FALSE(core_async_capability_valid({1, static_cast<CoreAsyncMode>(0), 0, 0, 0}));
+    EXPECT_TRUE(core_async_capability_valid({1, CoreAsyncMode::DEFERRED, 64, 3, 0}));
+    EXPECT_FALSE(core_async_capability_valid({0, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}));
+    EXPECT_FALSE(core_async_capability_valid({1, CoreAsyncMode::SYNCHRONOUS, 1, 0, 0}));
+    EXPECT_FALSE(core_async_capability_valid({1, CoreAsyncMode::DEFERRED, 0, 1, 0}));
+    EXPECT_FALSE(core_async_capability_valid({2, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}));
+    auto bytes = make_chip_with_children({0});
+    auto *chip = reinterpret_cast<ChipCallable *>(bytes.data());
+    const_cast<CoreCallable &>(chip->child(0)).async_capability_ = {0, CoreAsyncMode::DEFERRED, 1, 1, 0};
+    EXPECT_THROW(validate_chip_callable_buffer(bytes.data(), bytes.size()), std::invalid_argument);
+}

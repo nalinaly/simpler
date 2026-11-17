@@ -44,8 +44,12 @@ protected:
         const uint8_t first[] = {1, 2, 3, 4};
         const uint8_t second[124] = {5, 6, 7, 8};
         std::vector<uint8_t> children[] = {
-            make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, first, sizeof(first)),
-            make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, second, sizeof(second)),
+            make_callable<CORE_MAX_TENSOR_ARGS>(
+                nullptr, 0, first, sizeof(first), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+            ),
+            make_callable<CORE_MAX_TENSOR_ARGS>(
+                nullptr, 0, second, sizeof(second), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+            ),
         };
         const int32_t ids[] = {17, 3};
         const uint8_t orch[] = {0x7f, 'E', 'L', 'F'};

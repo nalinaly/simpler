@@ -460,8 +460,10 @@ static void release_run_tensor_leases(Runtime *runtime, const HostApi *api) {
 // Declined unless a runtime that schedules AICore differently links its own.
 // Outside the anonymous namespace below: an internal-linkage symbol cannot be
 // the weak half of an override.
-__attribute__((weak)) SchedulerExtensionResult
-scheduler_extension_select(Runtime *, const HostApi *, SharedMemoryHandle &, int32_t, const std::vector<SchedulerTaskMetadata> &, const std::vector<int64_t> &, const sm_layout::SegmentOffsets &, const void *) {
+__attribute__((weak)) SchedulerExtensionResult scheduler_extension_select(
+    Runtime *, const HostApi *, SharedMemoryHandle &, int32_t, const std::vector<SchedulerTaskMetadata> &,
+    const std::vector<int64_t> &, const sm_layout::SegmentOffsets &, const void *
+) {
     return SchedulerExtensionResult::DECLINED;
 }
 
@@ -1713,14 +1715,17 @@ bool create_scheduler_state(
          (!scheduler_layout_reserve(
               &layout.total_size, dump_layout.total_size, alignof(SchedulerArgsDumpHeader), &dump_offset
           ) ||
-          !scheduler_layout_checked_align(layout.total_size, pto2::resident::ASYNC_RECORD_ALIGNMENT, &layout.total_size)
-         ))) {
+          !scheduler_layout_checked_align(
+              layout.total_size, pto2::resident::ASYNC_RECORD_ALIGNMENT, &layout.total_size
+          )))) {
         LOG_ERROR("A5 HBG: task argument diagnostic image overflow");
         return false;
     }
 
     AsyncCompletionHostPlan async_plan;
     std::vector<AsyncTaskPlanInput> async_inputs;
+    std::vector<LaneMask> possible_async_lanes(task_metadata.size());
+    std::array<uint64_t, 2> capability_lanes{}, capability_executions{};
     for (uint32_t ref = 0; ref < task_metadata.size(); ++ref) {
         const auto &metadata = task_metadata[ref];
         if ((metadata.flags & SCHEDULER_TASK_EXECUTABLE) == 0 || scheduler_task_is_inline(metadata.flags)) continue;
@@ -1728,6 +1733,30 @@ bool create_scheduler_state(
         input.task_ref = ref;
         input.block_count = metadata.logical_block_num;
         input.active_mask = metadata.active_mask;
+        std::array<CoreAsyncCapability, 3> capabilities{};
+        for (uint32_t lane = 0; lane < 3; ++lane) {
+            if (!metadata.active_mask.has(static_cast<SubtaskSlot>(lane))) continue;
+            try {
+                capabilities[lane] = runtime->get_function_async_capability(metadata.kernel_ids[lane]);
+            } catch (const std::exception &error) {
+                LOG_ERROR(
+                    "A5 HBG: async capability unavailable for task=%u lane=%u kernel=%u: %s", ref, lane,
+                    metadata.kernel_ids[lane], error.what()
+                );
+                return false;
+            }
+        }
+        if (!async_task_apply_capabilities(&input, capabilities)) {
+            LOG_ERROR("A5 HBG: invalid async capability for leaf task=%u", ref);
+            return false;
+        }
+        for (uint32_t lane = 0; lane < 3; ++lane) {
+            if (!metadata.active_mask.has(static_cast<SubtaskSlot>(lane))) continue;
+            const auto mode = static_cast<uint32_t>(capabilities[lane].mode) - 1;
+            ++capability_lanes[mode];
+            capability_executions[mode] += metadata.logical_block_num;
+            if (input.capacities[lane] != 0) possible_async_lanes[ref].activate(static_cast<SubtaskSlot>(lane));
+        }
         async_inputs.push_back(input);
     }
     std::string async_error;
@@ -1738,6 +1767,13 @@ bool create_scheduler_state(
         LOG_ERROR("A5 HBG: async completion layout failed: %s", async_error.c_str());
         return false;
     }
+    LOG_TIMING(
+        "A5 HBG async capabilities: leaf_lanes synchronous=%" PRIu64 " deferred=%" PRIu64
+        " executions synchronous=%" PRIu64 " deferred=%" PRIu64 " groups=%u layout_offset=%" PRIu64
+        " async_bytes=%" PRIu64,
+        capability_lanes[0], capability_lanes[1], capability_executions[0], capability_executions[1],
+        async_plan.layout.group_count, async_plan.layout_offset, async_plan.total_bytes - async_plan.begin_offset
+    );
     layout.total_size = async_plan.total_bytes;
     layout.async_layout_offset = async_plan.layout_offset;
     layout.executable_subtask_count = executable_subtask_count;
@@ -1862,7 +1898,13 @@ bool create_scheduler_state(
                 metadata.logical_block_num, scheduler_task_lanes(metadata).count(), &executions
             ))
             return false;
-        counter_credits[ref] = executions * 2;
+        counter_credits[ref] = executions + metadata.logical_block_num * possible_async_lanes[ref].count();
+    }
+    if (!async_mark_input_visibility(
+            counter_fanin, task_catalog_plan.task_order, possible_async_lanes, &task_metadata
+        )) {
+        LOG_ERROR("A5 HBG: invalid dependency order for async input visibility");
+        return false;
     }
     SchedulerCompletionCounterPlan counter_plan;
     if (!scheduler_plan_completion_counters(
@@ -1916,8 +1958,7 @@ bool create_scheduler_state(
             return credits != 0;
         });
     const size_t mapped_counter_chains = std::count_if(
-        counter_notifications.add_addresses.begin(), counter_notifications.add_addresses.end(),
-        [](uint64_t address) {
+        counter_notifications.add_addresses.begin(), counter_notifications.add_addresses.end(), [](uint64_t address) {
             return address != 0;
         }
     );
@@ -2063,11 +2104,10 @@ bool create_scheduler_state(
     {
         std::scoped_lock lock(scheduler_state_owners_mutex);
         scheduler_state_owners.emplace(
-            runtime,
-            SchedulerStateOwner{
-                reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks),
-                std::move(protocol_source)
-            }
+            runtime, SchedulerStateOwner{
+                         reinterpret_cast<void *>(aligned_address), layout, api, std::move(protocol_tasks),
+                         std::move(protocol_source)
+                     }
         );
     }
     runtime->add_pending_metadata(

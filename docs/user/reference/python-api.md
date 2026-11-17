@@ -209,7 +209,10 @@ a child lookup does not enroll the owner's run.
 ## Callables and task args
 
 ```python
-CoreCallable.build(signature=[ArgDirection...], binary=kernel_bytes)
+CoreCallable.build(
+    signature=[ArgDirection...], binary=kernel_bytes,
+    async_capability={"version": 1, "mode": "SYNCHRONOUS", "max_conditions": 0, "condition_types": 0},
+)
 
 ChipCallable.build(
     signature=[ArgDirection...],
@@ -218,6 +221,12 @@ ChipCallable.build(
     children=[(func_id, core_callable), ...],
 )
 ```
+
+Every core callable requires an explicit version-1 `async_capability` declaration.
+`SYNCHRONOUS` requires zero `max_conditions` and `condition_types`; `DEFERRED`
+requires a bound of 1–64 conditions and a nonzero condition-type mask from 1–3.
+Missing declarations, `None`, `UNKNOWN`, and invalid bounds are rejected before
+registration. Scene specs require the same declaration on every `incores` entry.
 
 `ArgDirection` is `SCALAR`, `IN`, `OUT`, or `INOUT`. The signature list is
 positional and defines the task-arg order. `func_id` must match the id the

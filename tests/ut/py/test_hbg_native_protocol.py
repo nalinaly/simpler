@@ -80,6 +80,7 @@ def capture(epoch=0):
                 claim_tickets=0,
                 claim_seal=0,
                 completion_backend=0,
+                async_mask=0,
                 counter_index=(1 << 64) - 1,
                 counter_threshold=0,
                 counter_limit=0,
@@ -131,7 +132,9 @@ def test_task_order_metadata_survives_without_claiming_dependency_order():
 def test_counter_reader_preserves_unknown_observation_and_rejects_wrapped_values():
     raw = capture()
     raw["tasks"][0].update(flags=1, active_mask=1, kernel_ids=[0, 65535, 65535])
-    raw["task_controls"][0].update(completion_backend=1, counter_index=0, counter_threshold=2, counter_limit=2)
+    raw["task_controls"][0].update(
+        completion_backend=1, counter_index=0, counter_threshold=2, counter_limit=2, async_mask=1
+    )
     raw["completion_counters"] = [dict(index=0, value=0, valid=0, limit=2)]
     raw["condition_contributions"] = []
     assert read_native_protocol(raw) == raw

@@ -215,7 +215,9 @@ std::vector<uint8_t> loadable_kernel_bytes() {
 }
 
 std::vector<uint8_t> make_child(const std::vector<uint8_t> &binary) {
-    return make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, binary.data(), static_cast<uint32_t>(binary.size()));
+    return make_callable<CORE_MAX_TENSOR_ARGS>(
+        nullptr, 0, binary.data(), static_cast<uint32_t>(binary.size()), {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0}
+    );
 }
 
 // A ChipCallable whose children claim `func_ids`, each carrying `binary`.
@@ -324,6 +326,14 @@ TEST_F(SimCallablePoolTest, AnEmptyLaunchNeverEntersTheBackend) {
     EXPECT_EQ(outcome.prepared, nullptr);
     EXPECT_EQ(outcome.active, nullptr);
     EXPECT_EQ(runner.launch_calls, 0);
+}
+
+TEST_F(SimCallablePoolTest, RegistrationRejectsUndeclaredChildEvenWhenItIsUnused) {
+    auto chip = make_chip({0, 7}, kernel_, 0x12);
+    auto *image = reinterpret_cast<ChipCallable *>(chip.data());
+    const_cast<CoreCallable &>(image->child(1)).async_capability_ = {};
+    EXPECT_NE(register_host_orch(1, chip, nullptr), 0);
+    EXPECT_EQ(runner_.pool_size(), 0u);
 }
 
 TEST_F(SimCallablePoolTest, AFailedRegistrationPublishesNothing) {

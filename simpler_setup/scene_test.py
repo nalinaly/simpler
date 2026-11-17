@@ -1781,9 +1781,6 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
     ``l3_compile_cache_key`` so every path shares one cache entry per
     orchestration.
     """
-    if cache_key in _compile_cache:
-        return _compile_cache[cache_key]
-
     from simpler.task_interface import ChipCallable, CoreCallable  # noqa: PLC0415
 
     from .elf_parser import extract_text_section  # noqa: PLC0415
@@ -1792,6 +1789,27 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
 
     orch = spec["orchestration"]
     incores = spec["incores"]
+    capability_keys = []
+    for kernel in incores:
+        if "async_capability" not in kernel:
+            raise ValueError("each incore must declare async_capability as SYNCHRONOUS or DEFERRED")
+        # Validate before cache lookup or compilation through the same public
+        # constructor that owns the serialized declaration contract.
+        capability = CoreCallable.build(
+            signature=[], binary=b"", async_capability=kernel["async_capability"]
+        ).async_capability
+        capability_keys.append(
+            (
+                kernel["func_id"],
+                capability["version"],
+                capability["mode"],
+                capability["max_conditions"],
+                capability["condition_types"],
+            )
+        )
+    cache_key = (cache_key, tuple(capability_keys))
+    if cache_key in _compile_cache:
+        return _compile_cache[cache_key]
 
     pto_isa_root = ensure_pto_isa_root()
     kc = KernelCompiler(platform=platform)
@@ -1846,6 +1864,7 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
                     "func_id": k["func_id"],
                     "core_type": k["core_type"],
                     "signature": k.get("signature", []),
+                    "async_capability": k.get("async_capability"),
                     "artifact_key": incore_artifact_key,
                 }
                 for k, incore_artifact_key in zip(incores, incore_artifact_keys, strict=True)
@@ -1897,7 +1916,11 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
             kernel_binaries.append(
                 (
                     k["func_id"],
-                    CoreCallable.build(signature=k.get("signature", []), binary=incore),
+                    CoreCallable.build(
+                        signature=k.get("signature", []),
+                        binary=incore,
+                        async_capability=k["async_capability"],
+                    ),
                 )
             )
 

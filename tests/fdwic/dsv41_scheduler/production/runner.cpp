@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "chip_worker.h"
@@ -46,6 +47,21 @@ template <class T>
 T read(std::istream &stream) {
     T value;
     if (!(stream >> value)) throw std::runtime_error("Incomplete native input manifest");
+    return value;
+}
+
+CoreAsyncCapability read_capability(std::istream &stream) {
+    CoreAsyncCapability value{};
+    value.version = read<uint32_t>(stream);
+    const auto mode = read<uint32_t>(stream);
+    const auto capacity = read<uint32_t>(stream);
+    const auto types = read<uint32_t>(stream);
+    if ((mode != 1 && mode != 2) || capacity > 64 || types > 3)
+        throw std::runtime_error("Invalid kernel async capability fields");
+    value.mode = static_cast<CoreAsyncMode>(mode);
+    value.max_conditions = static_cast<uint8_t>(capacity);
+    value.condition_types = static_cast<uint8_t>(types);
+    if (!core_async_capability_valid(value)) throw std::runtime_error("Invalid kernel async capability contract");
     return value;
 }
 
@@ -119,6 +135,53 @@ int run(int argc, char **argv) {
         std::cout << "]}\n";
         return 0;
     }
+    if (argc == 5 && std::string(argv[1]) == "--declare-async-capabilities") {
+        auto packed = read_binary(argv[2]);
+        if (packed.size() < offsetof(ChipCallable, storage_))
+            throw std::runtime_error("Truncated callable for completion declaration");
+        std::ifstream declarations(argv[3]);
+        std::unordered_map<int32_t, CoreAsyncCapability> capabilities;
+        const auto count = read<size_t>(declarations);
+        for (size_t i = 0; i < count; ++i) {
+            const auto id = read<int32_t>(declarations);
+            if (!capabilities.emplace(id, read_capability(declarations)).second)
+                throw std::runtime_error("Duplicate kernel completion declaration");
+        }
+        const auto *callable = reinterpret_cast<const ChipCallable *>(packed.data());
+        const size_t storage_size = packed.size() - offsetof(ChipCallable, storage_);
+        if (callable->child_count() < 0 || callable->child_count() > ChipCallable::MAX_CHILDREN ||
+            callable->wire_version_ != CHIP_CALLABLE_WIRE_VERSION || callable->binary_size() > storage_size)
+            throw std::runtime_error("Invalid callable layout for completion declaration");
+        if (count != static_cast<size_t>(callable->child_count()))
+            throw std::runtime_error("Completion declarations must cover every registered kernel");
+        std::cout << '[';
+        for (int i = 0; i < callable->child_count(); ++i) {
+            const auto id = callable->child_func_ids_[i];
+            const auto declaration = capabilities.find(id);
+            if (declaration == capabilities.end()) throw std::runtime_error("Missing kernel completion declaration");
+            const auto relative = callable->child_offset(i);
+            if (relative % CALLABLE_ALIGN != 0 || relative < callable->binary_size() || relative > storage_size ||
+                CoreCallable::binary_data_offset() > storage_size - relative)
+                throw std::runtime_error("Truncated kernel for completion declaration");
+            const auto *old = &callable->child(i);
+            if (old->binary_size() > storage_size - relative - CoreCallable::binary_data_offset())
+                throw std::runtime_error("Truncated kernel binary for completion declaration");
+            const size_t offset = reinterpret_cast<const uint8_t *>(old) - packed.data();
+            auto *child = reinterpret_cast<CoreCallable *>(packed.data() + offset);
+            child->async_capability_ = declaration->second;
+            if (i != 0) std::cout << ',';
+            std::cout << "{\"func_id\":" << id
+                      << ",\"metadata_offset\":" << offset + offsetof(CoreCallable, async_capability_)
+                      << ",\"binary_offset\":" << offset + CoreCallable::binary_data_offset()
+                      << ",\"binary_size\":" << child->binary_size() << '}';
+        }
+        std::cout << "]\n";
+        validate_chip_callable_buffer(packed.data(), packed.size());
+        std::ofstream target(argv[4], std::ios::binary);
+        target.write(reinterpret_cast<const char *>(packed.data()), packed.size());
+        if (!target) throw std::runtime_error("Cannot write declared kernel bundle");
+        return 0;
+    }
     if (argc == 5 && std::string(argv[1]) == "--assemble-orchestration") {
         std::ifstream manifest(argv[2]);
         auto signature = [&] {
@@ -138,8 +201,11 @@ int run(int argc, char **argv) {
             std::string path;
             if (!(manifest >> std::quoted(path))) throw std::runtime_error("Missing cached kernel path");
             const auto binary = read_binary(path);
+            const auto capability = read_capability(manifest);
             children.push_back(
-                make_callable<CORE_MAX_TENSOR_ARGS>(directions.data(), directions.size(), binary.data(), binary.size())
+                make_callable<CORE_MAX_TENSOR_ARGS>(
+                    directions.data(), directions.size(), binary.data(), binary.size(), capability
+                )
             );
         }
         const auto orchestration = read_binary(argv[3]);

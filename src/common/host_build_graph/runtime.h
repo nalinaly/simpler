@@ -43,6 +43,7 @@
 #include "common/platform_config.h"
 #include "aicpu/platform_aicpu_affinity.h"  // MAX_GATE_THREADS (aicpu_allowed_cpus bound)
 #include "callable_limits.h"
+#include "core_async_capability.h"
 #include "task_args.h"
 #include "aicore_teardown.h"
 #include "common/launch_entry_args.h"     // LaunchEntryArgsPlan
@@ -242,7 +243,9 @@ struct alignas(64) SchedulerBootstrapInputs {
 };
 
 static_assert(sizeof(SchedulerBootstrapInputs) == 64);
-static_assert(std::is_standard_layout_v<SchedulerBootstrapInputs> && std::is_trivially_copyable_v<SchedulerBootstrapInputs>);
+static_assert(
+    std::is_standard_layout_v<SchedulerBootstrapInputs> && std::is_trivially_copyable_v<SchedulerBootstrapInputs>
+);
 
 // =============================================================================
 // Runtime Class
@@ -483,6 +486,7 @@ private:
         // the first is a host pointer, and because the host lookup must not
         // reach for the device address `dev` carries.
         const uint64_t *callable_table_host_;
+        const CoreAsyncCapability *callable_async_capabilities_;
         uint64_t callable_entry_table_addr_;
 
         // Host-side tensor ledger for the run's H2D and D2H transfers.
@@ -709,6 +713,7 @@ public:
      * the descriptor carries is never dereferenced here.
      */
     uint64_t get_function_bin_addr(int func_id) const;
+    CoreAsyncCapability get_function_async_capability(int func_id) const;
 
     /**
      * Bind this run to one registration-owned function-table pair.
@@ -719,8 +724,10 @@ public:
      * resolved-entry sibling — zero on a runtime whose device scheduler reads
      * no such view.
      */
-    void
-    set_callable_tables(const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len);
+    void set_callable_tables(
+        const uint64_t *host_view, uint64_t object_table_addr, uint64_t entry_table_addr, uint32_t len,
+        const CoreAsyncCapability *async_capabilities = nullptr
+    );
 
     /**
      * Drop the function-table reference.

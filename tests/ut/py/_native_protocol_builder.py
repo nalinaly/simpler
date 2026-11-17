@@ -86,6 +86,7 @@ class ProtocolBuilder:
                     claim_tickets=0,
                     claim_seal=0,
                     completion_backend=0,
+                    async_mask=0,
                     counter_index=MAX,
                     counter_threshold=0,
                     counter_limit=0,

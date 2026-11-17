@@ -312,7 +312,8 @@ struct IteratorDescriptor {
 
 TEST_F(ResumableDumpTest, ResumableEnumerationAndBlockingWrapperShareSelectionAndScalarBits) {
     const ArgDirection directions[] = {ArgDirection::IN, ArgDirection::OUT};
-    const auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(directions, 2, nullptr, 0);
+    const auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(directions, 2, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     IteratorDescriptor descriptor{simpler::ut::test_task_id(42), {7, 8, 9}};
     IteratorPayload payload;
     payload.tensors[0].buffer.addr = reinterpret_cast<uint64_t>(source.data());
@@ -364,7 +365,8 @@ TEST_F(ResumableDumpTest, ResumableEnumerationAndBlockingWrapperShareSelectionAn
 TEST_F(ResumableDumpTest, IteratorKeepsPartialMasksTypedScalarAndAmbiguityFlags) {
     dump_args_init(2, DumpArgsLevel::PARTIAL);
     const ArgDirection directions[] = {ArgDirection::IN, ArgDirection::OUT};
-    const auto callable = make_callable<CORE_MAX_TENSOR_ARGS>(directions, 2, nullptr, 0);
+    const auto callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(directions, 2, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     IteratorDescriptor descriptor{simpler::ut::test_task_id(43), {7, 8, 9}};
     IteratorPayload payload;
     auto get_bin = [&](int32_t) {

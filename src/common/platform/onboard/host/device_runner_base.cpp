@@ -2413,6 +2413,18 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     // scratch fill, the patch, the table fill and the copy — allocates nothing.
     std::vector<uint8_t> scratch(alloc_size);
     std::vector<uint64_t> object_table(table_len, 0);
+    std::vector<CoreAsyncCapability> async_capabilities(table_len);
+    for (int32_t index = 0; index < callable->child_count(); ++index) {
+        const auto capability = callable->child(index).async_capability();
+        if (!core_async_capability_valid(capability)) {
+            LOG_ERROR(
+                "CoreCallable func_id=%d requires an explicit SYNCHRONOUS or DEFERRED capability",
+                callable->child_func_id(index)
+            );
+            return 0;
+        }
+        async_capabilities[callable->child_func_id(index)] = capability;
+    }
     std::vector<uint64_t> entry_table;
     if (want_entry_table) entry_table.assign(table_len, 0);
 
@@ -2496,6 +2508,7 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     }
     auto inserted = chip_callable_buffers_.emplace(layout.content_hash, std::move(retained));
     inserted.first->second.object_table = std::move(object_table);
+    inserted.first->second.async_capabilities = std::move(async_capabilities);
     published = true;
     LOG_DEBUG(
         "Uploaded chip callable: chip_dev=0x%lx, size=%zu, child_count=%d, table_len=%u, hash=0x%lx", chip_dev,
@@ -3059,7 +3072,8 @@ int DeviceRunnerBase::bind_callable_to_runtime(
     const ChipCallableBuffer &tables = block->second;
     runtime.set_callable_tables(
         tables.object_table.empty() ? nullptr : tables.object_table.data(), tables.object_table_dev,
-        tables.entry_table_dev, tables.table_len
+        tables.entry_table_dev, tables.table_len,
+        tables.async_capabilities.empty() ? nullptr : tables.async_capabilities.data()
     );
     // Tell the AICPU which orch_so_table_ slot this run dispatches. The orch SO
     // descriptor itself was delivered at register time via RegisterCallableArgs.

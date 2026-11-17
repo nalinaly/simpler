@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "scheduler/scheduler_graph.h"
+#include "scheduler/scheduler_async_layout.h"
 #include "scheduler/scheduler_types.h"
 
 struct SchedulerProtocolTaskSpec {
@@ -381,6 +382,22 @@ completion_counters(JsonObject &root, const Image &image, const AicoreSchedulerL
     return task_indices;
 }
 
+inline std::vector<LaneMask> async_masks(const Image &image, const AicoreSchedulerLayout &layout) {
+    std::vector<LaneMask> result(layout.task_count);
+    if (layout.async_layout_offset == 0) return result;
+    const auto &async = *image.array<SchedulerAsyncLayout>(layout.async_layout_offset, 1);
+    if (async.task_count != layout.task_count) throw std::invalid_argument("async protocol task count mismatch");
+    const auto *map = image.array<uint32_t>(async.task_map_offset, async.task_count);
+    const auto *tasks = image.array<SchedulerAsyncTaskData>(async.task_data_offset, async.async_task_count);
+    for (uint64_t ref = 0; ref < layout.task_count; ++ref) {
+        if (map[ref] == pto2::resident::ASYNC_INVALID_INDEX) continue;
+        if (map[ref] >= async.async_task_count || tasks[map[ref]].task_ref != static_cast<int64_t>(ref))
+            throw std::invalid_argument("async protocol task map mismatch");
+        result[ref] = tasks[map[ref]].async_mask;
+    }
+    return result;
+}
+
 }  // namespace scheduler_protocol_export
 
 inline std::string scheduler_export_protocol(
@@ -485,6 +502,7 @@ inline std::string scheduler_export_protocol(
         out << ']';
         admissions(root, image, layout);
         const auto counter_indices = completion_counters(root, image, layout);
+        const auto task_async_masks = async_masks(image, layout);
         const auto *counters =
             image.array<SchedulerTaskCompletionCounter>(layout.completion_counters_offset, plan.task_count);
         const auto *controls = image.array<SchedulerTaskControl>(layout.task_controls_offset, plan.task_count);
@@ -510,20 +528,19 @@ inline std::string scheduler_export_protocol(
             row.number("counter_index", counter_indices[task]);
             row.number("counter_threshold", counted ? counters[task].threshold : 0);
             row.number("counter_limit", counted ? counters[task].limit : 0);
+            row.lane_mask("async_mask", task_async_masks[task]);
         }
         out << ']';
         sparse(
             root, "task_events", image.array<SchedulerProtocolTaskTrace>(plan.tasks_offset, plan.task_count),
-            plan.task_count,
-            [](JsonObject &row, const auto &record) {
+            plan.task_count, [](JsonObject &row, const auto &record) {
                 actor(row, "admission", record.admission);
                 actor(row, "completion", record.completion);
             }
         );
         sparse(
             root, "members", image.array<SchedulerProtocolMemberTrace>(plan.members_offset, plan.member_count),
-            plan.member_count,
-            [](JsonObject &row, const auto &record) {
+            plan.member_count, [](JsonObject &row, const auto &record) {
                 row.stamp("observed", record.observed);
                 row.stamp("closed", record.closed);
                 row.number("run_epoch", record.run_epoch);
@@ -542,8 +559,7 @@ inline std::string scheduler_export_protocol(
         );
         sparse(
             root, "blocks", image.array<SchedulerProtocolBlockTrace>(plan.blocks_offset, plan.trace_count),
-            plan.trace_count,
-            [](JsonObject &row, const auto &record) {
+            plan.trace_count, [](JsonObject &row, const auto &record) {
                 block_owner(row, record.owner);
                 claim_certificate(row, record.claim);
                 sparse(row, "lanes", record.lanes, 3, lane);
@@ -556,8 +572,7 @@ inline std::string scheduler_export_protocol(
         sparse(
             root, "condition_contributions",
             image.array<SchedulerProtocolConditionContribution>(plan.condition_contributions_offset, plan.trace_count),
-            plan.trace_count,
-            [](JsonObject &row, const auto &record) {
+            plan.trace_count, [](JsonObject &row, const auto &record) {
                 row.stamp("before", record.before);
                 row.stamp("after", record.after);
                 row.number("run_epoch", record.run_epoch);

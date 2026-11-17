@@ -1129,6 +1129,7 @@ protected:
         // registration's dlopen resolved, which is what a device consumer of
         // resolved entries would dispatch through.
         std::vector<uint64_t> object_table;
+        std::vector<CoreAsyncCapability> async_capabilities;
         std::vector<uint64_t> entry_table;
         uint64_t object_table_dev{0};
         uint64_t entry_table_dev{0};

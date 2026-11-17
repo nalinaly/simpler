@@ -1048,7 +1048,8 @@ int SimDeviceRunnerBase::bind_callable_to_runtime(
     const ChipCallableBuffer &tables = block->second;
     runtime.set_callable_tables(
         tables.object_table.empty() ? nullptr : tables.object_table.data(), tables.object_table_dev,
-        tables.entry_table_dev, tables.table_len
+        tables.entry_table_dev, tables.table_len,
+        tables.async_capabilities.empty() ? nullptr : tables.async_capabilities.data()
     );
     // The AICPU dispatches the orch SO via this callable_id; the SO descriptor
     // was already delivered at launch_device_register time.
@@ -1679,6 +1680,18 @@ uint64_t SimDeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *ca
     // only raw resource it owns is created with nothing fallible left between
     // it and the guard that owns it. Filling these below allocates nothing.
     std::vector<uint64_t> object_table(table_len, 0);
+    std::vector<CoreAsyncCapability> async_capabilities(table_len);
+    for (int32_t index = 0; index < callable->child_count(); ++index) {
+        const auto capability = callable->child(index).async_capability();
+        if (!core_async_capability_valid(capability)) {
+            LOG_ERROR(
+                "CoreCallable func_id=%d requires an explicit SYNCHRONOUS or DEFERRED capability",
+                callable->child_func_id(index)
+            );
+            return 0;
+        }
+        async_capabilities[callable->child_func_id(index)] = capability;
+    }
     std::vector<uint64_t> entry_table;
     if (want_entry_table) entry_table.assign(table_len, 0);
     std::vector<void *> dlopen_handles;
@@ -1792,6 +1805,7 @@ uint64_t SimDeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *ca
     auto inserted = chip_callable_buffers_.emplace(layout.content_hash, std::move(retained));
     ChipCallableBuffer &owner = inserted.first->second;
     owner.object_table = std::move(object_table);
+    owner.async_capabilities = std::move(async_capabilities);
     owner.entry_table = std::move(entry_table);
     owner.dlopen_handles = std::move(dlopen_handles);
     published = true;

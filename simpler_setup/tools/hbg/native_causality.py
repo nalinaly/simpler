@@ -28,6 +28,7 @@ from .native_protocol import (
 
 MAX = (1 << 64) - 1
 EXECUTABLE, MIX, SPMD, SYNC, INLINE, PREDICATE = (1, 4, 8, 16, 32, 64)
+ASYNC_INPUT = 1 << 1
 ENTRY, EXECUTED, COOPERATIVE, GM_GROUP, PERMIT_TAIL, PERMIT_NO_LOG, PUBLISHED = (1, 2, 4, 8, 16, 32, 64)
 CLUSTER_GROUP = 1 << 7
 PRECLAIM = 1 << 8
@@ -140,7 +141,10 @@ class NativeAudit:
             flags, mask, blocks = task["flags"], task["active_mask"], task["block_num"]
             deps = task["dependencies"]
             require(len(set(deps)) == len(deps) and all(0 <= dep < ref for dep in deps), "invalid frozen dependencies")
-            require(flags & ~(EXECUTABLE | MIX | SPMD | SYNC | INLINE | PREDICATE) == 0, "unknown task flags")
+            require(
+                flags & ~(EXECUTABLE | ASYNC_INPUT | MIX | SPMD | SYNC | INLINE | PREDICATE) == 0,
+                "unknown task flags",
+            )
             if ref in self.control_nodes:
                 require(mask == 0 and blocks == 1 and flags == 0, "invalid native control metadata")
                 continue
@@ -924,9 +928,11 @@ class NativeAudit:
                 self.causal.add(publication, ready)
         for index in range(task["trace_base"], task["trace_base"] + count):
             execution = self.executions[index]
+            may_defer = bool(self.controls[ref]["async_mask"] & (1 << execution["subtask_slot"]))
             if not task["flags"] & MIX:
                 require(
-                    execution["contribution_ticket"] == MAX and execution["contribution_credits"] in (1, 2),
+                    execution["contribution_ticket"] == MAX
+                    and execution["contribution_credits"] in ((1, 2) if may_defer else (1,)),
                     "counter execution fabricated a ticket or invalid credits",
                 )
                 publication = self.causal.bounded(
@@ -946,6 +952,9 @@ class NativeAudit:
                 if execution["contribution_credits"] == 2:
                     require(index not in self.conditions, "combined ADD2 duplicated a condition contribution")
                     continue
+            if not may_defer:
+                require(index not in self.conditions, "synchronous execution has a condition contribution")
+                continue
             self.counter_condition(index, ready, task)
         self.causal.add(ready, point(accounting, "before"))
 

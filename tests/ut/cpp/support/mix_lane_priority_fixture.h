@@ -157,7 +157,8 @@ protected:
     SharedMemoryHeader header{};
     ChipReadyQueueSlot cells[10][capacity]{};
     TestTask mixed, pure;
-    std::vector<uint8_t> callable_bytes = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    std::vector<uint8_t> callable_bytes =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     uint64_t callables[1]{};
     std::vector<uint64_t> registers;
     void SetUp() override {

@@ -68,6 +68,7 @@ TEST_F(ProtocolExportFixture, PreservesFrozenGraphAndHostCompletedNodeWithoutFab
     EXPECT_NE(json.find("\"executions\":[]"), std::string::npos);
     EXPECT_NE(json.find("\"completion_counters\":[]"), std::string::npos);
     EXPECT_NE(json.find("\"condition_contributions\":[]"), std::string::npos);
+    EXPECT_NE(json.find("\"async_mask\":0"), std::string::npos);
     EXPECT_NE(json.find("\"completion_backend\":0,\"counter_index\":18446744073709551615"), std::string::npos);
     EXPECT_NE(json.find("\"admission_log\":[-1]"), std::string::npos);
     EXPECT_EQ(json.find("protocol_verified"), std::string::npos);

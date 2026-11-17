@@ -663,12 +663,13 @@ __aicore__ bool run_ready_dispatch_loop(
                 );
             // Async-protected business inputs require observation on the actual
             // consumer after dependencies settle, independently of the call package.
-            if (function_address != 0 && scheduler_async_work_activated(context->async)) {
+            if (function_address != 0 && local_slot->may_observe_async_inputs && context->async != nullptr &&
+                scheduler_async_work_activated(context->async)) {
                 SchedulerScalarScope scalar_cache(context, SchedPhaseKind::ScalarCacheObserve, task_ref);
                 scheduler_observe_data_cache(binding);
             }
             uint32_t execution_group_index = pto2::resident::ASYNC_INVALID_INDEX;
-            {
+            if (binding->global_context.async_group_index != pto2::resident::ASYNC_INVALID_INDEX) {
                 pto2::resident::AsyncWriter writer{};
                 if (!scheduler_async_begin_prebound_execution(
                         context->async, task_ref, binding->global_context, writer
@@ -760,8 +761,9 @@ __aicore__ bool run_ready_dispatch_loop(
                 );
                 return false;
             }
-            local_slot->completion_credits = has_deferred ? 1 : 2;
-            if (!has_deferred && (local_slot->cluster_mix || local_slot->gm_mix)) {
+            const bool possible_async = execution_group_index != pto2::resident::ASYNC_INVALID_INDEX;
+            local_slot->completion_credits = 1 + static_cast<uint8_t>(possible_async && !has_deferred);
+            if (possible_async && !has_deferred && (local_slot->cluster_mix || local_slot->gm_mix)) {
                 const auto *counter = scheduler_completion_counter_at(
                     scheduler_state_base, context->config.completion_counters_offset, task_ref
                 );

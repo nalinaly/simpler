@@ -172,7 +172,8 @@ protected:
     std::unique_ptr<SchedulerState> scheduler = std::make_unique<SchedulerState>();
     std::unique_ptr<SchedulerContext> context = std::make_unique<SchedulerContext>();
     std::vector<char> heap;
-    std::vector<uint8_t> callable = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    std::vector<uint8_t> callable =
+        make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0, {1, CoreAsyncMode::SYNCHRONOUS, 0, 0, 0});
     uint64_t callables[1]{};
     std::array<uint32_t, 6> conditions{};
     std::vector<uint64_t> registers = std::vector<uint64_t>(6 * (0x6000 / sizeof(uint64_t)));

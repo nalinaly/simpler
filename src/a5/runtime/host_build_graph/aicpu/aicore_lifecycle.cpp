@@ -16,6 +16,7 @@
 #include "args_dump_service.h"
 
 #include "scheduler/scheduler_types.h"
+#include "scheduler/scheduler_async_layout.h"
 #include "scheduler/scheduler_topology.h"
 #include "scheduler/scheduler_watchdog.h"
 
@@ -215,11 +216,16 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
         );
         const auto *metadata =
             scheduler_state_at<SchedulerTaskMetadata>(scheduler_state_base, bootstrap_context->task_metadata_offset);
+        const auto *summary =
+            scheduler_state_at<SchedulerGraphSummary>(scheduler_state_base, bootstrap_context->graph_summary_offset);
         for (uint64_t task = 0; task < bootstrap_context->graph_task_count; ++task) {
             const auto &counter = counters[task];
             if (counter.add_address == 0) continue;
+            const auto async_lanes = scheduler_async_task_lanes(
+                scheduler_state_base, summary->async_layout_offset, static_cast<uint32_t>(task)
+            );
             const uint32_t credits =
-                2U * metadata[task].logical_block_num * scheduler_task_lanes(metadata[task]).count();
+                metadata[task].logical_block_num * (scheduler_task_lanes(metadata[task]).count() + async_lanes.count());
             // Only a chain head has no credit prefix. The run has not started;
             // there is no reset or transfer after READY.
             if (counter.threshold == credits) *reinterpret_cast<volatile uint32_t *>(counter.read_address) = 0;

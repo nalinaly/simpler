@@ -88,8 +88,8 @@ TEST(SchedulerTokenDispatch, AddChainReleasesSuccessorsBeforeAccountingAndKeepsO
     f.graph.executable(1, 0, {0});
     ASSERT_TRUE(f.prepare());
     uint32_t value = 0;
-    bind_counter(f, 0, value, 4, 8);
-    bind_counter(f, 1, value, 8, 8);
+    bind_counter(f, 0, value, 2, 4);
+    bind_counter(f, 1, value, 4, 4);
     const auto first = scheduler_completion_source(f.base(), f.local(), 0);
     for (uint32_t task = 0; task < 2; ++task) {
         for (uint32_t block = 0; block < 2; ++block) {
@@ -99,7 +99,7 @@ TEST(SchedulerTokenDispatch, AddChainReleasesSuccessorsBeforeAccountingAndKeepsO
             auto stale = f.local()->slots[slot].prepared;
             ASSERT_TRUE(f.complete(slot));
             EXPECT_FALSE(scheduler_return_prepared_execution(f.base(), f.local()->config.prepared, &stale));
-            EXPECT_EQ(value, task * 4 + (block + 1) * 2);
+            EXPECT_EQ(value, task * 2 + block + 1);
         }
         EXPECT_EQ(scheduler_completion_remaining(f.control(task)->completion_state), 2u);
         EXPECT_EQ(scheduler_observe_task_completion(first), SchedulerCompletionObservation::DONE);
@@ -115,9 +115,9 @@ TEST(SchedulerTokenDispatch, AddChainReleasesSuccessorsBeforeAccountingAndKeepsO
         scheduler_service_counter_accounting(f.graph.graph(), f.base(), f.local(), f.storage.run_control, &progress)
     );
     EXPECT_FALSE(progress);
-    EXPECT_EQ(value, 8u);
+    EXPECT_EQ(value, 4u);
     EXPECT_EQ(f.local()->pending_completed, 1u);
-    value = 9;
+    value = 5;
     EXPECT_EQ(scheduler_observe_task_completion(first), SchedulerCompletionObservation::INVALID);
 }
 
@@ -132,23 +132,29 @@ TEST(SchedulerTokenDispatch, AddMixContributionCountsOnlyActiveLanesAtTheExistin
     f.graph.storage()[0].task.kernel_id[0] = INVALID_KERNEL_ID;
     f.graph.storage()[0].task.kernel_id[1] = f.graph.storage()[0].task.kernel_id[2] = 1;
     ASSERT_TRUE(f.prepare());
-    uint32_t value = 0;
-    bind_counter(f, 0, value, 8, 8);
-    const auto *counter = scheduler_completion_counter_at(f.base(), f.storage.layout.completion_counters_offset, 0);
-    for (uint32_t block = 0; block < 2; ++block) {
-        for (uint32_t lane = 1; lane < 3; ++lane)
-            ASSERT_TRUE(scheduler_counter_publish_condition(
-                f.base(), *counter, 0, block, lane, f.storage.layout.task_metadata_offset, 0, lane, false
-            ));
-        EXPECT_EQ(value, block * 4 + 2);
-        EXPECT_EQ(scheduler_completion_counter_observe(*counter), 0);
-        ASSERT_TRUE(scheduler_contribute_mix_group<false>(
-            f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, block, LaneMask::both_aiv()
-        ));
-        EXPECT_EQ(value, (block + 1) * 4);
+    for (bool async_lane : {false, true}) {
+        SCOPED_TRACE(async_lane);
+        uint32_t value = 0;
+        const uint32_t credits_per_block = async_lane ? 3 : 2;
+        bind_counter(f, 0, value, 2 * credits_per_block, 2 * credits_per_block);
+        const auto *counter = scheduler_completion_counter_at(f.base(), f.storage.layout.completion_counters_offset, 0);
+        for (uint32_t block = 0; block < 2; ++block) {
+            if (async_lane)
+                ASSERT_TRUE(scheduler_counter_publish_condition(
+                    f.base(), *counter, 0, block, 2, f.storage.layout.task_metadata_offset, 0, 2, false
+                ));
+            EXPECT_EQ(value, block * credits_per_block + (async_lane ? 1 : 0));
+            EXPECT_EQ(scheduler_completion_counter_observe(*counter), 0);
+            ASSERT_TRUE(
+                scheduler_contribute_mix_group<false>(
+                    f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, block, LaneMask::both_aiv()
+                )
+            );
+            EXPECT_EQ(value, (block + 1) * credits_per_block);
+        }
+        EXPECT_EQ(scheduler_completion_counter_observe(*counter), 1);
+        EXPECT_EQ(scheduler_completion_remaining(f.control(0)->completion_state), 4u);
     }
-    EXPECT_EQ(scheduler_completion_counter_observe(*counter), 1);
-    EXPECT_EQ(scheduler_completion_remaining(f.control(0)->completion_state), 4u);
 }
 
 TEST(SchedulerTokenDispatch, CntNotifyCompletionReleasesAllReadersWithoutConsumingTheSignal) {
@@ -245,7 +251,8 @@ TEST(SchedulerTokenDispatch, ReturnReleasesItsSlotAndFlushCountsCompletionOnce) 
     EXPECT_TRUE(scheduler_prepared_already_returned(f.base(), f.local()->config.prepared, handle));
     auto stale = handle;
     EXPECT_FALSE(scheduler_return_prepared_execution(f.base(), f.local()->config.prepared, &stale));
-    EXPECT_FALSE(scheduler_fail_prepared_execution(f.base(), f.local()->config.prepared, f.local()->worker_id(), &stale)
+    EXPECT_FALSE(
+        scheduler_fail_prepared_execution(f.base(), f.local()->config.prepared, f.local()->worker_id(), &stale)
     );
     EXPECT_FALSE(scheduler_cancel_unstarted_handle(f.base(), f.local(), &stale));
     EXPECT_EQ(f.local()->pending_completed, 1u);
@@ -379,7 +386,8 @@ TEST(SchedulerTokenDispatch, ACorruptLaterCallCannotRewriteAnExistingExecution) 
     token.subtask_slot = 0;
     token.phase = SchedulerExecutionTokenPhase::TICKETED;
     ASSERT_EQ(scheduler_node_fanin_view(f.graph.graph(), 0, &token.fanin), SchedulerGraphResult::OK);
-    ASSERT_TRUE(scheduler_execution_token_receive(f.graph.graph(), f.base(), f.local(), f.storage.run_control, token, 0)
+    ASSERT_TRUE(
+        scheduler_execution_token_receive(f.graph.graph(), f.base(), f.local(), f.storage.run_control, token, 0)
     );
     ASSERT_TRUE(scheduler_close_ordinary_supply(
         f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, token.block_idx, 1

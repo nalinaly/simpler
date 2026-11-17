@@ -3218,6 +3218,40 @@ NB_MODULE(_task_interface, m) {
         nb::arg("direction"), "Return the string name of an ArgDirection."
     );
 
+    const auto parse_core_async_capability = [](const nb::object &value) {
+        CoreAsyncCapability result{};
+        if (value.is_none())
+            throw std::invalid_argument("async_capability requires an explicit SYNCHRONOUS or DEFERRED declaration");
+        if (!nb::isinstance<nb::dict>(value))
+            throw std::invalid_argument("async_capability must be a version-1 dictionary");
+        const auto dictionary = nb::cast<nb::dict>(value);
+        if (dictionary.size() != 4 || !dictionary.contains("version") || !dictionary.contains("mode") ||
+            !dictionary.contains("max_conditions") || !dictionary.contains("condition_types"))
+            throw std::invalid_argument("invalid async_capability fields");
+        const auto integer = [&](const char *key) -> int64_t {
+            const auto field = dictionary[key];
+            if (!PyLong_CheckExact(field.ptr()))
+                throw std::invalid_argument("async_capability fields must be integers");
+            return nb::cast<int64_t>(field);
+        };
+        const int64_t version = integer("version");
+        const int64_t count = integer("max_conditions");
+        const int64_t types = integer("condition_types");
+        if (version != 1 || count < 0 || count > 64 || types < 0 || types > 3 ||
+            !nb::isinstance<nb::str>(dictionary["mode"]))
+            throw std::invalid_argument("invalid async_capability version, mode, or bounds");
+        const auto mode = nb::cast<std::string>(dictionary["mode"]);
+        if (mode == "SYNCHRONOUS") result.mode = CoreAsyncMode::SYNCHRONOUS;
+        else if (mode == "DEFERRED") result.mode = CoreAsyncMode::DEFERRED;
+        else throw std::invalid_argument("invalid async_capability mode");
+        result.version = 1;
+        result.max_conditions = static_cast<uint8_t>(count);
+        result.condition_types = static_cast<uint8_t>(types);
+        if (!core_async_capability_valid(result))
+            throw std::invalid_argument("invalid async_capability capacity/types");
+        return result;
+    };
+
     // --- PyCoreCallable wrapper ---
     struct PyCoreCallable {
         std::vector<uint8_t> buffer_;
@@ -3227,17 +3261,35 @@ NB_MODULE(_task_interface, m) {
     nb::class_<PyCoreCallable>(m, "CoreCallable")
         .def_static(
             "build",
-            [](std::vector<ArgDirection> signature, nb::bytes binary) -> PyCoreCallable {
+            [parse_core_async_capability](
+                std::vector<ArgDirection> signature, nb::bytes binary, nb::object async_capability
+            ) -> PyCoreCallable {
                 auto bin_ptr = reinterpret_cast<const void *>(binary.c_str());
                 auto bin_size = static_cast<uint32_t>(binary.size());
                 auto buf = make_callable<CORE_MAX_TENSOR_ARGS>(
-                    signature.data(), static_cast<int32_t>(signature.size()), bin_ptr, bin_size
+                    signature.data(), static_cast<int32_t>(signature.size()), bin_ptr, bin_size,
+                    parse_core_async_capability(async_capability)
                 );
                 return PyCoreCallable{std::move(buf)};
             },
-            nb::arg("signature"), nb::arg("binary"),
+            nb::arg("signature"), nb::arg("binary"), nb::arg("async_capability"),
             "Build a CoreCallable from a signature list and binary bytes. The dump "
             "maps signature entry i to payload slot i positionally."
+        )
+
+        .def_prop_ro(
+            "async_capability",
+            [](const PyCoreCallable &self) {
+                const auto value = self.get().async_capability();
+                nb::dict result;
+                result["version"] = 1;
+                if (!core_async_capability_valid(value))
+                    throw std::invalid_argument("invalid CoreCallable async capability");
+                result["mode"] = value.mode == CoreAsyncMode::SYNCHRONOUS ? "SYNCHRONOUS" : "DEFERRED";
+                result["max_conditions"] = value.max_conditions;
+                result["condition_types"] = value.condition_types;
+                return result;
+            }
         )
 
         .def(
