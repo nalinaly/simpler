@@ -296,14 +296,13 @@ inline __aicore__ bool scheduler_async_begin_prebound_execution(
     return true;
 }
 
-// A nonempty SEALED execution owns one credit until the task FINISH. Its
-// compute contribution is still outstanding, so the debt cannot reach zero.
+// The first nonempty registration holds one task-wide async marker until FINISH.
+// Its own physical contribution is outstanding, so the gate cannot reach zero.
 // Validate before CAS: an unchecked overflowing addition could manufacture a
 // syntactically valid zero gate from corrupted input.
 inline __aicore__ bool scheduler_async_credit_available(uint64_t observed) {
     return scheduler_completion_valid(observed) && scheduler_completion_remaining(observed) != 0 &&
-           scheduler_completion_debt(observed) <
-               scheduler_completion_remaining(observed) + scheduler_completion_total(observed);
+           scheduler_completion_debt(observed) == scheduler_completion_remaining(observed);
 }
 
 // The caller validates the task identity and supplies a reliable gate snapshot.
@@ -382,10 +381,16 @@ static inline __aicore__ bool scheduler_async_seal_execution(
     uint32_t task_index_value = ASYNC_INVALID_INDEX;
     if (!task_index(*local, task_ref, task_index_value) || task_index_value == ASYNC_INVALID_INDEX)
         return fail(*local, task_ref);
-    if (!scheduler_async_register_completion_credit(*local, task_ref)) return false;
     auto *joins = scheduler_state_at<SchedulerAsyncTaskJoin>(local->base, local->layout->joins_offset);
-    if (scheduler_async_pending::register_group(joins[task_index_value]) != scheduler_async_pending::Result::PENDING)
+    uint64_t registered_before = 0;
+    if (scheduler_async_pending::register_group(joins[task_index_value], &registered_before) !=
+        scheduler_async_pending::Result::PENDING)
         return fail(*local, task_ref);
+    // The first registrant cannot release its physical contribution before
+    // installing the marker. Other groups can progress without waiting for it.
+    if (scheduler_async_pending::registered(registered_before) == 0 &&
+        !scheduler_async_register_completion_credit(*local, task_ref))
+        return false;
     auto *progress = scheduler_state_at<SchedulerAsyncGroupProgress>(local->base, local->layout->group_progress_offset);
     progress[writer.group_index].pending_mask = scheduler_async_condition_mask(count);
     progress[writer.group_index].condition_cursor = 0;
@@ -427,7 +432,8 @@ scheduler_async_close_computation(SchedulerAsyncLocalState *local, int64_t task_
     const auto closed = scheduler_async_pending::close_computation(joins[index]);
     if ((closed.result != scheduler_async_pending::Result::FINISH_OWNER &&
          closed.result != scheduler_async_pending::Result::PENDING) ||
-        scheduler_completion_debt(gate) != scheduler_async_pending::registered(closed.previous))
+        scheduler_completion_debt(gate) != 1 || scheduler_async_pending::registered(closed.previous) == 0 ||
+        scheduler_async_pending::registered(closed.previous) > scheduler_completion_total(gate))
         return completion_error(*local, task_ref);
     if (closed.result == scheduler_async_pending::Result::FINISH_OWNER)
         return {

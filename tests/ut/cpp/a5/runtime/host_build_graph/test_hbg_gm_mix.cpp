@@ -3896,18 +3896,18 @@ TEST(HbgGmMix, FailedPhysicalReturnReleasesResourcesButCannotGrantGroupCredit) {
 TEST(HbgCompletionPacking, GroupCreditsLeaveDeferredDebtForTheUniqueFinish) {
     for (uint64_t credits : {2u, 3u}) {
         SchedulerTaskControl control{};
-        control.completion_state = scheduler_completion_encode(2 * credits, 2 * credits, 2 * credits + 2);
+        control.completion_state = scheduler_completion_encode(2 * credits, 2 * credits, 2 * credits + 1);
         uint64_t previous = UINT64_MAX;
         EXPECT_EQ(scheduler_contribute_returns(&control, credits, &previous), SchedulerSubtaskFinishResult::PARTIAL);
         EXPECT_EQ(previous, 0u);
         EXPECT_EQ(scheduler_completion_remaining(control.completion_state), credits);
-        EXPECT_EQ(scheduler_completion_debt(control.completion_state), credits + 2);
+        EXPECT_EQ(scheduler_completion_debt(control.completion_state), credits + 1);
         EXPECT_EQ(
             scheduler_contribute_returns(&control, credits, &previous), SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED
         );
         EXPECT_EQ(previous, credits);
         EXPECT_EQ(scheduler_completion_remaining(control.completion_state), 0u);
-        EXPECT_EQ(scheduler_completion_debt(control.completion_state), 2u);
+        EXPECT_EQ(scheduler_completion_debt(control.completion_state), 1u);
         EXPECT_FALSE(scheduler_completion_done(control.completion_state));
     }
 }

@@ -842,6 +842,8 @@ GM MIX coordinator 的自身 ARRIVED/RELEASED 只更新本地 confirmed 与 fail
 
 已发布的 `claim_seal=count` 直接提供终态游标，不再重读 `next_block`；DFX 的终态游标由 seal 证明，不表示额外 GM 读取。admission 接收方通过 committed tail、日志及 record 的 epoch/order 确认发布，不再查询同一任务的 ADMITTED；提交端去重与 kernel 入口许可不变。最后一次 physical FAA 将完整 post-gate 私有值传给 async close，close 使用必需 RMW 的返回值校验 join，正常 deferred 路径不再重读这两个字；同步 checked 入口仍保留必要的零登记校验。
 
+async 登记的 canonical gate 只保存一个 task 级 `has_async` 门闩，真实 registered/pending 数量保留在现有 join。每个非空组照常执行一次 join.register FAA，并复用其返回值识别首注册者；只有首注册者执行 canonical 校验 CAS。它设置门闩之前不能提交自己的 physical return，所以其他组先返回或完成 CHECK 也不能误关 task。正常 gate 的 debt 为 remaining + has_async，close 校验门闩与合法非零 registered，FINISH CAS 从 `encode(total,0,1)` 转为 DONE；不新增等待 owner 或资源，零登记任务保持原同步路径。DFX 的 completion_debt 表示物理余量加门闩，不能当作剩余异步 group 数。
+
 ### CntNotify 资源复用与控制状态选型
 
 DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publication/capture lease

@@ -792,7 +792,43 @@ TEST(HbgAsyncControl, DuplicateSealCannotReinitializeAnOwnedCheckLease) {
     EXPECT_EQ(scheduler_async_pending::pending(f.join().word), 1u);
 }
 
-TEST(HbgAsyncControl, DifferentConditionCountsKeepOneDebtCreditPerNonemptyGroupUntilFinish) {
+TEST(HbgAsyncControl, FirstRegistrantWithholdsItsPhysicalReturnUntilTheTaskMarkerExists) {
+    AsyncFixture f(1, {async_task(0, 2)});
+    f.register_counter(f.start(0, 0, 0, 0), 1, 0);
+    bool interleaved = false;
+    uint32_t canonical_reads = 0;
+    {
+        ScopedAsyncQueryObserver observer([&](volatile uint64_t *word) {
+            if (word != &f.task_control(0)->completion_state) return;
+            ++canonical_reads;
+            if (interleaved) return;
+            interleaved = true;
+            ASSERT_EQ(scheduler_async_pending::registered(f.join().word), 1u);
+            f.register_counter(f.start(0, 1, 0, 1), 0, 1);
+            ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[1], 0, 1, 0, f.executions[1]));
+            uint64_t previous = 0;
+            ASSERT_EQ(
+                scheduler_contribute_returns(f.task_control(0), 1, &previous), SchedulerSubtaskFinishResult::PARTIAL
+            );
+            EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 1, 1));
+            ASSERT_TRUE(f.check(2));
+            EXPECT_EQ(scheduler_async_pending::pending(f.join().word), 1u);
+            EXPECT_FALSE(f.done());
+        });
+        ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
+    }
+    EXPECT_TRUE(interleaved);
+    EXPECT_EQ(canonical_reads, 1u);
+    EXPECT_EQ(scheduler_async_pending::registered(f.join().word), 2u);
+    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 1, 2));
+    ASSERT_TRUE(f.close());
+    EXPECT_FALSE(f.done());
+    f.signal[0] = 1;
+    ASSERT_TRUE(f.check(1));
+    EXPECT_TRUE(f.done());
+}
+
+TEST(HbgAsyncControl, DifferentConditionCountsShareOneTaskMarkerUntilFinish) {
     AsyncFixture f(1, {async_task(0, 2, LaneMask::aiv0(), 3)});
     const auto first = f.start(0, 0, 1, 1);
     for (uint32_t signal = 0; signal < 3; ++signal)
@@ -801,17 +837,17 @@ TEST(HbgAsyncControl, DifferentConditionCountsKeepOneDebtCreditPerNonemptyGroupU
     f.register_counter(f.start(0, 1, 1, 2), 1, 3);
     ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[2], 0, 1, 1, f.executions[2]));
     ASSERT_EQ(scheduler_async_pending::registered(f.join().word), 2u);
-    ASSERT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 2, 4));
+    ASSERT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 2, 3));
     ASSERT_EQ(f.return_next(0, f.local(1)), SchedulerSubtaskFinishResult::PARTIAL);
     for (uint32_t signal = 0; signal < 3; ++signal)
         f.signal[signal] = 1;
     for (uint32_t probe = 0; probe < 3; ++probe)
         (void)f.check(0);
     EXPECT_EQ(scheduler_async_pending::pending(f.join().word), 1u);
-    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 1, 3));
+    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 1, 2));
     ASSERT_EQ(f.return_next(0, f.local(2)), SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED);
     ASSERT_TRUE(f.close(2));
-    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 0, 2));
+    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(2, 0, 1));
     EXPECT_FALSE(f.check(0));
     f.signal[3] = 1;
     for (uint32_t probe = 0; probe < 2; ++probe)
@@ -834,7 +870,7 @@ TEST(HbgAsyncControl, InvalidDebtCarryCannotPublishAGroupOrBecomeLogicalDone) {
     ASSERT_FALSE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
     EXPECT_EQ(f.task_control(0)->completion_state, invalid);
     EXPECT_FALSE(scheduler_completion_done(f.task_control(0)->completion_state));
-    EXPECT_EQ(scheduler_async_pending::registered(f.join().word), 0u);
+    EXPECT_EQ(scheduler_async_pending::registered(f.join().word), 1u);
     EXPECT_EQ(f.group_lease().word, kUnused);
     EXPECT_EQ(f.storage.run_control->resolved_task_count, 0u);
 }

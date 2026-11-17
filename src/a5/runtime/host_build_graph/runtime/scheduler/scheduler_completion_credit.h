@@ -17,7 +17,7 @@
 enum class SchedulerSubtaskFinishResult : uint8_t { PARTIAL, TASK_LAST, TASK_LAST_DEFERRED, ERROR };
 
 // Each credit retires one physical return and its compute debt together.
-// Deferred conditions retain their independently registered debt.
+// A task with deferred conditions retains its single async marker.
 static inline __aicore__ SchedulerSubtaskFinishResult scheduler_contribute_returns(
     __gm__ SchedulerTaskControl *control, uint64_t credits, uint64_t *previous, uint64_t *completed_gate = nullptr
 ) {

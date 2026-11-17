@@ -63,13 +63,15 @@ AICore helper 的 `acquire/release` 参数不自动产生全部所需屏障；�
 | P 减一 | 最终 CHECK owner | 条件全部满足、group 终态及目录清位后；旧值 P=1 且 closed 时获得 FINISH 激活权 |
 | 设置 closed | 真实计算汇合的最后贡献者 | 全部物理子任务已返回并封口登记；trace 和 MIX 资源按各自收尾顺序完成；旧值 P=0、R>0 时获得 FINISH 激活权 |
 
+canonical completion gate 仅额外保存一个 `has_async` 门闩，不重复累计 R。非空组先执行 join.register；旧值 R=0 的唯一首注册者用原有校验 CAS 将 canonical debt 加一，其他组直接继续发布。首注册者建立门闩之前不会提交自己的物理完成，因此即使其他组先返回或 CHECK 完成，remaining 仍至少为一，不会提前 DONE。R>0 而门闩尚未建立是允许的短暂状态，其他组无需等待它。真实异步计数仍由 join 的 P/R 表达。
+
 每次转换只使用一次 unsigned GM fetch-add，并根据它返回的旧值判断结果。错误状态使用既有 run 首错 latch；非法位、溢出、下溢或重复 close 不作算术补偿，也不能获得完成权。唯一执行及 lease 身份防止重复贡献，计数校验不能替代身份验证。
 
-计算汇合使用统一的物理子任务计数：每个实际执行 lane 在返回并封口登记后贡献一次 `completed_subtasks`，总数为 block 数乘 active lane 数。最后贡献者依据同次 RMW 中累计的保守异步票决定是否关闭 computation。贡献和后继解析可以先于执行 trace 发布；MIX coordinator 收齐资源 release 后只负责资源退役，不重复贡献逻辑完成。释放 slot 的业务绑定前保存稳定身份，不能从已清空的 slot 反查。
+计算汇合使用统一的物理子任务计数：每个实际执行 lane 在返回并封口登记后贡献一次 `completed_subtasks`，总数为 block 数乘 active lane 数。最后贡献者依据同次 RMW 中的单个异步门闩决定是否关闭 computation。贡献和后继解析可以先于执行 trace 发布；MIX coordinator 收齐全部资源 release 后，按 active lane 数批量贡献物理完成；计算 lane 不再重复贡献。释放 slot 的业务绑定前保存稳定身份，不能从已清空的 slot 反查。
 
 P 暂时为零不证明计算结束，其他尚未返回的成员仍可能登记。只有设置 closed 或递减最后 P 的原子返回值授予 FINISH 激活权；普通读取只可验证已有 FINISH 的就绪条件，不能再激活。获权者先初始化完整 resolver 游标和 lease，再发布预分配 FINISH 的 RUNNABLE 和目录位后返回，FINISH 继续受预算约束。
 
-所有成员均零登记的普通、SPMD、MIX 或合法 skip task 沿用同步完成及本核后继路径，不创建 CHECK/FINISH 工作。最后物理贡献的保守异步票为零时可跳过 join；票非零时检查实际 P/R 并按 close 结果完成或激活 FINISH。不得根据先返回成员的零登记或暂时 P=0 推断整个任务同步；曾登记但条件已经满足的 task 仍进入 FINISH。全局逻辑完成计数可以早于最终 trace 和 MIX 资源收尾，但存储回收必须等待全部 trace、资源义务和 EXIT 握手完成。
+所有成员均零登记的普通、SPMD、MIX 或合法 skip task 沿用同步完成及本核后继路径，不创建 CHECK/FINISH 工作。最后物理贡献的异步门闩为零时可跳过 join；门闩为一时检查实际 P/R 并按 close 结果完成或激活 FINISH。不得根据先返回成员的零登记或暂时 P=0 推断整个任务同步；曾登记但条件已经满足的 task 仍进入 FINISH。全局逻辑完成计数可以早于最终 trace 写出；MIX 的物理汇聚仍须等待其完整资源 release。存储回收必须等待全部 trace、资源义务和 EXIT 握手完成。
 
 ### 不同任务形状
 
