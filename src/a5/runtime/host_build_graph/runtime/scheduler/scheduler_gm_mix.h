@@ -401,7 +401,9 @@ static inline __aicore__ bool scheduler_gm_mix_arrive(
     auto *mailbox = scheduler_gm_mix_mailbox(base, local);
     if constexpr (RecordProtocol) scheduler_protocol_lane_publication(base, local, false, true);
     scheduler_cache_barrier();
-    scheduler_gm_mix_store_signal(mailbox, local->config.self_lane, SchedulerGmMixSignal::ARRIVED, group.group_seq);
+    // Only remote lanes publish an ACK; the coordinator already owns its local proof.
+    if (!local->is_mix_coordinator())
+        scheduler_gm_mix_store_signal(mailbox, local->config.self_lane, SchedulerGmMixSignal::ARRIVED, group.group_seq);
     if constexpr (RecordProtocol) scheduler_protocol_lane_publication(base, local, false, false);
     group.arrivals_confirmed |= static_cast<uint8_t>(1U << local->config.self_lane);
     group.phase = SchedulerGmMixPhase::ARRIVED;
@@ -498,10 +500,11 @@ scheduler_gm_mix_publish_release(__gm__ void *base, SchedulerLocalState *local, 
     auto &group = local->admission->gm_mix;
     if constexpr (RecordProtocol) scheduler_protocol_lane_publication(base, local, true, true);
     scheduler_cache_barrier();
-    scheduler_gm_mix_store_signal(
-        scheduler_gm_mix_mailbox(base, local), local->config.self_lane, SchedulerGmMixSignal::RELEASED,
-        group.group_seq | (successful ? 0 : SCHEDULER_GROUP_SEQUENCE_LIMIT)
-    );
+    if (!local->is_mix_coordinator())
+        scheduler_gm_mix_store_signal(
+            scheduler_gm_mix_mailbox(base, local), local->config.self_lane, SchedulerGmMixSignal::RELEASED,
+            group.group_seq | (successful ? 0 : SCHEDULER_GROUP_SEQUENCE_LIMIT)
+        );
     if constexpr (RecordProtocol) scheduler_protocol_lane_publication(base, local, true, false);
     group.releases_confirmed |= static_cast<uint8_t>(1U << local->config.self_lane);
     if (!successful && local->admission->current_active_mask.has(static_cast<SubtaskSlot>(local->config.self_lane)))

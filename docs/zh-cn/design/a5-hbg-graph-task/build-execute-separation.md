@@ -838,6 +838,8 @@ Host 以全部 MIX block 数作为每簇序号上界，上界小于2^31且六个
 其余使用完整64-bit GM协议。SRAM release的bit31映射回原bit63失败位，不能截断序号或吞掉失败。
 每轮 AICPU 在 READY 前清零，发布、接收与资源退休边界的既有DSB保留。
 
+GM MIX coordinator 的自身 ARRIVED/RELEASED 只更新本地 confirmed 与 failure 状态；只有远端 lane 发布共享 ACK。唯一 ACK 汇合者已经持有自身到达/退休的直接证明，不需要再给自己写 GM 通知。远端到齐、完整 resource 退出、必要 DSB 和 DFX 的真实逻辑事件仍保留。
+
 ### CntNotify 资源复用与控制状态选型
 
 DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publication/capture lease

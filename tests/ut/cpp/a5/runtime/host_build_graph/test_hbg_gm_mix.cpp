@@ -229,7 +229,11 @@ TEST(HbgGmMix, AssignmentAndAckObservationsDoNotUseGmAtomics) {
         uint32_t assigned_reads = 0;
         uint32_t arrival_reads = 0;
         uint32_t release_reads = 0;
+        uint32_t self_ack_stores = 0;
         ScopedGmAtomicObserver observer([&](volatile uint64_t *word, uint64_t delta, GmAtomicOperation operation) {
+            if (operation == GmAtomicOperation::STORE && (word == &fixture.mailbox(0)->lanes[0].arrived_seq ||
+                                                          word == &fixture.mailbox(0)->lanes[0].released_seq))
+                ++self_ack_stores;
             if (delta != 0 || operation != GmAtomicOperation::FETCH_ADD) return;
             for (uint32_t lane = 0; lane < 3; ++lane) {
                 if (word == &fixture.mailbox(0)->lanes[lane].assigned_seq) ++assigned_reads;
@@ -243,6 +247,7 @@ TEST(HbgGmMix, AssignmentAndAckObservationsDoNotUseGmAtomics) {
         ASSERT_TRUE(fixture.finish_lanes(0));
         ASSERT_EQ(fixture.retire(0), SchedulerGmMixResult::PROGRESS);
         EXPECT_EQ(release_reads, 0u);
+        EXPECT_EQ(self_ack_stores, 0u);
         EXPECT_EQ(scheduler_read_error(fixture.run()), 0u);
     }
 }
@@ -1752,7 +1757,7 @@ TEST(HbgGmMix, ServiceCarriesNewPublicationThroughArrivalWithoutAnExtraPoll) {
             ));
             EXPECT_TRUE(progress);
             EXPECT_EQ(fixture.mailbox(0)->descriptor.group_seq, 1u);
-            EXPECT_EQ(fixture.mailbox(0)->lanes[worker].arrived_seq, 1u);
+            EXPECT_EQ(fixture.mailbox(0)->lanes[worker].arrived_seq, worker == 0 ? 0u : 1u);
             EXPECT_EQ(fixture.admissions[worker].gm_mix.phase, SchedulerGmMixPhase::ARRIVED);
         }
         for (uint32_t worker = 0; worker < 3; ++worker) {
@@ -2145,7 +2150,10 @@ TEST(HbgGmMix, FatalRunStillRetiresRealReturnsWithoutCompletingTheTask) {
                         SchedulerPreparedPhase::RETURNED
                     );
                     if (sync_start)
-                        EXPECT_EQ(fixture.mailbox(0)->lanes[lane].released_seq, SCHEDULER_GROUP_SEQUENCE_LIMIT | 1u);
+                        EXPECT_EQ(
+                            fixture.mailbox(0)->lanes[lane].released_seq,
+                            lane == 0 ? 0u : SCHEDULER_GROUP_SEQUENCE_LIMIT | 1u
+                        );
                     else EXPECT_EQ(fixture.signal(0)->finished[lane], fixture.signal(0)->armed_generation + 1);
                     EXPECT_EQ(local->pending_completed, 0u);
                 }
@@ -2409,8 +2417,10 @@ TEST_P(HbgGmMixInactiveLane, OnlyDeclaredResourceLanesArriveAndInactiveCoordinat
         ASSERT_TRUE(fixture.prepare(lane, &progress));
     EXPECT_EQ(fixture.admissions[inactive].gm_mix.phase, SchedulerGmMixPhase::RELEASED);
     EXPECT_EQ(fixture.locals[inactive]->local_ready_mask, 0u);
-    EXPECT_EQ(scheduler_gm_fetch_add(fixture.mailbox(0)->lanes[inactive].arrived_seq, UINT64_C(0)), 1u);
-    EXPECT_EQ(scheduler_gm_fetch_add(fixture.mailbox(0)->lanes[inactive].released_seq, UINT64_C(0)), 1u);
+    EXPECT_EQ(fixture.mailbox(0)->lanes[inactive].arrived_seq, inactive == 0 ? 0u : 1u);
+    EXPECT_NE(fixture.admissions[inactive].gm_mix.arrivals_confirmed & (1U << inactive), 0u);
+    EXPECT_EQ(fixture.mailbox(0)->lanes[inactive].released_seq, inactive == 0 ? 0u : 1u);
+    EXPECT_NE(fixture.admissions[inactive].gm_mix.releases_confirmed & (1U << inactive), 0u);
     for (uint32_t lane = 0; lane < 3; ++lane) {
         GmExecution execution{};
         if (lane == inactive) {
@@ -3103,7 +3113,7 @@ TEST(HbgGmMix, ExitDrainPublishesOutstandingGroupBeforeLogicalCompletion) {
         bool done = true;
         ASSERT_TRUE(fixture.drain(0, &done));
         EXPECT_FALSE(done);
-        EXPECT_EQ(fixture.mailbox(0)->lanes[0].released_seq, 1u);
+        EXPECT_EQ(fixture.mailbox(0)->lanes[0].released_seq, 0u);
         for (uint32_t worker = 0; worker < fixture.locals.size(); ++worker) {
             done = false;
             for (uint32_t step = 0; step < 3 && !done; ++step)
