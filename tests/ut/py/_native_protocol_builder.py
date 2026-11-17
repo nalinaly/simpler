@@ -85,6 +85,10 @@ class ProtocolBuilder:
                     admission_state=0,
                     claim_tickets=0,
                     claim_seal=0,
+                    completion_backend=0,
+                    counter_index=MAX,
+                    counter_threshold=0,
+                    counter_limit=0,
                 )
             )
             raw["inline_completed_count" if mask is None else "resolved_task_count"] += 1
@@ -224,6 +228,7 @@ class ProtocolBuilder:
             active_mask=spec["active_mask"],
             group_seq=0,
             completion_ticket=MAX,
+            completion_credits=0,
             released_seq=[0, 0, 0],
             sync_tail=0,
             sync_frontier=[0, 0, 0],
@@ -323,6 +328,7 @@ class ProtocolBuilder:
         )
         for name in ("permit", "entry", "returned", "visible", "completion_consumed", "trace_published"):
             row[name] = [0, 0]
+        row["contribution_credits"] = 0
         self.raw["executions"].append(row)
         self.stamp(row, "permit")
         self.stamp(row, "entry")

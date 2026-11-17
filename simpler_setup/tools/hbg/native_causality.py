@@ -17,6 +17,7 @@ from .native_protocol import (
     COMPLETION_ALIAS_FLAGS,
     COMPLETION_FROM_CONTRIBUTION,
     COMPLETION_FROM_GROUP,
+    COUNTER_ACCOUNTING,
     DEFERRED_FINISH,
     MEMBER_FROM_CLAIM,
     _completion_aliases,
@@ -71,6 +72,8 @@ class NativeAudit:
         self.members = {row["index"]: row for row in section["members"]}
         self.blocks = {row["index"]: row for row in section["blocks"]}
         self.executions = {row["index"]: row for row in section["executions"]}
+        self.conditions = {row["index"]: row for row in section["condition_contributions"]}
+        self.used_conditions = set()
         self.orders = {ref: order for order, ref in enumerate(section["admission_log"])}
         self.expected_executions = {}
         self.expected_blocks = {}
@@ -190,6 +193,14 @@ class NativeAudit:
         for ref in device:
             done = self.actors[ref]["completion"]
             require(done is not None, "missing TaskDone publication")
+            if self.controls[ref]["completion_backend"] == 1:
+                require(
+                    done["flags"] & COUNTER_ACCOUNTING and not done["flags"] & COMPLETION_ALIAS_FLAGS,
+                    "counter completion must identify accounting, not a last-writer alias",
+                )
+                self.done_points[ref] = ("CounterReady", ref)
+                continue
+            require(not done["flags"] & COUNTER_ACCOUNTING, "GM completion has counter accounting actor")
             source = self.completion_aliases.get(ref)
             name = (
                 ("TaskDone", ref)
@@ -277,7 +288,7 @@ class NativeAudit:
     def record_identity(self, record, ref, *, completion=False, member=False):
         flags = self.tasks[ref]["flags"]
         if completion:
-            flags |= record["flags"] & (DEFERRED_FINISH | COMPLETION_ALIAS_FLAGS)
+            flags |= record["flags"] & (DEFERRED_FINISH | COMPLETION_ALIAS_FLAGS | COUNTER_ACCOUNTING)
         if member:
             flags |= record["flags"] & MEMBER_FROM_CLAIM
         require(
@@ -377,11 +388,16 @@ class NativeAudit:
             if task["flags"] & MIX:
                 require(
                     execution["contribution_before"] == execution["contribution_after"] == [0, 0]
-                    and execution["contribution_ticket"] == execution["contribution_worker"] == 0,
+                    and execution["contribution_ticket"]
+                    == execution["contribution_worker"]
+                    == execution["contribution_credits"]
+                    == 0,
                     "Mix lane fabricated an individual completion contribution",
                 )
             else:
                 require(execution["contribution_worker"] == worker, "foreign subtask completion contributor")
+                if self.controls[ref]["completion_backend"] == 0:
+                    require(execution["contribution_credits"] == 0, "GM contribution carries counter credits")
                 self.chain(
                     execution, "completion_consumed", "contribution_before", "contribution_after", "trace_published"
                 )
@@ -674,13 +690,20 @@ class NativeAudit:
                 by_claim = sorted(blocks, key=lambda block: block["owner"]["block_idx"])
                 self.ordered_intervals([b["owner"] for b in by_claim], "claim_before", "claim_after")
             width = self.tasks[ref]["active_mask"].bit_count()
-            by_ticket = sorted(blocks, key=lambda block: block["owner"]["completion_ticket"])
-            require(
-                [b["owner"]["completion_ticket"] for b in by_ticket]
-                == list(range(0, self.tasks[ref]["block_num"] * width, width)),
-                "duplicate or missing block completion ticket",
-            )
-            self.ordered_intervals([b["owner"] for b in by_ticket], "completion_before", "completion_after")
+            if self.controls[ref]["completion_backend"] == 1:
+                require(
+                    all(b["owner"]["completion_ticket"] == MAX for b in blocks),
+                    "counter block fabricated a returned completion ticket",
+                )
+            else:
+                by_ticket = sorted(blocks, key=lambda block: block["owner"]["completion_ticket"])
+                require(
+                    [b["owner"]["completion_ticket"] for b in by_ticket]
+                    == list(range(0, self.tasks[ref]["block_num"] * width, width))
+                    and all(b["owner"]["completion_credits"] == 0 for b in blocks),
+                    "duplicate or missing block completion ticket",
+                )
+                self.ordered_intervals([b["owner"] for b in by_ticket], "completion_before", "completion_after")
             self.claim_certificates(ref, blocks)
             if not self.tasks[ref]["flags"] & SYNC:
                 continue
@@ -855,6 +878,9 @@ class NativeAudit:
             self.dependencies(task, done)
 
     def subtask_completion(self, task, done):
+        if self.controls[task["task_ref"]]["completion_backend"] == 1:
+            self.counter_completion(task, done)
+            return
         if task["flags"] & MIX:
             last = max(self.task_blocks[task["task_ref"]], key=lambda block: block["owner"]["completion_ticket"])[
                 "owner"
@@ -882,6 +908,69 @@ class NativeAudit:
         else:
             require(done["flags"] & COMPLETION_FROM_CONTRIBUTION, "TaskDone must alias its last subtask contribution")
             self.before(point(done, "after"), point(last, "trace_published"), "last subtask trace preceded TaskDone")
+
+    def counter_completion(self, task, accounting):
+        ref, width = task["task_ref"], task["active_mask"].bit_count()
+        count, ready = task["block_num"] * width, self.done_points[ref]
+        if task["flags"] & MIX:
+            for block in self.task_blocks[ref]:
+                owner = block["owner"]
+                require(owner["completion_credits"] == width, "invalid counter group physical credits")
+                publication = self.causal.bounded(
+                    ("counter_return", ref, owner["block_idx"]),
+                    point(owner, "completion_before"),
+                    point(owner, "completion_after"),
+                )
+                self.causal.add(publication, ready)
+        for index in range(task["trace_base"], task["trace_base"] + count):
+            execution = self.executions[index]
+            if not task["flags"] & MIX:
+                require(
+                    execution["contribution_ticket"] == MAX and execution["contribution_credits"] in (1, 2),
+                    "counter execution fabricated a ticket or invalid credits",
+                )
+                publication = self.causal.bounded(
+                    ("counter_return", ref, execution["block_idx"]),
+                    point(execution, "contribution_before"),
+                    point(execution, "contribution_after"),
+                )
+                self.causal.add(publication, ready)
+                if index in self.blocks:
+                    owner = self.blocks[index]["owner"]
+                    require(
+                        owner["completion_credits"] == execution["contribution_credits"],
+                        "pure block counter credits disagree with its execution",
+                    )
+                    self.causal.add(point(owner, "completion_before"), publication)
+                    self.causal.add(publication, point(owner, "completion_after"))
+                if execution["contribution_credits"] == 2:
+                    require(index not in self.conditions, "combined ADD2 duplicated a condition contribution")
+                    continue
+            self.counter_condition(index, ready, task)
+        self.causal.add(ready, point(accounting, "before"))
+
+    def counter_condition(self, index, ready, task):
+        require(index in self.conditions, "missing counter condition contribution")
+        condition, execution = self.conditions[index], self.executions[index]
+        require(
+            condition["task_ref"] == task["task_ref"]
+            and condition["block_idx"] == execution["block_idx"]
+            and condition["subtask_slot"] == execution["subtask_slot"]
+            and condition["credits"] == 1
+            and condition["source"] in (0, 1),
+            "invalid counter condition identity or credits",
+        )
+        if condition["source"] == 0:
+            require(
+                task["flags"] & MIX and condition["worker_index"] == execution["worker_index"],
+                "empty counter condition has a foreign owner or non-Mix task",
+            )
+        self.before(point(execution, "entry"), point(condition, "before"), "counter condition precedes its execution")
+        publication = self.causal.bounded(
+            ("counter_condition", index), point(condition, "before"), point(condition, "after")
+        )
+        self.causal.add(publication, ready)
+        self.used_conditions.add(index)
 
     def dependencies(self, task, done):
         ref = task["task_ref"]
@@ -920,6 +1009,11 @@ class NativeAudit:
 
         audit_mix(self)
         self.completions()
+        require(set(self.conditions) == self.used_conditions, "counter condition coverage mismatch")
+        require(
+            all(row["valid"] == 1 and row["value"] == row["limit"] for row in self.raw["completion_counters"]),
+            "counter observation is missing or not terminal",
+        )
         self.causal.validate()
         return dict(
             self.sequence_result,

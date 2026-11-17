@@ -73,6 +73,7 @@
 #include "prepared_execution_plan.h"
 #include "async_completion_plan.h"
 #include "task_catalog_plan.h"
+#include "completion_counter_plan.h"
 #include "dependency_plan.h"
 #include "scheduler/scheduler_graph.h"
 #include "scheduler/scheduler_args_dump.h"
@@ -753,7 +754,7 @@ bool publish_aicore_scheduler_profiling(Runtime *runtime, const HostApi *api) {
                 }
                 const uint32_t kind = record.kind & UINT32_C(0xffff);
                 if (kind < static_cast<uint32_t>(SchedPhaseKind::ScalarWindow) ||
-                    kind > static_cast<uint32_t>(SchedPhaseKind::ScalarPreparedClaim) ||
+                    kind > static_cast<uint32_t>(SchedPhaseKind::ScalarCounterAccounting) ||
                     std::strcmp(sched_phase_kind_name(static_cast<SchedPhaseKind>(kind)), "unknown") == 0 ||
                     record.start_time == 0 || record.end_time < record.start_time) {
                     LOG_WARN("A5 HBG: invalid Scalar interval for worker=%" PRIu64, worker);
@@ -1776,38 +1777,6 @@ bool create_scheduler_state(
         return false;
     }
 
-    SchedulerDoneNotifications notifications;
-    try {
-        if (api->acquire_scheduler_notifications(
-                SchedulerNotificationPurpose::TASK_STATE, static_cast<size_t>(node_count), 0, &notifications
-            ) != 0)
-            throw std::runtime_error("cannot acquire retained task notifications");
-    } catch (const std::exception &error) {
-        LOG_ERROR("A5 HBG: cannot prepare DONE notifications: %s", error.what());
-        return false;
-    }
-    auto *notification_addresses = scheduler_state_at<uint64_t>(host_base, layout.done_notifications_offset);
-    std::copy(notifications.addresses.begin(), notifications.addresses.end(), notification_addresses);
-
-    // The total number of MIX blocks bounds every cluster's sequence. Larger
-    // graphs retain the full-width GM protocol; no sequence is truncated.
-    uint64_t mix_blocks = 0;
-    for (const auto &metadata : task_metadata)
-        if (scheduler_task_is_mix(metadata.flags)) mix_blocks += metadata.logical_block_num;
-    SchedulerDoneNotifications mix_notifications;
-    if (spmd.sync_mix_task_count != 0 && mix_blocks < (UINT64_C(1) << 31)) {
-        try {
-            if (api->acquire_scheduler_notifications(
-                    SchedulerNotificationPurpose::MIX_ACK, static_cast<size_t>(spmd.cluster_count) * 6, 0,
-                    &mix_notifications
-                ) != 0)
-                throw std::runtime_error("cannot acquire retained MIX notifications");
-        } catch (const std::exception &error) {
-            LOG_ERROR("A5 HBG: cannot prepare MIX notifications: %s", error.what());
-            return false;
-        }
-    }
-
     if (layout.async_layout_offset != 0 && !initialize_async_completion(host_base, layout.total_size, async_plan)) {
         LOG_ERROR("A5 HBG: failed to initialize async completion storage");
         return false;
@@ -1872,6 +1841,111 @@ bool create_scheduler_state(
         }
         task_catalog_plan.header.control_count -= folded;
     }
+    std::vector<bool> host_completed(node_count, false);
+    for (const int64_t ref : inline_completed_task_refs)
+        host_completed[ref] = true;
+    std::vector<std::vector<int64_t>> counter_fanin(node_count);
+    std::vector<uint32_t> counter_credits(node_count, 0);
+    for (uint64_t ref = 0; ref < node_count; ++ref) {
+        if (host_completed[ref]) continue;
+        SchedulerFaninView view{};
+        if (scheduler_node_fanin_view(dependency_graph, ref, &view) != SchedulerGraphResult::OK) return false;
+        for (uint32_t edge = 0; edge < view.count; ++edge) {
+            int64_t predecessor = SCHEDULER_TASK_REF_INVALID;
+            if (scheduler_fanin_ref(view, ref, edge, &predecessor) != SchedulerGraphResult::OK) return false;
+            counter_fanin[ref].push_back(predecessor);
+        }
+        const auto &metadata = task_metadata[ref];
+        if ((metadata.flags & SCHEDULER_TASK_EXECUTABLE) == 0 || scheduler_task_is_inline(metadata.flags)) continue;
+        uint32_t executions = 0;
+        if (!scheduler_subtask_count_checked(
+                metadata.logical_block_num, scheduler_task_lanes(metadata).count(), &executions
+            ))
+            return false;
+        counter_credits[ref] = executions * 2;
+    }
+    SchedulerCompletionCounterPlan counter_plan;
+    if (!scheduler_plan_completion_counters(
+            counter_fanin, task_catalog_plan.task_order, counter_credits, &counter_plan, &task_order_error
+        )) {
+        LOG_ERROR("A5 HBG: completion counter plan failed: %s", task_order_error.c_str());
+        return false;
+    }
+    SchedulerDoneNotifications counter_notifications;
+    try {
+        if (api->acquire_scheduler_notifications(
+                SchedulerNotificationPurpose::COMPLETION_COUNTER, counter_plan.chains.size(), &counter_notifications
+            ) != 0)
+            throw std::runtime_error("cannot acquire retained completion counters");
+    } catch (const std::exception &error) {
+        LOG_ERROR("A5 HBG: cannot prepare completion counters: %s", error.what());
+        return false;
+    }
+    auto *counter_descriptors =
+        scheduler_state_at<SchedulerTaskCompletionCounter>(host_base, layout.completion_counters_offset);
+    std::vector<uint64_t> legacy_done_refs;
+    uint64_t mapped_counter_tasks = 0;
+    for (uint64_t ref = 0; ref < node_count; ++ref) {
+        const uint32_t chain = counter_plan.task_chains[ref];
+        if (chain != UINT32_MAX && counter_notifications.addresses[chain] != 0 &&
+            counter_notifications.add_addresses[chain] != 0) {
+            counter_descriptors[ref] = {
+                counter_notifications.addresses[chain], counter_notifications.add_addresses[chain],
+                counter_plan.thresholds[ref], counter_plan.chains[chain].limit
+            };
+            ++mapped_counter_tasks;
+        } else {
+            legacy_done_refs.push_back(ref);
+        }
+    }
+    SchedulerDoneNotifications notifications;
+    try {
+        if (api->acquire_scheduler_notifications(
+                SchedulerNotificationPurpose::TASK_STATE, legacy_done_refs.size(), &notifications
+            ) != 0)
+            throw std::runtime_error("cannot acquire retained task notifications");
+    } catch (const std::exception &error) {
+        LOG_ERROR("A5 HBG: cannot prepare DONE notifications: %s", error.what());
+        return false;
+    }
+    auto *notification_addresses = scheduler_state_at<uint64_t>(host_base, layout.done_notifications_offset);
+    for (size_t index = 0; index < legacy_done_refs.size(); ++index)
+        notification_addresses[legacy_done_refs[index]] = notifications.addresses[index];
+    const size_t eligible_counter_tasks =
+        std::count_if(counter_credits.begin(), counter_credits.end(), [](uint32_t credits) {
+            return credits != 0;
+        });
+    const size_t mapped_counter_chains = std::count_if(
+        counter_notifications.add_addresses.begin(), counter_notifications.add_addresses.end(),
+        [](uint64_t address) {
+            return address != 0;
+        }
+    );
+    LOG_TIMING(
+        "A5 HBG: completion counters backend=SET-slot-offset planned_chains=%zu mapped_chains=%zu eligible_tasks=%zu "
+        "mapped_tasks=%" PRIu64,
+        counter_plan.chains.size(), mapped_counter_chains, eligible_counter_tasks, mapped_counter_tasks
+    );
+
+    // The total number of MIX blocks bounds every cluster's sequence. Larger
+    // graphs retain the full-width GM protocol; no sequence is truncated.
+    uint64_t mix_blocks = 0;
+    for (const auto &metadata : task_metadata)
+        if (scheduler_task_is_mix(metadata.flags)) mix_blocks += metadata.logical_block_num;
+    SchedulerDoneNotifications mix_notifications;
+    if (spmd.sync_mix_task_count != 0 && mix_blocks < (UINT64_C(1) << 31)) {
+        try {
+            if (api->acquire_scheduler_notifications(
+                    SchedulerNotificationPurpose::MIX_ACK, static_cast<size_t>(spmd.cluster_count) * 6,
+                    &mix_notifications
+                ) != 0)
+                throw std::runtime_error("cannot acquire retained MIX notifications");
+        } catch (const std::exception &error) {
+            LOG_ERROR("A5 HBG: cannot prepare MIX notifications: %s", error.what());
+            return false;
+        }
+    }
+
     if (protocol_profiling) {
         try {
             SchedulerGraphView snapshot = host_graph;
@@ -1949,6 +2023,7 @@ bool create_scheduler_state(
         context.task_controls_offset = layout.task_controls_offset;
         context.task_metadata_offset = layout.task_metadata_offset;
         context.done_notifications_offset = layout.done_notifications_offset;
+        context.completion_counters_offset = mapped_counter_tasks == 0 ? 0 : layout.completion_counters_offset;
         context.aicpu_lifecycle_traces_offset = layout.aicpu_lifecycle_traces_offset;
         context.worker_contexts_offset = layout.worker_contexts_offset;
         context.runtime_worker_count = static_cast<uint64_t>(runtime->get_worker_count());
@@ -1999,6 +2074,8 @@ bool create_scheduler_state(
         reinterpret_cast<void *>(aligned_address), host_base, static_cast<size_t>(initialized_bytes),
         HostPhaseKind::Count, {}
     );
+    if (counter_notifications.owner != nullptr)
+        runtime->retain_pending_resource(std::move(counter_notifications.owner));
     if (notifications.owner != nullptr) runtime->retain_pending_resource(std::move(notifications.owner));
     if (mix_notifications.owner != nullptr) runtime->retain_pending_resource(std::move(mix_notifications.owner));
     LOG_INFO("A5 HBG: selected AICore Scheduler for %d tasks", total_tasks);

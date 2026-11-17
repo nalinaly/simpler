@@ -608,7 +608,7 @@ public:
         uint32_t pipeline_slot, std::size_t bytes, std::size_t alignment, void **device_out, void **host_out
     );
     virtual int
-    acquire_scheduler_notifications(uint32_t, SchedulerNotificationPurpose, size_t, size_t, SchedulerDoneNotifications *) {
+    acquire_scheduler_notifications(uint32_t, SchedulerNotificationPurpose, size_t, SchedulerDoneNotifications *) {
         return -1;
     }
 

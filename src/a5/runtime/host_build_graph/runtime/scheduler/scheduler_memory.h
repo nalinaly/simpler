@@ -155,6 +155,21 @@ static inline __aicore__ void scheduler_notify_done(__gm__ volatile uint32_t &va
     scheduler_notify_store(value, UINT32_C(1));
 }
 
+// The validated CntNotify command is a 32-bit write of one to SET + 8:
+// command=1 increments once. Other payloads are not an arithmetic delta.
+// Ordering of publication against later work remains the caller's responsibility.
+static inline __aicore__ void scheduler_notify_add(__gm__ volatile uint32_t &value, uint32_t credits) {
+    for (uint32_t credit = 0; credit < credits; ++credit) {
+        scheduler_scalar_memory_issue(SchedPhaseKind::ScalarBypassStore, 1, [&value]() __aicore__ {
+#if defined(__CCE_AICORE__)
+            __builtin_cce_st_dev(UINT32_C(1), const_cast<__gm__ uint32_t *>(&value), 0);
+#else
+            (void)__atomic_fetch_add(&value, UINT32_C(1), __ATOMIC_RELEASE);
+#endif
+        });
+    }
+}
+
 static inline __aicore__ uint64_t
 scheduler_gm_query_u32_pair(__gm__ volatile uint32_t *values, int order = __ATOMIC_ACQUIRE) {
     return scheduler_scalar_memory_result(SchedPhaseKind::ScalarBypassLoad, [values, order]() __aicore__ {

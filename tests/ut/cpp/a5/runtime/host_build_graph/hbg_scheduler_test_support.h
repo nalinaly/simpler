@@ -328,6 +328,7 @@ struct FixtureStorage {
         config.task_controls_offset = context->task_controls_offset;
         config.task_metadata_offset = context->task_metadata_offset;
         config.done_notifications_offset = context->done_notifications_offset;
+        config.completion_counters_offset = context->completion_counters_offset;
         config.task_catalog_offset = task_catalog_offset;
         local->profiling->trace_cells_offset = context->trace_cells_offset;
         local->profiling->activity_buffers_offset = context->activity_buffers_offset;

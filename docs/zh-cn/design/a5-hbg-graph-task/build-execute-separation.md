@@ -854,7 +854,7 @@ DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publicati
 控制信号优先迁移到 CntNotify，并按完整状态字的读、写、初始化及复用合同选型：
 单写者值/序号用SET；exactly-once贡献的数量汇合可用ADD，不同条件也可用不进位的权重ADD；
 需要条件身份和幂等重复时可用BIT_WR掩码置位。当前实机已验证SET及BIT_WR，
-ADD和BIT_CLR的直接映射仍被当前SDK/驱动拒绝，不能假设其AICore访问已可用。
+ADD和BIT_CLR的正式直接映射仍被当前SDK/驱动拒绝；ADD已通过下述SET slot+0x08偏移访问实测，BIT_CLR未作同等证明。
 只有依赖返回值裁定唯一责任的CAS/FAA等继续使用GM atomic；同一锁若仍用GM CAS，
 不能单独把它的解锁写搬到SRAM。普通payload、Tensor数据、GM descriptor不属于控制通知替换。
 原64-bit状态的范围、失败位和代际语义必须保留，不能截断成32-bit。
@@ -862,6 +862,35 @@ ADD和BIT_CLR的直接映射仍被当前SDK/驱动拒绝，不能假设其AICore
 AICore以32-bit ld_dev/st_dev访问通知，资源地址决定SET或BIT_WR操作；
 AICPU在启动阶段通过映射地址写值并在READY之前DSB。通知地址不做DCCI，
 同核存在数据发布顺序依赖时保留相应DSB，跨核通知本身不机械新增屏障。
+
+### 2026-11-17：CntNotify ADD 偏移访问实测依据
+
+`fwic-dsl` 已在 Ascend950DT_9581、CANN 9.3.0、driver 25.6.rc2.b023 上实测：持有 SDK 返回的 SET/read 映射，按 `slot = SET_address & ~0x1f`、`ADD_address = slot + 0x08` 得到同一通知对象的 ADD 地址，以 32-bit `st_dev` 写入。正式 ADD 地址接口仍返回 507899；该错误不表示硬件 ADD 不可用，也不需要更新驱动后才能使用本次已验证的偏移方式。
+
+| 验证 | 结果 |
+| ---- | ---- |
+| 单核初值7，ADD写1一次 | 8 |
+| 96核各写1一次，64轮 | 每轮96 |
+| 96核各写1八次，64轮 | 每轮768 |
+| 换第二、第三个对象各测64轮 | 每轮96，其他对象哨兵不变 |
+
+自动设备5，任务 `task_20261117_163922_212564423280`；使用硬件 SyncAll 对齐。256个满核轮次均有全核写入区间重叠，共67,585次ADD写1、24,672条逐核记录，无丢计数或邻居对象变化。此探针每次写后执行DSB，只证明操作数1；恢复调度器的合并ADD(2)、MIX聚合ADD(2/3)及批量尾屏障之前需补对应实测，不能从本结果直接外推。
+
+SET映射与handle覆盖整个运行生命周期；派生ADD地址不独立map/unmap。SDK报告的4字节是该资源接口返回长度，本次偏移可访问性由上述特定环境实测支撑，不扩写为其他芯片的公开SDK保证。原始源码/记录位于工作区 `cnt-notify-add-offset-20261117/`，本仓证据副本为 `artifacts/cnt-add-enable-20261117/reference-*`。恢复先前的单调计数链，继续保留当前MIX自身ACK省略、已有证明复用，以及GM回退路径的单次async标记；不恢复bitmap或run内bank交接。
+
+补充同构实测（`artifacts/cnt-add-enable-20261117/probe/`）：向偏移地址写2保持初值不变，写3一次只触发加一，不能解释为通用delta加法。固定命令值1连续写8次、每核批尾一次DSB，96核64轮全部为768，邻居哨兵正常。只重编Host增加的无溢出高位对照也通过：`0x7ffffff0 + 96 = 0x80000050`、`0xffffff00 + 96 = 0xffffff60`。安装目录名为cann-9.3.0，但补充探针读取的CANN/runtime版本头为9.2.0，版本信息按原始记录保留，不仅根据目录命名判断。以上是功能结果，不是调度性能对比。
+
+### 当前 ADD 完成链实现
+
+- Host 将严格真实DAG祖先链映射到同一单调计数器，每任务保存固定累计阈值；每execution的目标贡献为P物理完成与Q条件完成两份。Host用64-bit累计，超过UINT32_MAX前拆链。独立任务不共享链，也不添加执行依赖。
+- 同步普通返回逻辑贡献2，实际发送两次32-bit写1；有defer时P、Q各发送一次写1。MIX计算lane在无条件封口或最终CHECK时贡献Q，coordinator在完整资源release后按active lane数贡献P。不能把提前准备、发票结束或仅物理返回当作逻辑完成。
+- `scheduler_notify_add(credits)` 是逻辑批量贡献接口，实际只写已验证的命令1。数据发布前的DSB、消费者数据观察、kernel入口与退出的既有屏障保留；通知自身不机械增加逐次或尾DSB。读到完整阈值证明贡献已到达；探针批尾DSB的结果与此协议论证分开，实际无额外通知尾DSB的整网路径另行实测。
+- 后继直接读计数器并比较自己的阈值；计数器在一轮中只增不减，旧阈值永久有效，无bitmap、旧快照、run内reset或bank转交。每轮READY前仅由AICPU清零链头一次，publication/capture lease继续保护生命周期。
+- canonical GM账本按task一次有界归档，不阻塞fanin ready、固定owner或资源退休。DFX记录真实P/Q贡献区间、累计阈值和退出计数；不伪造FAA返回ticket，也不以归档时刻代替逻辑ready。
+- 由持有的SET映射校验32B slot并派生+0x08地址，派生地址不独立map/unmap；容量不足的整链仍用GM路径。GM回退保留近期的自身ACK删除、已有观察证明复用和首次登记者单has_async。Host覆盖日志使用benchmark可见的TIMING级，记录`backend=SET-slot-offset`及计划/实际链数、eligible/mapped任务数。
+- 正式验收要求实际非零ADD覆盖，记录完整与部分覆盖；GM回退成功不算ADD通过。继续以12组AICore L0配对总和和0.5%回退门槛判断性能，不从硬件探针直接推导整网收益。
+
+本轮实际ADD启用验证：12组均确认eligible计算任务完整映射；11组数值通过，原生MoE沿用仅计时。AICore L0配对总和20.2296068→20.2704963 ms（+0.202%），符合0.5%保留门槛；SWA为0.2577120→0.2486034 ms（−3.534%），新版第19–21层为3.0837522→3.1455712 ms（+2.005%）。该结果不表示各case均加速。完整样本、实际设备、覆盖证据保存在 `artifacts/cnt-add-enable-20261117/RESULTS.md` 与JSON中。
 
 <!-- markdownlint-disable-next-line MD033 -->
 <a id="performance-retention-policy"></a>

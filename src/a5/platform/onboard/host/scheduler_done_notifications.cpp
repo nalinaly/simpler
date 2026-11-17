@@ -24,21 +24,20 @@ void check(int rc, const char *operation) {
 struct Notification {
     aclrtCntNotify handle{nullptr};
     rtDevResInfo mapping{0, RT_PROCESS_CP1, RT_RES_TYPE_STARS_CNT_NOTIFY_RECORD, 0, 0};
-    rtDevResInfo bit_write_mapping{0, RT_PROCESS_CP1, RT_RES_TYPE_STARS_CNT_NOTIFY_BIT_WR, 0, 0};
     uint64_t address{0};
-    uint64_t bit_write_address{0};
+    uint64_t add_address{0};
     bool mapped{false};
-    bool bit_write_mapped{false};
 };
 
 class NotificationPool final : public SchedulerNotificationStorage {
 public:
-    explicit NotificationPool(void *context) :
-        SchedulerNotificationStorage(context) {}
+    NotificationPool(void *context, SchedulerNotificationPurpose purpose) :
+        SchedulerNotificationStorage(context),
+        counter_(purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER) {}
     size_t capacity() const override { return notifications_.size(); }
 
-    SchedulerDoneNotifications prepare(size_t count, size_t bit_write_count) override {
-        if (retiring || bit_write_count > count) throw std::invalid_argument("invalid CntNotify pool acquire");
+    SchedulerDoneNotifications prepare(size_t count) override {
+        if (retiring) throw std::invalid_argument("invalid CntNotify pool acquire");
         SchedulerDoneNotifications result{std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}};
         notifications_.reserve(count);
         while (notifications_.size() < count) {
@@ -55,16 +54,21 @@ public:
             }
             check(rc, "create");
             check(aclrtCntNotifyGetId(notification.handle, &notification.mapping.resId), "get id");
-            notification.bit_write_mapping.resId = notification.mapping.resId;
             map(notification.mapping, notification.address, notification.mapped);
+            if (counter_) {
+                // A5 CntNotify owns a 32-byte register slot. Its ADD register
+                // is offset 8 from the mapped SET/read base and shares the SET
+                // mapping and handle lifetime; it has no independent unmap.
+                if ((notification.address & UINT64_C(0x1f)) != 0)
+                    throw std::runtime_error("CntNotify SET mapping is not an A5 register-slot base");
+                notification.add_address = notification.address + UINT64_C(0x08);
+            }
         }
         for (size_t index = 0; index < count && index < notifications_.size(); ++index) {
             auto &notification = notifications_[index];
             if (!notification.mapped) throw std::runtime_error("CntNotify pool has an incomplete mapping");
-            if (index < bit_write_count && !notification.bit_write_mapped)
-                map(notification.bit_write_mapping, notification.bit_write_address, notification.bit_write_mapped);
             result.addresses[index] = notification.address;
-            if (index < bit_write_count) result.bit_write_addresses[index] = notification.bit_write_address;
+            if (counter_) result.add_addresses[index] = notification.add_address;
         }
         return result;
     }
@@ -82,17 +86,12 @@ public:
             if (error == 0 && rc != 0) error = rc;
         };
         for (auto &notification : notifications_) {
-            if (notification.bit_write_mapped) {
-                const auto rc = rtReleaseDevResAddress(&notification.bit_write_mapping);
-                note(rc);
-                if (rc == 0) notification.bit_write_mapped = false;
-            }
             if (notification.mapped) {
                 const auto rc = rtReleaseDevResAddress(&notification.mapping);
                 note(rc);
                 if (rc == 0) notification.mapped = false;
             }
-            if (!notification.mapped && !notification.bit_write_mapped && notification.handle != nullptr) {
+            if (!notification.mapped && notification.handle != nullptr) {
                 const auto rc = aclrtCntNotifyDestroy(notification.handle);
                 note(rc);
                 if (rc == ACL_SUCCESS) notification.handle = nullptr;
@@ -121,9 +120,11 @@ private:
     // Explicit close owns SDK calls. A reset or a rejected close cannot cause
     // a member destructor to operate on a dead or still-borrowed context.
     std::vector<Notification> notifications_;
+    const bool counter_;
 };
 }  // namespace
 
-std::shared_ptr<SchedulerNotificationStorage> make_scheduler_notification_storage(void *context) {
-    return std::make_shared<NotificationPool>(context);
+std::shared_ptr<SchedulerNotificationStorage>
+make_scheduler_notification_storage(void *context, SchedulerNotificationPurpose purpose) {
+    return std::make_shared<NotificationPool>(context, purpose);
 }

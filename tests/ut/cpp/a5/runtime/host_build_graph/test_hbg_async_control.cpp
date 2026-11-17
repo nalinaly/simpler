@@ -380,6 +380,84 @@ TEST(HbgAsyncControl, BoundExecutionStillChecksTaskBlockAndLaneOnReturn) {
     }
 }
 
+TEST(HbgAsyncControl, AddConditionsBeforeOrAfterPhysicalReturnNeedNoGlobalJoinOrAccountingToReleaseFanin) {
+    for (bool condition_first : {false, true}) {
+        SCOPED_TRACE(condition_first);
+        AsyncFixture f;
+        f.graph.executable(1, 0, {0});
+        ASSERT_TRUE(f.storage.prepare_calls(f.graph.graph()));
+        uint32_t count = 0;
+        auto *counters =
+            scheduler_state_at<SchedulerTaskCompletionCounter>(f.base(), f.storage.layout.completion_counters_offset);
+        counters[0] = {reinterpret_cast<uint64_t>(&count), reinterpret_cast<uint64_t>(&count), 2, 2};
+        for (uint32_t worker = 0; worker < 3; ++worker) {
+            f.storage.contexts[worker].completion_counters_offset = f.storage.layout.completion_counters_offset;
+            f.local(worker)->config.completion_counters_offset = f.storage.layout.completion_counters_offset;
+            f.workers[worker].completion_counters_offset = f.storage.layout.completion_counters_offset;
+        }
+        const auto writer = f.start();
+        f.register_counter(writer);
+        bool deferred = false;
+        ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, writer, &deferred));
+        EXPECT_TRUE(deferred);
+        EXPECT_EQ(f.join().word, 0u);
+        EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_initial_state(1));
+        if (condition_first) {
+            f.signal[0] = 1;
+            ASSERT_TRUE(f.check(1));
+            EXPECT_EQ(count, 1u);
+            EXPECT_EQ(
+                scheduler_observe_cached_completion(f.base(), f.local(), 0), SchedulerCompletionObservation::PENDING
+            );
+        }
+        auto &slot = f.local()->slots[0];
+        slot.task_ref = 0;
+        slot.block_idx = 0;
+        slot.subtask_slot = 0;
+        slot.state = SchedulerDispatchSlotState::EXECUTING;
+        slot.completion_credits = 1;
+        f.bind_package();
+        slot.execution_token = true;
+        const auto returned = slot.prepared;
+        ASSERT_TRUE((
+            scheduler_complete_own_slot<false, true>(f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, 0)
+        ));
+        EXPECT_EQ(slot.state, SchedulerDispatchSlotState::FREE);
+        EXPECT_EQ(
+            scheduler_prepared_phase(
+                scheduler_prepared_control_at(f.base(), f.local()->config.prepared, returned.execution_index)->state
+            ),
+            SchedulerPreparedPhase::RETURNED
+        );
+        // Retirement is explicit; it must not need the delayed canonical task proof.
+        EXPECT_FALSE(scheduler_prepared_already_returned(f.base(), f.local()->config.prepared, returned));
+        auto duplicate = returned;
+        EXPECT_FALSE(scheduler_return_prepared_execution(f.base(), f.local()->config.prepared, &duplicate));
+        EXPECT_EQ(f.join().word, 0u);
+        EXPECT_FALSE(f.done());
+        if (!condition_first) {
+            EXPECT_EQ(count, 1u);
+            EXPECT_FALSE(f.check(1));
+            f.signal[0] = 1;
+            EXPECT_TRUE(f.check(2));
+        }
+        EXPECT_EQ(count, 2u);
+        EXPECT_FALSE(f.check(1));
+        EXPECT_EQ(count, 2u);
+        int64_t ready = -1;
+        ASSERT_TRUE(f.select_execution(&ready));
+        EXPECT_EQ(ready, 1);
+        EXPECT_FALSE(f.done());
+        bool progress = false;
+        ASSERT_TRUE(
+            scheduler_service_counter_accounting(f.graph.graph(), f.base(), f.local(), f.storage.run_control, &progress)
+        );
+        EXPECT_TRUE(progress);
+        EXPECT_TRUE(f.done());
+        EXPECT_EQ(f.local()->pending_completed, 1u);
+    }
+}
+
 TEST(HbgAsyncControl, ReturnedExecutionReleasesSlotButCannotReleaseConsumerBeforeSignal) {
     AsyncFixture f;
     f.graph.executable(1, 0, {0});

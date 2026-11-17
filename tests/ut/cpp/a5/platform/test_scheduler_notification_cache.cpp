@@ -18,20 +18,23 @@ struct Counters {
     int released{0};
     int abandoned{0};
     bool fail_release{false};
+    size_t capacity_limit{SIZE_MAX};
 };
 class FakePool final : public SchedulerNotificationStorage {
 public:
-    FakePool(void *context, Counters &counts) :
+    FakePool(void *context, SchedulerNotificationPurpose purpose, Counters &counts) :
         SchedulerNotificationStorage(context),
-        counts_(counts) {
+        counts_(counts),
+        counter_(purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER) {
         ++counts_.created;
     }
     size_t capacity() const override { return capacity_; }
-    SchedulerDoneNotifications prepare(size_t count, size_t bit_count) override {
+    SchedulerDoneNotifications prepare(size_t count) override {
         ++counts_.prepared;
-        capacity_ = std::max(capacity_, count);
-        SchedulerDoneNotifications result{std::vector<uint64_t>(count, 32), std::vector<uint64_t>(count, 0), {}};
-        std::fill_n(result.bit_write_addresses.begin(), bit_count, 64);
+        capacity_ = std::min(std::max(capacity_, count), counts_.capacity_limit);
+        SchedulerDoneNotifications result{std::vector<uint64_t>(count, 0), std::vector<uint64_t>(count, 0), {}};
+        std::fill_n(result.addresses.begin(), std::min(capacity_, count), 32);
+        if (counter_) std::fill_n(result.add_addresses.begin(), std::min(capacity_, count), 40);
         return result;
     }
     int release() override {
@@ -42,6 +45,7 @@ public:
 
 private:
     Counters &counts_;
+    const bool counter_;
     size_t capacity_{0};
 };
 struct Fixture {
@@ -49,13 +53,13 @@ struct Fixture {
     Counters counts;
     int context{};
     int acquire(
-        SchedulerDoneNotifications &out, size_t size = 8, size_t bit_count = 7,
+        SchedulerDoneNotifications &out, size_t size = 8,
         SchedulerNotificationPurpose purpose = SchedulerNotificationPurpose::TASK_STATE
     ) {
         return cache.acquire(
-            0, purpose, &context, size, bit_count,
-            [&](void *ctx) {
-                return std::make_shared<FakePool>(ctx, counts);
+            0, purpose, &context, size,
+            [&](void *ctx, SchedulerNotificationPurpose purpose) {
+                return std::make_shared<FakePool>(ctx, purpose, counts);
             },
             &out
         );
@@ -85,12 +89,11 @@ TEST(SchedulerNotificationCache, ReusesAndGrowsUnleasedPoolWithIndependentPurpos
     ASSERT_EQ(f.acquire(first), 0);
     auto *identity = first.owner.get();
     first = {};
-    ASSERT_EQ(f.acquire(first, 16, 15), 0);
+    ASSERT_EQ(f.acquire(first, 16), 0);
     EXPECT_EQ(first.owner.get(), identity);
-    EXPECT_EQ(first.bit_write_addresses[14], 64u);
-    EXPECT_EQ(first.bit_write_addresses[15], 0u);
+    EXPECT_EQ(first.add_addresses[14], 0u);
     SchedulerDoneNotifications mix;
-    ASSERT_EQ(f.acquire(mix, 6, 0, SchedulerNotificationPurpose::MIX_ACK), 0);
+    ASSERT_EQ(f.acquire(mix, 6, SchedulerNotificationPurpose::MIX_ACK), 0);
     EXPECT_NE(mix.owner, first.owner);
     EXPECT_EQ(f.counts.created, 2);
     first = {};
@@ -133,9 +136,9 @@ TEST(SchedulerNotificationCache, RefusesReuseAcrossContextGenerations) {
     int another_context = 1;
     EXPECT_NE(
         f.cache.acquire(
-            0, SchedulerNotificationPurpose::TASK_STATE, &another_context, 8, 7,
-            [&](void *ctx) {
-                return std::make_shared<FakePool>(ctx, f.counts);
+            0, SchedulerNotificationPurpose::TASK_STATE, &another_context, 8,
+            [&](void *ctx, SchedulerNotificationPurpose purpose) {
+                return std::make_shared<FakePool>(ctx, purpose, f.counts);
             },
             &lease
         ),
@@ -143,5 +146,32 @@ TEST(SchedulerNotificationCache, RefusesReuseAcrossContextGenerations) {
     );
     EXPECT_EQ(f.counts.created, 1);
     EXPECT_EQ(f.cache.release(), 0);
+}
+TEST(SchedulerNotificationCache, CounterAliasesArePurposeSpecific) {
+    Fixture f;
+    SchedulerDoneNotifications counter;
+    ASSERT_EQ(f.acquire(counter, 4, SchedulerNotificationPurpose::COMPLETION_COUNTER), 0);
+    EXPECT_EQ(counter.addresses[0], 32u);
+    EXPECT_EQ(counter.add_addresses[0], 40u);
+    counter = {};
+    EXPECT_EQ(f.cache.release(), 0);
+}
+
+TEST(SchedulerNotificationCache, CapacityFallbackKeepsWholeCounterPairsAndLease) {
+    Fixture f;
+    f.counts.capacity_limit = 2;
+    SchedulerDoneNotifications counter;
+    ASSERT_EQ(f.acquire(counter, 4, SchedulerNotificationPurpose::COMPLETION_COUNTER), 0);
+    ASSERT_EQ(counter.addresses.size(), 4u);
+    ASSERT_EQ(counter.add_addresses.size(), 4u);
+    EXPECT_EQ(counter.addresses[0], 32u);
+    EXPECT_EQ(counter.add_addresses[0], 40u);
+    EXPECT_EQ(counter.addresses[2], 0u);
+    EXPECT_EQ(counter.add_addresses[2], 0u);
+    EXPECT_NE(counter.owner, nullptr);
+    EXPECT_NE(f.cache.release(), 0);
+    counter = {};
+    EXPECT_EQ(f.cache.release(), 0);
+    EXPECT_EQ(f.counts.released, 1);
 }
 }  // namespace

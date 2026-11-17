@@ -3,6 +3,17 @@
 Date: 2026-11-17. Status: withdrawn from the active implementation at the
 user's request; retain the design and code for a supported ADD software stack.
 
+Follow-up, 2026-11-17: direct ADD mapping still fails, but the user's A5 probe
+validated ADD(1) through the held SET mapping's 32-byte slot plus offset 0x08.
+The user authorized enabling the prepared implementation through that access.
+Follow-up probes require command value 1 per increment: writing 2 does not add
+2 and writing 3 increments once. The restored scheduler repeats command 1 for
+each credit. Actual full ADD coverage and the twelve-case replay passed; the
+AICore L0 sum regressed 0.202%, within the accepted 0.5% threshold.
+The current evidence and validation limits are recorded in the existing
+[design document](../zh-cn/design/a5-hbg-graph-task/build-execute-separation.md).
+The withdrawal below remains the historical decision, not a hardware limitation.
+
 ## Decision and retained implementation
 
 Commit `8a2c5e42bb5d918110af0ca3d9a3e45f5b72f922` prepared a real, non-returning

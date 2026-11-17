@@ -70,6 +70,87 @@ struct DispatchFixture {
     SchedulerTaskControl *control(uint32_t task) { return scheduler_task_control_at(base(), local(), task); }
 };
 
+void bind_counter(DispatchFixture &f, uint32_t task, uint32_t &value, uint32_t threshold, uint32_t limit) {
+    auto *counters =
+        scheduler_state_at<SchedulerTaskCompletionCounter>(f.base(), f.storage.layout.completion_counters_offset);
+    counters[task] = {reinterpret_cast<uint64_t>(&value), reinterpret_cast<uint64_t>(&value), threshold, limit};
+    for (uint32_t worker = 0; worker < 3; ++worker)
+        f.storage.contexts[worker].completion_counters_offset = f.storage.layout.completion_counters_offset;
+    f.local()->config.completion_counters_offset = f.storage.layout.completion_counters_offset;
+}
+
+TEST(SchedulerTokenDispatch, AddChainReleasesSuccessorsBeforeAccountingAndKeepsOldThresholdsValid) {
+    DispatchFixture f(2, 2);
+    for (uint32_t task = 0; task < 2; ++task) {
+        f.storage.metadata[task].logical_block_num = 2;
+        f.storage.metadata[task].flags |= SCHEDULER_TASK_SPMD;
+    }
+    f.graph.executable(1, 0, {0});
+    ASSERT_TRUE(f.prepare());
+    uint32_t value = 0;
+    bind_counter(f, 0, value, 4, 8);
+    bind_counter(f, 1, value, 8, 8);
+    const auto first = scheduler_completion_source(f.base(), f.local(), 0);
+    for (uint32_t task = 0; task < 2; ++task) {
+        for (uint32_t block = 0; block < 2; ++block) {
+            uint32_t slot = UINT32_MAX;
+            ASSERT_TRUE(f.take(slot));
+            ASSERT_EQ(f.local()->slots[slot].task_ref, task);
+            auto stale = f.local()->slots[slot].prepared;
+            ASSERT_TRUE(f.complete(slot));
+            EXPECT_FALSE(scheduler_return_prepared_execution(f.base(), f.local()->config.prepared, &stale));
+            EXPECT_EQ(value, task * 4 + (block + 1) * 2);
+        }
+        EXPECT_EQ(scheduler_completion_remaining(f.control(task)->completion_state), 2u);
+        EXPECT_EQ(scheduler_observe_task_completion(first), SchedulerCompletionObservation::DONE);
+    }
+    bool progress = false;
+    ASSERT_TRUE(
+        scheduler_service_counter_accounting(f.graph.graph(), f.base(), f.local(), f.storage.run_control, &progress)
+    );
+    EXPECT_TRUE(progress);
+    EXPECT_TRUE(scheduler_completion_done(f.control(0)->completion_state));
+    EXPECT_EQ(f.local()->pending_completed, 1u);
+    ASSERT_TRUE(
+        scheduler_service_counter_accounting(f.graph.graph(), f.base(), f.local(), f.storage.run_control, &progress)
+    );
+    EXPECT_FALSE(progress);
+    EXPECT_EQ(value, 8u);
+    EXPECT_EQ(f.local()->pending_completed, 1u);
+    value = 9;
+    EXPECT_EQ(scheduler_observe_task_completion(first), SchedulerCompletionObservation::INVALID);
+}
+
+TEST(SchedulerTokenDispatch, AddMixContributionCountsOnlyActiveLanesAtTheExistingReleaseBoundary) {
+    DispatchFixture f(1, 4);
+    auto &metadata = f.storage.metadata[0];
+    metadata.logical_block_num = 2;
+    metadata.active_mask = LaneMask::both_aiv();
+    metadata.flags = SCHEDULER_TASK_EXECUTABLE | SCHEDULER_TASK_SPMD | SCHEDULER_TASK_MIX;
+    metadata.kernel_ids[0] = UINT16_MAX;
+    metadata.kernel_ids[1] = metadata.kernel_ids[2] = 1;
+    f.graph.storage()[0].task.kernel_id[0] = INVALID_KERNEL_ID;
+    f.graph.storage()[0].task.kernel_id[1] = f.graph.storage()[0].task.kernel_id[2] = 1;
+    ASSERT_TRUE(f.prepare());
+    uint32_t value = 0;
+    bind_counter(f, 0, value, 8, 8);
+    const auto *counter = scheduler_completion_counter_at(f.base(), f.storage.layout.completion_counters_offset, 0);
+    for (uint32_t block = 0; block < 2; ++block) {
+        for (uint32_t lane = 1; lane < 3; ++lane)
+            ASSERT_TRUE(scheduler_counter_publish_condition(
+                f.base(), *counter, 0, block, lane, f.storage.layout.task_metadata_offset, 0, lane, false
+            ));
+        EXPECT_EQ(value, block * 4 + 2);
+        EXPECT_EQ(scheduler_completion_counter_observe(*counter), 0);
+        ASSERT_TRUE(scheduler_contribute_mix_group<false>(
+            f.graph.graph(), f.base(), f.local(), f.storage.run_control, 0, block, LaneMask::both_aiv()
+        ));
+        EXPECT_EQ(value, (block + 1) * 4);
+    }
+    EXPECT_EQ(scheduler_completion_counter_observe(*counter), 1);
+    EXPECT_EQ(scheduler_completion_remaining(f.control(0)->completion_state), 4u);
+}
+
 TEST(SchedulerTokenDispatch, CntNotifyCompletionReleasesAllReadersWithoutConsumingTheSignal) {
     DispatchFixture f(2);
     f.graph.executable(1, 0, {0});

@@ -23,7 +23,7 @@ public:
         context(context) {}
     virtual ~SchedulerNotificationStorage() = default;
     virtual size_t capacity() const = 0;
-    virtual SchedulerDoneNotifications prepare(size_t count, size_t bit_write_count) = 0;
+    virtual SchedulerDoneNotifications prepare(size_t count) = 0;
     virtual int release() = 0;
     virtual void abandon() noexcept = 0;
     void *const context;
@@ -36,10 +36,10 @@ class SchedulerNotificationCache {
 public:
     template <class Create>
     int acquire(
-        uint32_t slot, SchedulerNotificationPurpose purpose, void *context, size_t count, size_t bit_write_count,
-        Create create, SchedulerDoneNotifications *out
+        uint32_t slot, SchedulerNotificationPurpose purpose, void *context, size_t count, Create create,
+        SchedulerDoneNotifications *out
     ) {
-        if (out == nullptr || context == nullptr || bit_write_count > count) return -1;
+        if (out == nullptr || context == nullptr) return -1;
         *out = {};
         if (count == 0) return 0;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -63,12 +63,12 @@ public:
             it = bank.erase(it);
         }
         if (!selected) {
-            selected = create(context);
+            selected = create(context, purpose);
             if (!selected || selected->context != context) return -1;
             bank.push_back(selected);
         }
         try {
-            auto result = selected->prepare(count, bit_write_count);
+            auto result = selected->prepare(count);
             result.owner = selected;
             *out = std::move(result);
             return 0;
@@ -96,7 +96,9 @@ public:
                 }
             }
         }
-        if (first_error == 0) pools_.clear();
+        if (first_error == 0) {
+            pools_.clear();
+        }
         return first_error;
     }
 
