@@ -16,6 +16,8 @@
 #include <type_traits>
 
 inline constexpr uint64_t SCHEDULER_PROTOCOL_MAGIC = UINT64_C(0x53504d4454520002);
+// Control completion stamps describe accounting after idempotent notification.
+inline constexpr uint32_t SCHEDULER_PROTOCOL_CONTROL_NOTIFY_ACCOUNTING = UINT32_C(1) << 26;
 inline constexpr uint32_t SCHEDULER_PROTOCOL_COUNTER_ACCOUNTING = UINT32_C(1) << 27;
 inline constexpr uint32_t SCHEDULER_PROTOCOL_MEMBER_FROM_CLAIM = UINT32_C(1) << 28;
 // A physical synchronous completion aliases the actual last contribution stamps.
@@ -242,11 +244,32 @@ static_assert(offsetof(SchedulerProtocolBlockTrace, lanes) == 320);
 static_assert(sizeof(SchedulerProtocolBlockTrace) == 1088);
 static_assert(sizeof(SchedulerProtocolExecutionTrace) == 256);
 static_assert(sizeof(SchedulerProtocolWorkerTrace) == 64);
-static_assert(std::is_standard_layout_v<SchedulerProtocolLayout> && std::is_trivially_copyable_v<SchedulerProtocolLayout>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolTaskTrace> && std::is_trivially_copyable_v<SchedulerProtocolTaskTrace>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolConditionContribution> && std::is_trivially_copyable_v<SchedulerProtocolConditionContribution>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolCounterObservation> && std::is_trivially_copyable_v<SchedulerProtocolCounterObservation>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolMemberTrace> && std::is_trivially_copyable_v<SchedulerProtocolMemberTrace>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolBlockTrace> && std::is_trivially_copyable_v<SchedulerProtocolBlockTrace>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolExecutionTrace> && std::is_trivially_copyable_v<SchedulerProtocolExecutionTrace>);
-static_assert(std::is_standard_layout_v<SchedulerProtocolWorkerTrace> && std::is_trivially_copyable_v<SchedulerProtocolWorkerTrace>);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolLayout> && std::is_trivially_copyable_v<SchedulerProtocolLayout>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolTaskTrace> && std::is_trivially_copyable_v<SchedulerProtocolTaskTrace>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolConditionContribution> &&
+    std::is_trivially_copyable_v<SchedulerProtocolConditionContribution>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolCounterObservation> &&
+    std::is_trivially_copyable_v<SchedulerProtocolCounterObservation>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolMemberTrace> &&
+    std::is_trivially_copyable_v<SchedulerProtocolMemberTrace>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolBlockTrace> && std::is_trivially_copyable_v<SchedulerProtocolBlockTrace>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolExecutionTrace> &&
+    std::is_trivially_copyable_v<SchedulerProtocolExecutionTrace>
+);
+static_assert(
+    std::is_standard_layout_v<SchedulerProtocolWorkerTrace> &&
+    std::is_trivially_copyable_v<SchedulerProtocolWorkerTrace>
+);

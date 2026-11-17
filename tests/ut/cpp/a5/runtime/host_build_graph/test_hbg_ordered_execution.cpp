@@ -409,6 +409,33 @@ TEST(HbgOrderedScalarDetail, EmptyPollStillRecordsItsEarlyReturn) {
     EXPECT_EQ(buffer->scalar_dropped, 0u);
 }
 
+TEST(HbgOrderedControl, NotifyBeforeAccountingStillCountsExactlyOnceAndRejectsInvalidGate) {
+    using scheduler_test::gm_mix::GmMixFixture;
+    using scheduler_test::gm_mix::GmShape;
+    for (bool invalid : {false, true}) {
+        GmShape shape{1, LaneMask::aic()};
+        shape.inline_task = true;
+        GmMixFixture fixture({shape}, false, 1);
+        uint32_t notification = 0;
+        scheduler_state_at<uint64_t>(fixture.base(), fixture.storage.layout.done_notifications_offset)[0] =
+            reinterpret_cast<uint64_t>(&notification);
+        if (invalid) fixture.control(0)->completion_state = UINT64_MAX;
+        bool progress = false;
+        const bool succeeded = scheduler_service_controls(
+            fixture.graph.graph(), fixture.base(), fixture.locals[0], fixture.run(), 0, &progress
+        );
+        EXPECT_EQ(succeeded, !invalid);
+        EXPECT_EQ(notification, invalid ? 0u : 1u);
+        EXPECT_EQ(fixture.locals[0]->pending_completed, invalid ? 0u : 1u);
+        if (invalid) continue;
+        ASSERT_TRUE(scheduler_service_controls(
+            fixture.graph.graph(), fixture.base(), fixture.locals[1], fixture.run(), 0, &progress
+        ));
+        EXPECT_EQ(fixture.locals[1]->pending_completed, 0u);
+        EXPECT_TRUE(scheduler_completion_done(fixture.control(0)->completion_state));
+    }
+}
+
 TEST(HbgOrderedControl, ConfirmedFaninPrefixSurvivesProofCacheCollisionAndOtherScannedNodes) {
     using scheduler_test::gm_mix::GmMixFixture;
     using scheduler_test::gm_mix::GmShape;

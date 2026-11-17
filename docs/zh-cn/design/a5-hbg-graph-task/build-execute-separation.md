@@ -312,6 +312,8 @@ GM MIX 的 assigned_seq 与未确认 arrived/released ACK 直接消费可靠 ld_
 
 未折叠的 inline/native control 沿原有目录与每轮8项预算轮转。每核使用16项控制节点专用私有缓存，保存 task_ref 对应的已确认 DONE 的 fanin 前缀，避免多个未完成 control 轮转时丢掉彼此进度。槽位内完整身份必须匹配；hash 碰撞只遗忘旧证明，不能将旧前缀授予新节点。零进度不驱逐其他节点的有效前缀，扫描普通节点或跳过已完成 control 不清空缓存。新 run 清零全部条目；缓存遗忘只造成重新确认，不改变数据依赖、Graph 激活、最终完成 CAS 或错误检查。
 
+具有独立SRAM DONE通知的控制节点，在完整fanin满足并可靠读取canonical状态为合法INITIAL后，保留原发布屏障，先幂等SET(1)放行后继，再于同次服务执行原canonical CAS。CAS胜者负责唯一记账，发布与CAS之间不返回或让出执行；非法状态在SET前拒绝，已DONE不重复记账。没有通知资源时仍走原GM路径，不增加静态accountant或第二套扫描。DFX的`CONTROL_NOTIFY_ACCOUNTING`标记保留CAS实际时间，将逻辑就绪表示为完整fanin的无精确时刻汇合点，不把记账时间伪装成最早通知时间。
+
 合法图的 task_count 不超过 INT32_MAX，fanin count 不超过32位字段范围，因此每项用64位编码 task_ref+1 与 next_fanin，零值表示空条目。缓存共128B/核，仅在本核使用，不新增共享通知或原子操作。
 
 等待中的 control 不绑定服务核，也不阻止扫描其他 control；不新增共享选主、通知副本或 ready 队列。前缀只保存原完成字的有效 DONE 证明；可靠 `ld_dev` 读取合法 `C=D=0` 可建立该证明，PENDING、供给关闭和参数就绪均不能代替它。操作减少与12组 L0 门禁分别验证。
@@ -815,8 +817,9 @@ Build 同时展示准备工作量和它与前驱计算的重叠；领取同时�
 - 每次 Device 启动，由 AICPU 初始化阶段在任何 READY 发布之前复位通知，尾部屏障保证
   复位先于 READY。已由 Host 完成的节点初始化为 DONE；运行中的节点初始化为 PENDING。
   不依赖 Host 再次 bind，因此 captured replay 也不会读到上轮 DONE。
-- 普通 SPMD/MIX 的最后有效完成贡献者、Graph 控制节点 CAS 胜者，以及 defer_wait
-  的最终 FINISH owner，分别在原有逻辑完成点发布一次 `st_dev.b32(DONE)`。
+- 使用独立SET通知的普通 SPMD/MIX 最后有效完成贡献者及 defer_wait 最终 FINISH owner，
+  在原有逻辑完成点发布一次 `st_dev.b32(DONE)`。Graph/inline控制节点在完整fanin和合法状态证明后
+  可幂等SET放行，随后的canonical CAS仍只裁定唯一记账者；计数链上的任务遵循下文P/Q阈值协议。
   物理 kernel 返回或计算计数归零而异步债务未清，均不得发布 DONE。
 - 后继用 `ld_dev.b32` 非消费式读取，多个后继可观察同一通知。首次绑定前驱时保存通知地址，
   同次等待不重复读取地址表；正向 DONE 证明仍可私有缓存。通知不转移执行所有权，
