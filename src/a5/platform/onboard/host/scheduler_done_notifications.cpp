@@ -33,7 +33,8 @@ class NotificationPool final : public SchedulerNotificationStorage {
 public:
     NotificationPool(void *context, SchedulerNotificationPurpose purpose) :
         SchedulerNotificationStorage(context),
-        counter_(purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER) {}
+        counter_(purpose == SchedulerNotificationPurpose::COMPLETION_COUNTER),
+        bit_directory_(purpose == SchedulerNotificationPurpose::CHECK_DIRECTORY) {}
     size_t capacity() const override { return notifications_.size(); }
 
     SchedulerDoneNotifications prepare(size_t count) override {
@@ -55,12 +56,12 @@ public:
             check(rc, "create");
             check(aclrtCntNotifyGetId(notification.handle, &notification.mapping.resId), "get id");
             map(notification.mapping, notification.address, notification.mapped);
+            if ((counter_ || bit_directory_) && (notification.address & UINT64_C(0x1f)) != 0)
+                throw std::runtime_error("CntNotify SET mapping is not an A5 register-slot base");
             if (counter_) {
                 // A5 CntNotify owns a 32-byte register slot. Its ADD register
                 // is offset 8 from the mapped SET/read base and shares the SET
                 // mapping and handle lifetime; it has no independent unmap.
-                if ((notification.address & UINT64_C(0x1f)) != 0)
-                    throw std::runtime_error("CntNotify SET mapping is not an A5 register-slot base");
                 notification.add_address = notification.address + UINT64_C(0x08);
             }
         }
@@ -121,6 +122,7 @@ private:
     // a member destructor to operate on a dead or still-borrowed context.
     std::vector<Notification> notifications_;
     const bool counter_;
+    const bool bit_directory_;
 };
 }  // namespace
 

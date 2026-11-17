@@ -846,6 +846,8 @@ async 登记的 canonical gate 只保存一个 task 级 `has_async` 门闩，真
 
 CHECK lease 在目录发布之前只有唯一 sealer，可用单写者 st_dev 初始化 RUNNABLE；保留初始化后的 DSB，随后才发布目录位。发布后的 claim、release、finish 仍使用原子交权，不能将初始化证明扩展到多写者更新。
 
+CHECK目录仍按64组扫描，两个32位半区可各自映射到CntNotify；实际不足32组的尾部只申请一个通知。唯一成功sealer通过BIT_WR置位，只有成功完成lease终态CAS的CHECK owner才能通过BIT_CLR清位并提交Q。通知不返回旧bit，因此重复登记或重复完成必须在原有seal/lease协议中拒绝，不能依赖OR/CLR辨认唯一owner。目录扫描仅读取剩余有效半区；映射不足的半区保留GM CAS路径，可与已映射半区共存。目录地址由Host写入后不可变，运行中不对包含GM bits的目录行做cached store或DCCI写回；每轮READY前清零SRAM，通知池仍按prepared slot、用途和capture租约复用。纯同步图不创建这类通知。
+
 成功领取 CHECK 后，只重新接收 AsyncGroupData 的首64B可写行和 progress 行，两条 DCCI 之后统一 DSB，再读取两者字段；header 后64B由 Host 初始化且整轮不可变，复用启动观察。目录与 lease、条件读取、CCU 事件消费及消费者 tensor 获取边界均保留。
 
 ### 按 lane 分类完成能力
@@ -874,8 +876,8 @@ DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publicati
 
 控制信号优先迁移到 CntNotify，并按完整状态字的读、写、初始化及复用合同选型：
 单写者值/序号用SET；exactly-once贡献的数量汇合可用ADD，不同条件也可用不进位的权重ADD；
-需要条件身份和幂等重复时可用BIT_WR掩码置位。当前实机已验证SET及BIT_WR，
-ADD和BIT_CLR的正式直接映射仍被当前SDK/驱动拒绝；ADD已通过下述SET slot+0x08偏移访问实测，BIT_CLR未作同等证明。
+需要条件身份和幂等重复时可用BIT_WR掩码置位、BIT_CLR掩码清位。当前实机已验证SET、BIT_WR及同槽偏移访问的ADD、BIT_CLR。
+ADD和BIT_CLR的正式直接映射仍被当前SDK/驱动拒绝；接口失败不能用来推断同槽硬件操作不可用。
 只有依赖返回值裁定唯一责任的CAS/FAA等继续使用GM atomic；同一锁若仍用GM CAS，
 不能单独把它的解锁写搬到SRAM。普通payload、Tensor数据、GM descriptor不属于控制通知替换。
 原64-bit状态的范围、失败位和代际语义必须保留，不能截断成32-bit。
@@ -885,6 +887,10 @@ AICPU在启动阶段通过映射地址写值并在READY之前DSB。通知地址�
 同核存在数据发布顺序依赖时保留相应DSB，跨核通知本身不机械新增屏障。
 
 ### 2026-11-17：CntNotify ADD 偏移访问实测依据
+
+本机已确认每个通知占32B槽：`slot = SET_address & ~0x1f`，SET/read为`slot+0x00`、ADD为`slot+0x08`、BIT_WR为`slot+0x10`、BIT_CLR为`slot+0x18`。Host必须先成功取得并保留SET映射，验证返回地址非零、长度至少4B及槽对齐；不能把其他SoC的寄存器跨度直接套入此布局。四种访问均为32位，派生地址不独立申请或释放，生命周期由原通知handle和映射共同保证。
+
+BIT_CLR按`x &= ~mask`工作，已验证单bit清除、保留其他bit、96核并发清除、不同bit并发置/清、重复幂等及同资源重放。独立探针使用真实SyncAll建立相位边界，8场景×16轮×96核×2次重放共24,576次观测，错误、超时及相邻通知污染均为零；证据在`artifacts/cnt-three-20261117/bit-clr/`。这证明所测硬件操作可用，不代替CHECK目录的发布顺序、唯一lease和整网性能验证。同一bit的置位与清位仍须由业务协议规定先后，不能把无返回值的操作当作唯一owner裁定。
 
 `fwic-dsl` 已在 Ascend950DT_9581、CANN 9.3.0、driver 25.6.rc2.b023 上实测：持有 SDK 返回的 SET/read 映射，按 `slot = SET_address & ~0x1f`、`ADD_address = slot + 0x08` 得到同一通知对象的 ADD 地址，以 32-bit `st_dev` 写入。正式 ADD 地址接口仍返回 507899；该错误不表示硬件 ADD 不可用，也不需要更新驱动后才能使用本次已验证的偏移方式。
 

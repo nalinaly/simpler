@@ -234,6 +234,18 @@ int32_t AicoreLifecycle::post_handshake_init(Runtime *runtime) {
     }
     const auto *notification_summary =
         scheduler_state_at<SchedulerGraphSummary>(scheduler_state_base, bootstrap_context->graph_summary_offset);
+    if (notification_summary->async_layout_offset != 0) {
+        const auto *async =
+            scheduler_state_at<SchedulerAsyncLayout>(scheduler_state_base, notification_summary->async_layout_offset);
+        const auto *directory =
+            scheduler_state_at<SchedulerAsyncDirectoryWord>(scheduler_state_base, async->check_directory_offset);
+        const uint64_t halves = (static_cast<uint64_t>(async->group_count) + 31) / 32;
+        for (uint64_t half = 0; half < halves; ++half) {
+            const uint64_t address = directory[half / 2].notification_addresses[half % 2];
+            if (address != 0) *reinterpret_cast<volatile uint32_t *>(address) = 0;
+        }
+        wmb();
+    }
     if (notification_summary->group_mailboxes_offset != 0) {
         const auto *mailboxes = scheduler_state_at<SchedulerGroupMailbox>(
             scheduler_state_base, notification_summary->group_mailboxes_offset

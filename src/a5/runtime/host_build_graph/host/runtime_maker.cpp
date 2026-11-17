@@ -1987,6 +1987,32 @@ bool create_scheduler_state(
         }
     }
 
+    SchedulerDoneNotifications check_notifications;
+    if (async_plan.layout_offset != 0) {
+        const size_t halves = (static_cast<size_t>(async_plan.layout.group_count) + 31) / 32;
+        try {
+            if (api->acquire_scheduler_notifications(
+                    SchedulerNotificationPurpose::CHECK_DIRECTORY, halves, &check_notifications
+                ) != 0)
+                throw std::runtime_error("cannot acquire retained CHECK directory notifications");
+        } catch (const std::exception &error) {
+            LOG_ERROR("A5 HBG: cannot prepare CHECK directory: %s", error.what());
+            return false;
+        }
+        auto *directory =
+            scheduler_state_at<SchedulerAsyncDirectoryWord>(host_base, async_plan.layout.check_directory_offset);
+        size_t mapped = 0;
+        for (size_t half = 0; half < halves; ++half) {
+            const uint64_t address = check_notifications.addresses[half];
+            directory[half / 2].notification_addresses[half % 2] = address;
+            mapped += address != 0;
+        }
+        LOG_TIMING(
+            "A5 HBG: CHECK directory groups=%u mapped_halves=%zu gm_halves=%zu", async_plan.layout.group_count, mapped,
+            halves - mapped
+        );
+    }
+
     if (protocol_profiling) {
         try {
             SchedulerGraphView snapshot = host_graph;
@@ -2118,6 +2144,7 @@ bool create_scheduler_state(
         runtime->retain_pending_resource(std::move(counter_notifications.owner));
     if (notifications.owner != nullptr) runtime->retain_pending_resource(std::move(notifications.owner));
     if (mix_notifications.owner != nullptr) runtime->retain_pending_resource(std::move(mix_notifications.owner));
+    if (check_notifications.owner != nullptr) runtime->retain_pending_resource(std::move(check_notifications.owner));
     LOG_INFO("A5 HBG: selected AICore Scheduler for %d tasks", total_tasks);
     return true;
 }

@@ -884,19 +884,52 @@ TEST(HbgAsyncControl, UnusedRecordsRemainUntouchedByInitializationAndZeroWaitExe
 }
 
 TEST(HbgAsyncControl, DuplicateSealCannotReinitializeAnOwnedCheckLease) {
+    for (bool mapped : {false, true}) {
+        SCOPED_TRACE(mapped);
+        AsyncFixture f(1);
+        uint32_t notification = 0;
+        if (mapped)
+            scheduler_state_at<SchedulerAsyncDirectoryWord>(f.base(), f.plan.layout.check_directory_offset)[0]
+                .notification_addresses[0] = reinterpret_cast<uint64_t>(&notification);
+        const auto writer = f.start();
+        f.register_counter(writer);
+        ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
+        ASSERT_EQ(
+            scheduler_async_lease_try_claim(f.group_lease(), f.group_lease().word).result,
+            SchedulerAsyncLeaseResult::SUCCESS
+        );
+        const uint64_t owned = f.group_lease().word;
+        EXPECT_FALSE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
+        EXPECT_EQ(f.group_lease().word, owned);
+        EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(1, 1, 2));
+        EXPECT_EQ(scheduler_async_pending::pending(f.join().word), 1u);
+    }
+}
+
+TEST(HbgAsyncControl, MappedDirectoryCannotGrantAnotherCheckAfterTerminalPublication) {
     AsyncFixture f(1);
-    const auto writer = f.start();
-    f.register_counter(writer);
+    uint32_t notification = 0, credits = 0;
+    auto *directory = scheduler_state_at<SchedulerAsyncDirectoryWord>(f.base(), f.plan.layout.check_directory_offset);
+    directory[0].notification_addresses[0] = reinterpret_cast<uint64_t>(&notification);
+    auto *counter =
+        scheduler_state_at<SchedulerTaskCompletionCounter>(f.base(), f.storage.layout.completion_counters_offset);
+    counter[0] = {reinterpret_cast<uint64_t>(&credits), reinterpret_cast<uint64_t>(&credits), 2, 2};
+    for (auto &worker : f.workers)
+        worker.completion_counters_offset = f.storage.layout.completion_counters_offset;
+    f.register_counter(f.start(), 0);
     ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
-    ASSERT_EQ(
-        scheduler_async_lease_try_claim(f.group_lease(), f.group_lease().word).result,
-        SchedulerAsyncLeaseResult::SUCCESS
-    );
-    const uint64_t owned = f.group_lease().word;
-    EXPECT_FALSE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
-    EXPECT_EQ(f.group_lease().word, owned);
-    EXPECT_EQ(f.task_control(0)->completion_state, scheduler_completion_encode(1, 1, 2));
-    EXPECT_EQ(scheduler_async_pending::pending(f.join().word), 1u);
+    ASSERT_EQ(notification, 1u);
+    ASSERT_TRUE(f.check(1));
+    EXPECT_EQ(notification, 0u);
+    EXPECT_EQ(credits, 1u);
+    EXPECT_EQ(scheduler_async_lease_phase(f.group_lease().word), SchedulerAsyncPhase::TERMINAL);
+    const auto owned = scheduler_async_lease_encode(1, SchedulerAsyncPhase::OWNED);
+    EXPECT_EQ(scheduler_async_lease_finish(f.group_lease(), owned).result, SchedulerAsyncLeaseResult::OWNERSHIP_LOST);
+    notification = 1;  // A reader can still observe the bit before CLR arrives.
+    EXPECT_FALSE(f.check(2));
+    EXPECT_EQ(credits, 1u);
+    EXPECT_EQ(notification, 1u);
+    EXPECT_EQ(f.join().word, 0u);
 }
 
 TEST(HbgAsyncControl, FirstRegistrantWithholdsItsPhysicalReturnUntilTheTaskMarkerExists) {
