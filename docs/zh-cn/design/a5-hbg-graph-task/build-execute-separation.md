@@ -558,7 +558,7 @@ flowchart LR
 
 普通单元首次有效分配由一条 FAA 授予不可撤销的 block/lane 票，后续接收不再独立竞争执行记录。票限定的执行记录标记 TICKET_OWNED，整个128B区域仅由该 owner 更新，使用普通 store、单行 DCCI、尾 DSB 发布 CLAIMED/RETURNED/FAILED 诊断；该区域没有其他 Device writer 或执行许可读者，不承担跨核交权。AICPU 错误快照保留原定向 invalidate，Host 在所有核退休后读取，仍保留原有 owner、phase 和完成推导。取消先核对 owner 和当前状态，失败不产生完成贡献；普通最后返回的 C 归零推导仍成立。MIX/cohort 的记录继续原 CAS/Exch 协议，两类访问不作用于同一执行记录；TaskControl 的发票、C/D/N、异步 lease/FINISH 及实际资源许可保持原子语义。不使用 st_dev，也不把“一个 writer”泛化为任意共享控制可取消原子。
 
-普通 token refill 与 ordinary MIX 在实际申请新票之前，用一次可靠 `ld_dev(next_block)` 判定 `next_block >= N`。有效票不可撤销；越界申请的回滚只撤回超额部分，因此该确认足以设置本核当前 task 的 `issue_ticket_exhausted`。它不能设置 SUPPLY_CLOSED、发布 seal、推进目录或放行 kernel。token refill 确认时清除本轮旧 issue snapshot；切换 task 时清除耗尽位。未确认耗尽仍走原一次申请 FAA，竞争导致的越界仍须回滚；不改变共享游标的最终精确值。continuation 的可选提示检查保持原语义，负向提示只把工作交回正式 refill，不另做原子确认。
+普通 token refill 与 ordinary MIX 在实际申请新票之前，用一次可靠 `ld_dev(next_block)` 判定 `next_block >= N`。有效票不可撤销；越界申请的回滚只撤回超额部分，因此该确认足以设置本核当前 task 的 `issue_ticket_exhausted`。它不能设置 SUPPLY_CLOSED、发布 seal、推进目录或放行 kernel。continuation 的耗尽观察写入同一个本核耗尽位，紧接的 refill 复用本次 fill 的 issue snapshot，不重复读取 next_block，也不因此额外重扫发行头；下一轮 fill 使用新的 snapshot。refill 自己首次确认耗尽时仍清除本轮旧 snapshot；切换 task 时清除耗尽位。未确认耗尽仍走原一次申请 FAA，竞争导致的越界仍须回滚；不改变共享游标的最终精确值。continuation 的可选提示检查保持原语义，负向提示只把工作交回正式 refill，不另做原子确认。
 
 供给游标检查分别读取一次 seal 与 next_block，不追加 `FAA(0)`。正向 seal 之后保留读侧 DSB，再检查 next_block，保证跨字观察顺序；seal 非法、游标越界或 seal 与游标不一致仍报错。实际取票和退款原子不变。
 
@@ -568,7 +568,7 @@ flowchart LR
 
 Host 在启动前构造并上传全部 Call，包括当前 native Graph 的 child 实例。metadata 上传通过 entry fork 事件先于 AICore 启动；每次 resident 入口执行原有 DSB + DCI，清除该核上轮缓存。Call 在本轮内没有 Device 写者，普通接收与 MIX 提前准备均直接读取已发布 Call，不再逐次遍历512B执行DCCI，不新增参数extent或额外屏障。所有 epoch/task/execution/block/lane、参数数量、function和固定context指针校验保留。
 
-可写 Binding 继续刷新 local/global context 两行，保留接收尾 DSB 与 compiler barrier。defer_wait 的业务 tensor 数据仍由实际消费者在依赖满足后观察；Call 地址和参数不可变不代表其指向的数据已经产出。Graph 激活、Tensor/view观察、args_dump边界和最终执行许可均保持。跨run复用依赖重新上传及每次resident入口的清缓存，不能把本轮证明带到下一轮。
+Binding 接收仍观察 local/global context 两行，保留接收尾 DSB 与 compiler barrier。LocalContext 的 block 几何只由 Host 初始化，Device 准备阶段不再对未修改的 LocalContext 二次写回；GlobalContext 的动态字段仍按原时点写回，发布尾 DSB 保留。defer_wait 的业务 tensor 数据仍由实际消费者在依赖满足后观察；Call 地址和参数不可变不代表其指向的数据已经产出。Graph 激活、Tensor/view观察、args_dump边界和最终执行许可均保持。跨run复用依赖重新上传及每次resident入口的清缓存，不能把本轮证明带到下一轮。
 
 ### 本核复用已确认的任务完成
 
@@ -844,6 +844,10 @@ GM MIX coordinator 的自身 ARRIVED/RELEASED 只更新本地 confirmed 与 fail
 
 async 登记的 canonical gate 只保存一个 task 级 `has_async` 门闩，真实 registered/pending 数量保留在现有 join。每个非空组照常执行一次 join.register FAA，并复用其返回值识别首注册者；只有首注册者执行 canonical 校验 CAS。它设置门闩之前不能提交自己的 physical return，所以其他组先返回或完成 CHECK 也不能误关 task。正常 gate 的 debt 为 remaining + has_async，close 校验门闩与合法非零 registered，FINISH CAS 从 `encode(total,0,1)` 转为 DONE；不新增等待 owner 或资源，零登记任务保持原同步路径。DFX 的 completion_debt 表示物理余量加门闩，不能当作剩余异步 group 数。
 
+CHECK lease 在目录发布之前只有唯一 sealer，可用单写者 st_dev 初始化 RUNNABLE；保留初始化后的 DSB，随后才发布目录位。发布后的 claim、release、finish 仍使用原子交权，不能将初始化证明扩展到多写者更新。
+
+成功领取 CHECK 后，只重新接收 AsyncGroupData 的首64B可写行和 progress 行，两条 DCCI 之后统一 DSB，再读取两者字段；header 后64B由 Host 初始化且整轮不可变，复用启动观察。目录与 lease、条件读取、CCU 事件消费及消费者 tensor 获取边界均保留。
+
 ### 按 lane 分类完成能力
 
 `async_capability` 是 kernel 注册时必须提供的静态合同，随 CoreCallable 保存并进入缓存身份。只接受 `SYNCHRONOUS` 和 `DEFERRED` 两种明确声明；缺失、非法类型或版本直接报错，不生成保守执行计划，也不能由某次运行没有登记条件推断为同步。注册入口验证每个 kernel 的声明，包括本次未使用的入口；缺失声明不能因未被执行而绕过检查。Host 在 Graph 展开后只按本次实际可执行的 leaf kernel、每个活动 lane 选择容量；未使用的合法 DEFERRED 声明不会给纯同步图增加异步布局。
@@ -901,7 +905,7 @@ SET映射与handle覆盖整个运行生命周期；派生ADD地址不独立map/u
 - 已知同步普通返回贡献1；可能异步的普通执行在本次零登记时贡献2，实际发送两次32-bit写1；有defer时P、Q各发送一次写1。MIX可能异步lane在无条件封口或最终CHECK时贡献Q，coordinator在完整资源release后按active lane数贡献P。不能把提前准备、发票结束或仅物理返回当作仍有条件的任务逻辑完成。
 - `scheduler_notify_add(credits)` 是逻辑批量贡献接口，实际只写已验证的命令1。数据发布前的DSB、消费者数据观察、kernel入口与退出的既有屏障保留；通知自身不机械增加逐次或尾DSB。读到完整阈值证明贡献已到达；探针批尾DSB的结果与此协议论证分开，实际无额外通知尾DSB的整网路径另行实测。
 - 后继直接读计数器并比较自己的阈值；计数器在一轮中只增不减，旧阈值永久有效，无bitmap、旧快照、run内reset或bank转交。每轮READY前仅由AICPU清零链头一次，publication/capture lease继续保护生命周期。
-- canonical GM账本按task一次有界归档，不阻塞fanin ready、固定owner或资源退休。DFX记录真实P/Q贡献区间、累计阈值和退出计数；不伪造FAA返回ticket，也不以归档时刻代替逻辑ready。
+- canonical GM账本按task一次有界归档，不阻塞fanin ready、固定owner或资源退休。固定归档者可复用本核当前task的真实DONE证明，避免再次读取同一计数器；未命中仍观察阈值，SUPPLY_CLOSED不能代替DONE，error检查和唯一结账/退出统计不变。DFX记录真实P/Q贡献区间、累计阈值和退出计数；不伪造FAA返回ticket，也不以归档时刻代替逻辑ready。
 - 由持有的SET映射校验32B slot并派生+0x08地址，派生地址不独立map/unmap；容量不足的整链仍用GM路径。GM回退保留近期的自身ACK删除、已有观察证明复用和首次登记者单has_async。Host覆盖日志使用benchmark可见的TIMING级，记录`backend=SET-slot-offset`及计划/实际链数、eligible/mapped任务数。
 - 正式验收要求实际非零ADD覆盖，记录完整与部分覆盖；GM回退成功不算ADD通过。继续以12组AICore L0配对总和和0.5%回退门槛判断性能，不从硬件探针直接推导整网收益。
 

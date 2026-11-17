@@ -148,7 +148,9 @@ static inline __aicore__ bool scheduler_service_counter_accounting(
         return true;
     }
     if (scheduler_read_worker_error(run, local->worker_id()) != 0) return false;
-    const int observed = scheduler_completion_counter_observe(*counter);
+    const int observed = scheduler_cached_task_proof(local, task) == SchedulerTaskProof::DONE ?
+                             1 :
+                             scheduler_completion_counter_observe(*counter);
     if (observed == 0) return true;
     const auto &metadata = *scheduler_task_metadata_at(base, local, task);
     uint32_t total = 0;

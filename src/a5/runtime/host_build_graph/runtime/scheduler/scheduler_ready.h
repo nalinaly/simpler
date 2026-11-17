@@ -1033,7 +1033,7 @@ static inline __aicore__ void scheduler_stage_dispatch_slot(
             scheduler_state_base, scheduler->config.prepared, local_slot->prepared.execution_index
         );
         SchedulerScalarScope scalar_cache(scheduler, SchedPhaseKind::ScalarCachePublish, ready_claim.task_ref);
-        scheduler_writeback_cache_line(&binding->local_context);
+        // Receipt observes the immutable Host LocalContext; only GlobalContext changed.
         scheduler_writeback_cache_line(&binding->global_context);
     }
 }

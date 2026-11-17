@@ -541,7 +541,13 @@ static inline __aicore__ bool scheduler_async_check_step(
     if (!span(local.bytes, offset, 1, sizeof(AsyncGroupData), pto2::resident::ASYNC_RECORD_ALIGNMENT))
         return failed(-1);
     auto *data = scheduler_state_at<AsyncGroupData>(local.base, offset);
-    observe(data, sizeof(*data));
+    auto *progress = scheduler_state_at<SchedulerAsyncGroupProgress>(local.base, local.layout->group_progress_offset);
+    auto &current = progress[index];
+    // Run entry acquires the Host-owned second header line. Only its first line
+    // and the prior CHECK owner's progress need reception after this claim.
+    scheduler_invalidate_cache_line(data);
+    scheduler_invalidate_cache_line(&current);
+    scheduler_cache_barrier();
     const int64_t task_ref = data->task_ref;
     AsyncWriter writer{local.base, local.bytes, local.layout->run_epoch, offset, index};
     if (task_ref < 0 || static_cast<uint64_t>(task_ref) >= local.layout->task_count ||
@@ -549,9 +555,6 @@ static inline __aicore__ bool scheduler_async_check_step(
         data->error_code != 0 || data->count == 0 || data->count > data->capacity ||
         !pto2::resident::detail::layout_valid(writer, *data))
         return failed(task_ref);
-    auto *progress = scheduler_state_at<SchedulerAsyncGroupProgress>(local.base, local.layout->group_progress_offset);
-    auto &current = progress[index];
-    observe(&current, sizeof(current));
     uint64_t pending = current.pending_mask;
     uint32_t cursor = current.condition_cursor;
     if (pending == 0 || (pending & ~scheduler_async_condition_mask(data->count)) != 0 || cursor >= 64 ||
