@@ -263,8 +263,7 @@ std::vector<uint8_t> make_callable(
     const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size,
     const CoreAsyncCapability &capability
 ) {
-    if (!core_async_capability_valid(capability))
-        throw std::invalid_argument("CoreCallable requires an explicit SYNCHRONOUS or DEFERRED capability");
+    const auto normalized_capability = normalize_core_async_capability(capability);
     if (sig_count > MaxSig) {
         throw std::invalid_argument(
             "make_callable: requested tensor count " + std::to_string(sig_count) + " exceeds supported tensor count " +
@@ -286,10 +285,18 @@ std::vector<uint8_t> make_callable(
     obj->sig_count_ = sig_count;
     obj->binary_size_ = binary_size;
     obj->resolved_addr_ = 0;
-    obj->async_capability_ = capability;
+    obj->async_capability_ = normalized_capability;
     if (binary_size > 0) std::memcpy(buf.data() + aligned_header, binary, binary_size);
 
     return buf;
+}
+
+// Legacy callers do not declare async capability. Reserve the full deferred
+// contract rather than infer that their kernel is synchronous.
+template <int MaxSig>
+std::vector<uint8_t>
+make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size) {
+    return make_callable<MaxSig>(sig, sig_count, binary, binary_size, CoreAsyncCapability{});
 }
 
 // ============================================================================
@@ -371,6 +378,8 @@ std::vector<uint8_t> make_callable(
     return buf;
 }
 
+inline void normalize_chip_callable_buffer(void *raw, size_t size);
+
 inline std::vector<uint8_t> make_chip_callable(
     const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
     const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
@@ -390,6 +399,7 @@ inline std::vector<uint8_t> make_chip_callable(
         callable->ccu_modules_offset_ = static_cast<uint32_t>(offset);
         callable->ccu_modules_size_ = static_cast<uint32_t>(package.size());
     }
+    normalize_chip_callable_buffer(buffer.data(), buffer.size());
     return buffer;
 }
 
@@ -431,8 +441,7 @@ inline void validate_chip_callable_buffer(const void *raw, size_t size) {
             child.binary_size_ > storage_size - offset - CoreCallable::binary_data_offset())
             throw std::invalid_argument("invalid CoreCallable header fields");
         validate_signature(child.signature_, child.sig_count_);
-        if (!core_async_capability_valid(child.async_capability()))
-            throw std::invalid_argument("invalid CoreCallable async capability");
+        (void)normalize_core_async_capability(child.async_capability());
         end = offset + CoreCallable::binary_data_offset() + child.binary_size_;
     }
     if (callable->ccu_modules_size_ != 0) {
@@ -445,4 +454,15 @@ inline void validate_chip_callable_buffer(const void *raw, size_t size) {
         throw std::invalid_argument("empty ChipCallable CCU module table has nonzero offset");
     }
     if (end != storage_size) throw std::invalid_argument("ChipCallable has trailing bytes");
+}
+
+// Only call on owned storage. Validate the entire image before writing any
+// child, so malformed input never leaves a partially normalized artifact.
+inline void normalize_chip_callable_buffer(void *raw, size_t size) {
+    validate_chip_callable_buffer(raw, size);
+    auto *callable = static_cast<ChipCallable *>(raw);
+    for (int32_t i = 0; i < callable->child_count(); ++i) {
+        auto &child = const_cast<CoreCallable &>(callable->child(i));
+        child.async_capability_ = normalize_core_async_capability(child.async_capability());
+    }
 }

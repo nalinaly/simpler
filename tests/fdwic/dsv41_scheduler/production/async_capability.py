@@ -7,23 +7,21 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Explicit completion declarations, maintained with each kernel's signature."""
+"""Completion declarations normalized through the public registration boundary."""
+
+from simpler.task_interface import CoreCallable
 
 MODES = {"SYNCHRONOUS": 1, "DEFERRED": 2}
 
 
+def capability_declaration(kernel):
+    """Use the same declaration policy as every registered CoreCallable."""
+    return CoreCallable.build(
+        signature=[], binary=b"", async_capability=kernel.get("async_capability")
+    ).async_capability
+
+
 def capability_words(kernel):
-    """Validate a declaration and return its four wire fields; never infer one."""
-    value = kernel.get("async_capability")
-    if not isinstance(value, dict) or set(value) != {"version", "mode", "max_conditions", "condition_types"}:
-        raise ValueError("Invalid async capability fields")
-    version, mode = value["version"], value["mode"]
-    count, types = value["max_conditions"], value["condition_types"]
-    if type(version) is not int or version != 1 or type(mode) is not str or mode not in MODES:
-        raise ValueError("Unsupported async capability version or mode")
-    if type(count) is not int or type(types) is not int:
-        raise ValueError("Invalid async capacity/types")
-    valid = (1 <= count <= 64 and 1 <= types <= 3) if mode == "DEFERRED" else count == types == 0
-    if not valid:
-        raise ValueError("Invalid async capacity/types")
-    return version, MODES[mode], count, types
+    """Return canonical wire fields without a separate benchmark capability policy."""
+    value = capability_declaration(kernel)
+    return value["version"], MODES[value["mode"]], value["max_conditions"], value["condition_types"]

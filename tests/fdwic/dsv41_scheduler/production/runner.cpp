@@ -17,6 +17,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <cstdlib>
 #include <string>
@@ -51,18 +52,25 @@ T read(std::istream &stream) {
 }
 
 CoreAsyncCapability read_capability(std::istream &stream) {
+    // Each kernel occupies one manifest row. An omitted declaration must not
+    // consume the next kernel's ID as a version field.
+    std::string row;
+    std::getline(stream, row);
+    std::istringstream fields(row);
     CoreAsyncCapability value{};
-    value.version = read<uint32_t>(stream);
-    const auto mode = read<uint32_t>(stream);
-    const auto capacity = read<uint32_t>(stream);
-    const auto types = read<uint32_t>(stream);
-    if ((mode != 1 && mode != 2) || capacity > 64 || types > 3)
+    fields >> std::ws;
+    if (fields.eof()) return normalize_core_async_capability(value);
+    value.version = read<uint32_t>(fields);
+    const auto mode = read<uint32_t>(fields);
+    const auto capacity = read<uint32_t>(fields);
+    const auto types = read<uint32_t>(fields);
+    fields >> std::ws;
+    if (!fields.eof() || mode > UINT8_MAX || capacity > UINT8_MAX || types > UINT8_MAX)
         throw std::runtime_error("Invalid kernel async capability fields");
     value.mode = static_cast<CoreAsyncMode>(mode);
     value.max_conditions = static_cast<uint8_t>(capacity);
     value.condition_types = static_cast<uint8_t>(types);
-    if (!core_async_capability_valid(value)) throw std::runtime_error("Invalid kernel async capability contract");
-    return value;
+    return normalize_core_async_capability(value);
 }
 
 // Host launch alignment only. Device dependencies and defer_wait remain owned

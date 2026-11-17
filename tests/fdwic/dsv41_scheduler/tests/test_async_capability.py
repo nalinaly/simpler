@@ -7,7 +7,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""The benchmark requires an explicit, valid completion declaration."""
+"""Benchmark declarations share the public completion-capability boundary."""
 
 import importlib.util
 from pathlib import Path
@@ -23,10 +23,19 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def test_missing_unknown_and_malformed_declarations_are_rejected():
+def test_missing_none_and_unknown_normalize_to_full_deferred_capacity():
+    assert MODULE.capability_words({}) == (1, 2, 64, 3)
+    assert MODULE.capability_words({"async_capability": None}) == (1, 2, 64, 3)
+    assert MODULE.capability_words(
+        dict(async_capability=dict(version=1, mode="UNKNOWN", max_conditions=0, condition_types=0))
+    ) == (1, 2, 64, 3)
+
+
+def test_malformed_declarations_are_rejected():
     for value in (
-        None,
-        dict(version=1, mode="UNKNOWN", max_conditions=0, condition_types=0),
+        {},
+        dict(version=2, mode="UNKNOWN", max_conditions=0, condition_types=0),
+        dict(version=1, mode="UNKNOWN", max_conditions=1, condition_types=0),
         dict(version=1, mode="SYNCHRONOUS", max_conditions=1, condition_types=0),
     ):
         with pytest.raises(ValueError):

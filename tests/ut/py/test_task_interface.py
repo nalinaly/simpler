@@ -1562,11 +1562,31 @@ class TestCoreCallable:
         assert restored.child(0).async_capability == capability
         assert restored.child(0).binary_size == 6
 
-    def test_missing_async_capability_is_rejected(self):
-        with pytest.raises(TypeError):
-            CoreCallable.build(signature=[], binary=b"kernel")
-        with pytest.raises(TypeError, match="async_capability"):
-            CoreCallable.build(signature=[], binary=b"kernel", async_capability=None)
+    def test_unknown_async_capability_is_conservatively_deferred(self):
+        deferred = {"version": 1, "mode": "DEFERRED", "max_conditions": 64, "condition_types": 3}
+        assert CoreCallable.build(signature=[], binary=b"kernel").async_capability == deferred
+        for value in (None, {"version": 1, "mode": "UNKNOWN", "max_conditions": 0, "condition_types": 0}):
+            child = CoreCallable.build(signature=[], binary=b"kernel", async_capability=value)
+            assert child.async_capability == deferred
+
+    @pytest.mark.parametrize("version", [0, 1])
+    def test_unknown_wire_is_normalized_in_owned_copy(self, version):
+        import struct
+
+        deferred = {"version": 1, "mode": "DEFERRED", "max_conditions": 64, "condition_types": 3}
+        child = CoreCallable.build(signature=[], binary=b"kernel", async_capability=deferred)
+        chip = ChipCallable.build(signature=[], func_name="orch", binary=b"orch", children=[(7, child)])
+        canonical = ctypes.string_at(chip.buffer_ptr(), chip.buffer_size())
+        raw = bytearray(canonical)
+        # The public wire keeps the eight-byte capability at offset 144 of
+        # each 192-byte child header; locate the header from its binary tail.
+        child_start = len(raw) - child.buffer_size()
+        struct.pack_into("<IBBBB", raw, child_start + 144, version, 0, 0, 0, 0)
+        unchanged = bytes(raw)
+        restored = ChipCallable.from_bytes(unchanged)
+        assert restored.child(0).async_capability == deferred
+        assert ctypes.string_at(restored.buffer_ptr(), restored.buffer_size()) == canonical
+        assert bytes(raw) == unchanged
 
     @pytest.mark.parametrize(
         "change",
@@ -1574,7 +1594,7 @@ class TestCoreCallable:
             {"version": 0},
             {"version": True},
             {"mode": "INVALID"},
-            {"mode": "UNKNOWN"},
+            {"mode": "UNKNOWN", "max_conditions": 1},
             {"max_conditions": 1},
             {"condition_types": 1},
             {"extra": 0},

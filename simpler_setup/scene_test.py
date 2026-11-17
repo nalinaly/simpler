@@ -1790,14 +1790,14 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
     orch = spec["orchestration"]
     incores = spec["incores"]
     capability_keys = []
+    capabilities = []
     for kernel in incores:
-        if "async_capability" not in kernel:
-            raise ValueError("each incore must declare async_capability as SYNCHRONOUS or DEFERRED")
         # Validate before cache lookup or compilation through the same public
         # constructor that owns the serialized declaration contract.
         capability = CoreCallable.build(
-            signature=[], binary=b"", async_capability=kernel["async_capability"]
+            signature=[], binary=b"", async_capability=kernel.get("async_capability")
         ).async_capability
+        capabilities.append(capability)
         capability_keys.append(
             (
                 kernel["func_id"],
@@ -1864,10 +1864,10 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
                     "func_id": k["func_id"],
                     "core_type": k["core_type"],
                     "signature": k.get("signature", []),
-                    "async_capability": k.get("async_capability"),
+                    "async_capability": capability,
                     "artifact_key": incore_artifact_key,
                 }
-                for k, incore_artifact_key in zip(incores, incore_artifact_keys, strict=True)
+                for k, incore_artifact_key, capability in zip(incores, incore_artifact_keys, capabilities, strict=True)
             ],
         },
         orchestration_units,
@@ -1912,14 +1912,14 @@ def compile_chip_callable_spec(spec, platform, runtime, cache_key):
         if len(incores_binary) != len(incores):
             raise AssertionError("compiled incore binaries must match the incore specification")
         kernel_binaries = []
-        for k, incore in zip(incores, incores_binary):
+        for k, incore, capability in zip(incores, incores_binary, capabilities, strict=True):
             kernel_binaries.append(
                 (
                     k["func_id"],
                     CoreCallable.build(
                         signature=k.get("signature", []),
                         binary=incore,
-                        async_capability=k["async_capability"],
+                        async_capability=capability,
                     ),
                 )
             )

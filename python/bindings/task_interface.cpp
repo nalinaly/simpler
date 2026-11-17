@@ -3220,8 +3220,7 @@ NB_MODULE(_task_interface, m) {
 
     const auto parse_core_async_capability = [](const nb::object &value) {
         CoreAsyncCapability result{};
-        if (value.is_none())
-            throw std::invalid_argument("async_capability requires an explicit SYNCHRONOUS or DEFERRED declaration");
+        if (value.is_none()) return normalize_core_async_capability(result);
         if (!nb::isinstance<nb::dict>(value))
             throw std::invalid_argument("async_capability must be a version-1 dictionary");
         const auto dictionary = nb::cast<nb::dict>(value);
@@ -3243,13 +3242,12 @@ NB_MODULE(_task_interface, m) {
         const auto mode = nb::cast<std::string>(dictionary["mode"]);
         if (mode == "SYNCHRONOUS") result.mode = CoreAsyncMode::SYNCHRONOUS;
         else if (mode == "DEFERRED") result.mode = CoreAsyncMode::DEFERRED;
+        else if (mode == "UNKNOWN") result.mode = static_cast<CoreAsyncMode>(0);
         else throw std::invalid_argument("invalid async_capability mode");
         result.version = 1;
         result.max_conditions = static_cast<uint8_t>(count);
         result.condition_types = static_cast<uint8_t>(types);
-        if (!core_async_capability_valid(result))
-            throw std::invalid_argument("invalid async_capability capacity/types");
-        return result;
+        return normalize_core_async_capability(result);
     };
 
     // --- PyCoreCallable wrapper ---
@@ -3272,7 +3270,7 @@ NB_MODULE(_task_interface, m) {
                 );
                 return PyCoreCallable{std::move(buf)};
             },
-            nb::arg("signature"), nb::arg("binary"), nb::arg("async_capability"),
+            nb::arg("signature"), nb::arg("binary"), nb::arg("async_capability") = nb::none(),
             "Build a CoreCallable from a signature list and binary bytes. The dump "
             "maps signature entry i to payload slot i positionally."
         )
@@ -3280,11 +3278,9 @@ NB_MODULE(_task_interface, m) {
         .def_prop_ro(
             "async_capability",
             [](const PyCoreCallable &self) {
-                const auto value = self.get().async_capability();
+                const auto value = normalize_core_async_capability(self.get().async_capability());
                 nb::dict result;
                 result["version"] = 1;
-                if (!core_async_capability_valid(value))
-                    throw std::invalid_argument("invalid CoreCallable async capability");
                 result["mode"] = value.mode == CoreAsyncMode::SYNCHRONOUS ? "SYNCHRONOUS" : "DEFERRED";
                 result["max_conditions"] = value.max_conditions;
                 result["condition_types"] = value.condition_types;
@@ -3382,7 +3378,7 @@ NB_MODULE(_task_interface, m) {
                     signature.data(), static_cast<int32_t>(signature.size()), func_name.c_str(), bin_ptr, bin_size,
                     func_ids.data(), child_bufs.data(), child_count, config_name.c_str(), module_bytes
                 );
-                validate_chip_callable_buffer(buf.data(), buf.size());
+                normalize_chip_callable_buffer(buf.data(), buf.size());
                 return PyChipCallable{std::move(buf)};
             },
             nb::arg("signature"), nb::arg("func_name"), nb::arg("binary"), nb::arg("children"),
@@ -3404,7 +3400,7 @@ NB_MODULE(_task_interface, m) {
                     reinterpret_cast<const uint8_t *>(raw.c_str()),
                     reinterpret_cast<const uint8_t *>(raw.c_str()) + raw.size()
                 );
-                validate_chip_callable_buffer(buf.data(), buf.size());
+                normalize_chip_callable_buffer(buf.data(), buf.size());
                 return PyChipCallable{std::move(buf)};
             },
             nb::arg("raw"),
@@ -3509,6 +3505,8 @@ NB_MODULE(_task_interface, m) {
                 const uint8_t *child_start = reinterpret_cast<const uint8_t *>(parent.storage_ + offset);
                 const size_t child_size = CoreCallable::binary_data_offset() + c.binary_size();
                 std::vector<uint8_t> child_buf(child_start, child_start + child_size);
+                reinterpret_cast<CoreCallable *>(child_buf.data())->async_capability_ =
+                    normalize_core_async_capability(c.async_capability());
                 return PyCoreCallable{std::move(child_buf)};
             },
             nb::arg("i"), "Return the CoreCallable child at index i."

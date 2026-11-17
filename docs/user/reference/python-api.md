@@ -222,11 +222,17 @@ ChipCallable.build(
 )
 ```
 
-Every core callable requires an explicit version-1 `async_capability` declaration.
+Core callables accept a version-1 `async_capability` declaration.
 `SYNCHRONOUS` requires zero `max_conditions` and `condition_types`; `DEFERRED`
 requires a bound of 1–64 conditions and a nonzero condition-type mask from 1–3.
-Missing declarations, `None`, `UNKNOWN`, and invalid bounds are rejected before
-registration. Scene specs require the same declaration on every `incores` entry.
+For compatibility, an omitted declaration, `None`, or `UNKNOWN` with zero
+condition fields is normalized at registration to `DEFERRED` with
+`max_conditions=64` and `condition_types=3`. Legacy all-zero serialized metadata
+uses the same conservative default. Scene specs use this normalization for each
+`incores` entry and cache the canonical declaration. Invalid versions, fields,
+and bounds are still rejected. Explicit `SYNCHRONOUS` declarations retain the
+synchronous fast path; a run that happens to register no conditions does not
+establish that a kernel is synchronous.
 
 `ArgDirection` is `SCALAR`, `IN`, `OUT`, or `INOUT`. The signature list is
 positional and defines the task-arg order. `func_id` must match the id the

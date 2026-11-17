@@ -21,7 +21,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from async_capability import capability_words
+from async_capability import capability_declaration, capability_words
 
 from simpler_setup.compile_pool import compile_slot, compile_worker_budget
 from simpler_setup.elf_parser import extract_text_section
@@ -55,7 +55,7 @@ def build(flavor, output, tools, pto, jobs):
     compiler_tokens = {core: compiler.incore_compile_cache_token(core) for core in ("aic", "aiv")}
 
     def compile_kernel(kernel):
-        capability_words(kernel)
+        capability = capability_declaration(kernel)
         source = sources / kernel["source"]
         extra = common_includes + [str(sources / item) for item in kernel["include_dirs"]]
         dsl_entry = flavor == "pypto_lib_dsl" and "/external/" in kernel["source"]
@@ -111,7 +111,7 @@ def build(flavor, output, tools, pto, jobs):
             "file": target.name,
             "cache_key": key,
             "cache_hit": not compiled,
-            "async_capability": kernel.get("async_capability"),
+            "async_capability": capability,
         }
 
     with compile_worker_budget(jobs), ThreadPoolExecutor(max_workers=jobs) as pool:

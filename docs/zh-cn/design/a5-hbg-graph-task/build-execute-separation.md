@@ -850,7 +850,9 @@ CHECK lease 在目录发布之前只有唯一 sealer，可用单写者 st_dev �
 
 ### 按 lane 分类完成能力
 
-`async_capability` 是 kernel 注册时必须提供的静态合同，随 CoreCallable 保存并进入缓存身份。只接受 `SYNCHRONOUS` 和 `DEFERRED` 两种明确声明；缺失、非法类型或版本直接报错，不生成保守执行计划，也不能由某次运行没有登记条件推断为同步。注册入口验证每个 kernel 的声明，包括本次未使用的入口；缺失声明不能因未被执行而绕过检查。Host 在 Graph 展开后只按本次实际可执行的 leaf kernel、每个活动 lane 选择容量；未使用的合法 DEFERRED 声明不会给纯同步图增加异步布局。
+`async_capability` 是 kernel 的静态完成合同，随 CoreCallable 保存并进入缓存身份。当前兼容阶段在注册入口把缺失声明、`None`、条件字段为零的显式 `UNKNOWN`，以及旧序列化格式的全零声明，统一转换为 `DEFERRED(max_conditions=64, condition_types=3)`。不得把未知能力当作同步，也不能由某次运行没有登记条件推断为同步。转换在持有的副本上完成，缓存身份使用转换后的声明，不修改调用者的原始缓冲区。非法类型、版本、字段及边界仍报错；显式 UNKNOWN 携带非零条件字段也不接受。
+
+Host 和 Device 内部只保留 `SYNCHRONOUS`、`DEFERRED` 两态，不恢复 UNKNOWN 调度分支。注册入口验证并归一化每个 kernel，包括本次未使用的入口。Host 在 Graph 展开后只按本次实际可执行的 leaf kernel、每个活动 lane 选择容量；未使用的合法 DEFERRED 声明不会给纯同步图增加异步布局。补齐上游准确声明仍有价值：未知入口按最大容量保留异步上下文和 P/Q 完成协议，只有显式 SYNCHRONOUS 才能享受零布局和同步快速路径。
 
 - `SYNCHRONOUS`：Host 容量为零，无 group、lease 和条件数组；Device 跳过 begin、条件数量检查和 seal，只提交物理完成 P。
 - `DEFERRED`：Host 按已验证的条件上界和类型声明分配；Device 返回时提交 P，空登记或最终 CHECK 提交 Q。
@@ -859,9 +861,9 @@ CHECK lease 在目录发布之前只有唯一 sealer，可用单写者 st_dev �
 
 CntNotify 每任务目标贡献为 `block_num × (active_lane_count + possible_async_lane_count)`。同步普通执行返回仅写一次 INC；可能异步的普通执行零登记时可合并提交 P/Q 两个信用。有异步登记时，P/Q 分开提交。MIX 的 Q 只由具有异步组的 lane 提交，P 仍由 coordinator 在所有资源真实退休后按活动 lane 数提交。例：AIC 同步、两个 AIV 可能异步，每 block 为 P3+Q2，共5，不是6。
 
-SYNCHRONOUS 只描述自身完成语义，不表示前驱数据已经可见。前驱逻辑 DONE、正常依赖获取和必要的缓存/顺序操作仍然成立。Host 沿真实依赖传播 DEFERRED 祖先信息，只对确有此类祖先的任务设置输入获取标记；其他任务不查询全图 activity。所有执行计划都必须完成这个计算，缺少声明直接拒绝准备，不设置额外的保守兜底。带标记的消费者保留实际执行核上的获取。不能因为消费者自身同步就删除异步前驱的数据可见性保证。
+SYNCHRONOUS 只描述自身完成语义，不表示前驱数据已经可见。前驱逻辑 DONE、正常依赖获取和必要的缓存/顺序操作仍然成立。Host 沿真实依赖传播 DEFERRED 祖先信息，只对确有此类祖先的任务设置输入获取标记；其他任务不查询全图 activity。所有执行计划都必须基于入口归一化后的能力完成这个计算，内部缺失或无效能力仍拒绝准备。带标记的消费者保留实际执行核上的获取。不能因为消费者自身同步就删除异步前驱的数据可见性保证。
 
-验证关注纯同步图零布局、混 lane 信用总数、DEFERRED 的零登记/实际 CHECK、无效声明被拒绝和重放。性能仍使用同一份业务二进制与注册元数据，对照12组 AICore L0 wall；声明来源和实际生效覆盖需要一并记录，不把未传入 runtime 的源码分类当成优化已生效。
+验证关注纯同步图零布局、混 lane 信用总数、DEFERRED 的零登记/实际 CHECK、UNKNOWN 和旧调用归一化、无效声明被拒绝和重放。未知入口即使本次没有实际登记也走空 seal；真实登记仍等待 CHECK 提交 Q，不能提前发布 DONE。性能仍使用同一份业务二进制与注册元数据，对照12组 AICore L0 wall；声明来源和实际生效覆盖需要一并记录，不把未传入 runtime 的源码分类当成优化已生效。
 
 ### CntNotify 资源复用与控制状态选型
 

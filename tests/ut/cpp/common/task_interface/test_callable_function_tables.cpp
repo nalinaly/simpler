@@ -247,7 +247,7 @@ TEST(CoreAsyncCapability, UsesExistingPaddingAndPreservesCodeIdentity) {
     EXPECT_EQ(std::memcmp(as_chip(original)->child(0).binary_data(), child.binary_data(), child.binary_size()), 0);
 }
 
-TEST(CoreAsyncCapability, RejectsMissingAndInvalidDeclaration) {
+TEST(CoreAsyncCapability, RejectsMalformedDeclaration) {
     EXPECT_FALSE(core_async_capability_valid({}));
     EXPECT_FALSE(core_async_capability_valid({1, static_cast<CoreAsyncMode>(0), 0, 0, 0}));
     EXPECT_TRUE(core_async_capability_valid({1, CoreAsyncMode::DEFERRED, 64, 3, 0}));
@@ -259,4 +259,34 @@ TEST(CoreAsyncCapability, RejectsMissingAndInvalidDeclaration) {
     auto *chip = reinterpret_cast<ChipCallable *>(bytes.data());
     const_cast<CoreCallable &>(chip->child(0)).async_capability_ = {0, CoreAsyncMode::DEFERRED, 1, 1, 0};
     EXPECT_THROW(validate_chip_callable_buffer(bytes.data(), bytes.size()), std::invalid_argument);
+}
+
+TEST(CoreAsyncCapability, UnknownIngressHasCanonicalIdentityWithoutChangingInput) {
+    auto canonical = make_chip_with_children({0});
+    auto *canonical_chip = reinterpret_cast<ChipCallable *>(canonical.data());
+    const_cast<CoreCallable &>(canonical_chip->child(0)).async_capability_ = {1, CoreAsyncMode::DEFERRED, 64, 3, 0};
+    const auto canonical_layout = compute_chip_callable_layout(canonical_chip);
+    for (uint32_t version : {0u, 1u}) {
+        auto raw = canonical;
+        auto *chip = reinterpret_cast<ChipCallable *>(raw.data());
+        const_cast<CoreCallable &>(chip->child(0)).async_capability_ = {
+            version, static_cast<CoreAsyncMode>(0), 0, 0, 0
+        };
+        const auto unchanged = raw;
+        EXPECT_NO_THROW(validate_chip_callable_buffer(raw.data(), raw.size()));
+        const auto layout = compute_chip_callable_layout(chip);
+        EXPECT_EQ(layout.content_hash, canonical_layout.content_hash);
+        EXPECT_EQ(layout.aicore_image_hash, canonical_layout.aicore_image_hash);
+        EXPECT_EQ(raw, unchanged);
+        auto owned = raw;
+        normalize_chip_callable_buffer(owned.data(), owned.size());
+        EXPECT_EQ(owned, canonical);
+        EXPECT_EQ(raw, unchanged);
+    }
+    auto legacy = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, nullptr, 0);
+    const auto capability = reinterpret_cast<const CoreCallable *>(legacy.data())->async_capability();
+    EXPECT_EQ(capability.mode, CoreAsyncMode::DEFERRED);
+    EXPECT_EQ(capability.max_conditions, 64);
+    EXPECT_EQ(capability.condition_types, 3);
+    EXPECT_THROW(normalize_core_async_capability({1, static_cast<CoreAsyncMode>(0), 1, 0, 0}), std::invalid_argument);
 }

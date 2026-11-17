@@ -270,19 +270,22 @@ def test_compile_cache_survives_session_cache_clear(monkeypatch, tmp_path):
     assert second.child_count == first.child_count
 
 
-def test_missing_or_unknown_capability_fails_before_compile_or_cache_hit(monkeypatch, tmp_path):
+def test_unknown_capability_uses_one_canonical_cache_identity(monkeypatch, tmp_path):
     _configure_fake_compilation(monkeypatch, tmp_path)
     spec, _header = _cacheable_spec(tmp_path)
     key = ("TestScene", "a2a3sim", "host_build_graph", "pin")
-    capability = spec["incores"][0].pop("async_capability")
-    with pytest.raises(ValueError, match="async_capability"):
-        compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key)
-    assert _FakeKernelCompiler.incore_compiles == 0
-    spec["incores"][0]["async_capability"] = capability
-    compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key)
-    spec["incores"][0]["async_capability"] = {**capability, "mode": "UNKNOWN"}
-    with pytest.raises(ValueError, match="async_capability"):
-        compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key)
+    spec["incores"][0].pop("async_capability")
+    deferred = {"version": 1, "mode": "DEFERRED", "max_conditions": 64, "condition_types": 3}
+    first = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key)
+    assert first.child(0).async_capability == deferred
+    assert "async_capability" not in spec["incores"][0]
+    for value in (None, {**deferred, "mode": "UNKNOWN", "max_conditions": 0, "condition_types": 0}, deferred):
+        spec["incores"][0]["async_capability"] = value
+        assert compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key) is first
+    clear_compile_cache()
+    from_disk = compile_chip_callable_spec(spec, "a2a3sim", "host_build_graph", key)
+    assert from_disk.child(0).async_capability == deferred
+    assert _FakeKernelCompiler.orchestration_compiles == 1
     assert _FakeKernelCompiler.incore_compiles == 1
 
 

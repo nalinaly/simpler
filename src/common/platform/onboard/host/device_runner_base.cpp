@@ -2350,7 +2350,13 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
         return 0;
     }
 
-    const ChipCallableLayout layout = compute_chip_callable_layout(callable);
+    ChipCallableLayout layout{};
+    try {
+        layout = compute_chip_callable_layout(callable);
+    } catch (const std::invalid_argument &error) {
+        LOG_ERROR("Invalid ChipCallable registration: %s", error.what());
+        return 0;
+    }
 
     // Content-hash dedup: identical bytes → return cached chip_dev.
     auto it = chip_callable_buffers_.find(layout.content_hash);
@@ -2415,15 +2421,8 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     std::vector<uint64_t> object_table(table_len, 0);
     std::vector<CoreAsyncCapability> async_capabilities(table_len);
     for (int32_t index = 0; index < callable->child_count(); ++index) {
-        const auto capability = callable->child(index).async_capability();
-        if (!core_async_capability_valid(capability)) {
-            LOG_ERROR(
-                "CoreCallable func_id=%d requires an explicit SYNCHRONOUS or DEFERRED capability",
-                callable->child_func_id(index)
-            );
-            return 0;
-        }
-        async_capabilities[callable->child_func_id(index)] = capability;
+        async_capabilities[callable->child_func_id(index)] =
+            normalize_core_async_capability(callable->child(index).async_capability());
     }
     std::vector<uint64_t> entry_table;
     if (want_entry_table) entry_table.assign(table_len, 0);
@@ -2455,6 +2454,11 @@ uint64_t DeviceRunnerBase::upload_chip_callable_buffer(const ChipCallable *calla
     // path's `reinterpret_cast<CoreCallable*>(addr)->resolved_addr()` lands
     // on the right device offset).
     std::memcpy(scratch.data(), callable, layout.total_size);
+    for (int32_t index = 0; index < callable->child_count(); ++index) {
+        auto *child =
+            reinterpret_cast<CoreCallable *>(scratch.data() + layout.header_size + callable->child_offset(index));
+        child->async_capability_ = async_capabilities[callable->child_func_id(index)];
+    }
     patch_chip_callable_scratch_for_device(callable, layout, chip_dev, scratch.data());
 
     // The function tables go in the alignment-padded tail of that same scratch,
