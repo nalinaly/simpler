@@ -111,7 +111,7 @@ static inline __aicore__ bool scheduler_cancel_unstarted_work(__gm__ void *base,
 template <bool RecordProtocol = true>
 static inline __aicore__ SchedulerSubtaskFinishResult scheduler_contribute_subtask(
     const SchedulerGraphAccess &graph, __gm__ void *base, SchedulerLocalState *local, __gm__ SchedulerRunControl *run,
-    const SchedulerLocalSlotState &completed, uint32_t pending_slot
+    const SchedulerLocalSlotState &completed, uint32_t pending_slot, uint64_t *completed_gate = nullptr
 ) {
     if (scheduler_read_worker_error(run, local->worker_id()) != 0) return SchedulerSubtaskFinishResult::ERROR;
     auto *control = scheduler_task_control_at(base, local, completed.task_ref);
@@ -121,7 +121,7 @@ static inline __aicore__ SchedulerSubtaskFinishResult scheduler_contribute_subta
         if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, true, UINT64_MAX);
     }
     uint64_t previous = 0;
-    const auto result = scheduler_contribute_returns(control, 1, &previous);
+    const auto result = scheduler_contribute_returns(control, 1, &previous, completed_gate);
     if constexpr (RecordProtocol) {
         scheduler_protocol_subtask_complete(base, local, completed, pending_slot, false, previous);
         if (block_owner) scheduler_protocol_block_complete(base, local, completed.block_idx, false, previous);
@@ -211,6 +211,7 @@ static inline __aicore__ bool scheduler_complete_own_slot(
     const bool contribution_retires = FromExecutor && PublishCompletion && completed_slot.execution_token &&
                                       !completed_slot.cluster_mix && !completed_slot.gm_mix;
     auto contribution = SchedulerSubtaskFinishResult::PARTIAL;
+    uint64_t completed_gate = 0;
     bool retirement_inferred = false;
     if (contribution_retires) {
         if (!scheduler_execution_token_handle_valid(
@@ -226,7 +227,7 @@ static inline __aicore__ bool scheduler_complete_own_slot(
         if constexpr (RecordProtocol)
             scheduler_protocol_execution_consumed(scheduler_state_base, scheduler, pending_slot, completed_slot);
         contribution = scheduler_contribute_subtask<RecordProtocol>(
-            graph, scheduler_state_base, scheduler, run_control, completed_slot, pending_slot
+            graph, scheduler_state_base, scheduler, run_control, completed_slot, pending_slot, &completed_gate
         );
         retirement_inferred = contribution == SchedulerSubtaskFinishResult::TASK_LAST ||
                               contribution == SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED;
@@ -265,7 +266,7 @@ static inline __aicore__ bool scheduler_complete_own_slot(
         } else {
             if (!contribution_retires)
                 contribution = scheduler_contribute_subtask<RecordProtocol>(
-                    graph, scheduler_state_base, scheduler, run_control, completed_slot, pending_slot
+                    graph, scheduler_state_base, scheduler, run_control, completed_slot, pending_slot, &completed_gate
                 );
             completion_ok = contribution != SchedulerSubtaskFinishResult::ERROR;
             if (completed_slot.execution_token && contribution == SchedulerSubtaskFinishResult::PARTIAL)
@@ -274,7 +275,7 @@ static inline __aicore__ bool scheduler_complete_own_slot(
                 scheduler_remember_task_proof(scheduler, task_ref, SchedulerTaskProof::DONE);
                 ++scheduler->pending_completed;
             } else if (contribution == SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED) {
-                const auto completion = scheduler_async_close_computation(scheduler->async, task_ref);
+                const auto completion = scheduler_async_close_computation(scheduler->async, task_ref, completed_gate);
                 completion_ok =
                     completion.result == SchedulerAsyncCompletionResult::FINISH_OWNER ?
                         scheduler_async_complete_task(graph, scheduler_state_base, scheduler, run_control, completion) :

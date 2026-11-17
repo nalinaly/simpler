@@ -840,6 +840,8 @@ Host 以全部 MIX block 数作为每簇序号上界，上界小于2^31且六个
 
 GM MIX coordinator 的自身 ARRIVED/RELEASED 只更新本地 confirmed 与 failure 状态；只有远端 lane 发布共享 ACK。唯一 ACK 汇合者已经持有自身到达/退休的直接证明，不需要再给自己写 GM 通知。远端到齐、完整 resource 退出、必要 DSB 和 DFX 的真实逻辑事件仍保留。
 
+已发布的 `claim_seal=count` 直接提供终态游标，不再重读 `next_block`；DFX 的终态游标由 seal 证明，不表示额外 GM 读取。admission 接收方通过 committed tail、日志及 record 的 epoch/order 确认发布，不再查询同一任务的 ADMITTED；提交端去重与 kernel 入口许可不变。最后一次 physical FAA 将完整 post-gate 私有值传给 async close，close 使用必需 RMW 的返回值校验 join，正常 deferred 路径不再重读这两个字；同步 checked 入口仍保留必要的零登记校验。
+
 ### CntNotify 资源复用与控制状态选型
 
 DeviceRunner 按 pipeline slot 和用途保留通知池。只有没有 publication/capture lease

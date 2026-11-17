@@ -795,7 +795,7 @@ class NativeAudit:
             "invalid close cursor: unclaimed work without a retired sync_start position",
         )
         closed = point(member, "closed")
-        read = ("close_cursor_read", ref, worker)
+        read = ("close_cursor_proof", ref, worker)
         self.close_proofs[(ref, worker)] = read
         self.causal.add(("event", worker, closed[2] - 1), read)
         self.causal.add(read, closed)

@@ -401,28 +401,34 @@ static inline __aicore__ bool scheduler_async_seal_execution(
     return true;
 }
 
-// All executions have sealed their condition registrations before computation closes.
+// The last physical FAA supplies a stable gate after every execution sealed
+// its conditions. The close RMW supplies the join observation and ownership.
 static inline __aicore__ SchedulerAsyncCompletion
-scheduler_async_close_computation(SchedulerAsyncLocalState *local, int64_t task_ref) {
+scheduler_async_close_computation(SchedulerAsyncLocalState *local, int64_t task_ref, uint64_t gate) {
     using namespace scheduler_async_detail;
     if (local == nullptr) return {};
     uint32_t index = ASYNC_INVALID_INDEX;
     if (!task_index(*local, task_ref, index)) return completion_error(*local, task_ref);
     if (index == ASYNC_INVALID_INDEX) return {};
     auto *joins = scheduler_state_at<SchedulerAsyncTaskJoin>(local->base, local->layout->joins_offset);
-    // The final contribution precedes these dependent bypass observations.
-    // Its pre-RMW fence cannot order the RMW against the following loads.
-    scheduler_cache_barrier();
-    const uint64_t gate = scheduler_gm_query(local->controls[task_ref].completion_state);
-    const uint64_t joined = scheduler_gm_query(joins[index].word);
-    if (!scheduler_completion_valid(gate) || scheduler_completion_remaining(gate) != 0 ||
-        !scheduler_async_pending::valid(joined) || scheduler_async_pending::closed(joined) ||
-        scheduler_completion_debt(gate) != scheduler_async_pending::registered(joined))
+    if (!scheduler_completion_valid(gate) || scheduler_completion_remaining(gate) != 0)
         return completion_error(*local, task_ref);
-    // No group registered: the final compute RMW already completed the task.
-    if (scheduler_async_pending::registered(joined) == 0) return {};
+    // A synchronous checked call has no close RMW. Keep its validation out of
+    // the deferred path, whose previous join word comes from the required RMW.
+    if (scheduler_completion_debt(gate) == 0) {
+        scheduler_cache_barrier();
+        const uint64_t joined = scheduler_gm_query(joins[index].word);
+        if (!scheduler_async_pending::valid(joined) || scheduler_async_pending::closed(joined) ||
+            scheduler_async_pending::registered(joined) != 0)
+            return completion_error(*local, task_ref);
+        return {};
+    }
     scheduler_cache_barrier();
     const auto closed = scheduler_async_pending::close_computation(joins[index]);
+    if ((closed.result != scheduler_async_pending::Result::FINISH_OWNER &&
+         closed.result != scheduler_async_pending::Result::PENDING) ||
+        scheduler_completion_debt(gate) != scheduler_async_pending::registered(closed.previous))
+        return completion_error(*local, task_ref);
     if (closed.result == scheduler_async_pending::Result::FINISH_OWNER)
         return {
             SchedulerAsyncCompletionResult::FINISH_OWNER, task_ref, local->layout->run_epoch,

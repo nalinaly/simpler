@@ -81,6 +81,7 @@ struct alignas(64) SchedulerProtocolMemberTrace {
     uint32_t flags;
     uint64_t pending_mask;
     uint64_t claim_seal_seen;
+    // A nonzero seal supplies this terminal cursor; no second GM read is implied.
     uint64_t claim_cursor_seen;
 };
 

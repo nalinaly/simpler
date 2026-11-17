@@ -18,8 +18,9 @@ enum class SchedulerSubtaskFinishResult : uint8_t { PARTIAL, TASK_LAST, TASK_LAS
 
 // Each credit retires one physical return and its compute debt together.
 // Deferred conditions retain their independently registered debt.
-static inline __aicore__ SchedulerSubtaskFinishResult
-scheduler_contribute_returns(__gm__ SchedulerTaskControl *control, uint64_t credits, uint64_t *previous) {
+static inline __aicore__ SchedulerSubtaskFinishResult scheduler_contribute_returns(
+    __gm__ SchedulerTaskControl *control, uint64_t credits, uint64_t *previous, uint64_t *completed_gate = nullptr
+) {
     scheduler_cache_barrier();
     const uint64_t state =
         scheduler_gm_fetch_add(control->completion_state, UINT64_C(0) - credits * SCHEDULER_COMPLETION_RETURN_UNIT);
@@ -27,6 +28,7 @@ scheduler_contribute_returns(__gm__ SchedulerTaskControl *control, uint64_t cred
     if (!scheduler_completion_valid(state) || credits == 0 || scheduler_completion_remaining(state) < credits)
         return SchedulerSubtaskFinishResult::ERROR;
     if (scheduler_completion_remaining(state) != credits) return SchedulerSubtaskFinishResult::PARTIAL;
+    if (completed_gate != nullptr) *completed_gate = state - credits * SCHEDULER_COMPLETION_RETURN_UNIT;
     return scheduler_completion_debt(state) == credits ? SchedulerSubtaskFinishResult::TASK_LAST :
                                                          SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED;
 }
@@ -59,8 +61,10 @@ static inline __aicore__ bool scheduler_contribute_mix_group(
         scheduler_protocol_stamp(base, local, layout, &owner->completion_before);
     }
     uint64_t previous = 0;
-    const auto result =
-        scheduler_contribute_returns(scheduler_task_control_at(base, local, task_ref), active.count(), &previous);
+    uint64_t completed_gate = 0;
+    const auto result = scheduler_contribute_returns(
+        scheduler_task_control_at(base, local, task_ref), active.count(), &previous, &completed_gate
+    );
     if (owner != nullptr) {
         owner->completion_ticket = previous;
         scheduler_protocol_stamp(base, local, layout, &owner->completion_after);
@@ -98,7 +102,7 @@ static inline __aicore__ bool scheduler_contribute_mix_group(
             scheduler_protocol_publish_record(actor);
         }
     } else if (result == SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED) {
-        const auto completion = scheduler_async_close_computation(local->async, task_ref);
+        const auto completion = scheduler_async_close_computation(local->async, task_ref, completed_gate);
         const bool complete = completion.result == SchedulerAsyncCompletionResult::FINISH_OWNER;
         if ((complete && !scheduler_async_complete_task(graph, base, local, run, completion)) ||
             (!complete && completion.result != SchedulerAsyncCompletionResult::WAITING)) {

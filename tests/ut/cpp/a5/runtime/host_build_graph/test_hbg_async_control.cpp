@@ -27,12 +27,39 @@ struct SchedulerScalarCompilation<void> {
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
+#include <type_traits>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "async_completion_plan.h"
+#include "scheduler/scheduler_memory.h"
+
+namespace {
+thread_local std::function<void(volatile uint64_t *)> async_query_observer;
+
+template <typename T>
+T observe_async_query(volatile T &word, int order = __ATOMIC_ACQUIRE) {
+    if constexpr (std::is_same_v<T, uint64_t>)
+        if (async_query_observer) async_query_observer(&word);
+    return scheduler_gm_query(word, order);
+}
+
+class ScopedAsyncQueryObserver {
+public:
+    explicit ScopedAsyncQueryObserver(std::function<void(volatile uint64_t *)> observer) {
+        async_query_observer = std::move(observer);
+    }
+    ~ScopedAsyncQueryObserver() { async_query_observer = {}; }
+};
+}  // namespace
+
+#define scheduler_gm_query observe_async_query
+#include "scheduler/scheduler_async_control.h"
+#undef scheduler_gm_query
+
 #include "hbg_scheduler_test_support.h"
 #include "scheduler/scheduler_completion.h"
 #include "scheduler/scheduler_async_finish.h"
@@ -203,7 +230,7 @@ struct AsyncFixture {
             );
         return progress;
     }
-    SchedulerSubtaskFinishResult return_next(int64_t task, SchedulerLocalState *state) {
+    SchedulerSubtaskFinishResult return_next(int64_t task, SchedulerLocalState *state, uint64_t *gate = nullptr) {
         const auto word = scheduler_gm_query(task_control(task)->completion_state);
         const auto &metadata = storage.metadata[task];
         const uint32_t returned = scheduler_completion_count(word);
@@ -218,7 +245,7 @@ struct AsyncFixture {
                 break;
             }
         }
-        return scheduler_contribute_subtask<false>(graph.graph(), base(), state, storage.run_control, slot, 0);
+        return scheduler_contribute_subtask<false>(graph.graph(), base(), state, storage.run_control, slot, 0, gate);
     }
     // close_computation is called by the last physical return. Drive that
     // precondition through the real counter operation, once per remaining unit.
@@ -230,13 +257,49 @@ struct AsyncFixture {
     }
     bool close(uint32_t worker = 0, int64_t task = 0, SchedulerAsyncCompletionResult *result = nullptr) {
         if (!return_remaining(task, local(worker))) return false;
-        const auto completion = scheduler_async_close_computation(&workers[worker], task);
+        const auto completion =
+            scheduler_async_close_computation(&workers[worker], task, task_control(task)->completion_state);
         if (result != nullptr) *result = completion.result;
         if (completion.result == SchedulerAsyncCompletionResult::FINISH_OWNER)
             return scheduler_async_complete_task(graph.graph(), base(), local(worker), storage.run_control, completion);
         return completion.result != SchedulerAsyncCompletionResult::ERROR;
     }
 };
+
+TEST(HbgAsyncControl, DeferredCloseConsumesTheReturnProofWithoutRereadingGateOrJoin) {
+    for (const bool condition_ready : {false, true}) {
+        AsyncFixture f(1);
+        f.register_counter(f.start(), 1);
+        ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
+        if (condition_ready) {
+            f.signal[0] = 1;
+            ASSERT_TRUE(f.check(1));
+        }
+        ASSERT_TRUE(f.return_remaining(0, f.local(2)));
+        const uint64_t gate = f.task_control(0)->completion_state;
+        uint32_t reads = 0;
+        SchedulerAsyncCompletion completion;
+        {
+            ScopedAsyncQueryObserver observer([&](volatile uint64_t *word) {
+                if (word == &f.task_control(0)->completion_state || word == &f.join().word) ++reads;
+            });
+            completion = scheduler_async_close_computation(&f.workers[2], 0, gate);
+        }
+        EXPECT_EQ(reads, 0u);
+        ASSERT_TRUE(scheduler_async_pending::closed(f.join().word));
+        if (condition_ready) {
+            ASSERT_EQ(completion.result, SchedulerAsyncCompletionResult::FINISH_OWNER);
+            ASSERT_TRUE(
+                scheduler_async_complete_task(f.graph.graph(), f.base(), f.local(2), f.storage.run_control, completion)
+            );
+        } else {
+            ASSERT_EQ(completion.result, SchedulerAsyncCompletionResult::WAITING);
+            f.signal[0] = 1;
+            ASSERT_TRUE(f.check(1));
+        }
+        EXPECT_TRUE(f.done());
+    }
+}
 
 TEST(HbgAsyncControl, HostPreboundEntryUsesExactGroupWithoutRegisteringCredit) {
     for (uint32_t corrupt = 0; corrupt < 3; ++corrupt) {
@@ -1212,11 +1275,12 @@ TEST(HbgAsyncControl, CounterAndFullWidthSdmaRecordsMustBothCompleteAndAreNeverC
     EXPECT_EQ(completed_post, UINT64_C(0x100000003));
 }
 
-TEST(HbgAsyncControl, OrdersFinalContributionBeforeClosureSnapshots) {
+TEST(HbgAsyncControl, OrdersFinalContributionBeforeClosureRmw) {
     AsyncFixture f(1);
     f.register_counter(f.start());
     ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
-    ASSERT_EQ(f.return_next(0, f.local(2)), SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED);
+    uint64_t gate = 0;
+    ASSERT_EQ(f.return_next(0, f.local(2), &gate), SchedulerSubtaskFinishResult::TASK_LAST_DEFERRED);
     auto buffer = std::make_unique<SchedulerActivityBuffer>();
     auto records = std::make_unique<SchedulerScalarStorageSlot[]>(2 * SCHEDULER_SCALAR_RECORD_CAPACITY);
     SchedulerScalarTrace trace;
@@ -1226,7 +1290,7 @@ TEST(HbgAsyncControl, OrdersFinalContributionBeforeClosureSnapshots) {
     {
         SchedulerScalarBinding binding;
         binding.attach(&trace);
-        const auto completion = scheduler_async_close_computation(&f.workers[2], 0);
+        const auto completion = scheduler_async_close_computation(&f.workers[2], 0, gate);
         ASSERT_EQ(completion.result, SchedulerAsyncCompletionResult::WAITING);
     }
     bool ordered = false;
@@ -1237,8 +1301,8 @@ TEST(HbgAsyncControl, OrdersFinalContributionBeforeClosureSnapshots) {
         ASSERT_TRUE(scheduler_decode_scalar_storage(trace.records, trace.storage_slots, cursor, record));
         const auto kind = static_cast<SchedPhaseKind>(record.kind & 0xffffU);
         if (kind == SchedPhaseKind::ScalarDsbAll) ordered = true;
-        if (kind == SchedPhaseKind::ScalarBypassLoad) {
-            EXPECT_TRUE(ordered) << "Closure must order the final contribution before observing its result";
+        if (kind == SchedPhaseKind::ScalarAtomicFetchAdd) {
+            EXPECT_TRUE(ordered) << "Closure must order the final contribution before its join RMW";
             observed = true;
         }
     }
@@ -1259,7 +1323,7 @@ TEST(HbgAsyncControl, JoinRmwOwnerCannotCompleteTwice) {
     ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
     ASSERT_TRUE(f.check(1));
     ASSERT_TRUE(f.return_remaining(0, f.local(2)));
-    const auto completion = scheduler_async_close_computation(&f.workers[2], 0);
+    const auto completion = scheduler_async_close_computation(&f.workers[2], 0, f.task_control(0)->completion_state);
     ASSERT_EQ(completion.result, SchedulerAsyncCompletionResult::FINISH_OWNER);
     EXPECT_EQ(notification, 0u);
     ASSERT_TRUE(
@@ -1284,7 +1348,7 @@ TEST(HbgAsyncControl, InvalidCompletionOwnerProofFailsRunWithoutPublishingDone) 
         ASSERT_TRUE(scheduler_async_seal_execution(&f.workers[0], 0, 0, 0, f.executions[0]));
         ASSERT_TRUE(f.check(1));
         ASSERT_TRUE(f.return_remaining(0, f.local(2)));
-        auto completion = scheduler_async_close_computation(&f.workers[2], 0);
+        auto completion = scheduler_async_close_computation(&f.workers[2], 0, f.task_control(0)->completion_state);
         ASSERT_EQ(completion.result, SchedulerAsyncCompletionResult::FINISH_OWNER);
         if (invalid == 0) ++completion.run_epoch;
         else if (invalid == 1) completion.joined &= ~scheduler_async_pending::COMPUTATION_CLOSED;
@@ -1398,7 +1462,7 @@ TEST(HbgAsyncControl, ConcurrentObserversAndBlockReleaseGrantOneFinish) {
     }
     begin.store(true, std::memory_order_release);
     if (!f.return_remaining(0, &producer_context)) failed.store(true, std::memory_order_release);
-    const auto completion = scheduler_async_close_computation(&producer, 0);
+    const auto completion = scheduler_async_close_computation(&producer, 0, f.task_control(0)->completion_state);
     if (completion.result == SchedulerAsyncCompletionResult::FINISH_OWNER) {
         if (!scheduler_async_complete_task(
                 f.graph.graph(), f.base(), &producer_context, f.storage.run_control, completion
